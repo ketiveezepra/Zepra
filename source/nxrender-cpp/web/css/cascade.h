@@ -145,10 +145,29 @@ struct ComputedValues {
     std::string transform;
     std::string filter;
     std::string boxShadow;
+    std::string textShadow;
     std::string cursor = "auto";
     std::string pointerEvents = "auto";
     std::string willChange;
     std::string isolation;
+
+    // Outline
+    float outlineWidth = 0;
+    uint32_t outlineColor = 0;
+    float outlineOffset = 0;
+    std::string outlineStyle = "none";
+
+    // Table (CSS 2.1 §17)
+    int borderCollapse = 0;   // 0 = separate, 1 = collapse
+    float borderSpacingH = 0;
+    float borderSpacingV = 0;
+    int tableLayout = 0;      // 0 = auto, 1 = fixed
+    int colSpan = 1;
+    int rowSpan = 1;
+
+    // Pseudo-element
+    std::string content;       // content property for ::before/::after
+    std::string listStyleType; // disc, circle, square, decimal, etc.
 
     // Sizing
     std::string objectFit;
