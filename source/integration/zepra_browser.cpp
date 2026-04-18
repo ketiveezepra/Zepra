@@ -2016,6 +2016,25 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     blockBox->visibilityHidden = (childStyle->visibility == Visibility::Hidden);
                     blockBox->boxSizing = (childStyle->boxSizing == Zepra::WebCore::BoxSizing::BorderBox) ? 1 : 0;
                     
+                    // CSS Positioning
+                    switch (childStyle->position) {
+                        case PositionValue::Static:   blockBox->positionType = 0; break;
+                        case PositionValue::Relative: blockBox->positionType = 1; break;
+                        case PositionValue::Absolute: blockBox->positionType = 2; break;
+                        case PositionValue::Fixed:    blockBox->positionType = 3; break;
+                        case PositionValue::Sticky:   blockBox->positionType = 4; break;
+                    }
+                    
+                    // Inset offsets (resolve to px and store as LayoutLength{value, Px})
+                    if (!childStyle->top.isAuto()) blockBox->cssTop = cssToLayout(childStyle->top);
+                    if (!childStyle->right.isAuto()) blockBox->cssRight = cssToLayout(childStyle->right);
+                    if (!childStyle->bottom.isAuto()) blockBox->cssBottom = cssToLayout(childStyle->bottom);
+                    if (!childStyle->left.isAuto()) blockBox->cssLeft = cssToLayout(childStyle->left);
+                    blockBox->zIndex = childStyle->zIndex;
+                    
+                    // Float
+                    blockBox->floatType = childStyle->cssFloat;
+                    
                     // Text alignment
                     if (childStyle->textAlign == TextAlign::Center) blockBox->textAlign = 1;
                     else if (childStyle->textAlign == TextAlign::Right) blockBox->textAlign = 2;

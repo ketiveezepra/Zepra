@@ -314,6 +314,11 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         if (value == "auto") { style.zIndexAuto = true; }
         else { try { style.zIndex = std::stoi(value); style.zIndexAuto = false; } catch (...) {} }
     }
+    else if (property == "float") {
+        if (value == "left") style.cssFloat = 1;
+        else if (value == "right") style.cssFloat = 2;
+        else style.cssFloat = 0;
+    }
 
     // =====================================================================
     // Typography

@@ -179,9 +179,14 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         std::vector<FlexLine> lines;
         lines.push_back(FlexLine());
         
+        bool mainSizeAuto = false;
         float containerMainSize = isColumn
             ? (box.height - box.paddingTop - box.paddingBottom - box.borderTop - box.borderBottom)
             : contentWidth;
+        if (containerMainSize <= 0 && isColumn) {
+            mainSizeAuto = true;
+            containerMainSize = 999999; // large value — items won't shrink
+        }
         if (containerMainSize < 0) containerMainSize = 0;
         
         float containerCrossSize = isColumn ? contentWidth
@@ -503,9 +508,32 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         }
     } else {
     // Block/Inline flow layout
-    float prevBlockMarginBottom = 0; // For margin collapsing (CSS2 §8.3.1)
+    float prevBlockMarginBottom = 0;
+    float floatLeftX = 0, floatRightX = contentWidth;
+    float floatLeftBottom = 0, floatRightBottom = 0;
+    
     for (auto& child : box.children) {
         if (child.type == LayoutType::None) continue;
+        
+        // Skip absolutely positioned elements from normal flow
+        if (child.positionType == 2 || child.positionType == 3) continue;
+        
+        // Float handling
+        if (child.floatType > 0) {
+            layoutBlock(child, contentWidth, childY);
+            if (child.floatType == 1) { // float:left
+                child.x = childX + floatLeftX + child.marginLeft;
+                child.y = childY + child.marginTop;
+                floatLeftX += child.width + child.marginLeft + child.marginRight;
+                floatLeftBottom = std::max(floatLeftBottom, child.y + child.height + child.marginBottom);
+            } else { // float:right
+                child.x = childX + floatRightX - child.width - child.marginRight;
+                child.y = childY + child.marginTop;
+                floatRightX -= child.width + child.marginLeft + child.marginRight;
+                floatRightBottom = std::max(floatRightBottom, child.y + child.height + child.marginBottom);
+            }
+            continue;
+        }
         
         if (child.type == LayoutType::Block || child.type == LayoutType::Flex) {
             // Flush any inline content first
@@ -529,11 +557,26 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 child.marginTop = collapsed;
             }
             
-            layoutBlock(child, contentWidth, childY);
-            child.x += box.paddingLeft + box.borderLeft;
+            // Adjust available width for floats
+            float blockAvailWidth = contentWidth;
+            float blockOffsetX = 0;
+            if (childY < floatLeftBottom) {
+                blockAvailWidth -= floatLeftX;
+                blockOffsetX = floatLeftX;
+            }
+            if (childY < floatRightBottom) {
+                blockAvailWidth -= (contentWidth - floatRightX);
+            }
+            
+            layoutBlock(child, blockAvailWidth, childY);
+            child.x += box.paddingLeft + box.borderLeft + blockOffsetX;
             
             childY = child.y + child.height + child.marginBottom;
             prevBlockMarginBottom = child.marginBottom;
+            
+            // Clear floats if child extends past them
+            if (childY >= floatLeftBottom) floatLeftX = 0;
+            if (childY >= floatRightBottom) floatRightX = contentWidth;
             
         } else if (child.type == LayoutType::Inline || child.type == LayoutType::Text || child.type == LayoutType::InlineBlock) {
             // Inline/Text/InlineBlock: flow horizontally with wrapping
@@ -676,8 +719,42 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         box.height = std::max(box.height, box.fontSize + box.paddingTop + box.paddingBottom + 4);
     }
     
-
-
+    // Post-layout: apply CSS positioning offsets
+    for (auto& child : box.children) {
+        if (child.positionType == 2) {
+            // Absolute: position relative to this containing block
+            // First, layout the child to resolve its own dimensions
+            layoutBlock(child, contentWidth, 0);
+            
+            float contW = box.width;
+            float contH = box.height;
+            
+            // Resolve horizontal
+            if (child.cssLeft.isSet() && !child.cssLeft.isAuto()) {
+                child.x = box.paddingLeft + box.borderLeft + child.cssLeft.resolve(contW, child.fontSize, vpW, vpH);
+            } else if (child.cssRight.isSet() && !child.cssRight.isAuto()) {
+                child.x = contW - box.paddingRight - box.borderRight - child.width - child.cssRight.resolve(contW, child.fontSize, vpW, vpH);
+            }
+            
+            // Resolve vertical
+            if (child.cssTop.isSet() && !child.cssTop.isAuto()) {
+                child.y = box.paddingTop + box.borderTop + child.cssTop.resolve(contH, child.fontSize, vpW, vpH);
+            } else if (child.cssBottom.isSet() && !child.cssBottom.isAuto()) {
+                child.y = contH - box.paddingBottom - box.borderBottom - child.height - child.cssBottom.resolve(contH, child.fontSize, vpW, vpH);
+            }
+        }
+        else if (child.positionType == 1) {
+            // Relative: offset from normal flow position
+            if (child.cssTop.isSet() && !child.cssTop.isAuto())
+                child.y += child.cssTop.resolve(0, child.fontSize, vpW, vpH);
+            else if (child.cssBottom.isSet() && !child.cssBottom.isAuto())
+                child.y -= child.cssBottom.resolve(0, child.fontSize, vpW, vpH);
+            if (child.cssLeft.isSet() && !child.cssLeft.isAuto())
+                child.x += child.cssLeft.resolve(0, child.fontSize, vpW, vpH);
+            else if (child.cssRight.isSet() && !child.cssRight.isAuto())
+                child.x -= child.cssRight.resolve(0, child.fontSize, vpW, vpH);
+        }
+    }
 }
 
 // =============================================================================

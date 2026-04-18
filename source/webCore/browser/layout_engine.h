@@ -140,6 +140,17 @@ struct LayoutBox {
     // Overflow clipping
     bool overflowHidden = false;
     
+    // CSS Positioning: 0=static, 1=relative, 2=absolute, 3=fixed, 4=sticky
+    int positionType = 0;
+    LayoutLength cssTop;
+    LayoutLength cssRight;
+    LayoutLength cssBottom;
+    LayoutLength cssLeft;
+    int zIndex = 0;
+    
+    // Float: 0=none, 1=left, 2=right
+    int floatType = 0;
+    
     // Visibility: hidden (takes space in layout but not painted)
     bool visibilityHidden = false;
     
