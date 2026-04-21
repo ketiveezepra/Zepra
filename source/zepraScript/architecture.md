@@ -4,7 +4,7 @@
 > Target: 2M+ lines of C++. Multi-tier JIT. Custom GC. Full ES2025 compliance.
 
 **Version:** 1.2.0
-**Last Updated:** 2026-03-04
+**Last Updated:** 2026-04-18
 
 ---
 
@@ -46,10 +46,10 @@ Source Code
 [ Baseline JIT ] Fast native code + inline cache stubs
     |
     v  (type feedback)
-[ DFG JIT ]      Speculative optimization, type-specialized IR
+[ ZOpt JIT ]     Speculative optimization, type-specialized IR
     |
     v  (critical hot loops)
-[ FTL / B3 ]     LLVM-style backend, aggressive inlining
+[ ZIR / FTL ]    Low-level IR backend, aggressive inlining
     |
     v  (speculation failure)
 [ Interpreter ]  Bail-out, reset profiling
@@ -67,23 +67,23 @@ Each subsystem directory contains **both** `.cpp` and `.h/.hpp` files together. 
 zeprascript/
 |-- frontend/          # Lexer, Parser, AST                          (14 files)
 |-- bytecode/          # Opcode definitions, bytecode generator       (9 files)
-|-- interpreter/       # Bytecode dispatch loop                       (2 files)
-|-- jit/               # Baseline JIT, assemblers, IC, OSR           (23 files)
-|-- dfg/               # Data Flow Graph optimizer                   (19 files)
-|-- b3/                # FTL/B3 low-level IR backend                 (11 files)
+|-- interpreter/       # Bytecode dispatch loop                       (6 files)
+|-- jit/               # Baseline JIT, assemblers, IC, OSR           (29 files)
+|-- zopt/              # Zepra Optimizer (sea-of-nodes IR)           (19 files)
+|-- zir/               # Zepra IR low-level backend                  (11 files)
 |
 |-- runtime/
-|   |-- objects/       # Value, Object, Function, Symbol, Proxy, Map (30 files)
-|   |-- execution/     # VM, Environment, GlobalObject               (16 files)
+|   |-- objects/       # Value, Object, Function, Symbol, Proxy, Map (36 files)
+|   |-- execution/     # VM, Environment, GlobalObject               (27 files)
 |   |-- async/         # Promise, AsyncFunction, Iterator            (18 files)
 |   |-- handles/       # Module, WeakMap, InlineCache                (11 files)
-|   |-- builtins_api/  # ES builtin type API stubs                   (26 files)
+|   |-- builtins_api/  # ES builtin type API stubs                   (31 files)
 |   |-- intl/          # Intl/locale API stubs                       (14 files)
 |   |-- wasm_api/      # WASM runtime API stubs                       (5 files)
 |   +-- proposals/     # TC39 proposal stubs                          (9 files)
 |
-|-- builtins/          # Native builtin implementations              (42 files)
-|-- heap/              # Generational, incremental, concurrent GC    (22 files)
+|-- builtins/          # Native builtin implementations              (43 files)
+|-- heap/              # Generational, incremental, concurrent GC   (191 files)
 |-- memory/            # Page, arena, slab allocators                 (6 files)
 |-- optimization/      # Hidden classes, property tables, speculation (4 files)
 |
@@ -93,7 +93,7 @@ zeprascript/
 |-- regex/             # Regex compiler + JIT                         (5 files)
 |-- threading/         # Thread pool, concurrent queue                (3 files)
 |
-|-- api/               # Embedder API (Isolate, Context, Handles)    (18 files)
+|-- api/               # Embedder API (Isolate, Context, Handles)    (19 files)
 |-- host/              # C++ <-> JS bridge, native function binding   (2 files)
 |-- debugger/          # Native debug protocol                       (18 files)
 |-- profiler/          # CPU, heap, sampling profilers                (4 files)
@@ -107,16 +107,12 @@ zeprascript/
 |-- bridge/            # Host bridge abstractions                     (1 files)
 |-- integration/       # VM-module integration layer                  (2 files)
 |-- workers/           # Worker module loader                         (2 files)
-|-- utils/             # Hash table, string builder, platform, unicode(3 files)
+|-- utils/             # String builder, platform, unicode            (3 files)
 |
-|-- tests/             # Unit tests, integration tests, test262      (32 files)
 |-- benchmarks/        # Performance benchmarks                       (3 files)
-|-- tools/             # REPL, bytecode dumper                        (2 files)
-|
-|-- cdp-extension/     # Optional: Chrome DevTools Protocol adapter
-|-- zepra-devtools/    # Optional: Native DevTools UI (Qt/GTK)
-|-- docs/              # Architecture docs, bytecode spec, guides
-|-- cmake/             # Build configuration modules
+|-- tools/             # REPL, bytecode dumper, engine health         (5 files)
+|-- ci/                # Conformance gate                             (1 file)
+|-- release/           # Release manifest                             (1 file)
 +-- CMakeLists.txt     # Engine build definition
 ```
 
@@ -157,13 +153,13 @@ The baseline execution tier. Threaded dispatch with computed gotos. Maintains ty
 
 ### 3.4 JIT Tiers
 
-**Location:** `jit/`, `dfg/`, `b3/`
+**Location:** `jit/`, `zopt/`, `zir/`
 
 **Baseline JIT** (`jit/baseline_jit`) — Triggered after ~100 invocations. Emits unoptimized native code with inline cache stubs. Fast compile latency.
 
-**DFG JIT** (`dfg/`) — Triggered by type feedback after ~1000 calls. Builds a sea-of-nodes IR. Type specialization, inlining, escape analysis. Includes OSR for loop-heavy code.
+**ZOpt JIT** (`zopt/`) — Triggered by type feedback after ~1000 calls. Builds a sea-of-nodes IR. Type specialization, inlining, escape analysis. Includes OSR for loop-heavy code.
 
-**FTL/B3** (`b3/`) — For the hottest functions under sustained load. Low-level IR, full register allocation, instruction scheduling, SIMD. Deoptimization bails back to interpreter.
+**ZIR / FTL** (`zir/`) — For the hottest functions under sustained load. Low-level IR, full register allocation, instruction scheduling, SIMD. Deoptimization bails back to interpreter.
 
 **Platform assemblers:** `macro_assembler`, plus platform-specific backends in `jit/`.
 
@@ -296,11 +292,11 @@ V8-compatible handle/isolate API: `Isolate`, `Context`, `LocalHandle<T>`, `Persi
               +-------------+--------------+
                    hot?     | type feedback
               +-------------v--------------+
-              |          DFG JIT           |  Speculative + type-specialized
+              |          ZOpt JIT          |  Speculative + type-specialized
               +-------------+--------------+
                    hot?     |
               +-------------v--------------+
-              |        FTL / B3            |  Maximum optimization
+              |        ZIR / FTL           |  Maximum optimization
               +----------------------------+
                             |  deopt?
                             +------------>  Interpreter (bail-out)
@@ -314,8 +310,8 @@ V8-compatible handle/isolate API: `Isolate`, `Context`, `LocalHandle<T>`, `Persi
 | ------------ | ----------------------------- | ------------ | ------------------- |
 | Interpreter  | Always                        | None         | Baseline            |
 | Baseline JIT | ~100 calls or loop iterations | ~1ms         | 2-5x interpreter    |
-| DFG JIT      | ~1000 calls + type stability  | ~10ms        | 10-30x interpreter  |
-| FTL / B3     | ~10000 calls + DFG hotness    | ~50ms        | 50-100x interpreter |
+| ZOpt JIT     | ~1000 calls + type stability  | ~10ms        | 10-30x interpreter  |
+| ZIR / FTL    | ~10000 calls + ZOpt hotness   | ~50ms        | 50-100x interpreter |
 
 Deoptimization occurs when a speculation assumption is invalidated. The engine bails to interpreter with reconstructed stack state and resets the profiling counter.
 
@@ -400,8 +396,8 @@ runtime       <-  heap, memory, utils
 builtins      <-  runtime
 interpreter   <-  bytecode, runtime
 jit           <-  interpreter, optimization, runtime, memory
-dfg           <-  jit, runtime
-b3            <-  dfg
+zopt          <-  jit, runtime
+zir           <-  zopt
 optimization  <-  runtime, heap
 async (src)   <-  runtime (promise), threading
 modules       <-  runtime
@@ -452,9 +448,15 @@ The engine root (`source/zepraScript/`) is the include root. All `#include` path
 ## 11. Testing Strategy
 
 ```
-tests/
+test/zeprascript/
 |-- unit/           # Per-subsystem C++ unit tests (GoogleTest)
 |-- integration/    # Cross-subsystem tests
+|-- gc/             # GC-specific tests
+|-- jit/            # JIT-specific tests
+|-- wasm/           # WASM-specific tests
+|-- browser_apis/   # Browser API tests
+|-- js/             # JavaScript conformance scripts
+|-- spec/           # Spec compliance tests
 +-- test262/        # ECMAScript conformance suite
 ```
 
@@ -465,7 +467,7 @@ tests/
 | Test262     | Full ES spec conformance — target 99%+ pass rate          |
 | Benchmarks  | JetStream2, Speedometer, Octane                           |
 
-Current: 266/267 tests passing.
+Current: 470/470 tests passing (401 unit + 69 integration).
 
 ---
 
@@ -489,75 +491,75 @@ Current: 266/267 tests passing.
 
 ## 13. Development TODO
 
-### Immediate (Build Fixes)
+### Immediate (Build Fixes) — RESOLVED
 
-- [ ] Fix `runtime/objects/symbol.cpp` type mismatch (string vs uint32 in symbol registry)
-- [ ] Fix `heap/generational_gc.cpp` missing closing brace
-- [ ] Fix `runtime/execution/Sandbox.h` missing `<stdexcept>` include
-- [ ] Fix `runtime/handles/module_loader.cpp` `starts_with` (C++20 — either bump standard or use `.substr()`)
-- [ ] Fix `heap/GCController.h` undeclared member variables
+- [x] Fix `runtime/objects/symbol.cpp` type mismatch (Phase 64)
+- [x] Fix `heap/generational_gc.cpp` missing closing brace (Phase 74)
+- [x] Fix `runtime/execution/Sandbox.h` missing `<stdexcept>` include (Phase 68)
+- [x] Fix `runtime/handles/module_loader.cpp` `starts_with` (Phase 59)
+- [x] Fix `heap/GCController.h` undeclared member variables (Phase 73)
 
-### Phase 1: Core Correctness
+### Phase 1: Core Correctness — MOSTLY COMPLETE
 
-- [ ] Complete ES2024 spec compliance in builtins (Array methods, String methods)
-- [ ] Implement `for-in` / `for-of` iteration protocol end-to-end
-- [ ] Implement `class` syntax with inheritance, private fields, static methods
-- [ ] Implement `Proxy` trap dispatch for all 13 internal methods
-- [ ] Implement `WeakRef` and `FinalizationRegistry`
-- [ ] Implement destructuring assignment (array + object)
-- [ ] Implement generator functions and `yield` / `yield*`
+- [x] Complete ES2024 spec compliance in builtins (Array, String, Date, Map, Set, WeakMap — Phase 54-56)
+- [x] Implement `for-in` / `for-of` iteration protocol end-to-end (Phase 60-62)
+- [x] Implement `class` syntax with inheritance, private fields, static methods (Phase 60-61)
+- [x] Implement `Proxy` trap dispatch for all 13 internal methods (Phase 57)
+- [x] Implement `WeakRef` and `FinalizationRegistry` (builtins/weakref.cpp)
+- [x] Implement destructuring assignment (Phase 61 — SpreadElement/RestElement)
+- [x] Implement generator functions and `yield` / `yield*` (Phase 57, 64)
 - [ ] Reach 95%+ on Test262 ES2024 subset
 
-### Phase 2: Performance (JIT)
+### Phase 2: Performance (JIT) — FRAMEWORK
 
-- [ ] Wire Baseline JIT tier-up from interpreter
-- [ ] Implement inline cache stubs for property access in Baseline JIT
-- [ ] Implement DFG IR builder from bytecode + type feedback
-- [ ] DFG type specialization for numeric operations
-- [ ] DFG inlining for small functions
-- [ ] OSR entry/exit between interpreter <-> Baseline <-> DFG
-- [ ] B3 lowering pass from DFG IR
+- [x] Wire Baseline JIT tier-up from interpreter (JITProfiler wired — Phase 70)
+- [x] Implement inline cache stubs for property access (ICManager in VM — Phase 52)
+- [ ] Implement ZOpt IR builder from bytecode + type feedback
+- [ ] ZOpt type specialization for numeric operations
+- [ ] ZOpt inlining for small functions
+- [ ] OSR entry/exit between interpreter <-> Baseline <-> ZOpt
+- [ ] ZIR lowering pass from ZOpt IR
 - [ ] Deoptimization with stack reconstruction
 
-### Phase 3: GC Hardening
+### Phase 3: GC Hardening — COMPLETE
 
-- [ ] Concurrent marking thread with write barrier enforcement
-- [ ] Nursery semi-space copying collector
-- [ ] Old-gen incremental mark-sweep with configurable slice budget
-- [ ] Compaction for old-gen fragmentation
-- [ ] Large object space (direct-mapped pages, no compaction)
-- [ ] FinalizationRegistry callback scheduling
+- [x] Concurrent marking thread with write barrier enforcement (Phase 73)
+- [x] Nursery semi-space copying collector (gc_nursery — Phase 73)
+- [x] Old-gen incremental mark-sweep with configurable slice budget (gc_incremental — Phase 73)
+- [x] Compaction for old-gen fragmentation (incremental_compactor — Phase 73)
+- [x] Large object space (gc_large_object — Phase 73)
+- [x] FinalizationRegistry callback scheduling (gc_finalizer_queue — Phase 73)
 
-### Phase 4: WASM
+### Phase 4: WASM — FRAMEWORK
 
-- [ ] WASM binary validation (all sections)
-- [ ] WASM interpreter for tier-0 execution
-- [ ] WASM baseline compiler for hot modules
-- [ ] WASM-JS interop (import/export, memory sharing)
-- [ ] WASM threads + shared memory
-- [ ] WASM SIMD instructions
-- [ ] WASM GC proposal
+- [x] WASM binary validation (all sections) (WasmValidate — 35K lines)
+- [x] WASM interpreter for tier-0 execution (WasmInterpreter — 49K lines)
+- [x] WASM baseline compiler for hot modules (WasmBaselineCompile — 310K lines, stubs remain)
+- [x] WASM-JS interop (import/export, memory sharing) (Phase 71)
+- [ ] WASM threads + shared memory (WasmThreads.h — declaration only)
+- [ ] WASM SIMD instructions (partial — AArch64 popcount stub)
+- [ ] WASM GC proposal (WasmGC.h — declaration only)
 
-### Phase 5: Browser Integration
+### Phase 5: Browser Integration — FRAMEWORK
 
-- [ ] DOM node binding via host callbacks
-- [ ] Fetch API with nxhttp backend
-- [ ] Event loop integration with browser main loop
-- [ ] Web Worker isolation (separate Isolate per worker)
-- [ ] Service Worker lifecycle management
-- [ ] IndexedDB transactional storage
-- [ ] WebSocket bidirectional messaging
+- [x] DOM node binding via host callbacks (browser/document.cpp)
+- [x] Fetch API with nxhttp backend (browser/fetch.cpp — 31K lines)
+- [x] Event loop integration with browser main loop (runtime/execution/event_loop.cpp)
+- [x] Web Worker isolation (browser/worker.cpp)
+- [x] Service Worker lifecycle management (browser/service_worker.cpp)
+- [x] IndexedDB transactional storage (browser/indexeddb.cpp — 27K lines)
+- [x] WebSocket bidirectional messaging (browser/websocket.cpp)
 
 ### Phase 6: Scale to 2M+ LOC
 
 - [ ] Split `browser/` into `browser/dom/`, `browser/networking/`, `browser/events/`, `browser/storage/`, `browser/workers/`
-- [ ] Implement all ES2025 Intl APIs
-- [ ] Implement Temporal API
-- [ ] Implement Decorators (stage 3)
-- [ ] Implement Pattern Matching (stage 2)
-- [ ] Implement Record & Tuple (stage 2)
+- [ ] Implement all ES2025 Intl APIs (14 headers, 0 implementations)
+- [x] Implement Temporal API (builtins/temporal.cpp — 20K lines)
+- [ ] Implement Decorators (stage 3) (DecoratorsAPI.h — declaration only)
+- [ ] Implement Pattern Matching (stage 2) (PatternMatchAPI.h — declaration only)
+- [ ] Implement Record & Tuple (stage 2) (RecordTupleAPI.h — declaration only)
 
 ---
 
 _Update this document alongside any major subsystem addition or API change._
-_For bytecode instruction reference see `docs/bytecode-spec.md`. For JIT internals see `docs/jit-tiers.md`._
+_For bytecode instruction reference see `docs/zeprascript/bytecode-spec.md`. For JIT internals see `docs/zeprascript/jit-tiers.md`._

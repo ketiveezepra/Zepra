@@ -4015,7 +4015,8 @@ void onCloseTab(int tabId) {
         }
     }
     if (g_tabs.empty()) {
-        g_running = false;
+        // Last tab closed — open a new start page tab instead of exiting
+        onNewTab();
     } else if (g_activeTabId == tabId) {
         g_activeTabId = g_tabs[0].id;
         g_currentUrl = g_tabs[0].url;
@@ -4447,10 +4448,8 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
             onNewTab();
             return;
         } else if (key == NXRender::KeyCode::W) {
-            // Ctrl+W - Close tab
-            if (g_tabs.size() > 1) {
-                onCloseTab(g_activeTabId);
-            }
+            // Ctrl+W - Close tab (always allowed — onCloseTab handles last-tab case)
+            onCloseTab(g_activeTabId);
             return;
         } else if (key == NXRender::KeyCode::L) {
             // Ctrl+L - Focus address bar
@@ -4674,13 +4673,24 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
             if (tab.id == g_activeTabId) {
                 tab.scrollY += shift ? -100 : 100;
                 if (tab.scrollY < 0) tab.scrollY = 0;
+                if (g_layoutRoot) {
+                    float maxS = std::max(0.0f, g_layoutRoot->height - ((float)g_height - TAB_HEIGHT - NAV_HEIGHT));
+                    if (tab.scrollY > maxS) tab.scrollY = maxS;
+                }
                 break;
             }
         }
     } else if (key == KeyCode::PageDown) {
         // Page Down - Scroll down by viewport
         for (Tab& tab : g_tabs) {
-            if (tab.id == g_activeTabId) { tab.scrollY += g_height - 100; break; }
+            if (tab.id == g_activeTabId) {
+                tab.scrollY += g_height - 100;
+                if (g_layoutRoot) {
+                    float maxS = std::max(0.0f, g_layoutRoot->height - ((float)g_height - TAB_HEIGHT - NAV_HEIGHT));
+                    if (tab.scrollY > maxS) tab.scrollY = maxS;
+                }
+                break;
+            }
         }
     } else if (key == KeyCode::PageUp) {
         // Page Up - Scroll up by viewport
@@ -4693,9 +4703,12 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
             if (tab.id == g_activeTabId) { tab.scrollY = 0; break; }
         }
     } else if (key == KeyCode::End && ctrl) {
-        // Ctrl+End - Scroll to bottom (approximate)
+        // Ctrl+End - Scroll to bottom
         for (Tab& tab : g_tabs) {
-            if (tab.id == g_activeTabId) { tab.scrollY = 10000; break; }
+            if (tab.id == g_activeTabId) {
+                if (g_layoutRoot) tab.scrollY = std::max(0.0f, g_layoutRoot->height - ((float)g_height - TAB_HEIGHT - NAV_HEIGHT));
+                break;
+            }
         }
     } else if (key == KeyCode::Escape) {
         // Close context menu first, then console
@@ -4845,6 +4858,12 @@ void handleNXEvent(const NXRender::Event& event) {
                  if (tab.id == g_activeTabId) {
                      tab.scrollY -= event.mouse.wheelDelta * 40.0f;
                      if (tab.scrollY < 0) tab.scrollY = 0;
+                     // Clamp to max scroll (page height - viewport height)
+                     if (g_layoutRoot) {
+                         float viewH = (float)g_height - TAB_HEIGHT - NAV_HEIGHT;
+                         float maxScroll = std::max(0.0f, g_layoutRoot->height - viewH);
+                         if (tab.scrollY > maxScroll) tab.scrollY = maxScroll;
+                     }
                      break;
                  }
              }

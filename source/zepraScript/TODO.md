@@ -1,7 +1,7 @@
 # ZepraScript Development Status
 
-> **Last Updated:** 2026-03-13
-> **Version:** 1.0.2
+> **Last Updated:** 2026-04-18
+> **Version:** 1.2.0
 > **Build:** GCC 13.3.0, C++20
 > **Tests:** 470/470 passing (401 unit + 69 integration)
 

@@ -133,13 +133,12 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     if (contentWidth < 0) contentWidth = 0;
     
     // Flex containers: pre-loop pass handles all children at once
-    // Resolve container height BEFORE layout if explicitly set or min-height applies
-    // This is critical for flex containers using justify-content centering
-    if (box.cssHeight.isSet() && !box.cssHeight.isAuto()) {
-        box.height = std::max(box.height, box.cssHeight.resolve(0, box.fontSize, vpW, vpH));
-    }
+    // Pre-resolve min-height for flex justify-content centering
+    // cssHeight already resolved at line 93-97. Only apply min-height constraint here.
     if (box.cssMinHeight.isSet() && !box.cssMinHeight.isAuto()) {
-        box.height = std::max(box.height, box.cssMinHeight.resolve(0, box.fontSize, vpW, vpH));
+        float minH = box.cssMinHeight.resolve(0, box.fontSize, vpW, vpH);
+        if (box.boxSizing == 0) minH += box.paddingTop + box.paddingBottom + box.borderTop + box.borderBottom;
+        if (box.height < minH) box.height = minH;
     }
     
     if (box.type == LayoutType::Flex) {
@@ -712,15 +711,17 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         }
     }
     
-    // Apply min/max height constraints
+    // Apply min/max height constraints (accounting for box-sizing)
     float vpW2 = (float)g_width;
     float vpH2 = (float)g_height;
     if (box.cssMinHeight.isSet() && !box.cssMinHeight.isAuto()) {
         float minH = box.cssMinHeight.resolve(0, box.fontSize, vpW2, vpH2);
+        if (box.boxSizing == 0) minH += box.paddingTop + box.paddingBottom + box.borderTop + box.borderBottom;
         if (box.height < minH) box.height = minH;
     }
     if (box.cssMaxHeight.isSet() && !box.cssMaxHeight.isAuto()) {
         float maxH = box.cssMaxHeight.resolve(0, box.fontSize, vpW2, vpH2);
+        if (box.boxSizing == 0) maxH += box.paddingTop + box.paddingBottom + box.borderTop + box.borderBottom;
         if (box.height > maxH) box.height = maxH;
     }
     

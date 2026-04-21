@@ -355,6 +355,7 @@ set(ZEPRA_CORE_SOURCES
     browser/performance.cpp
     browser/console_api.cpp
     browser/devtools.cpp
+    browser/video_bindings.cpp
 
     # Regex Engine
     regex/regex_compiler.cpp
@@ -364,7 +365,10 @@ set(ZEPRA_CORE_SOURCES
     threading/thread_pool.cpp
 
     # Optimization
-    # (optimization/ sources not yet implemented — stubs removed to unblock build)
+    optimization/hidden_class.cpp
+    optimization/property_table.cpp
+    optimization/inline_cache_opt.cpp
+    optimization/speculation.cpp
 
     # Workers
     workers/WorkerModuleLoader.cpp
@@ -379,6 +383,10 @@ set(ZEPRA_CORE_SOURCES
 
     # Integration
     integration/VMModuleIntegration.cpp
+
+    # Core (embedder API implementations)
+    core/EmbedderAPI.cpp
+    core/TaskRunner.cpp
 )
 
 # Create core library

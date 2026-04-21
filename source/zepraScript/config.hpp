@@ -12,7 +12,7 @@
 // Version Information
 // =============================================================================
 #ifndef ZEPRA_VERSION
-#define ZEPRA_VERSION "1.0.0"
+#define ZEPRA_VERSION "1.2.0"
 #endif
 
 #ifndef ZEPRA_VERSION_MAJOR
@@ -20,7 +20,7 @@
 #endif
 
 #ifndef ZEPRA_VERSION_MINOR
-#define ZEPRA_VERSION_MINOR 0
+#define ZEPRA_VERSION_MINOR 2
 #endif
 
 #ifndef ZEPRA_VERSION_PATCH
