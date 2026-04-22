@@ -1686,5 +1686,3 @@ bool BaselineCompiler::emitTableSet(uint32_t tableIdx) {
 }
 
 } // namespace Zepra::Wasm
-
-} // namespace Zepra::Wasm
