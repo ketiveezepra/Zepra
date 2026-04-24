@@ -1,3 +1,0 @@
-/home/swana/dev/search/zeprabrowser/source/networking/build/CMakeFiles/networking.dir
-/home/swana/dev/search/zeprabrowser/source/networking/build/CMakeFiles/edit_cache.dir
-/home/swana/dev/search/zeprabrowser/source/networking/build/CMakeFiles/rebuild_cache.dir

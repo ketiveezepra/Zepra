@@ -1,0 +1,3 @@
+[submodule "source/NXNet"]
+	path = source/NXNet
+	url = https://github.com/KetiveeAI/NXNet

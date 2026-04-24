@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/swana/dev/search/zeprabrowser/source/networking/build/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
