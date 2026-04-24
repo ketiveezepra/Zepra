@@ -87,8 +87,8 @@ endif()
 add_executable(nxhttp_security_test nxhttp_security_test.cpp)
 target_include_directories(nxhttp_security_test PRIVATE
     ${PROJECT_SOURCE_DIR}/include
-    ${PROJECT_SOURCE_DIR}/source/nxhttp
-    ${PROJECT_SOURCE_DIR}/source/networking
+    ${PROJECT_SOURCE_DIR}/source/NXNet/nxhttp
+    ${PROJECT_SOURCE_DIR}/source/NXNet/networking
 )
 target_link_libraries(nxhttp_security_test nxhttp networking GTest::gtest GTest::gtest_main pthread)
 add_test(NAME NxHttpSecurityTest COMMAND nxhttp_security_test)
@@ -97,8 +97,8 @@ add_test(NAME NxHttpSecurityTest COMMAND nxhttp_security_test)
 add_executable(nxhttp_tests nxhttp_tests.cpp)
 target_include_directories(nxhttp_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/include
-    ${PROJECT_SOURCE_DIR}/source/nxhttp
-    ${PROJECT_SOURCE_DIR}/source/networking
+    ${PROJECT_SOURCE_DIR}/source/NXNet/nxhttp
+    ${PROJECT_SOURCE_DIR}/source/NXNet/networking
 )
 target_link_libraries(nxhttp_tests nxhttp networking GTest::gtest GTest::gtest_main pthread)
 add_test(NAME NxHttpTests COMMAND nxhttp_tests)
@@ -107,7 +107,7 @@ add_test(NAME NxHttpTests COMMAND nxhttp_tests)
 add_executable(nxcrypto_tests nxcrypto_tests.cpp)
 target_include_directories(nxcrypto_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/include
-    ${PROJECT_SOURCE_DIR}/source/nxcrypto
+    ${PROJECT_SOURCE_DIR}/source/NXNet/nxcrypto
 )
 target_link_libraries(nxcrypto_tests nxcrypto GTest::gtest GTest::gtest_main pthread ssl crypto)
 add_test(NAME NxCryptoTests COMMAND nxcrypto_tests)

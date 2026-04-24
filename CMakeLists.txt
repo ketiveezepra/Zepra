@@ -117,6 +117,14 @@ find_package(OpenGL REQUIRED)
 include_directories(${CMAKE_SOURCE_DIR}/source/integration/include)
 include_directories(${CMAKE_SOURCE_DIR}/external)
 
+# NXNet includes
+include_directories(${CMAKE_SOURCE_DIR}/source/NXNet)
+include_directories(${CMAKE_SOURCE_DIR}/source/NXNet/networking/include)
+include_directories(${CMAKE_SOURCE_DIR}/source/NXNet/nxbase/include
+                    ${CMAKE_SOURCE_DIR}/source/NXNet/nxbase)
+include_directories(${CMAKE_SOURCE_DIR}/source/NXNet/nxhttp/include)
+include_directories(${CMAKE_SOURCE_DIR}/source/NXNet/nxcrypto/include)
+
 # ============================================================================
 # Engine subdirectories (zepraScript, webCore, etc.)
 # ============================================================================
@@ -128,9 +136,7 @@ include_directories(${CMAKE_SOURCE_DIR}/source/zepraScript)
 add_subdirectory(source/webCore)
 include_directories(${CMAKE_SOURCE_DIR}/source/webCore/include)
 
-# Build Networking module
-add_subdirectory(source/networking)
-include_directories(${CMAKE_SOURCE_DIR}/source/networking/include)
+# Build Networking module (Now part of NXNet submodule)
 
 # Build NXRender-cpp graphics library
 add_subdirectory(source/nxrender-cpp)
@@ -151,19 +157,13 @@ include_directories(${CMAKE_SOURCE_DIR}/source/media/nxaudio/include)
 # Custom Zepra Stack (Unconditional)
 # ============================================================================
     message(STATUS "Using custom Zepra Stack libraries")
-    add_subdirectory(source/nxbase)
+    add_subdirectory(source/NXNet)
     add_subdirectory(source/nxjson)
-    add_subdirectory(source/nxhttp)
     add_subdirectory(source/nxxml)
-    add_subdirectory(source/nxcrypto)
     
-    include_directories(${CMAKE_SOURCE_DIR}/source/nxbase/include
-                        ${CMAKE_SOURCE_DIR}/source/nxbase)
     include_directories(${CMAKE_SOURCE_DIR}/source/nxjson/include)
     include_directories(${CMAKE_SOURCE_DIR}/source/nxjson)
-    include_directories(${CMAKE_SOURCE_DIR}/source/nxhttp/include)
     include_directories(${CMAKE_SOURCE_DIR}/source/nxxml/include)
-    include_directories(${CMAKE_SOURCE_DIR}/source/nxcrypto/include)
 
 # Source files
 if(USE_NXRENDER)
@@ -191,9 +191,9 @@ if(USE_NXRENDER)
         UI/settings/settings_ui.cpp
         source/sandbox/src/sandbox_manager.cpp
         source/platform/src/config/config_manager.cpp
-        source/networking/remote/zep_remote.cpp
-        source/networking/network/network_monitor.cpp
-        source/networking/network/monitored_http.cpp
+        source/NXNet/networking/remote/zep_remote.cpp
+        source/NXNet/networking/network/network_monitor.cpp
+        source/NXNet/networking/network/monitored_http.cpp
         source/sandbox/src/security/security_checker.cpp
         source/webCore/browser/mouse_handler.cpp
         source/webCore/browser/layout_engine.cpp
@@ -262,7 +262,7 @@ else()
         UI/settings/settings_ui.cpp
         source/sandbox/src/sandbox_manager.cpp
         source/platform/src/config/config_manager.cpp
-        source/networking/network/network_monitor.cpp
+        source/NXNet/networking/network/network_monitor.cpp
     )
 
 
@@ -289,7 +289,7 @@ set(HEADERS
     source/platform/include/auth/zepra_auth.h
     UI/settings/auth_ui.h
     UI/settings/settings_ui.h
-    source/networking/http.h
+    source/NXNet/networking/http.h
     source/sandbox/include/sandbox/sandbox_manager.h
     source/platform/include/config/dual_config.h
     source/platform/src/config/config_manager.h

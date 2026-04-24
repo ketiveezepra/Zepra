@@ -23,7 +23,7 @@ add_library(storage STATIC ${STORAGE_SOURCES})
 
 target_include_directories(storage PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../networking/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../NXNet/networking/include
 )
 
 # Export settings
