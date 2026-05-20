@@ -9,6 +9,8 @@
 
 #ifdef __linux__
 #include <GL/glx.h>
+#elif _WIN32
+#include <windows.h>
 #endif
 
 namespace NXRender {
@@ -48,9 +50,12 @@ static void loadBatchGLFunctions() {
     if (s_batchGLLoaded) return;
     s_batchGLLoaded = true;
 
-#ifdef __linux__
+#if defined(__linux__)
     #define BLOAD(name) nxb_##name = reinterpret_cast<decltype(nxb_##name)>( \
         glXGetProcAddress(reinterpret_cast<const GLubyte*>(#name)))
+#elif defined(_WIN32)
+    #define BLOAD(name) nxb_##name = reinterpret_cast<decltype(nxb_##name)>( \
+        wglGetProcAddress(#name))
 #else
     #define BLOAD(name) (void)0
 #endif

@@ -7,6 +7,8 @@
 
 #ifdef __linux__
 #include <GL/glx.h>
+#elif _WIN32
+#include <windows.h>
 #endif
 
 namespace NXRender {
@@ -30,16 +32,21 @@ static void loadRTGLFunctions() {
     if (s_rtGLLoaded) return;
     s_rtGLLoaded = true;
 
-#ifdef __linux__
+#if defined(__linux__)
     #define RTLOAD(name) rt_##name = reinterpret_cast<decltype(rt_##name)>( \
         glXGetProcAddress(reinterpret_cast<const GLubyte*>(#name)))
+#elif defined(_WIN32)
+    #define RTLOAD(name) rt_##name = reinterpret_cast<decltype(rt_##name)>( \
+        wglGetProcAddress(#name))
+#else
+    #define RTLOAD(name) (void)0
+#endif
     RTLOAD(glGenFramebuffers);
     RTLOAD(glBindFramebuffer);
     RTLOAD(glFramebufferTexture2D);
     RTLOAD(glCheckFramebufferStatus);
     RTLOAD(glDeleteFramebuffers);
     #undef RTLOAD
-#endif
 }
 
 // ==================================================================

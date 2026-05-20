@@ -1,0 +1,5 @@
+if(EXISTS "C:/Users/Lenovo/Music/Zepra/build-win/test/zeprascript/zeprascript-unit-tests[1]_tests.cmake")
+  include("C:/Users/Lenovo/Music/Zepra/build-win/test/zeprascript/zeprascript-unit-tests[1]_tests.cmake")
+else()
+  add_test(zeprascript-unit-tests_NOT_BUILT zeprascript-unit-tests_NOT_BUILT)
+endif()

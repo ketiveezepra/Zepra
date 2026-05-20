@@ -5,6 +5,8 @@
 #include <GL/gl.h>
 #ifdef __linux__
 #include <GL/glx.h>
+#elif _WIN32
+#include <windows.h>
 #endif
 #include <cstring>
 

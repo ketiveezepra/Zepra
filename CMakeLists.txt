@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+﻿cmake_minimum_required(VERSION 3.16)
 project(Zepra VERSION 1.0.0 LANGUAGES CXX)
 
 # ============================================================================
@@ -143,7 +143,7 @@ add_subdirectory(source/nxrender-cpp)
 
 # NOTE: zepraEngine demos moved to test/demos/zepraEngine/ (SDL removed)
 
-# Build Integration layer (JS↔DOM bridge)
+# Build Integration layer (JSâ†”DOM bridge)
 add_subdirectory(source/integration)
 include_directories(${CMAKE_SOURCE_DIR}/source/integration/include)
 
@@ -215,7 +215,7 @@ if(USE_NXRENDER)
         source/webCore/browser/nxrender_layout_bridge.cpp
         # Stubs for missing WebCore symbols (WebGL, etc.)
         source/integration/stubs/webgl_stubs.cpp
-        # tab_suspender_stubs removed — real impl now active
+        # tab_suspender_stubs removed â€” real impl now active
         source/integration/stubs/link_stubs.cpp
     )
     set(EXECUTABLE_NAME "zepra_browser")
@@ -300,21 +300,12 @@ add_executable(${EXECUTABLE_NAME} ${SOURCES} ${HEADERS})
 
 # Link libraries based on build mode
 if(USE_NXRENDER)
-    # NXRENDER mode - link nxrender_ffi, X11, OpenGL, FreeType
-    find_package(X11 REQUIRED)
-    find_package(Freetype REQUIRED)
-    # CURL removed - now using nxhttp
-    find_package(PkgConfig REQUIRED)
-    # Note: Using nxjson instead of jsoncpp (line 266)
-    
-    target_link_libraries(${EXECUTABLE_NAME} 
+    # NXRENDER mode - link nxrender + platform-specific graphics
+
+    # Common libraries for all platforms
+    target_link_libraries(${EXECUTABLE_NAME}
         webcore
         nxrender
-        ${X11_LIBRARIES}
-        X11
-        GL GLX
-        pthread dl m z
-        Freetype::Freetype
         zepra-integration
         networking
         nxaudio_static
@@ -323,9 +314,37 @@ if(USE_NXRENDER)
         nxcrypto
         nxjson
         nxxml
-        SDL2
     )
-    target_include_directories(${EXECUTABLE_NAME} PRIVATE 
+
+    if(WIN32)
+        # Windows: OpenGL + Win32 APIs (no X11, no SDL2)
+        find_package(OpenGL REQUIRED)
+        find_package(Freetype REQUIRED)
+        target_link_libraries(${EXECUTABLE_NAME}
+            OpenGL::GL
+            Freetype::Freetype
+            user32 gdi32 opengl32 ws2_32
+        )
+    else()
+        # Linux: X11/GLX/FreeType/SDL2 as before
+        find_package(X11 REQUIRED)
+        find_package(Freetype REQUIRED)
+        find_package(PkgConfig REQUIRED)
+        target_link_libraries(${EXECUTABLE_NAME}
+            ${X11_LIBRARIES}
+            X11
+            GL GLX
+            pthread dl m z
+            Freetype::Freetype
+            SDL2
+        )
+        target_include_directories(${EXECUTABLE_NAME} PRIVATE
+            ${X11_INCLUDE_DIR}
+            ${FREETYPE_INCLUDE_DIRS}
+        )
+    endif()
+
+    target_include_directories(${EXECUTABLE_NAME} PRIVATE
         ${CMAKE_SOURCE_DIR}/source/integration/include
         ${CMAKE_SOURCE_DIR}/source/storage/include/storage
         ${CMAKE_SOURCE_DIR}/source/webCore/include/webcore/browser
@@ -340,13 +359,11 @@ if(USE_NXRENDER)
         ${CMAKE_SOURCE_DIR}/source/storage/include
         ${CMAKE_SOURCE_DIR}/source/networking
         ${CMAKE_SOURCE_DIR}/UI
-        ${X11_INCLUDE_DIR}
-        ${FREETYPE_INCLUDE_DIRS}
-        ${CMAKE_SOURCE_DIR}/../../REOX/reolab/runtime
     )
     target_compile_definitions(${EXECUTABLE_NAME} PRIVATE USE_WEBCORE
         RESOURCE_PATH="${CMAKE_SOURCE_DIR}/resources"
     )
+    message(STATUS "Using NXRENDER native rendering (platform: ${CMAKE_SYSTEM_NAME})")
     message(STATUS "Using NXRENDER + REOX native rendering with X11/OpenGL/FreeType (NO SDL)")
 else()
     # SDL mode

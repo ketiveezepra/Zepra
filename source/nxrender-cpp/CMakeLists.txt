@@ -212,20 +212,47 @@ target_include_directories(nxrender PRIVATE
 # Link dependencies
 find_package(OpenGL REQUIRED)
 find_package(Freetype REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(HARFBUZZ REQUIRED harfbuzz)
 
-target_include_directories(nxrender PRIVATE ${HARFBUZZ_INCLUDE_DIRS})
+# HarfBuzz: use pkg-config when available (Linux), fall back to find_library (Windows)
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(HARFBUZZ REQUIRED harfbuzz)
+    target_include_directories(nxrender PRIVATE ${HARFBUZZ_INCLUDE_DIRS})
+    set(HARFBUZZ_LINK_LIBS ${HARFBUZZ_LIBRARIES})
+else()
+    # Windows / systems without pkg-config
+    find_library(HARFBUZZ_LIB NAMES harfbuzz)
+    find_path(HARFBUZZ_INCLUDE_DIR hb.h PATH_SUFFIXES harfbuzz)
+    if(HARFBUZZ_LIB AND HARFBUZZ_INCLUDE_DIR)
+        target_include_directories(nxrender PRIVATE ${HARFBUZZ_INCLUDE_DIR})
+        set(HARFBUZZ_LINK_LIBS ${HARFBUZZ_LIB})
+        message(STATUS "Found HarfBuzz: ${HARFBUZZ_LIB}")
+    else()
+        message(WARNING "HarfBuzz not found — text shaping will be disabled. Install harfbuzz-devel or provide it in CMAKE_PREFIX_PATH.")
+        set(HARFBUZZ_LINK_LIBS "")
+    endif()
+endif()
 
 target_link_libraries(nxrender PUBLIC
     OpenGL::GL
     Freetype::Freetype
-    ${HARFBUZZ_LIBRARIES}
+    ${HARFBUZZ_LINK_LIBS}
 )
 
 # Platform-specific
 if(UNIX AND NOT APPLE)
     target_link_libraries(nxrender PUBLIC X11 Xrandr pthread)
+endif()
+
+if(WIN32)
+    # Windows platform source is gated to _WIN32 inside the file itself,
+    # but we add it here so CMake includes it in the build.
+    target_sources(nxrender PRIVATE platform/windows_wgl.cpp)
+    target_link_libraries(nxrender PUBLIC opengl32 gdi32 user32)
+    target_compile_definitions(nxrender PUBLIC ZEPRA_PLATFORM_WINDOWS)
+    # Suppress MSVC/MinGW POSIX deprecation noise
+    target_compile_definitions(nxrender PRIVATE
+        _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN)
 endif()
 
 # Install

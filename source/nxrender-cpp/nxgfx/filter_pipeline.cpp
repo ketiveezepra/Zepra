@@ -13,6 +13,8 @@
 #include <GL/gl.h>
 #ifdef __linux__
 #include <GL/glx.h>
+#elif _WIN32
+#include <windows.h>
 #endif
 
 #ifndef M_PI
@@ -40,16 +42,21 @@ static void loadFilterGLFunctions() {
     if (s_filterGLLoaded) return;
     s_filterGLLoaded = true;
 
-#ifdef __linux__
+#if defined(__linux__)
     #define FLOAD(name) nxf_##name = reinterpret_cast<decltype(nxf_##name)>( \
         glXGetProcAddress(reinterpret_cast<const GLubyte*>(#name)))
+#elif defined(_WIN32)
+    #define FLOAD(name) nxf_##name = reinterpret_cast<decltype(nxf_##name)>( \
+        wglGetProcAddress(#name))
+#else
+    #define FLOAD(name) (void)0
+#endif
     FLOAD(glGenFramebuffers);
     FLOAD(glBindFramebuffer);
     FLOAD(glFramebufferTexture2D);
     FLOAD(glCheckFramebufferStatus);
     FLOAD(glDeleteFramebuffers);
     #undef FLOAD
-#endif
 }
 
 // ==================================================================

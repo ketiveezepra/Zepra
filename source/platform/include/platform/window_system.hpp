@@ -100,7 +100,26 @@ public:
 
 #ifdef _WIN32
 class WindowSystemWin : public WindowSystem {
-    // Windows implementation
+public:
+    WindowHandle* createWindow(const WindowConfig& config) override;
+    void destroyWindow(WindowHandle* window) override;
+    void showWindow(WindowHandle* window) override;
+    void hideWindow(WindowHandle* window) override;
+    void minimizeWindow(WindowHandle* window) override;
+    void maximizeWindow(WindowHandle* window) override;
+    void restoreWindow(WindowHandle* window) override;
+    void setFullscreen(WindowHandle* window, bool fullscreen) override;
+    void setTitle(WindowHandle* window, const std::string& title) override;
+    void setSize(WindowHandle* window, int width, int height) override;
+    void setPosition(WindowHandle* window, int x, int y) override;
+    void getSize(WindowHandle* window, int& width, int& height) override;
+    void getPosition(WindowHandle* window, int& x, int& y) override;
+    void focusWindow(WindowHandle* window) override;
+    bool isFocused(WindowHandle* window) override;
+    void* getNativeHandle(WindowHandle* window) override;
+    void setOnResize(WindowHandle* window, ResizeCallback callback) override;
+    void setOnClose(WindowHandle* window, CloseCallback callback) override;
+    void setOnFocus(WindowHandle* window, FocusCallback callback) override;
 };
 #endif
 

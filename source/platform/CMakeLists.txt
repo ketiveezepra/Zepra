@@ -44,6 +44,12 @@ if(X11_FOUND)
     target_include_directories(platform PRIVATE ${X11_INCLUDE_DIRS})
 endif()
 
+if(WIN32)
+    target_link_libraries(platform user32 gdi32 opengl32)
+    target_compile_definitions(platform PRIVATE
+        WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS ZEPRA_PLATFORM_WINDOWS)
+endif()
+
 set_target_properties(platform PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
