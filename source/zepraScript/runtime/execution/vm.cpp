@@ -28,6 +28,7 @@
 #include "runtime/objects/well_known_symbols.hpp"
 #include "builtins/map.hpp"
 #include "builtins/set.hpp"
+#include "builtins/object_builtins.hpp"
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -854,6 +855,18 @@ void VM::dispatch(Opcode op) {
                     fn->addUpvalue(upvalue);
                 }
             }
+            // Per ES spec: constructable functions get a .prototype property
+            // with a .constructor back-reference. Arrow functions are excluded.
+            if (fn && fn->isConstructor()) {
+                Value existingProto = fn->get("prototype");
+                if (!existingProto.isObject()) {
+                    static Object* objectProto = Builtins::ObjectBuiltin::createObjectPrototype(nullptr);
+                    Object* proto = new Object();
+                    proto->setPrototype(objectProto);
+                    proto->set("constructor", funcValue);
+                    fn->set("prototype", Value::object(proto));
+                }
+            }
             
             push(funcValue);
             break;
@@ -945,9 +958,13 @@ void VM::dispatch(Opcode op) {
             break;
         }
         
-        case Opcode::OP_CREATE_OBJECT:
-            push(Value::object(new Object()));
+        case Opcode::OP_CREATE_OBJECT: {
+            static Object* objectProto = Builtins::ObjectBuiltin::createObjectPrototype(nullptr);
+            Object* obj = new Object();
+            obj->setPrototype(objectProto);
+            push(Value::object(obj));
             break;
+        }
             
         case Opcode::OP_INIT_PROPERTY: {
             Value value = pop();
