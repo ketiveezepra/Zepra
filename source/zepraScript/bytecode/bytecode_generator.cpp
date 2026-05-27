@@ -30,6 +30,22 @@ void BytecodeChunk::writeShort(uint16_t value, uint32_t line) {
 }
 
 size_t BytecodeChunk::addConstant(Runtime::Value value) {
+    // Deduplicate: reuse existing constant for identical values
+    for (size_t i = 0; i < constants_.size(); i++) {
+        const auto& existing = constants_[i];
+        if (existing.type() != value.type()) continue;
+        
+        if (value.isNumber() && existing.asNumber() == value.asNumber()) return i;
+        if (value.isBoolean() && existing.asBoolean() == value.asBoolean()) return i;
+        if (value.isNull() && existing.isNull()) return i;
+        if (value.isUndefined() && existing.isUndefined()) return i;
+        if (value.isString() && existing.isString()) {
+            auto* a = static_cast<Runtime::String*>(value.asObject());
+            auto* b = static_cast<Runtime::String*>(existing.asObject());
+            if (a->value() == b->value()) return i;
+        }
+    }
+    
     constants_.push_back(value);
     return constants_.size() - 1;
 }
@@ -415,23 +431,21 @@ void BytecodeGenerator::compileVariableDeclaration(const Frontend::VariableDecl*
         const auto* idExpr = declarator.id.get();
         
         if (idExpr->type() == Frontend::NodeType::Identifier) {
-            // Simple variable: let x = ...
             const auto* id = static_cast<const Frontend::IdentifierExpr*>(idExpr);
             std::string varName = id->name();
             declareVariable(varName, isConstVar);
             if (declarator.init) {
                 compileExpression(declarator.init.get());
             } else {
-                emit(Opcode::OP_NIL);
+                emitConstant(Runtime::Value::undefined());
             }
             defineVariable(varName);
         } else if (idExpr->type() == Frontend::NodeType::ObjectPattern ||
                    idExpr->type() == Frontend::NodeType::ArrayPattern) {
-            // Destructuring: let {a, b} = ... or let [x, y] = ...
             if (declarator.init) {
                 compileExpression(declarator.init.get());
             } else {
-                emit(Opcode::OP_NIL);
+                emitConstant(Runtime::Value::undefined());
             }
             emitBindingPattern(idExpr, isConstVar);
         } else {
@@ -696,7 +710,7 @@ void BytecodeGenerator::compileReturnStatement(const Frontend::ReturnStmt* stmt)
     if (stmt->argument()) {
         compileExpression(stmt->argument());
     } else {
-        emit(Opcode::OP_NIL);
+        emitConstant(Runtime::Value::undefined());
     }
     emit(Opcode::OP_RETURN);
 }
@@ -1075,7 +1089,64 @@ void BytecodeGenerator::compileConditionalExpression(const Frontend::Conditional
 }
 
 void BytecodeGenerator::compileAssignmentExpression(const Frontend::AssignmentExpr* expr) {
-    // For compound assignment, get the current value first
+    // Member assignment: obj.prop = value or obj[expr] = value
+    // Must compile LHS object BEFORE RHS value so stack order matches
+    // OP_SET_PROPERTY which pops: value, object
+    if (expr->left()->type() == Frontend::NodeType::MemberExpression) {
+        const auto* member = static_cast<const Frontend::MemberExpr*>(expr->left());
+        
+        // Push object reference first
+        compileExpression(member->object());
+        
+        // For compound assignment, duplicate obj ref and get current value
+        if (expr->op() != Frontend::TokenType::Assign) {
+            emit(Opcode::OP_DUP);
+            if (member->isComputed()) {
+                compileExpression(member->property());
+                emit(Opcode::OP_GET_ELEMENT);
+            } else {
+                const auto* prop = static_cast<const Frontend::IdentifierExpr*>(member->property());
+                size_t constant = makeConstant(Runtime::Value::string(new Runtime::String(prop->name())));
+                emit(Opcode::OP_GET_PROPERTY);
+                emit(static_cast<uint8_t>(constant));
+            }
+        }
+        
+        // Push RHS value
+        compileExpression(expr->right());
+        
+        // Apply compound operator
+        switch (expr->op()) {
+            case Frontend::TokenType::PlusAssign: emit(Opcode::OP_ADD); break;
+            case Frontend::TokenType::MinusAssign: emit(Opcode::OP_SUBTRACT); break;
+            case Frontend::TokenType::StarAssign: emit(Opcode::OP_MULTIPLY); break;
+            case Frontend::TokenType::SlashAssign: emit(Opcode::OP_DIVIDE); break;
+            case Frontend::TokenType::PercentAssign: emit(Opcode::OP_MODULO); break;
+            case Frontend::TokenType::StarStarAssign: emit(Opcode::OP_POWER); break;
+            case Frontend::TokenType::AmpersandAssign: emit(Opcode::OP_BITWISE_AND); break;
+            case Frontend::TokenType::PipeAssign: emit(Opcode::OP_BITWISE_OR); break;
+            case Frontend::TokenType::CaretAssign: emit(Opcode::OP_BITWISE_XOR); break;
+            case Frontend::TokenType::LeftShiftAssign: emit(Opcode::OP_LEFT_SHIFT); break;
+            case Frontend::TokenType::RightShiftAssign: emit(Opcode::OP_RIGHT_SHIFT); break;
+            case Frontend::TokenType::UnsignedRightShiftAssign: emit(Opcode::OP_UNSIGNED_RIGHT_SHIFT); break;
+            case Frontend::TokenType::Assign: break;
+            default: break;
+        }
+        
+        // Stack is now [obj, value] — emit property store
+        if (member->isComputed()) {
+            compileExpression(member->property());
+            emit(Opcode::OP_SET_ELEMENT);
+        } else {
+            const auto* prop = static_cast<const Frontend::IdentifierExpr*>(member->property());
+            size_t constant = makeConstant(Runtime::Value::string(new Runtime::String(prop->name())));
+            emit(Opcode::OP_SET_PROPERTY);
+            emit(static_cast<uint8_t>(constant));
+        }
+        return;
+    }
+    
+    // Simple or compound assignment to identifier
     if (expr->op() != Frontend::TokenType::Assign) {
         compileExpression(expr->left());
     }
@@ -1103,14 +1174,13 @@ void BytecodeGenerator::compileAssignmentExpression(const Frontend::AssignmentEx
         default: break;
     }
     
-    // Store the result
+    // Store to identifier
     if (expr->left()->type() == Frontend::NodeType::Identifier) {
         const auto* id = static_cast<const Frontend::IdentifierExpr*>(expr->left());
         const std::string& identName = id->name();
         
         int local = resolveLocal(identName);
         if (local != -1) {
-            // Check if it's a const variable
             if (current_->locals[local].isConst) {
                 error("Cannot assign to const variable '" + identName + "'");
                 return;
@@ -1121,19 +1191,6 @@ void BytecodeGenerator::compileAssignmentExpression(const Frontend::AssignmentEx
         } else {
             size_t constant = makeConstant(Runtime::Value::string(new Runtime::String(identName)));
             emit(Opcode::OP_SET_GLOBAL);
-            emit(static_cast<uint8_t>(constant));
-        }
-    } else if (expr->left()->type() == Frontend::NodeType::MemberExpression) {
-        // Member assignment
-        const auto* member = static_cast<const Frontend::MemberExpr*>(expr->left());
-        compileExpression(member->object());
-        if (member->isComputed()) {
-            compileExpression(member->property());
-            emit(Opcode::OP_SET_ELEMENT);
-        } else {
-            const auto* prop = static_cast<const Frontend::IdentifierExpr*>(member->property());
-            size_t constant = makeConstant(Runtime::Value::string(new Runtime::String(prop->name())));
-            emit(Opcode::OP_SET_PROPERTY);
             emit(static_cast<uint8_t>(constant));
         }
     }
@@ -2037,6 +2094,7 @@ void BytecodeGenerator::compileForInStatement(const Frontend::ForInStmt* stmt) {
     size_t varSlot = SIZE_MAX;
     const Frontend::ASTNode* left = stmt->left();
     bool isVarDecl = (left->type() == Frontend::NodeType::VariableDeclaration);
+    bool isGlobalVar = false;
     std::string loopVarName;
     
     if (isVarDecl) {
@@ -2046,10 +2104,20 @@ void BytecodeGenerator::compileForInStatement(const Frontend::ForInStmt* stmt) {
                 varDecl->declarators()[0].id.get());
             loopVarName = id->name();
             bool isConst = varDecl->kind() == Frontend::VariableDecl::Kind::Const;
-            emit(Opcode::OP_NIL);  // Placeholder
-            declareVariable(loopVarName, isConst);
-            defineVariable(loopVarName);
-            varSlot = current_->locals.size() - 1;
+            
+            if (current_->scopeDepth == 0) {
+                // Global scope: define as global variable
+                isGlobalVar = true;
+                emitConstant(Runtime::Value::undefined());
+                size_t constant = makeConstant(Runtime::Value::string(new Runtime::String(loopVarName)));
+                emit(Opcode::OP_DEFINE_GLOBAL);
+                emit(static_cast<uint8_t>(constant));
+            } else {
+                emitConstant(Runtime::Value::undefined());
+                declareVariable(loopVarName, isConst);
+                defineVariable(loopVarName);
+                varSlot = current_->locals.size() - 1;
+            }
         }
     }
     
@@ -2077,9 +2145,15 @@ void BytecodeGenerator::compileForInStatement(const Frontend::ForInStmt* stmt) {
     emit(Opcode::OP_GET_ELEMENT);
     
     // Assign key to loop variable
-    if (isVarDecl && varSlot != SIZE_MAX) {
-        emit(Opcode::OP_SET_LOCAL);
-        emit(static_cast<uint8_t>(varSlot));
+    if (isVarDecl) {
+        if (isGlobalVar) {
+            size_t constant = makeConstant(Runtime::Value::string(new Runtime::String(loopVarName)));
+            emit(Opcode::OP_SET_GLOBAL);
+            emit(static_cast<uint8_t>(constant));
+        } else if (varSlot != SIZE_MAX) {
+            emit(Opcode::OP_SET_LOCAL);
+            emit(static_cast<uint8_t>(varSlot));
+        }
         emit(Opcode::OP_POP);
     } else if (left->type() == Frontend::NodeType::Identifier) {
         const auto* id = static_cast<const Frontend::IdentifierExpr*>(left);
