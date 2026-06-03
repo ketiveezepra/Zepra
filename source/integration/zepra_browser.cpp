@@ -2374,7 +2374,10 @@ const float NAV_HEIGHT = 48;
 const float SIDEBAR_WIDTH = 220;
 
 // LEFT floating sidebar layout (per reference design)
-const float TOPBAR_HEIGHT = 44;              // Clean top bar
+// Chrome/Safari-style browser chrome: Tab strip + Toolbar
+const float TOPBAR_HEIGHT  = 80;             // Tab strip (36) + Toolbar (44)
+const float TAB_STRIP_H    = 36;             // Chrome-style tab strip height
+const float TOOLBAR_H      = 44;             // Address bar row height
 const float LEFT_SIDEBAR_WIDTH = 56;         // Collapsed (icons + labels)
 const float LEFT_SIDEBAR_EXPANDED = 240;     // Expanded with content
 
@@ -2567,117 +2570,177 @@ void renderNavBar() {
 // ============================================================================
 
 void renderTopBar() {
-    // Top bar spans full width, independent of the floating sidebar
-    float barX = 0;
-    float barWidth = g_width;
-    
-    // Background - lavender theme like reference
-    gfx::gradient(barX, 0, barWidth, TOPBAR_HEIGHT, 0xE6D5E8, 0xD8C8DA);
-    gfx::rect(barX, TOPBAR_HEIGHT - 1, barWidth, 1, 0xC8B8CA);
-    
-    float y = (TOPBAR_HEIGHT - 28) / 2;
-    
-    // === LEFT SIDE: Sidebar toggle + Zepra icon ===
-    float leftX = barX + 12;
-    
-    // Sidebar toggle (use sidebar.svg)
-    bool sbToggleHover = hit(leftX, y, 24, 24);
-    if (sbToggleHover) {
-        gfx::rrect(leftX - 2, y - 2, 28, 28, 4, 0xD0C0D2);
+    float W = g_width;
+    float sidebarOff = getSidebarOffset();
+
+    // =========================================================
+    // ROW 1: Tab Strip  (y=0 .. TAB_STRIP_H)
+    // =========================================================
+    // Background - dark chrome like Chromium
+    gfx::rect(0, 0, W, TAB_STRIP_H, 0x23272E);
+
+    float tabX = sidebarOff + 8;
+    float tabY = 4;
+    float tabH = TAB_STRIP_H - 6;   // ~30px tall tabs
+    float tabMaxW = 200.0f;
+
+    // Render each tab chip
+    for (int i = 0; i < (int)g_tabs.size(); i++) {
+        const auto& tab = g_tabs[i];
+        bool active = (tab.id == g_activeTabId);
+        float tabW = std::min(tabMaxW, (W - sidebarOff - 80) / (float)std::max(1, (int)g_tabs.size()));
+        tabW = std::max(tabW, 80.0f);
+
+        // Tab background
+        uint32_t tabBg = active ? 0x1E2229 : 0x2C313A;
+        if (!active && hit(tabX, tabY, tabW, tabH)) tabBg = 0x353A44;
+        gfx::rrect(tabX, tabY, tabW, tabH, 6, tabBg);
+
+        // Active tab indicator bar at top
+        if (active) gfx::rect(tabX + 2, tabY, tabW - 4, 2, 0x8B5CF6);
+
+        // Favicon placeholder circle
+        gfx::circle(tabX + 14, tabY + tabH / 2, 7, active ? 0x8B5CF6 : 0x555B66);
+
+        // Tab title (truncated)
+        std::string title = tab.title.empty() ? "New Tab" : tab.title;
+        if (title.length() > 18) title = title.substr(0, 16) + "..";
+        text(title, tabX + 26, tabY + tabH / 2 + 5,
+             active ? 0xE8E9EA : 0x9DA3AE, 11.0f);
+
+        // Close button "×" - only show on active tab or hover
+        float cx = tabX + tabW - 20;
+        float cy = tabY + (tabH - 16) / 2;
+        if (active || hit(tabX, tabY, tabW, tabH)) {
+            bool closeHov = hit(cx, cy, 16, 16);
+            if (closeHov) gfx::rrect(cx - 2, cy - 2, 20, 20, 4, 0x3E4452);
+            text("\xC3\x97", cx + 3, cy + 12, closeHov ? 0xFF6B6B : 0x9DA3AE, 12.0f);
+        }
+
+        tabX += tabW + 2;
     }
-    svg("sidebar.svg", leftX, y, 24, g_leftSidebarVisible ? g_theme.accent : 0x6B5B7B);
-    leftX += 32;
-    
-    // Zepra "Z" logo button
-    bool zHover = hit(leftX, y, 28, 28);
-    gfx::circle(leftX + 14, y + 14, 14, zHover ? g_theme.accent : 0x9B8BBB);
-    svg("zepralogo.svg", leftX + 2, y + 2, 24, 0xFFFFFF);
-    leftX += 36;
-    
-    // === CENTER: Search Bar ===
-    float searchBarWidth = std::min(500.0f, barWidth - 280);
-    float searchBarX = barX + (barWidth - searchBarWidth) / 2;
-    
-    // Search bar background (rounded pill) - translucent white
-    gfx::rrect(searchBarX, y - 4, searchBarWidth, 36, 18, 
-               g_addressFocused ? 0xFFFFFF : 0xF0E8F0);
+
+    // New Tab "+" button
+    bool addHov = hit(tabX + 2, tabY + 2, 26, 26);
+    gfx::rrect(tabX + 2, tabY + 2, 26, 26, 6, addHov ? 0x353A44 : 0x2C313A);
+    text("+", tabX + 9, tabY + 19, 0x9DA3AE, 14.0f);
+
+    // Window control dots (top-right, macOS-style color)
+    float dotX = W - 90;
+    float dotY = TAB_STRIP_H / 2;
+    // Close (red)
+    bool rClose = hit(dotX, dotY - 7, 14, 14);
+    gfx::circle(dotX + 7, dotY, 7, rClose ? 0xFF5F57 : 0xE74C3C);
+    dotX += 22;
+    // Minimize (yellow)
+    bool rMin = hit(dotX, dotY - 7, 14, 14);
+    gfx::circle(dotX + 7, dotY, 7, rMin ? 0xFFBD2E : 0xF39C12);
+    dotX += 22;
+    // Maximize (green)
+    bool rMax = hit(dotX, dotY - 7, 14, 14);
+    gfx::circle(dotX + 7, dotY, 7, rMax ? 0x28CA42 : 0x27AE60);
+
+    // =========================================================
+    // ROW 2: Toolbar  (y=TAB_STRIP_H .. TAB_STRIP_H+TOOLBAR_H)
+    // =========================================================
+    float tY = TAB_STRIP_H;
+
+    // Toolbar background - slightly lighter than tab strip
+    gfx::rect(0, tY, W, TOOLBAR_H, 0x1E2229);
+    // Bottom border separator
+    gfx::rect(0, tY + TOOLBAR_H - 1, W, 1, 0x3A3F4A);
+
+    float btnY = tY + (TOOLBAR_H - 28) / 2;
+    float lx = sidebarOff + 8;
+
+    // --- Back button ---
+    bool backHov = hit(lx, btnY, 28, 28);
+    gfx::rrect(lx, btnY, 28, 28, 6, backHov ? 0x2C313A : 0x23272E);
+    svg("arrow-back.svg", lx + 4, btnY + 4, 20, 0xCDD1D8);
+    lx += 34;
+
+    // --- Forward button ---
+    bool fwdHov = hit(lx, btnY, 28, 28);
+    gfx::rrect(lx, btnY, 28, 28, 6, fwdHov ? 0x2C313A : 0x23272E);
+    svg("arrow-forward.svg", lx + 4, btnY + 4, 20, 0xCDD1D8);
+    lx += 34;
+
+    // --- Refresh button ---
+    bool refHov = hit(lx, btnY, 28, 28);
+    gfx::rrect(lx, btnY, 28, 28, 6, refHov ? 0x2C313A : 0x23272E);
+    svg(g_isLoading ? "close.svg" : "refresh.svg", lx + 4, btnY + 4, 20,
+        g_isLoading ? 0xF87171 : 0xCDD1D8);
+    lx += 34;
+
+    // --- Home button ---
+    bool homeHov = hit(lx, btnY, 28, 28);
+    gfx::rrect(lx, btnY, 28, 28, 6, homeHov ? 0x2C313A : 0x23272E);
+    svg("home.svg", lx + 4, btnY + 4, 20, 0xCDD1D8);
+    lx += 40;
+
+    // --- Address / Search Bar (centre, pill shape) ---
+    float barRight = W - 140;
+    float barW = barRight - lx;
+    float barH = 30;
+    float barTop = tY + (TOOLBAR_H - barH) / 2;
+
+    // Bar background
+    uint32_t barBg = g_addressFocused ? 0x2C313A : 0x16191F;
+    gfx::rrect(lx, barTop, barW, barH, 15, barBg);
     if (g_addressFocused) {
-        gfx::border(searchBarX, y - 4, searchBarWidth, 36, 2, g_theme.accent);
-    }
-    
-    // Zepra shield logo inside search
-    gfx::circle(searchBarX + 24, y + 14, 14, g_theme.accent);
-    svg("shield.svg", searchBarX + 12, y + 2, 24, 0xFFFFFF);
-    
-    // Placeholder or URL text
-    std::string searchText;
-    if (g_addressFocused) {
-        searchText = g_addressInput;
-    } else if (g_currentUrl.empty() || g_currentUrl == "zepra://start") {
-        searchText = "Search with Zepra or enter your web destination";
+        gfx::border(lx, barTop, barW, barH, 2, 0x8B5CF6);
     } else {
-        searchText = g_currentUrl;
+        gfx::border(lx, barTop, barW, barH, 1, 0x3A3F4A);
     }
-    if (searchText.length() > 50) searchText = searchText.substr(0, 48) + "...";
-    text(searchText, searchBarX + 50, y + 16, 
-         g_addressFocused ? g_theme.text_primary : 0x8B7B8B, 12.0f);
-    
-    // Right side of search bar - icons
-    float iconRightX = searchBarX + searchBarWidth - 60;
-    
-    // Voice search icon
-    bool voiceHover = hit(iconRightX, y, 24, 24);
-    if (voiceHover) {
-        gfx::circle(iconRightX + 12, y + 14, 14, 0xE0D0E0);
+
+    // Shield / lock icon inside bar
+    bool isSecure = g_currentUrl.substr(0,5) == "https";
+    uint32_t lockCol = isSecure ? 0x34D399 : 0x9DA3AE;
+    svg("shield.svg", lx + 6, barTop + 5, 20, lockCol);
+
+    // URL / placeholder text
+    std::string urlText;
+    if (g_addressFocused) {
+        urlText = g_addressInput;
+    } else if (g_currentUrl.empty() || g_currentUrl == "zepra://start") {
+        urlText = "Search or type a URL";
+    } else {
+        urlText = g_currentUrl;
     }
-    svg("ringingBell.svg", iconRightX, y, 24, 0x8B7B8B);
-    iconRightX += 28;
-    
-    // Microphone/speaker icon
-    svg("notification.svg", iconRightX, y, 24, 0x8B7B8B);
-    
-    // === RIGHT SIDE: Tab controls (colorful circles like reference) ===
-    float rightX = barX + barWidth - 140;
-    
-    // Refresh button (green)
-    bool refHover = hit(rightX, y, 28, 28);
-    gfx::circle(rightX + 14, y + 14, 12, refHover ? 0x4ADE80 : 0x22C55E);
-    svg("refresh.svg", rightX + 4, y + 4, 20, 0xFFFFFF);
-    rightX += 32;
-    
-    // Close tab button (red/orange)
-    bool closeHover = hit(rightX, y, 28, 28);
-    gfx::circle(rightX + 14, y + 14, 12, closeHover ? 0xFB7185 : 0xF43F5E);
-    svg("close.svg", rightX + 6, y + 6, 16, 0xFFFFFF);
-    rightX += 32;
-    
-    // New tab button (blue)
-    bool addHover = hit(rightX, y, 28, 28);
-    gfx::circle(rightX + 14, y + 14, 12, addHover ? 0x60A5FA : 0x3B82F6);
-    svg("plus.svg", rightX + 6, y + 6, 16, 0xFFFFFF);
-    rightX += 40;
-    
-    // === FAR RIGHT: Additional buttons ===
-    // Grid/menu button
-    bool menuHover = hit(rightX, y, 24, 24);
-    if (menuHover) {
-        gfx::rrect(rightX - 2, y - 2, 28, 28, 4, 0xD0C0D2);
+    if (urlText.length() > 70) urlText = urlText.substr(0, 68) + "...";
+    uint32_t urlCol = g_addressFocused ? 0xE8E9EA :
+                      (g_currentUrl.empty() || g_currentUrl == "zepra://start") ? 0x555B66 : 0xCDD1D8;
+    text(urlText, lx + 32, barTop + barH / 2 + 5, urlCol, 12.0f);
+
+    // Cursor blink when focused
+    if (g_addressFocused) {
+        g_cursorBlink++;
+        if ((g_cursorBlink / 30) % 2 == 0) {
+            float cx2 = lx + 32 + textWidth(g_addressInput);
+            gfx::rect(cx2, barTop + 5, 2, barH - 10, 0xE8E9EA);
+        }
     }
-    svg("grid.svg", rightX, y, 24, 0x6B5B7B);
-    rightX += 28;
-    
-    // Cloud/share button
-    bool shareHover = hit(rightX, y, 24, 24);
-    if (shareHover) {
-        gfx::rrect(rightX - 2, y - 2, 28, 28, 4, 0xD0C0D2);
-    }
-    svg("share.svg", rightX, y, 24, 0x6B5B7B);
-    rightX += 28;
-    
-    // Mobile/tablet icon
-    svg("tablet.svg", rightX, y, 24, 0x6B5B7B);
+
+    // --- Right toolbar buttons ---
+    float rx = barRight + 8;
+
+    // Bookmarks star
+    bool bkHov = hit(rx, btnY, 28, 28);
+    gfx::rrect(rx, btnY, 28, 28, 6, bkHov ? 0x2C313A : 0x23272E);
+    svg("bookmark.svg", rx + 4, btnY + 4, 20, 0xCDD1D8);
+    rx += 34;
+
+    // Extensions
+    bool extHov = hit(rx, btnY, 28, 28);
+    gfx::rrect(rx, btnY, 28, 28, 6, extHov ? 0x2C313A : 0x23272E);
+    svg("extention.svg", rx + 4, btnY + 4, 20, 0xCDD1D8);
+    rx += 34;
+
+    // Menu (three dots)
+    bool menuHov = hit(rx, btnY, 28, 28);
+    gfx::rrect(rx, btnY, 28, 28, 6, menuHov ? 0x2C313A : 0x23272E);
+    svg("menu.svg", rx + 4, btnY + 4, 20, 0xCDD1D8);
 }
-#endif // Old UI implementation extracted
 
 // ============================================================================
 // FLOATING RIGHT SIDEBAR
@@ -3299,7 +3362,9 @@ void render() {
     }
     
     // Draw scrollbar
-    if (g_layoutRoot && g_activeTabId >= 0 && g_tabs[g_activeTabId].url != "zepra://start") {
+    const Tab* activeTabPtr = nullptr;
+    for (const auto& t : g_tabs) { if (t.id == g_activeTabId) { activeTabPtr = &t; break; } }
+    if (g_layoutRoot && activeTabPtr && activeTabPtr->url != "zepra://start") {
         float viewportHeight = contentH;
         float pageHeight = g_layoutRoot->height + 40; // Add padding at the bottom
         if (pageHeight > viewportHeight) {
@@ -4917,9 +4982,15 @@ static bool validate_startup_resources() {
 
     // Check at least one font is available
     const char* font_paths[] = {
+#ifdef _WIN32
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+        "C:\\Windows\\Fonts\\tahoma.ttf",
+#else
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+#endif
         nullptr
     };
     bool font_found = false;
@@ -4946,128 +5017,110 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
 
 
     // Initialize NXRender (creates Window & GL Context)
+    std::cout << "[Init] Creating NXRender window..." << std::flush;
     if (!NXRender::init(g_width, g_height)) {
         std::cerr << "Failed to init NXRender" << std::endl;
         return 1;
     }
+    std::cout << " OK" << std::endl;
+
+    // Set compositor background to dark theme (prevents white flash)
+    if (NXRender::compositor()) {
+        NXRender::compositor()->setBackgroundColor(NXRender::Color(0x0D1117));
+        std::cout << "[Init] Compositor background set to dark theme" << std::endl;
+    }
 
     // Validate startup resources (fonts, icons)
     validate_startup_resources();
+    std::cout << std::flush;
 
     // Initialize Browser GPU Context (Loads shaders)
+    std::cout << "[Init] Initializing GPU context..." << std::flush;
     g_nxGpu.init(g_width, g_height);
     g_nxGpu.setViewport(0, 0, g_width, g_height);
+    std::cout << " OK" << std::endl;
 
     // Set Up Event Handler
     NXRender::setEventHandler(handleNXEvent);
+    std::cout << "[Init] Event handler registered" << std::endl;
     
     // Set Render Callback (Fixes blank screen)
     NXRender::setRenderCallback(render);
+    std::cout << "[Init] Render callback registered" << std::endl;
 
     // Initialize Components
+    std::cout << "[Init] Registering mouse handler callbacks..." << std::flush;
     ::g_mouseHandler.onCopy([](const std::string& text) {
         ZepraBrowser::Clipboard::instance().copy(text);
         std::cout << "[Clipboard] Copied: " << text.substr(0, 50) << std::endl;
     });
-
     ::g_mouseHandler.onPaste([]() -> std::string {
         return ZepraBrowser::Clipboard::instance().paste();
     });
-
     ::g_mouseHandler.onNavigate([](int direction) {
-        if (direction == 0) {
-            onNavigate(g_currentUrl);  // Reload
-        }
-        // TODO: history stack for back/forward
+        if (direction == 0) { onNavigate(g_currentUrl); }
     });
-
-    ::g_mouseHandler.onReload([]() {
-        onNavigate(g_currentUrl);
-    });
-
-    ::g_mouseHandler.onInspect([](float, float) {
-        g_consoleVisible = !g_consoleVisible;
-    });
-
+    ::g_mouseHandler.onReload([]() { onNavigate(g_currentUrl); });
+    ::g_mouseHandler.onInspect([](float, float) { g_consoleVisible = !g_consoleVisible; });
     ::g_mouseHandler.onGetText([](float x, float y, float w, float h) -> std::string {
-        if (g_layoutRoot) {
-            return ZepraBrowser::getTextInRect(*g_layoutRoot, x, y, w, h);
-        }
+        if (g_layoutRoot) return ZepraBrowser::getTextInRect(*g_layoutRoot, x, y, w, h);
         return "";
     });
-    
-    // Connect MouseHandler to TabManager (Open in New Tab)
     ::g_mouseHandler.onNewTab([](const std::string& url) {
-        std::cout << "[NewTab] Opening: " << url << std::endl;
-        Tab newTab;
-        newTab.id = g_nextTabId++;
-        newTab.url = url;
-        newTab.title = "Loading...";
-        newTab.isStart = false;
-        g_tabs.push_back(std::move(newTab));
-        g_activeTabId = newTab.id;
-        // Trigger load
-        g_currentUrl = url;
-        g_addressInput = url;
+        Tab newTab; newTab.id = g_nextTabId++; newTab.url = url;
+        newTab.title = "Loading..."; newTab.isStart = false;
+        g_tabs.push_back(std::move(newTab)); g_activeTabId = newTab.id;
+        g_currentUrl = url; g_addressInput = url;
     });
-    
-    // Connect MouseHandler to Ketivee Search
     ::g_mouseHandler.onSearch([](const std::string& query) {
-        std::cout << "[Search] Ketivee: " << query << std::endl;
         std::string searchUrl = getSearchUrl(query);
-        g_currentUrl = searchUrl;
-        g_addressInput = searchUrl;
-        // Load the search
+        g_currentUrl = searchUrl; g_addressInput = searchUrl;
     });
-    
-    // Connect MouseHandler to DownloadManager
     ::g_mouseHandler.onDownload([](const std::string& url) {
-        std::cout << "[Download] Starting: " << url << std::endl;
         std::string filename = url.substr(url.find_last_of('/') + 1);
         if (filename.empty()) filename = "download";
         g_downloadManager.startDownload(url, filename);
     });
-    
-    // Setup TabSuspender with video detection
-    ::g_tabSuspender.setVideoDetector([](int tabId) -> bool {
-        // Check if tab has playing video (placeholder - needs WebCore integration)
-        return false;
-    });
-    
-    ::g_tabSuspender.setAudioDetector([](int tabId) -> bool {
-        // Check if tab has playing audio (placeholder)
-        return false;
-    });
+    ::g_tabSuspender.setVideoDetector([](int) -> bool { return false; });
+    ::g_tabSuspender.setAudioDetector([](int) -> bool { return false; });
+    std::cout << " OK" << std::endl;
 
     // Initialize Graphics Resources - load ALL icons used in UI
+    std::cout << "[Init] Loading SVG icons from: " << RESOURCE_PATH << std::endl;
     std::string iconPath = std::string(RESOURCE_PATH) + "/icons/";
     const char* icons[] = {
-        // Top bar / Navigation
         "zepralogo.svg", "sidebar.svg", "settings.svg", "search.svg", "shield.svg",
         "close.svg", "plus.svg", "refresh.svg", "download.svg", "menu.svg",
         "home.svg", "history.svg", "bookmark.svg", "extention.svg",
         "arrow-back.svg", "arrow-forward.svg", "share.svg",
-        // Additional top bar
         "grid.svg", "tablet.svg", "ringingBell.svg", "notification.svg",
-        // Sidebar icons
         "avtar.svg", "globe.svg", "devtool.svg", "help.svg", "star.svg",
-        // Web Apps icons
         "Calendar.svg", "MialInbox.svg", "creative.svg", "docs.svg",
         "DebitCard.svg", "KetiveeStudio.svg", "3dSpace.svg",
-        // Start page
         "zepra.svg", "Film.svg", "Picture.svg", "krtivee.svg",
         nullptr
     };
     for (int i = 0; icons[i]; i++) {
-        g_svg.loadFromFile(icons[i], iconPath + icons[i]);
+        std::cout << "[Init] SVG: " << icons[i] << std::flush;
+        try {
+            bool ok = g_svg.loadFromFile(icons[i], iconPath + icons[i]);
+            std::cout << (ok ? " OK" : " (not found)") << std::endl;
+        } catch (const std::exception& e) {
+            std::cout << " CRASH: " << e.what() << std::endl;
+        } catch (...) {
+            std::cout << " CRASH: unknown exception" << std::endl;
+        }
     }
+    std::cout << "[Init] SVG icons loaded" << std::endl;
 
-    // nxfont_init(g_display); // Legacy font system disabled for NXRender migration
 
     // Init layout engine
+    std::cout << "[Init] Initializing layout engine..." << std::flush;
     initLayoutEngine();
+    std::cout << " OK" << std::endl;
     
     // Create initial tab (CRITICAL: Must be done before entering main loop)
+    std::cout << "[Init] Creating initial tab..." << std::flush;
     if (g_tabs.empty()) {
         Tab initialTab;
         initialTab.id = 1;
@@ -5076,18 +5129,18 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
         initialTab.isStart = (g_currentUrl == "zepra://start");
         g_tabs.push_back(std::move(initialTab));
         g_activeTabId = 1;
+        std::cout << " tab created, navigating..." << std::flush;
         onNavigate(g_currentUrl);
-        std::cout << "[Browser] Created initial tab: " << g_currentUrl << std::endl;
+        std::cout << " OK (" << g_currentUrl << ")" << std::endl;
     }
     
 #ifdef USE_WEBCORE
-    // Initialize WebCore (HTML parser, DOM, CSS, ZebraScript VM)
-    // Note: Per-tab WebCore (WebCoreTab class) available but not yet integrated
+    std::cout << "[Init] Initializing WebCore..." << std::flush;
     if (!webcore_init()) {
         std::cerr << "[Error] Failed to initialize WebCore" << std::endl;
         return 1;
     }
-    std::cout << "[WebCore] Initialized (HTML parser + DOM + CSS + ZebraScript VM)" << std::endl;
+    std::cout << " OK" << std::endl;
 #endif
 
     // Setup periodic tab suspension check

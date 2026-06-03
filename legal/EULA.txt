@@ -1,0 +1,128 @@
+KETIVEEAI - END USER LICENSE AGREEMENT (EULA)
+Zepra Browser v0.1.0-beta
+Effective Date: May 2026
+
+================================================================
+BETA SOFTWARE NOTICE
+================================================================
+
+This is a PRE-RELEASE BETA VERSION of Zepra Browser. It is
+provided for testing and evaluation purposes. This software
+may contain bugs, incomplete features, and may not perform
+as expected. Do not rely on this software for critical tasks.
+By installing this beta, you acknowledge and accept these risks.
+
+================================================================
+
+1. ACCEPTANCE OF TERMS
+
+By downloading, installing, copying, or otherwise using Zepra
+Browser ("Software"), you ("User") agree to be bound by the
+terms of this End User License Agreement ("Agreement"). If you
+do not agree to these terms, do not install or use the Software.
+
+2. LICENSE GRANT
+
+Subject to the terms of this Agreement and the KetiveeAI Public
+License (KPL-2.0), KetiveeAI grants you a limited, non-exclusive,
+non-transferable, revocable license to:
+
+  - Install and use the Software on your personal devices
+  - Use the Software for personal, educational, research, or
+    commercial purposes
+  - Study and modify the source code under the terms of KPL-2.0
+
+3. BETA SOFTWARE DISCLAIMER
+
+THIS SOFTWARE IS A BETA RELEASE. You expressly acknowledge that:
+
+  (a) The Software is in a pre-release state and is not
+      feature-complete
+  (b) The Software may contain errors, defects, and security
+      vulnerabilities
+  (c) The Software may cause unexpected behavior, crashes, or
+      data loss
+  (d) Performance, stability, and compatibility are not guaranteed
+  (e) Features present in this beta may be modified or removed
+  (f) This beta should not be used as your sole browser for
+      sensitive activities (banking, medical, legal)
+
+4. DATA COLLECTION AND PRIVACY
+
+  4.1 The Software may collect anonymous crash reports containing
+      stack traces, system configuration, and version information.
+      Crash reports do NOT contain browsing history, passwords,
+      or personally identifiable information.
+
+  4.2 Zepra Browser does NOT collect browsing history, search
+      queries, keystroke data, or behavioral tracking data.
+
+  4.3 The Software may connect to ketivee.com for search
+      functionality and update checks.
+
+5. INTELLECTUAL PROPERTY
+
+The Software is the intellectual property of KetiveeAI and is
+protected by copyright law. The following are trademarks of
+KetiveeAI: ZepraBrowser, ZepraScript, NXRender, NXSVG,
+KetiveeAI, NeolyxOS, HiiFie.
+
+6. RESTRICTIONS
+
+You may NOT:
+  (a) Remove or alter copyright, trademark, or license notices
+  (b) Use KetiveeAI trademarks as your product name
+  (c) Claim original authorship of the Software
+  (d) Distribute modified versions that misrepresent origin
+
+7. WARRANTY DISCLAIMER
+
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+NON-INFRINGEMENT. KETIVEEAI DOES NOT WARRANT THAT THE SOFTWARE
+WILL BE UNINTERRUPTED, ERROR-FREE, OR FREE OF HARMFUL COMPONENTS.
+
+8. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, KETIVEEAI SHALL NOT BE
+LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR
+PUNITIVE DAMAGES, OR ANY LOSS OF PROFITS, DATA, BUSINESS
+OPPORTUNITY, OR GOODWILL ARISING FROM USE OF THE SOFTWARE.
+
+KETIVEEAI'S TOTAL LIABILITY SHALL NOT EXCEED THE AMOUNT PAID
+FOR THE SOFTWARE (WHICH IS ZERO FOR THIS FREE BETA).
+
+9. TERMINATION
+
+Your rights terminate automatically if you violate any term of
+this Agreement, violate trademark restrictions, remove copyright
+notices, or initiate patent litigation against KetiveeAI. Upon
+termination, cease all use and destroy all copies.
+
+10. GOVERNING LAW
+
+This Agreement is governed by the laws of India. Disputes shall
+be subject to the exclusive jurisdiction of the courts of India.
+
+11. ENTIRE AGREEMENT
+
+This Agreement and the KPL-2.0 license constitute the entire
+agreement between you and KetiveeAI regarding the Software.
+
+================================================================
+
+CONTACT
+
+KetiveeAI
+License inquiries: licence@ketivee.com
+Support: support@ketivee.com
+Website: https://zepra.ketivee.com
+GitHub: https://github.com/KetiveeAI
+
+================================================================
+
+KetiveeAI End User License Agreement - Version 1.0
+Zepra Browser v0.1.0-beta
+Copyright (c) 2025-2026 KetiveeAI. All rights reserved.
+Built in India. Independent by design.

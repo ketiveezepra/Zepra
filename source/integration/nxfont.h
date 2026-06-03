@@ -264,12 +264,20 @@ public:
     // Try common system fonts with specific key and size
     bool loadSystemFont(const std::string& key, int size) {
         const char* paths[] = {
+#ifdef _WIN32
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+            "C:\\Windows\\Fonts\\arial.ttf",
+            "C:\\Windows\\Fonts\\tahoma.ttf",
+            "C:\\Windows\\Fonts\\verdana.ttf",
+            "C:\\Windows\\Fonts\\calibri.ttf",
+#else
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
             "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
             "/usr/share/fonts/TTF/DejaVuSans.ttf",
             "/usr/share/fonts/noto/NotoSans-Regular.ttf",
             "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+#endif
             nullptr
         };
         

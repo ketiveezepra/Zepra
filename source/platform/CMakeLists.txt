@@ -48,7 +48,7 @@ if(X11_FOUND)
 endif()
 
 if(WIN32)
-    target_link_libraries(platform PUBLIC user32 gdi32 opengl32)
+    target_link_libraries(platform PUBLIC user32 gdi32 opengl32 psapi shell32)
     target_compile_definitions(platform PUBLIC
         WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS ZEPRA_PLATFORM_WINDOWS)
 endif()

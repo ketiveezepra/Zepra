@@ -43,6 +43,41 @@
 #endif
 #include <fcntl.h>
 #include <numa.h>
+#elif defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <psapi.h>
+#include <memoryapi.h>
+#endif
+
+#ifdef _WIN32
+namespace Zepra::Heap::detail {
+
+static bool tryEnableLargePages() {
+    HANDLE token;
+    if (!OpenProcessToken(GetCurrentProcess(),
+                          TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
+        return false;
+    TOKEN_PRIVILEGES tp;
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    if (!LookupPrivilegeValue(NULL, SE_LOCK_MEMORY_NAME,
+                              &tp.Privileges[0].Luid)) {
+        CloseHandle(token);
+        return false;
+    }
+    BOOL ok = AdjustTokenPrivileges(token, FALSE, &tp, 0, NULL, NULL);
+    DWORD err = GetLastError();
+    CloseHandle(token);
+    return ok && err == ERROR_SUCCESS;
+}
+
+} // namespace Zepra::Heap::detail
 #endif
 
 namespace Zepra::Heap {
@@ -564,6 +599,18 @@ inline PageInfo PageInfo::query() {
         fclose(f);
     }
     info.hugePagesAvailable = info.hugePagesTotal > 0;
+#elif defined(_WIN32)
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    info.regularPageSize = static_cast<size_t>(si.dwPageSize);
+    info.hugePageSize = GetLargePageMinimum();
+    if (info.hugePageSize == 0)
+        info.hugePageSize = 2 * 1024 * 1024;  // 2MB fallback
+    info.giganticPageSize = 1024 * 1024 * 1024;  // 1GB
+    info.hugePagesAvailable = detail::tryEnableLargePages() &&
+                              GetLargePageMinimum() > 0;
+    info.hugePagesTotal = 0;  // Not queryable on Windows
+    info.hugePagesFree = 0;
 #else
     info.regularPageSize = 4096;
     info.hugePageSize = 2 * 1024 * 1024;
@@ -587,6 +634,8 @@ inline VirtualMemory::~VirtualMemory() {
         if (region.base) {
 #ifdef __linux__
             munmap(region.base, region.size);
+#elif defined(_WIN32)
+            VirtualFree(region.base, 0, MEM_RELEASE);
 #else
             std::free(region.base);
 #endif
@@ -625,6 +674,28 @@ inline VirtualRegion VirtualMemory::reserve(size_t size,
         }
 
         region.base = reinterpret_cast<void*>(aligned);
+#elif defined(_WIN32)
+        void* raw = VirtualAlloc(NULL, overSize, MEM_RESERVE, PAGE_NOACCESS);
+        if (!raw) {
+            stats_.reserveFailures++;
+            return region;
+        }
+
+        uintptr_t rawAddr = reinterpret_cast<uintptr_t>(raw);
+        uintptr_t aligned = (rawAddr + flags.alignment - 1) & ~(flags.alignment - 1);
+
+        // Win32 cannot partially release — free and re-reserve at aligned address
+        VirtualFree(raw, 0, MEM_RELEASE);
+        region.base = VirtualAlloc(reinterpret_cast<void*>(aligned), size,
+                                   MEM_RESERVE, PAGE_NOACCESS);
+        if (!region.base) {
+            // Fallback: accept any address
+            region.base = VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_NOACCESS);
+            if (!region.base) {
+                stats_.reserveFailures++;
+                return region;
+            }
+        }
 #else
         region.base = zepra_aligned_alloc(flags.alignment, size);
 #endif
@@ -642,6 +713,34 @@ inline VirtualRegion VirtualMemory::reserve(size_t size,
         if (ptr == MAP_FAILED) {
             stats_.reserveFailures++;
             return region;
+        }
+        region.base = ptr;
+#elif defined(_WIN32)
+        DWORD allocType = MEM_RESERVE;
+        if (flags.hugePages && pageInfo_.hugePagesAvailable) {
+            allocType |= MEM_LARGE_PAGES;
+            size = roundUpToHugePage(size);
+        }
+
+        void* ptr = nullptr;
+        if (flags.numaNode >= 0) {
+            ptr = VirtualAllocExNuma(GetCurrentProcess(), NULL, size,
+                                    allocType, PAGE_NOACCESS,
+                                    static_cast<DWORD>(flags.numaNode));
+        } else {
+            ptr = VirtualAlloc(NULL, size, allocType, PAGE_NOACCESS);
+        }
+        if (!ptr) {
+            // If large pages failed, retry without
+            if (flags.hugePages && (allocType & MEM_LARGE_PAGES)) {
+                allocType &= ~static_cast<DWORD>(MEM_LARGE_PAGES);
+                size = roundUpToPage(size);  // revert to normal page rounding
+                ptr = VirtualAlloc(NULL, size, allocType, PAGE_NOACCESS);
+            }
+            if (!ptr) {
+                stats_.reserveFailures++;
+                return region;
+            }
         }
         region.base = ptr;
 #else
@@ -677,6 +776,14 @@ inline VirtualRegion VirtualMemory::reserveAt(void* address, size_t size,
     void* ptr = mmap(address, size, PROT_NONE, mapFlags, -1, 0);
     if (ptr == MAP_FAILED || ptr != address) {
         stats_.reserveFailures++;
+        return region;
+    }
+    region.base = ptr;
+#elif defined(_WIN32)
+    void* ptr = VirtualAlloc(address, size, MEM_RESERVE, PAGE_NOACCESS);
+    if (!ptr || ptr != address) {
+        stats_.reserveFailures++;
+        if (ptr && ptr != address) VirtualFree(ptr, 0, MEM_RELEASE);
         return region;
     }
     region.base = ptr;
@@ -721,6 +828,13 @@ inline bool VirtualMemory::commit(VirtualRegion& region, size_t offset,
         madvise(addr, size, MADV_HUGEPAGE);
 #endif
     }
+#elif defined(_WIN32)
+    DWORD winProt = static_cast<DWORD>(protectionToNative(prot));
+    void* result = VirtualAlloc(addr, size, MEM_COMMIT, winProt);
+    if (!result) {
+        stats_.commitFailures++;
+        return false;
+    }
 #else
     (void)prot;
 #endif
@@ -750,6 +864,8 @@ inline bool VirtualMemory::decommit(VirtualRegion& region, size_t offset,
 #ifdef __linux__
     madvise(addr, size, MADV_DONTNEED);
     mprotect(addr, size, PROT_NONE);
+#elif defined(_WIN32)
+    VirtualFree(addr, size, MEM_DECOMMIT);
 #endif
 
     region.committedSize -= std::min(region.committedSize, size);
@@ -776,6 +892,8 @@ inline void VirtualMemory::release(VirtualRegion& region) {
 
 #ifdef __linux__
     munmap(region.base, region.size);
+#elif defined(_WIN32)
+    VirtualFree(region.base, 0, MEM_RELEASE);
 #else
     std::free(region.base);
 #endif
@@ -789,6 +907,12 @@ inline bool VirtualMemory::protect(void* address, size_t size, Protection prot) 
 #ifdef __linux__
     int nativeProt = protectionToNative(prot);
     bool ok = mprotect(address, roundUpToPage(size), nativeProt) == 0;
+    if (ok) stats_.protectCount++;
+    return ok;
+#elif defined(_WIN32)
+    DWORD winProt = static_cast<DWORD>(protectionToNative(prot));
+    DWORD oldProt;
+    bool ok = VirtualProtect(address, roundUpToPage(size), winProt, &oldProt) != 0;
     if (ok) stats_.protectCount++;
     return ok;
 #else
@@ -826,6 +950,40 @@ inline bool VirtualMemory::advise(void* address, size_t size, Advice advice) {
         default: return false;
     }
     return madvise(address, size, nativeAdvice) == 0;
+#elif defined(_WIN32)
+    switch (advice) {
+        case Advice::DontNeed:
+        case Advice::Free:
+            // Decommit and recommit to discard physical pages
+            if (VirtualFree(address, size, MEM_DECOMMIT)) {
+                VirtualAlloc(address, size, MEM_COMMIT, PAGE_READWRITE);
+            }
+            return true;
+        case Advice::WillNeed: {
+            // PrefetchVirtualMemory is available on Win8.1+
+            typedef BOOL (WINAPI *PrefetchFn)(HANDLE, ULONG_PTR,
+                                              PWIN32_MEMORY_RANGE_ENTRY, ULONG);
+            HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+            if (kernel) {
+                auto pfn = reinterpret_cast<PrefetchFn>(
+                    GetProcAddress(kernel, "PrefetchVirtualMemory"));
+                if (pfn) {
+                    WIN32_MEMORY_RANGE_ENTRY entry;
+                    entry.VirtualAddress = address;
+                    entry.NumberOfBytes = size;
+                    pfn(GetCurrentProcess(), 1, &entry, 0);
+                }
+            }
+            return true;
+        }
+        case Advice::Normal:
+        case Advice::Sequential:
+        case Advice::Random:
+        case Advice::HugePage:
+        case Advice::NoHugePage:
+        default:
+            return true;  // No-op on Windows
+    }
 #else
     (void)address; (void)size; (void)advice;
     return true;
@@ -869,6 +1027,8 @@ inline void VirtualMemory::prefaultPages(void* address, size_t size) {
 inline bool VirtualMemory::lockPages(void* address, size_t size) {
 #ifdef __linux__
     return mlock(address, size) == 0;
+#elif defined(_WIN32)
+    return VirtualLock(address, size) != 0;
 #else
     (void)address; (void)size;
     return true;
@@ -878,6 +1038,8 @@ inline bool VirtualMemory::lockPages(void* address, size_t size) {
 inline bool VirtualMemory::unlockPages(void* address, size_t size) {
 #ifdef __linux__
     return munlock(address, size) == 0;
+#elif defined(_WIN32)
+    return VirtualUnlock(address, size) != 0;
 #else
     (void)address; (void)size;
     return true;
@@ -892,6 +1054,14 @@ inline size_t VirtualMemory::processVirtualSize() {
     if (fscanf(f, "%zu", &pages) != 1) pages = 0;
     fclose(f);
     return pages * static_cast<size_t>(sysconf(_SC_PAGESIZE));
+#elif defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS_EX pmc;
+    pmc.cb = sizeof(pmc);
+    if (GetProcessMemoryInfo(GetCurrentProcess(),
+                            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc),
+                            sizeof(pmc)))
+        return static_cast<size_t>(pmc.PrivateUsage);
+    return 0;
 #else
     return 0;
 #endif
@@ -905,6 +1075,14 @@ inline size_t VirtualMemory::processResidentSize() {
     if (fscanf(f, "%zu %zu", &virt, &rss) != 2) rss = 0;
     fclose(f);
     return rss * static_cast<size_t>(sysconf(_SC_PAGESIZE));
+#elif defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS_EX pmc;
+    pmc.cb = sizeof(pmc);
+    if (GetProcessMemoryInfo(GetCurrentProcess(),
+                            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc),
+                            sizeof(pmc)))
+        return static_cast<size_t>(pmc.WorkingSetSize);
+    return 0;
 #else
     return 0;
 #endif
@@ -924,6 +1102,12 @@ inline size_t VirtualMemory::availablePhysicalMemory() {
     }
     fclose(f);
     return 0;
+#elif defined(_WIN32)
+    MEMORYSTATUSEX ms;
+    ms.dwLength = sizeof(ms);
+    if (GlobalMemoryStatusEx(&ms))
+        return static_cast<size_t>(ms.ullAvailPhys);
+    return 0;
 #else
     return 0;
 #endif
@@ -936,6 +1120,16 @@ inline int VirtualMemory::protectionToNative(Protection prot) const {
     if (prot & Protection::Write)   native |= PROT_WRITE;
     if (prot & Protection::Execute) native |= PROT_EXEC;
     return native;
+#elif defined(_WIN32)
+    bool r = prot & Protection::Read;
+    bool w = prot & Protection::Write;
+    bool x = prot & Protection::Execute;
+    if (x && w)  return static_cast<int>(PAGE_EXECUTE_READWRITE);
+    if (x && r)  return static_cast<int>(PAGE_EXECUTE_READ);
+    if (x)       return static_cast<int>(PAGE_EXECUTE);
+    if (w)       return static_cast<int>(PAGE_READWRITE);
+    if (r)       return static_cast<int>(PAGE_READONLY);
+    return static_cast<int>(PAGE_NOACCESS);
 #else
     (void)prot;
     return 0;

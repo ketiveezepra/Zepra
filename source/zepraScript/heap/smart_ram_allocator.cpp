@@ -18,6 +18,14 @@
 #endif
 #include <fstream>
 #include <string>
+#elif defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 namespace Zepra::Heap {
@@ -275,6 +283,12 @@ private:
         long pageSize = sysconf(_SC_PAGESIZE);
         if (pages > 0 && pageSize > 0) {
             return static_cast<size_t>(pages) * static_cast<size_t>(pageSize);
+        }
+#elif defined(_WIN32)
+        MEMORYSTATUSEX ms;
+        ms.dwLength = sizeof(ms);
+        if (GlobalMemoryStatusEx(&ms)) {
+            return static_cast<size_t>(ms.ullTotalPhys);
         }
 #endif
         return 4ULL * 1024 * 1024 * 1024;  // 4GB fallback

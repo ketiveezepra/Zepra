@@ -1,0 +1,22 @@
+[Desktop Entry]
+Name=Zepra Browser (Beta)
+GenericName=Web Browser
+Comment=Independent web browser by KetiveeAI — Beta Release
+Exec=/opt/ketiveeai/zepra-browser/bin/zepra_browser %U
+Icon=zepra-browser
+Terminal=false
+Type=Application
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;
+StartupNotify=true
+StartupWMClass=zepra-browser
+Keywords=browser;web;internet;zepra;ketivee;
+Actions=new-window;new-private;
+
+[Desktop Action new-window]
+Name=Open a New Window
+Exec=/opt/ketiveeai/zepra-browser/bin/zepra_browser --new-window
+
+[Desktop Action new-private]
+Name=Open a Private Window
+Exec=/opt/ketiveeai/zepra-browser/bin/zepra_browser --private

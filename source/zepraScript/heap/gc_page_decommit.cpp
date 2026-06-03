@@ -11,6 +11,14 @@
 
 #ifdef __linux__
 #include <sys/mman.h>
+#elif defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 namespace Zepra::Heap {
@@ -87,6 +95,10 @@ private:
     bool decommitPage(uintptr_t addr, size_t size) {
 #ifdef __linux__
         return madvise(reinterpret_cast<void*>(addr), size, MADV_DONTNEED) == 0;
+#elif defined(_WIN32)
+        // MEM_DECOMMIT releases physical pages but keeps the virtual address
+        // range reserved — equivalent to madvise(MADV_DONTNEED) on Linux.
+        return VirtualFree(reinterpret_cast<void*>(addr), size, MEM_DECOMMIT) != 0;
 #else
         (void)addr; (void)size;
         return true;

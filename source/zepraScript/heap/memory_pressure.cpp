@@ -40,6 +40,15 @@
 #include <sys/mman.h>
 #include <sys/sysinfo.h>
 #include <fcntl.h>
+#elif defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <psapi.h>
 #endif
 
 namespace Zepra::Heap {
@@ -158,6 +167,21 @@ public:
         }
 
         return info.totalPhysical > 0;
+#elif defined(_WIN32)
+        MEMORYSTATUSEX ms;
+        ms.dwLength = sizeof(ms);
+        if (!GlobalMemoryStatusEx(&ms)) return false;
+        info.totalPhysical = static_cast<size_t>(ms.ullTotalPhys);
+        info.availablePhysical = static_cast<size_t>(ms.ullAvailPhys);
+        info.freePhysical = static_cast<size_t>(ms.ullAvailPhys);
+        info.buffered = 0;  // Windows does not expose buffer/cache separately
+        info.swapTotal = static_cast<size_t>(
+            ms.ullTotalPageFile > ms.ullTotalPhys
+                ? ms.ullTotalPageFile - ms.ullTotalPhys : 0);
+        info.swapFree = static_cast<size_t>(
+            ms.ullAvailPageFile > ms.ullAvailPhys
+                ? ms.ullAvailPageFile - ms.ullAvailPhys : 0);
+        return true;
 #else
         (void)info;
         return false;
@@ -192,6 +216,19 @@ public:
         }
         fclose(f);
         return info.rss > 0;
+#elif defined(_WIN32)
+        PROCESS_MEMORY_COUNTERS_EX pmc;
+        pmc.cb = sizeof(pmc);
+        if (!GetProcessMemoryInfo(GetCurrentProcess(),
+                reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc)))
+            return false;
+        info.rss = pmc.WorkingSetSize;
+        info.vmSize = pmc.PrivateUsage;
+        info.vmPeak = pmc.PeakWorkingSetSize;
+        info.privateAnon = pmc.PrivateUsage;
+        info.sharedMem = pmc.WorkingSetSize > pmc.PrivateUsage
+            ? pmc.WorkingSetSize - pmc.PrivateUsage : 0;
+        return true;
 #else
         (void)info;
         return false;

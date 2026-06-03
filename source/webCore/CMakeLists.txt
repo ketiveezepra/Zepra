@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(WebCore VERSION 1.0.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Check if pre-built library exists
@@ -113,6 +113,36 @@ else()
         if(OpenGL_FOUND)
             target_link_libraries(webcore PUBLIC OpenGL::GL)
             target_compile_definitions(webcore PUBLIC ZEPRA_HAS_OPENGL)
+        endif()
+
+        # FreeType for font rendering
+        find_package(Freetype QUIET)
+        if(Freetype_FOUND OR FREETYPE_FOUND)
+            target_link_libraries(webcore PUBLIC Freetype::Freetype)
+            target_compile_definitions(webcore PUBLIC ZEPRA_HAS_FREETYPE)
+            message(STATUS "WebCore: FreeType found — font rendering enabled")
+        else()
+            # Windows: try vcpkg / manual path
+            find_path(FREETYPE_INCLUDE_DIR ft2build.h
+                PATHS
+                    "C:/msys64/mingw64/include/freetype2"
+                    "C:/vcpkg/installed/x64-windows/include"
+                    "$ENV{FREETYPE_DIR}/include"
+            )
+            find_library(FREETYPE_LIBRARY NAMES freetype
+                PATHS
+                    "C:/msys64/mingw64/lib"
+                    "C:/vcpkg/installed/x64-windows/lib"
+                    "$ENV{FREETYPE_DIR}/lib"
+            )
+            if(FREETYPE_INCLUDE_DIR AND FREETYPE_LIBRARY)
+                target_include_directories(webcore PUBLIC ${FREETYPE_INCLUDE_DIR})
+                target_link_libraries(webcore PUBLIC ${FREETYPE_LIBRARY})
+                target_compile_definitions(webcore PUBLIC ZEPRA_HAS_FREETYPE)
+                message(STATUS "WebCore: FreeType found (manual) — font rendering enabled")
+            else()
+                message(WARNING "WebCore: FreeType not found — install with: pacman -S mingw-w64-x86_64-freetype or vcpkg install freetype")
+            endif()
         endif()
         
         # Export settings

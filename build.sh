@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 # ZepraBrowser Build Script - Uses Ninja for faster, lighter builds
 # Usage: ./build.sh [clean|release|debug]
 

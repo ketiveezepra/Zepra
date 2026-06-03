@@ -16,6 +16,15 @@
 #endif
 #include <fstream>
 #include <string>
+#elif defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <psapi.h>
 #endif
 
 namespace Zepra::Heap {
@@ -85,6 +94,12 @@ private:
             statm >> virt >> rss;
             long pageSize = sysconf(_SC_PAGESIZE);
             return (rss * pageSize) / (1024 * 1024);
+        }
+#elif defined(_WIN32)
+        PROCESS_MEMORY_COUNTERS pmc;
+        pmc.cb = sizeof(pmc);
+        if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
+            return pmc.WorkingSetSize / (1024 * 1024);
         }
 #endif
         return 0;

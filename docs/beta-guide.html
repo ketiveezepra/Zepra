@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Getting started with Zepra Browser Beta - Installation guide, features, and feedback instructions.">
+    <title>Getting Started with Zepra Browser Beta | KetiveeAI</title>
+    <style>
+        :root {
+            --bg-primary: #0D0D1A;
+            --bg-secondary: #111128;
+            --bg-card: #1A1A2E;
+            --border: #252545;
+            --accent: #6C3AED;
+            --accent-light: #B794F6;
+            --text-primary: #E8E8F0;
+            --text-secondary: #AAAACC;
+            --text-dim: #666688;
+            --warning-bg: #1C1020;
+            --warning-border: #3D2040;
+            --warning-text: #FF6B1A;
+            --success: #4ADE80;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.7;
+        }
+
+        /* Beta banner */
+        .beta-banner {
+            background: linear-gradient(90deg, #FF6B1A, #FF3D00);
+            padding: 10px 20px;
+            text-align: center;
+            font-size: 13px;
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        /* Header */
+        .header {
+            text-align: center;
+            padding: 60px 20px 40px;
+            background: linear-gradient(180deg, #0D0D1A 0%, #111128 100%);
+        }
+        .header h1 {
+            font-size: 42px;
+            font-weight: 700;
+            color: var(--accent-light);
+            margin-bottom: 8px;
+        }
+        .header .version {
+            font-size: 16px;
+            color: var(--text-dim);
+            margin-bottom: 24px;
+        }
+        .header .tagline {
+            font-size: 18px;
+            color: var(--text-secondary);
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        /* Container */
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 0 24px 60px;
+        }
+
+        /* Section */
+        .section { margin: 48px 0; }
+        .section h2 {
+            font-size: 26px;
+            color: var(--accent-light);
+            margin-bottom: 20px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+        }
+        .section h3 {
+            font-size: 18px;
+            color: var(--text-primary);
+            margin: 24px 0 12px;
+        }
+        .section p {
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+        }
+
+        /* Warning box */
+        .warning-box {
+            background: var(--warning-bg);
+            border: 1px solid var(--warning-border);
+            border-radius: 8px;
+            padding: 20px 24px;
+            margin: 24px 0;
+        }
+        .warning-box .label {
+            color: var(--warning-text);
+            font-weight: 700;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+        .warning-box p {
+            color: #CC8899;
+            font-size: 14px;
+            margin: 0;
+        }
+
+        /* Card grid */
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 16px;
+            margin: 20px 0;
+        }
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 24px;
+            transition: border-color 0.2s;
+        }
+        .card:hover { border-color: var(--accent); }
+        .card .icon { font-size: 28px; margin-bottom: 12px; }
+        .card h4 {
+            font-size: 16px;
+            color: var(--text-primary);
+            margin-bottom: 8px;
+        }
+        .card p {
+            font-size: 13px;
+            color: var(--text-dim);
+            margin: 0;
+        }
+
+        /* Code block */
+        .code-block {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px 20px;
+            font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+            font-size: 13px;
+            color: var(--accent-light);
+            overflow-x: auto;
+            margin: 12px 0;
+            line-height: 1.6;
+        }
+        .code-block .comment { color: var(--text-dim); }
+
+        /* Platform tabs */
+        .platform-tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 16px;
+        }
+        .platform-tab {
+            padding: 10px 20px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px 8px 0 0;
+            cursor: pointer;
+            color: var(--text-dim);
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .platform-tab.active {
+            background: var(--bg-secondary);
+            color: var(--accent-light);
+            border-bottom-color: var(--bg-secondary);
+        }
+        .platform-content {
+            display: none;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 0 8px 8px 8px;
+            padding: 24px;
+        }
+        .platform-content.active { display: block; }
+
+        /* Table */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+        }
+        th, td {
+            text-align: left;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+        }
+        th {
+            color: var(--accent-light);
+            font-size: 13px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        td { color: var(--text-secondary); font-size: 14px; }
+        tr:hover td { background: rgba(108, 58, 237, 0.05); }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 40px 20px;
+            border-top: 1px solid var(--border);
+            color: var(--text-dim);
+            font-size: 13px;
+        }
+        .footer a { color: var(--accent-light); text-decoration: none; }
+
+        /* Links */
+        a { color: var(--accent-light); }
+    </style>
+</head>
+<body>
+
+<div class="beta-banner">
+    ⚠ BETA RELEASE — This is pre-release software for testing and feedback
+</div>
+
+<div class="header">
+    <h1>🌐 Zepra Browser</h1>
+    <div class="version">v0.1.0-beta</div>
+    <div class="tagline">
+        The first public beta of an independent web browser built entirely from scratch by KetiveeAI.
+    </div>
+</div>
+
+<div class="container">
+
+    <div class="warning-box">
+        <div class="label">⚠ Beta Software Notice</div>
+        <p>
+            This is a pre-release version intended for testing and community feedback.
+            It may contain bugs, incomplete features, and performance issues.
+            Do not use this as your primary browser for sensitive activities (banking, medical, legal).
+        </p>
+    </div>
+
+    <!-- What's Inside -->
+    <div class="section">
+        <h2>What's Inside</h2>
+        <div class="card-grid">
+            <div class="card">
+                <div class="icon">⚡</div>
+                <h4>ZepraScript Engine</h4>
+                <p>Custom JavaScript engine with multi-tier JIT, ES2023+ support, and WebAssembly interpreter.</p>
+            </div>
+            <div class="card">
+                <div class="icon">🎨</div>
+                <h4>NXRender</h4>
+                <p>Hardware-accelerated OpenGL rendering with HTML5/CSS3 layout and NXSVG vector graphics.</p>
+            </div>
+            <div class="card">
+                <div class="icon">🌐</div>
+                <h4>NXNet</h4>
+                <p>Custom HTTP client, TLS/SSL, DNS resolver, cookie manager, and response cache.</p>
+            </div>
+            <div class="card">
+                <div class="icon">🔒</div>
+                <h4>Security First</h4>
+                <p>File quarantine, sandbox flags, executable detection, and URL scheme classification.</p>
+            </div>
+            <div class="card">
+                <div class="icon">🗂️</div>
+                <h4>Tab Management</h4>
+                <p>Tabbed browsing with tab suspension for memory management and per-tab history.</p>
+            </div>
+            <div class="card">
+                <div class="icon">🤖</div>
+                <h4>AI Sidebar</h4>
+                <p>Page summarization, Q&A, and entity extraction powered by ZepraSearch ML services.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Installation -->
+    <div class="section">
+        <h2>Installation</h2>
+
+        <div class="platform-tabs">
+            <div class="platform-tab active" onclick="showPlatform('windows')">🪟 Windows</div>
+            <div class="platform-tab" onclick="showPlatform('linux')">🐧 Linux</div>
+            <div class="platform-tab" onclick="showPlatform('macos')">🍎 macOS</div>
+        </div>
+
+        <div id="windows" class="platform-content active">
+            <h3>Option A: GUI Installer (Recommended)</h3>
+            <p>Download the installer package and run:</p>
+            <div class="code-block">
+                <span class="comment"># Right-click and select "Run with PowerShell"</span><br>
+                Install-ZepraBrowser.ps1<br><br>
+                <span class="comment"># Or from terminal (as Administrator):</span><br>
+                powershell -ExecutionPolicy Bypass -File Install-ZepraBrowser.ps1
+            </div>
+            <h3>Option B: Silent Install</h3>
+            <div class="code-block">
+                powershell -ExecutionPolicy Bypass -File Install-ZepraBrowser.ps1 -Silent
+            </div>
+            <p><strong>System Requirements:</strong> Windows 10 or later, x86_64, 2 GB RAM, OpenGL 2.0</p>
+        </div>
+
+        <div id="linux" class="platform-content">
+            <h3>Option A: .deb Package (Debian/Ubuntu)</h3>
+            <div class="code-block">
+                <span class="comment"># Install the .deb package</span><br>
+                sudo apt install ./zepra-browser_0.1.0-beta_amd64.deb<br><br>
+                <span class="comment"># Or with dpkg:</span><br>
+                sudo dpkg -i zepra-browser_0.1.0-beta_amd64.deb<br>
+                sudo apt-get install -f &nbsp;<span class="comment"># fix dependencies</span>
+            </div>
+            <h3>Option B: Interactive Installer</h3>
+            <div class="code-block">
+                chmod +x install-zepra.sh<br>
+                sudo ./install-zepra.sh
+            </div>
+            <p>The installer auto-detects GUI availability and uses zenity for graphical dialogs when available.</p>
+            <p><strong>Dependencies:</strong> libfreetype6, libx11-6, libgl1, zlib1g, libssl3</p>
+        </div>
+
+        <div id="macos" class="platform-content">
+            <h3>DMG Installation</h3>
+            <p>1. Download <code>ZepraBrowser-0.1.0-beta.dmg</code></p>
+            <p>2. Double-click to mount the disk image</p>
+            <p>3. Drag <strong>Zepra Browser</strong> to the <strong>Applications</strong> folder</p>
+            <p>4. Right-click and select "Open" on first launch (unsigned beta)</p>
+            <p><strong>Requirements:</strong> macOS 11.0 (Big Sur) or later</p>
+        </div>
+    </div>
+
+    <!-- System Requirements -->
+    <div class="section">
+        <h2>System Requirements</h2>
+        <table>
+            <tr><th>Component</th><th>Minimum</th><th>Recommended</th></tr>
+            <tr><td>CPU</td><td>x86_64, 2 cores</td><td>x86_64, 4+ cores</td></tr>
+            <tr><td>RAM</td><td>2 GB</td><td>4 GB+</td></tr>
+            <tr><td>Disk Space</td><td>200 MB</td><td>500 MB</td></tr>
+            <tr><td>GPU</td><td>OpenGL 2.0</td><td>OpenGL 3.3+</td></tr>
+            <tr><td>OS</td><td>Win 10 / Ubuntu 20.04</td><td>Win 11 / Ubuntu 22.04+</td></tr>
+        </table>
+    </div>
+
+    <!-- Reporting Bugs -->
+    <div class="section">
+        <h2>Reporting Bugs</h2>
+        <p>Your feedback is critical for improving Zepra Browser. Here's how to report issues:</p>
+        <div class="card-grid">
+            <div class="card">
+                <div class="icon">🐛</div>
+                <h4>GitHub Issues</h4>
+                <p><a href="https://github.com/KetiveeAI/Zepra/issues">github.com/KetiveeAI/Zepra/issues</a> — Preferred method. Include OS, steps to reproduce, and screenshots.</p>
+            </div>
+            <div class="card">
+                <div class="icon">✉️</div>
+                <h4>Email</h4>
+                <p><a href="mailto:support@ketivee.com">support@ketivee.com</a> — For sensitive reports or if you can't use GitHub.</p>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<div class="footer">
+    <p>
+        <strong>Zepra Browser v0.1.0-beta</strong> — Copyright © 2025-2026 <a href="https://about.ketivee.com">KetiveeAI</a><br>
+        Licensed under <a href="https://zepra.ketivee.com/license">KPL-2.0</a> · Built in India · Independent by design
+    </p>
+</div>
+
+<script>
+    function showPlatform(id) {
+        document.querySelectorAll('.platform-content').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.platform-tab').forEach(el => el.classList.remove('active'));
+        document.getElementById(id).classList.add('active');
+        event.target.classList.add('active');
+    }
+</script>
+
+</body>
+</html>

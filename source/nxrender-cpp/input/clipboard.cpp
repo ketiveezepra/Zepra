@@ -9,6 +9,15 @@
 #include <X11/Xatom.h>
 #include <cstring>
 #include <iostream>
+#elif defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <cstring>
 #endif
 
 namespace NXRender {
@@ -31,7 +40,15 @@ bool Clipboard::init(void* display, unsigned long window) {
     atomNxClip_ = XInternAtom(dpy, "NX_CLIPBOARD", False);
 
     return true;
+#elif defined(_WIN32)
+    // Win32 clipboard doesn't need a display/window — it's global.
+    // Store params for API compatibility but ignore them.
+    (void)display;
+    (void)window;
+    return true;
 #else
+    (void)display;
+    (void)window;
     return false;
 #endif
 }
@@ -66,6 +83,39 @@ void Clipboard::setText(const std::string& text, ClipboardSelection sel) {
             ownsPrimary_ = true;
         }
     }
+#elif defined(_WIN32)
+    // Win32 has no PRIMARY selection; store it in-memory for consistency
+    if (sel == ClipboardSelection::Primary) {
+        primaryText_ = text;
+        ownsPrimary_ = true;
+        return;
+    }
+
+    if (!OpenClipboard(nullptr)) return;
+    EmptyClipboard();
+
+    // Convert UTF-8 to wide string for CF_UNICODETEXT
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, text.c_str(),
+                                   static_cast<int>(text.size()), nullptr, 0);
+    if (wlen <= 0) { CloseClipboard(); return; }
+
+    SIZE_T bytes = static_cast<SIZE_T>(wlen + 1) * sizeof(wchar_t);
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!hg) { CloseClipboard(); return; }
+
+    wchar_t* dst = static_cast<wchar_t*>(GlobalLock(hg));
+    if (!dst) { GlobalFree(hg); CloseClipboard(); return; }
+
+    MultiByteToWideChar(CP_UTF8, 0, text.c_str(),
+                        static_cast<int>(text.size()), dst, wlen);
+    dst[wlen] = L'\0';
+    GlobalUnlock(hg);
+
+    SetClipboardData(CF_UNICODETEXT, hg);
+    CloseClipboard();
+
+    clipboardText_ = text;
+    ownsClipboard_ = true;
 #endif
 }
 
@@ -97,6 +147,35 @@ void Clipboard::getText(std::function<void(const std::string&)> callback, Clipbo
                       static_cast<Window>(window_),
                       CurrentTime);
     XFlush(dpy);
+#elif defined(_WIN32)
+    if (!callback) return;
+
+    // PRIMARY — in-memory only on Windows
+    if (sel == ClipboardSelection::Primary) {
+        callback(ownsPrimary_ ? primaryText_ : std::string());
+        return;
+    }
+
+    // Win32 clipboard read is synchronous — no event roundtrip needed
+    if (!OpenClipboard(nullptr)) { callback(""); return; }
+
+    HANDLE hd = GetClipboardData(CF_UNICODETEXT);
+    if (!hd) { CloseClipboard(); callback(""); return; }
+
+    const wchar_t* wide = static_cast<const wchar_t*>(GlobalLock(hd));
+    if (!wide) { GlobalUnlock(hd); CloseClipboard(); callback(""); return; }
+
+    int needed = WideCharToMultiByte(CP_UTF8, 0, wide, -1,
+                                     nullptr, 0, nullptr, nullptr);
+    std::string result;
+    if (needed > 1) {
+        result.resize(static_cast<size_t>(needed - 1));
+        WideCharToMultiByte(CP_UTF8, 0, wide, -1,
+                            &result[0], needed, nullptr, nullptr);
+    }
+    GlobalUnlock(hd);
+    CloseClipboard();
+    callback(result);
 #else
     if (callback) callback("");
 #endif

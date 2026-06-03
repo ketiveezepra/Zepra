@@ -97,6 +97,7 @@ public:
     
     const std::string& data() const { return data_; }
     void setData(const std::string& data) { data_ = data; }
+    void appendData(const std::string& extra) { data_ += extra; }
     size_t length() const { return data_.length(); }
     
     std::unique_ptr<DOMNode> cloneNode(bool deep) const override;
@@ -115,6 +116,7 @@ public:
     std::string nodeName() const override { return "#comment"; }
     std::string nodeValue() const override { return data_; }
     void setNodeValue(const std::string& value) override { data_ = value; }
+    const std::string& data() const { return data_; }
     
     std::unique_ptr<DOMNode> cloneNode(bool deep) const override;
     
@@ -166,11 +168,30 @@ public:
     
     // Cloning
     std::unique_ptr<DOMNode> cloneNode(bool deep) const override;
+
+    // Element state (for CSS pseudo-class matching)
+    bool hovered() const { return hovered_; }
+    bool focused() const { return focused_; }
+    bool active() const { return active_; }
+    bool checked() const { return checked_; }
+    bool disabled() const { return disabled_; }
+    void setHovered(bool v) { hovered_ = v; }
+    void setFocused(bool v) { focused_ = v; }
+    void setActive(bool v)  { active_ = v; }
+    void setChecked(bool v) { checked_ = v; }
+    void setDisabled(bool v){ disabled_ = v; }
     
 private:
     std::string tagName_;
     std::unordered_map<std::string, std::string> attributes_;
     std::unordered_map<std::string, std::string> styleMap_;
+
+    // Pseudo-class state
+    bool hovered_  = false;
+    bool focused_  = false;
+    bool active_   = false;
+    bool checked_  = false;
+    bool disabled_ = false;
 };
 
 /**

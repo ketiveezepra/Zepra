@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 # =============================================================================
 # ZepraBrowser Installation Script for NeolyxOS
 # Installs to /Applications/ZepraBrowser/

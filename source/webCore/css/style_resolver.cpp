@@ -133,13 +133,10 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
         sheetPairs.push_back({entry.sheet.get(), entry.origin});
     }
     
-    std::cerr << " [collect]" << std::flush;
     auto matchedRules = cascade_.collectMatchingRulesWithOrigins(element, sheetPairs);
-    std::cerr << "(" << matchedRules.size() << ")" << std::flush;
     
     // Step 3: Sort by cascade order
     cascade_.sortByCascade(matchedRules);
-    std::cerr << " [sort]" << std::flush;
     
     // Step 4: Apply matched rules in order (lowest priority first)
     for (const auto& match : matchedRules) {
@@ -147,7 +144,6 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
             applyDeclarations(computed, match.rule->style(), parentStyle);
         }
     }
-    std::cerr << " [apply]" << std::flush;
     
     // Step 5: Apply inline styles (highest priority)
     std::string inlineStyle = element->getAttribute("style");

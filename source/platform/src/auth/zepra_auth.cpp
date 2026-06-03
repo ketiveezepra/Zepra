@@ -751,8 +751,14 @@ std::string generateUUID() {
 std::string getCurrentTimestamp() {
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
+    struct tm tm_buf;
+#ifdef _WIN32
+    gmtime_s(&tm_buf, &time_t);
+#else
+    gmtime_r(&time_t, &tm_buf);
+#endif
     std::stringstream ss;
-    ss << std::put_time(std::gmtime(&time_t), "%Y-%m-%dT%H:%M:%SZ");
+    ss << std::put_time(&tm_buf, "%Y-%m-%dT%H:%M:%SZ");
     return ss.str();
 }
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(Zepra VERSION 0.0.1 LANGUAGES CXX)
+project(Zepra VERSION 0.1.0 LANGUAGES CXX)
 
 # ============================================================================
 # Build System - Prefer Ninja for faster, lighter builds
@@ -9,7 +9,7 @@ project(Zepra VERSION 0.0.1 LANGUAGES CXX)
 # ============================================================================
 
 # Set C++ standard
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Performance optimizations for build
@@ -37,6 +37,22 @@ endif()
 option(USE_UNIFIED_SYSTEM "Use unified Zepra Core system" OFF)
 option(USE_NXRENDER "Use NXRENDER native rendering (no SDL)" OFF)
 option(USE_ZEPRA_STACK "Use custom Zepra libraries (NxHTTP, NxJSON, NxCrypto)" OFF)
+
+# Version metadata
+set(ZEPRA_VERSION_SUFFIX "beta" CACHE STRING "Version suffix (beta, nightly, rc1, etc.)")
+set(ZEPRA_BUILD_CHANNEL "beta" CACHE STRING "Build channel (stable, beta, nightly)")
+string(TIMESTAMP ZEPRA_BUILD_DATE "%Y-%m-%d" UTC)
+string(TIMESTAMP ZEPRA_BUILD_YEAR "%Y" UTC)
+set(ZEPRA_VERSION_STRING "${PROJECT_VERSION}-${ZEPRA_VERSION_SUFFIX}")
+set(ZEPRA_IS_BETA TRUE)
+
+# Generate version header
+configure_file(
+    "${CMAKE_SOURCE_DIR}/source/version.h.in"
+    "${CMAKE_BINARY_DIR}/generated/version.h"
+    @ONLY
+)
+include_directories(${CMAKE_BINARY_DIR}/generated)
 
 # Set build type if not specified
 if(NOT CMAKE_BUILD_TYPE)
@@ -303,6 +319,13 @@ set(HEADERS
 # Create main executable
 add_executable(${EXECUTABLE_NAME} ${SOURCES} ${HEADERS})
 
+# On Windows Release builds, hide console window (use WinMain entry)
+if(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    set_target_properties(${EXECUTABLE_NAME} PROPERTIES
+        WIN32_EXECUTABLE TRUE
+    )
+endif()
+
 # Link libraries based on build mode
 if(USE_NXRENDER)
     # NXRENDER mode - link nxrender + platform-specific graphics
@@ -386,19 +409,21 @@ else()
     endif()
 endif()
 
-if(SDL2_IMAGE_FOUND)
-    target_link_libraries(${EXECUTABLE_NAME} ${SDL2_IMAGE_LIBRARIES})
-    target_include_directories(${EXECUTABLE_NAME} PRIVATE ${SDL2_IMAGE_INCLUDE_DIRS})
-else()
-     # Fallback or error - for now optional but recommended
-     message(STATUS "SDL2_image not found via pkg-config")
-endif()
+# SDL2 image/ttf only needed when NOT using NXRender
+if(NOT USE_NXRENDER)
+    if(SDL2_IMAGE_FOUND)
+        target_link_libraries(${EXECUTABLE_NAME} ${SDL2_IMAGE_LIBRARIES})
+        target_include_directories(${EXECUTABLE_NAME} PRIVATE ${SDL2_IMAGE_INCLUDE_DIRS})
+    else()
+        message(STATUS "SDL2_image not found via pkg-config")
+    endif()
 
-if(SDL2_TTF_FOUND)
-    target_link_libraries(${EXECUTABLE_NAME} ${SDL2_TTF_LIBRARIES})
-    target_include_directories(${EXECUTABLE_NAME} PRIVATE ${SDL2_TTF_INCLUDE_DIRS})
-else()
-     message(STATUS "SDL2_ttf not found via pkg-config")
+    if(SDL2_TTF_FOUND)
+        target_link_libraries(${EXECUTABLE_NAME} ${SDL2_TTF_LIBRARIES})
+        target_include_directories(${EXECUTABLE_NAME} PRIVATE ${SDL2_TTF_INCLUDE_DIRS})
+    else()
+        message(STATUS "SDL2_ttf not found via pkg-config")
+    endif()
 endif()
 
 
@@ -435,8 +460,11 @@ target_link_libraries(${EXECUTABLE_NAME} ${OPENGL_LIBRARIES} ${PLATFORM_LIBS})
 find_package(ZLIB QUIET)
 if(ZLIB_FOUND)
     target_link_libraries(${EXECUTABLE_NAME} ZLIB::ZLIB)
-else()
+elseif(NOT WIN32)
+    # On Linux/macOS, zlib is always available as -lz
     target_link_libraries(${EXECUTABLE_NAME} z)
+else()
+    message(WARNING "ZLIB not found on Windows — PDF and compression features will be unavailable. Install zlib via vcpkg.")
 endif()
 
 # Link engine libraries (zepraScript, webCore, integration, platform)
@@ -482,7 +510,50 @@ target_compile_options(${EXECUTABLE_NAME} PRIVATE
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic>
 )
 
-# Test executable
+# MinGW: statically link runtime DLLs (libgcc, libstdc++, libwinpthread)
+# This eliminates the need to ship these DLLs alongside the executable
+if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    target_link_options(${EXECUTABLE_NAME} PRIVATE
+        -static-libgcc -static-libstdc++
+    )
+    # Also try to statically link winpthread if available
+    target_link_options(${EXECUTABLE_NAME} PRIVATE
+        $<$<BOOL:TRUE>:-Wl,-Bstatic -lwinpthread -Wl,-Bdynamic>
+    )
+    message(STATUS "MinGW detected: statically linking libgcc/libstdc++/winpthread")
+endif()
+
+# Post-build: copy required DLLs to output directory (OpenSSL, FreeType, etc.)
+if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    # Find the MinGW bin directory from the compiler path
+    get_filename_component(MINGW_BIN_DIR ${CMAKE_CXX_COMPILER} DIRECTORY)
+    set(RUNTIME_DLLS
+        "libssl-3-x64.dll"
+        "libcrypto-3-x64.dll"
+        "libfreetype-6.dll"
+        "libharfbuzz-0.dll"
+        "zlib1.dll"
+        "libpng16-16.dll"
+        "libbz2-1.dll"
+        "libbrotlicommon.dll"
+        "libbrotlidec.dll"
+        "libgraphite2.dll"
+        "libintl-8.dll"
+        "libiconv-2.dll"
+        "libglib-2.0-0.dll"
+        "libpcre2-8-0.dll"
+    )
+    foreach(DLL ${RUNTIME_DLLS})
+        if(EXISTS "${MINGW_BIN_DIR}/${DLL}")
+            add_custom_command(TARGET ${EXECUTABLE_NAME} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${MINGW_BIN_DIR}/${DLL}"
+                    "$<TARGET_FILE_DIR:${EXECUTABLE_NAME}>"
+                COMMENT "Copying ${DLL}"
+            )
+        endif()
+    endforeach()
+endif()
 
 
 # Installation rules

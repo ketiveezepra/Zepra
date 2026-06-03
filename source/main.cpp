@@ -60,6 +60,11 @@
 #include <iostream>
 #include <string>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#pragma comment(lib, "ws2_32.lib")
+#endif
+
 // Forward declaration - implementation in zepra_browser.cpp
 extern int zepra_main(int argc, char* argv[]);
 
@@ -117,11 +122,27 @@ int main(int argc, char* argv[]) {
     std::cout << std::endl;
     
     // Note: The actual browser implementation is in zepra_browser.cpp
-    // which uses X11 + OpenGL + nxsvg.h + nxfont.h
+    // which uses native platform + OpenGL + nxsvg.h + nxfont.h
     // No SDL dependency anywhere in the rendering pipeline
     
+    // Initialize Winsock on Windows (required before any socket call)
+#ifdef _WIN32
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "[Fatal] WSAStartup failed" << std::endl;
+        return 1;
+    }
+    std::cout << "[Init] Winsock initialized" << std::endl;
+#endif
+    
     // Actually launch the browser GUI
-    return zepra_main(argc, argv);
+    int result = zepra_main(argc, argv);
+    
+#ifdef _WIN32
+    WSACleanup();
+#endif
+    
+    return result;
 }
 
 

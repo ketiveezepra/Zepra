@@ -61,6 +61,9 @@ public:
 private:
     Clipboard() = default;
     ChangeCallback onChange_;
+    // In-memory fallback (Linux/NeolyxOS — no X11 window handle available here)
+    std::string memoryClipboard_;
+    std::string memoryHtml_;
 };
 
 } // namespace Zepra::Platform
