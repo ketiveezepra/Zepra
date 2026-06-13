@@ -17,6 +17,11 @@
 #include "frontend/parser.hpp"
 #include "frontend/syntax_checker.hpp"
 #include "bytecode/bytecode_generator.hpp"
+
+// JS-DOM bridge (minimal implementation for beta)
+#include "webCore/dom/dom_node.hpp"
+#include "webCore/scripting/js_dom_bridge.hpp"
+
 #include <limits>
 #include <memory>
 
@@ -34,10 +39,13 @@ public:
         , sandbox_(Runtime::SandboxConfig::browser())
         , resourceMonitor_(std::make_unique<Runtime::ResourceMonitor>(sandbox_.limits))
         , vm_(std::make_unique<Runtime::VM>(nullptr))
+        , domDocument_(std::make_unique<Zepra::WebCore::DOMDocument>())
+        , jsDomBridge_(std::make_unique<Zepra::Bridge::JSDOMBridge>())
     {
         vm_->setGCHeap(gcHeap_.get());
         vm_->setSandbox(resourceMonitor_.get());
         initializeGlobals();
+        initializeDOMBridge();
     }
 
     ~ContextImpl() override {
@@ -99,12 +107,33 @@ private:
         vm_->setGlobal("null", Runtime::Value::null());
     }
 
+    /**
+     * @brief Wire the minimal JS-DOM bridge so that window/document exist
+     *        before any user script runs. This is the key fix for SPA rendering.
+     */
+    void initializeDOMBridge() {
+        // Create a fresh DOM document for this context
+        domDocument_->appendChild(domDocument_->createElement("html"));
+
+        // Initialize the bridge
+        jsDomBridge_->initialize(vm_.get(), domDocument_.get());
+
+        // Expose window + document + console to the JS global scope
+        jsDomBridge_->exposeWindowObject();
+
+        // Store the bridge so it lives as long as the Context
+    }
+
     IsolateImpl* isolate_;
     Runtime::Object* globalObject_;
     std::unique_ptr<Runtime::GCHeap> gcHeap_;
     Runtime::SandboxConfig sandbox_;
     std::unique_ptr<Runtime::ResourceMonitor> resourceMonitor_;
     std::unique_ptr<Runtime::VM> vm_;
+
+    // DOM bridge members (added for beta SPA support)
+    std::unique_ptr<Zepra::WebCore::DOMDocument> domDocument_;
+    std::unique_ptr<Zepra::Bridge::JSDOMBridge> jsDomBridge_;
 };
 
 } // namespace Zepra

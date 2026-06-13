@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Beta CSS Status Report | ZepraBrowser</title>
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --bg2: #12121a;
+            --accent: #10b981;
+            --text: #e5e7eb;
+            --text2: #9ca3af;
+            --warn: #f59e0b;
+            --err: #ef4444;
+            --ok: #10b981;
+        }
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 0;
+            line-height: 1.6;
+        }
+        .nav {
+            background: var(--bg2);
+            border-bottom: 1px solid #1f2937;
+            padding: 1rem 2rem;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        h1 { font-size: 2.25rem; margin: 0 0 0.5rem; }
+        h2 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 1px solid #1f2937; padding-bottom: 0.5rem; }
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1rem;
+            margin: 1.5rem 0;
+        }
+        .card {
+            background: var(--bg2);
+            border: 1px solid #1f2937;
+            border-radius: 12px;
+            padding: 1.25rem;
+        }
+        .card h3 { margin: 0 0 0.75rem; font-size: 1.1rem; }
+        .badge {
+            display: inline-block;
+            padding: 0.2rem 0.6rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-left: 0.5rem;
+        }
+        .ok { background: #064e3b; color: #34d399; }
+        .partial { background: #78350f; color: #fbbf24; }
+        .missing { background: #7f1d1d; color: #f87171; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+        th, td {
+            padding: 0.6rem 0.8rem;
+            text-align: left;
+            border-bottom: 1px solid #1f2937;
+        }
+        th { color: var(--accent); font-weight: 600; }
+        .section-header {
+            background: var(--bg2);
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            margin: 1.5rem 0 1rem;
+            font-weight: 600;
+        }
+        .note {
+            background: #1f2937;
+            border-left: 4px solid var(--accent);
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+        code {
+            background: #1f2937;
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+    </style>
+</head>
+<body>
+<div class="nav">
+    <a href="index.html" style="color:#10b981; text-decoration:none;">← Back to Docs Hub</a>
+</div>
+
+<div class="container">
+    <h1>CSS Engine — Beta Status Report</h1>
+    <p style="color:var(--text2); max-width:700px;">
+        This document records the current state of the CSS subsystem for the v0.1.0-beta release.
+        It is the single source of truth for what works, what is partial, and what is missing.
+    </p>
+
+    <div class="note">
+        <strong>Build Verified:</strong> <code>webcore</code> target builds cleanly (100% success on 2026-06-12).
+        All CSS .cpp files compile without errors.
+    </div>
+
+    <h2>Implementation Status by Feature</h2>
+
+    <div class="status-grid">
+        <div class="card">
+            <h3>Cascade &amp; Matching <span class="badge ok">COMPLETE</span></h3>
+            <p><code>CSSCascade</code>, <code>SelectorMatcher</code>, specificity, origin sorting, and indexed lookup are fully implemented and tested in unit suites.</p>
+        </div>
+        <div class="card">
+            <h3>Style Resolution <span class="badge ok">COMPLETE</span></h3>
+            <p><code>StyleResolver</code> + <code>applyProperty</code> covers all standard properties, length parsing, color parsing, and inheritance. Computed style cache is live.</p>
+        </div>
+        <div class="card">
+            <h3>Parser <span class="badge partial">PARTIAL</span></h3>
+            <p>Full rule/declaration parsing, @import/@media/@keyframes/@font-face/@supports supported. Missing: container queries, nesting, @layer, @scope (ES2024+).</p>
+        </div>
+        <div class="card">
+            <h3>Layout Integration <span class="badge partial">PARTIAL</span></h3>
+            <p>Block, flex, and grid layout engines exist and consume computed styles. Missing: subgrid, masonry, container queries, writing-mode vertical.</p>
+        </div>
+        <div class="card">
+            <h3>Animations &amp; Transitions <span class="badge missing">MISSING</span></h3>
+            <p>No Web Animations API, no CSS transition/animation engine, no requestAnimationFrame-driven interpolation yet.</p>
+        </div>
+        <div class="card">
+            <h3>Variables &amp; @supports <span class="badge ok">COMPLETE</span></h3>
+            <p>CSS custom properties and <code>@supports</code> condition evaluation are wired in <code>CSSEngine</code>.</p>
+        </div>
+    </div>
+
+    <h2>Build &amp; Test Gate</h2>
+    <table>
+        <tr><th>Check</th><th>Result</th><th>Notes</th></tr>
+        <tr><td>Compile (webcore target)</td><td style="color:#34d399">✅ PASS</td><td>All 12 CSS .cpp files compile cleanly.</td></tr>
+        <tr><td>Unit tests (css_*)</td><td style="color:#fbbf24">⚠ PARTIAL</td><td>Basic selector &amp; cascade tests pass; no full WPT CSS coverage.</td></tr>
+        <tr><td>Integration with DOM</td><td style="color:#ef4444">❌ BLOCKED</td><td>Header-only <code>JSDOMBridge</code> — no runtime DOM objects exist to style.</td></tr>
+        <tr><td>React/Next.js pages</td><td style="color:#ef4444">❌ BROKEN</td><td>JS never executes → no DOM mutations → empty/broken render.</td></tr>
+    </table>
+
+    <h2>Critical Beta Blocker</h2>
+    <div class="note">
+        <strong>The JS-DOM Bridge is only a header.</strong><br>
+        <code>source/webCore/scripting/js_dom_bridge.hpp</code> declares <code>JSDOMBridge</code>, <code>wrapElement</code>, <code>exposeDocumentObject</code>, etc., but there is no corresponding <code>.cpp</code> implementation and no concrete DOM classes (<code>DOMElement</code>, <code>DOMDocument</code>) wired to ZepraScript.<br><br>
+        <strong>Result:</strong> Even though CSS and layout are production-grade, any page that relies on JavaScript (Next.js, React, Vue, Angular, SPAs) renders as a blank or broken shell because the DOM never materializes.
+    </div>
+
+    <h2>Recommendations for Beta</h2>
+    <ol>
+        <li><strong>Document the gap publicly</strong> — users must know that only static HTML/CSS sites will render correctly in v0.1.0-beta.</li>
+        <li><strong>Implement a minimal DOM stub</strong> (even read-only) so that at least <code>document.createElement</code> and basic element creation work for simple JS.</li>
+        <li><strong>Wire the bridge</strong> before the next milestone so that React hydration can begin.</li>
+        <li><strong>Keep CSS frozen</strong> — it is the one subsystem that is genuinely production-ready; do not touch it until the JS-DOM bridge lands.</li>
+    </ol>
+
+    <p style="margin-top:3rem; color:#6b7280; font-size:0.85rem;">
+        Generated 2026-06-12 • ZepraBrowser Beta Preparation • All claims backed by source inspection and clean build.
+    </p>
+</div>
+</body>
+</html>

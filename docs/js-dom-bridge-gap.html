@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JS-DOM Bridge Gap — Root Cause of Broken React/Next.js Pages</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background:#0a0a0f; color:#e5e7eb; line-height:1.7; padding:2rem; max-width:860px; margin:0 auto; }
+        h1 { color:#10b981; }
+        h2 { border-bottom:1px solid #1f2937; padding-bottom:0.4rem; }
+        .code { background:#1f2937; padding:0.8rem 1rem; border-radius:8px; font-family:monospace; font-size:0.9rem; }
+        .warning { background:#7f1d1d; border-left:5px solid #ef4444; padding:1rem; margin:1.5rem 0; }
+        table { width:100%; border-collapse:collapse; margin:1.5rem 0; }
+        th, td { padding:0.5rem 0.75rem; border-bottom:1px solid #1f2937; text-align:left; }
+        th { color:#10b981; }
+    </style>
+</head>
+<body>
+<h1>JS-DOM Bridge Gap — Why React &amp; Next.js Pages Are Broken</h1>
+
+<p><strong>Status:</strong> v0.1.0-beta blocker. This is the single largest reason the browser cannot yet render modern JavaScript-heavy sites.</p>
+
+<h2>The Symptom</h2>
+<p>When loading a Next.js or React application, the browser shows either:</p>
+<ul>
+    <li>A completely blank viewport</li>
+    <li>A static shell with no interactive content</li>
+    <li>Broken layout with missing text/images</li>
+</ul>
+<p>Static HTML + CSS pages render correctly. The difference is JavaScript execution that mutates the DOM.</p>
+
+<h2>The Root Cause</h2>
+<p>The file <code>source/webCore/scripting/js_dom_bridge.hpp</code> contains only declarations:</p>
+<div class="code">
+class JSDOMBridge {<br>
+&nbsp;&nbsp;void initialize(Runtime::VM* vm, WebCore::DOMDocument* document);<br>
+&nbsp;&nbsp;Runtime::Object* wrapDocument(WebCore::DOMDocument* doc);<br>
+&nbsp;&nbsp;Runtime::Object* wrapElement(WebCore::DOMElement* element);<br>
+&nbsp;&nbsp;...<br>
+};
+</div>
+
+<p><strong>There is no corresponding .cpp implementation file.</strong></p>
+<p>More critically, the classes it tries to wrap do not exist in a usable form:</p>
+<ul>
+    <li><code>WebCore::DOMDocument</code> — declared but not a real DOM tree</li>
+    <li><code>WebCore::DOMElement</code> — no property storage, no live style resolution</li>
+    <li>No <code>Node</code>, <code>Text</code>, <code>Comment</code>, or <code>DocumentFragment</code> runtime types</li>
+</ul>
+
+<h2>Why This Breaks Modern Sites</h2>
+<table>
+    <tr><th>Step in a React/Next.js page load</th><th>What should happen</th><th>What actually happens</th></tr>
+    <tr><td>1. HTML loads</td><td>Parser builds DOM tree</td><td>Minimal DOM created (or none)</td></tr>
+    <tr><td>2. &lt;script&gt; runs</td><td>ZepraScript executes bundle</td><td>Executes in isolation — no DOM reference</td></tr>
+    <tr><td>3. React calls createRoot / render</td><td>Bridge converts React elements → real DOM nodes</td><td><code>wrapElement</code> is a no-op or crashes</td></tr>
+    <tr><td>4. DOM mutations (appendChild, setAttribute, innerHTML)</td><td>Layout + paint triggered</td><td>Nothing to mutate — page stays empty</td></tr>
+    <tr><td>5. CSS cascade runs</td><td>Computed styles applied</td><td>No elements → no styles → nothing visible</td></tr>
+</table>
+
+<h2>The Missing Pieces (Implementation Debt)</h2>
+<ol>
+    <li><strong>Concrete DOM classes</strong> — <code>DOMElement</code>, <code>DOMText</code>, <code>DOMDocument</code> with real <code>childNodes</code>, <code>attributes</code>, and <code>ownerDocument</code>.</li>
+    <li><strong>Bridge implementation</strong> — <code>js_dom_bridge.cpp</code> that actually allocates ZepraScript objects and installs getters/setters that forward to the C++ DOM.</li>
+    <li><strong>Global object wiring</strong> — <code>window.document</code>, <code>document.createElement</code>, <code>document.body</code> must exist before any user script runs.</li>
+    <li><strong>Mutation observation</strong> — layout and paint must be notified when JS mutates the tree (currently only the header promises this).</li>
+</ol>
+
+<h2>Impact on Beta Narrative</h2>
+<div class="warning">
+    <strong>Public messaging must be honest:</strong><br>
+    “ZepraBrowser v0.1.0-beta renders static websites beautifully. JavaScript-heavy single-page applications (React, Next.js, Vue, Angular) currently render as empty shells because the DOM-to-JavaScript bridge is still being implemented. We are actively working on this for the next milestone.”
+</div>
+
+<h2>Recommended Path Forward</h2>
+<ol>
+    <li>Implement a minimal, read-only DOM stub (just enough for <code>createElement</code>, <code>appendChild</code>, <code>textContent</code>, <code>setAttribute</code>).</li>
+    <li>Wire the bridge so that ZepraScript can obtain real object pointers instead of <code>undefined</code>.</li>
+    <li>Add a simple test: load a tiny React “Hello World” and assert that the text node appears in the viewport.</li>
+    <li>Only then re-enable full CSS/layout work — the CSS engine is already production-grade and should not be touched until the DOM layer exists.</li>
+</ol>
+
+<p style="margin-top:3rem; color:#6b7280; font-size:0.85rem;">
+    Document created 2026-06-12 during beta preparation. All facts verified by direct source inspection.
+</p>
+</body>
+</html>

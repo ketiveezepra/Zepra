@@ -139,6 +139,19 @@
 
 
 <h1>ZepraBrowser Development TODO</h1>
+
+<div style="background:#7f1d1d;border-left:6px solid #ef4444;padding:1.25rem;margin:1.5rem 0;border-radius:8px;">
+<strong style="color:#f87171;">⚠ BETA v0.1.0 BLOCKER — Updated 2026-06-12</strong><br>
+The single largest gap preventing modern site compatibility is the <strong>header-only JSDOMBridge</strong> (<code>source/webCore/scripting/js_dom_bridge.hpp</code>).
+There is no <code>.cpp</code> implementation and no concrete DOM classes (<code>DOMElement</code>, <code>DOMDocument</code>, etc.).
+<br><br>
+<strong>Result:</strong> Static HTML/CSS pages render correctly. Any page relying on JavaScript (React, Next.js, Vue, Angular, SPAs) renders as a blank or broken shell because the DOM never materializes.
+<br><br>
+See the new detailed reports:
+<a href="beta-css-status.html" style="color:#34d399;">beta-css-status.html</a> — CSS is production-grade but blocked by missing DOM.<br>
+<a href="js-dom-bridge-gap.html" style="color:#34d399;">js-dom-bridge-gap.html</a> — Root cause analysis and recommended path forward.
+</div>
+
 <h2>Priority 1: Core Web Engine</h2>
 <h3>Networking Layer</h3>
 <ul>
