@@ -100,7 +100,14 @@ void StackManager::initThreadStack(size_t guardReserve) {
         }
         // Approximate base from current SP.
         uintptr_t sp;
+#if defined(__x86_64__) || defined(_M_X64)
         __asm__ volatile("mov %%rsp, %0" : "=r"(sp));
+#elif defined(__aarch64__)
+        __asm__ volatile("mov %0, sp" : "=r"(sp));
+#else
+        // Generic C fallback: address of a local is near the current SP.
+        sp = reinterpret_cast<uintptr_t>(&sp);
+#endif
         // Round down to nearest page.
         sp &= ~(uintptr_t)(4096 - 1);
         stackBase = reinterpret_cast<void*>(sp - stackSize);

@@ -58,7 +58,6 @@ private:
     // =========================================================================
 
     void allocateRegisters() {
-        // Available GPRs (callee-saved excluded from allocation for simplicity)
 #if defined(__x86_64__) || defined(_M_X64)
         availableGPRs_ = {
             JIT::Reg::rcx, JIT::Reg::rdx, JIT::Reg::rsi, JIT::Reg::rdi,
@@ -67,6 +66,21 @@ private:
         availableFPRs_ = {
             JIT::Reg::xmm0, JIT::Reg::xmm1, JIT::Reg::xmm2, JIT::Reg::xmm3
         };
+#elif defined(__aarch64__) || defined(_M_ARM64)
+        // AArch64: x0–x15 are caller-saved, x16–x17 are IP scratch,
+        // x18 is platform register, x19–x28 are callee-saved.
+        availableGPRs_ = {
+            JIT::Reg::x0,  JIT::Reg::x1,  JIT::Reg::x2,  JIT::Reg::x3,
+            JIT::Reg::x4,  JIT::Reg::x5,  JIT::Reg::x6,  JIT::Reg::x7,
+            JIT::Reg::x8,  JIT::Reg::x9,  JIT::Reg::x10, JIT::Reg::x11,
+            JIT::Reg::x12, JIT::Reg::x13, JIT::Reg::x14, JIT::Reg::x15
+        };
+        availableFPRs_ = {
+            JIT::Reg::d0, JIT::Reg::d1, JIT::Reg::d2, JIT::Reg::d3,
+            JIT::Reg::d4, JIT::Reg::d5, JIT::Reg::d6, JIT::Reg::d7
+        };
+#else
+        static_assert(false, "ZOptLowering: unsupported architecture — add GPR/FPR sets");
 #endif
         gprIdx_ = 0;
         fprIdx_ = 0;

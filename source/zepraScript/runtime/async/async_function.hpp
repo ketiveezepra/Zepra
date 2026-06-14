@@ -77,7 +77,7 @@ private:
     Context* ctx_;
     AsyncState state_;
     Promise* resultPromise_;
-    Value resumeValue_;            // Set by resume(), consumed by takeResumeValue()
+    Value resumeValue_ = Value::undefined(); // Set by resume(), consumed by takeResumeValue()
     size_t awaitDepth_ = 0;
 
     // Stack of awaited promises for resumption

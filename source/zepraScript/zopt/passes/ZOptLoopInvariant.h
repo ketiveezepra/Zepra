@@ -73,17 +73,17 @@ inline void LoopInvariantCodeMotion::findLoops() {
     loops_.clear();
     
     // Find loop headers (blocks with back edges)
-    for (BasicBlock* block : graph_->blocks()) {
+    for (uint32_t i = 0; i < graph_->numBlocks(); i++) {
+        BasicBlock* block = graph_->block(i);
+        if (!block) continue;
         if (block->isLoopHeader()) {
             LoopInfo loop;
             loop.header = block;
             loop.blocks.insert(block);
             
             // Find loop body (blocks that can reach header via back edge)
-            // Simplified: just use header's predecessors that come after it
             for (BasicBlock* pred : block->predecessors()) {
                 if (pred->index() >= block->index()) {
-                    // This is a back edge - pred is in loop
                     loop.blocks.insert(pred);
                 }
             }

@@ -6,11 +6,14 @@
  *
  * Orchestrates the full ZOpt optimization pipeline:
  *   1. Build ZOpt graph from bytecode (ZOptBuilder)
- *   2. Constant folding
- *   3. Strength reduction
- *   4. Dead code elimination  
- *   5. Lowering to machine code
- *   6. Emit into executable buffer
+ *   2. Copy propagation (canonicalize values)
+ *   3. Constant folding
+ *   4. Common subexpression elimination
+ *   5. Strength reduction
+ *   6. Loop-invariant code motion
+ *   7. Dead code elimination
+ *   8. Register allocation (linear scan)
+ *   9. Lowering to machine code
  *
  */
 
@@ -22,6 +25,9 @@
 #include "zopt/passes/ZOptConstFold.h"
 #include "zopt/passes/ZOptDeadCodeElim.h"
 #include "zopt/passes/ZOptStrengthReduce.h"
+#include "zopt/passes/ZOptCopyProp.h"
+#include "zopt/passes/ZOptCommonSubexpr.h"
+#include "zopt/passes/ZOptLoopInvariant.h"
 #include "jit/MacroAssembler.h"
 #include <memory>
 #include <cstdio>
@@ -58,8 +64,11 @@ struct CompilationResult {
 
 enum class Phase : uint8_t {
     Build,
+    CopyPropagation,
     ConstantFolding,
+    CommonSubexprElim,
     StrengthReduction,
+    LoopInvariantCodeMotion,
     DeadCodeElimination,
     RegisterAllocation,
     Lowering,
@@ -69,8 +78,11 @@ enum class Phase : uint8_t {
 static const char* phaseName(Phase p) {
     switch (p) {
         case Phase::Build: return "Build";
+        case Phase::CopyPropagation: return "CopyProp";
         case Phase::ConstantFolding: return "ConstFold";
+        case Phase::CommonSubexprElim: return "CSE";
         case Phase::StrengthReduction: return "StrengthReduce";
+        case Phase::LoopInvariantCodeMotion: return "LICM";
         case Phase::DeadCodeElimination: return "DCE";
         case Phase::RegisterAllocation: return "RegAlloc";
         case Phase::Lowering: return "Lowering";
@@ -103,21 +115,30 @@ public:
         result.numBlocksBefore = graph_->numBlocks();
         result.numValuesBefore = graph_->numValues();
 
-        // Phase 2: Constant folding (iterate until fixpoint)
+        // Phase 2: Copy propagation (canonicalizes values, enables CSE)
+        runPhase(Phase::CopyPropagation, result);
+
+        // Phase 3: Constant folding (iterate until fixpoint)
         {
             uint32_t preValues = graph_->numValues();
             runPhase(Phase::ConstantFolding, result);
             result.constFoldReductions = preValues - graph_->numValues();
         }
 
-        // Phase 3: Strength reduction
+        // Phase 4: Common subexpression elimination
+        runPhase(Phase::CommonSubexprElim, result);
+
+        // Phase 5: Strength reduction
         {
             uint32_t preValues = graph_->numValues();
             runPhase(Phase::StrengthReduction, result);
             result.strengthReductions = preValues - graph_->numValues();
         }
 
-        // Phase 4: Dead code elimination
+        // Phase 6: Loop-invariant code motion
+        runPhase(Phase::LoopInvariantCodeMotion, result);
+
+        // Phase 7: Dead code elimination (cleanup from all prior passes)
         {
             uint32_t preValues = graph_->numValues();
             runPhase(Phase::DeadCodeElimination, result);
@@ -207,6 +228,12 @@ private:
                 break;
             }
 
+            case Phase::CopyPropagation: {
+                CopyPropagation cp(graph_.get());
+                cp.run();
+                break;
+            }
+
             case Phase::ConstantFolding: {
                 ConstantFolding cf(graph_.get());
                 bool changed = true;
@@ -221,9 +248,21 @@ private:
                 break;
             }
 
+            case Phase::CommonSubexprElim: {
+                CommonSubexpressionElimination cse(graph_.get());
+                cse.run();
+                break;
+            }
+
             case Phase::StrengthReduction: {
                 StrengthReduction sr(graph_.get());
                 sr.run();
+                break;
+            }
+
+            case Phase::LoopInvariantCodeMotion: {
+                LoopInvariantCodeMotion licm(graph_.get());
+                licm.run();
                 break;
             }
 

@@ -11,6 +11,7 @@
 
 #include "../ZOptGraph.h"
 #include <unordered_map>
+#include <unordered_set>
 
 namespace Zepra::ZOpt {
 
