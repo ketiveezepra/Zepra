@@ -124,8 +124,11 @@ private:
     ConsoleHandler consoleHandler_;
     std::string lastError_;
     
-    // ZepraScript Engine (Internal VM)
-    Zepra::Runtime::VM* vm_ = nullptr;  // Raw pointer - incomplete type
+    // ZepraScript Engine (Per-instance VM — each tab gets its own)
+    Zepra::Runtime::VM* vm_ = nullptr;
+    std::unique_ptr<Zepra::Runtime::VM> ownedVm_;
+    std::unique_ptr<Zepra::Runtime::Context> ownedContext_;
+    bool vmReady_ = false;
     
     // Timers
     std::vector<TimerCallback> timers_;

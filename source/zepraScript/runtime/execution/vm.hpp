@@ -199,6 +199,18 @@ public:
     GCHeap* gcHeap() const { return gcHeap_; }
     
     /**
+     * @brief Allocate an Object via GCHeap when available, raw new otherwise.
+     * All VM-internal object creation should go through this.
+     */
+    Object* allocObject(ObjectType type = ObjectType::Ordinary);
+    
+    /**
+     * @brief Scan all GC roots: globals, operand stack, call frames.
+     * Called by GCHeap root scanner during marking.
+     */
+    void scanRoots(std::function<void(Object*)> visitor) const;
+    
+    /**
      * @brief Check if execution should be terminated (timeout/limit)
      */
     bool shouldTerminate() const;

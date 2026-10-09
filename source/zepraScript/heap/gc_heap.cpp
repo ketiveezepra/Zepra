@@ -148,21 +148,31 @@ void GCHeap::traceObject(Object* obj) {
 void GCHeap::markObject(Object* obj) {
     if (!obj) return;
     
+    // Only mark objects allocated via GCHeap (have ObjectHeader).
+    // Static prototypes (stringProto, arrayProto, etc.) are raw new'd
+    // and must not be treated as GCHeap-managed.
+    if (!obj->isGCManaged()) return;
+    
     ObjectHeader* header = ObjectHeader::fromObject(obj);
-    if (header->marked) return;  // Already visited
+    if (header->marked) return;
     
     header->marked = true;
-    
-    // Trace references in this object
     traceObject(obj);
 }
 
 void GCHeap::markFromRoots() {
-    // Mark from explicit roots
+    // Mark from explicit roots (Object** pointers)
     for (Object** root : roots_) {
         if (*root) {
             markObject(*root);
         }
+    }
+    
+    // Mark from root scanner callback (VM globals, stack, call frames)
+    if (rootScanner_) {
+        rootScanner_([this](Object* obj) {
+            if (obj) markObject(obj);
+        });
     }
     
     // Mark from remembered set (old→young cross-gen refs)

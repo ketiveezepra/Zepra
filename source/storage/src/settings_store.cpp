@@ -50,15 +50,59 @@ void SettingsStore::setDarkMode(bool enabled) {
 
 bool SettingsStore::load(const std::string& filepath) {
     filepath_ = filepath;
-    // TODO: JSON loading
-    std::cout << "[SettingsStore] Load from: " << filepath << std::endl;
+    std::ifstream file(filepath);
+    if (!file.is_open()) {
+        std::cout << "[SettingsStore] No existing settings file, using defaults: " << filepath << std::endl;
+        return false;
+    }
+    
+    std::string line;
+    while (std::getline(file, line)) {
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = line.substr(0, eq);
+        std::string val = line.substr(eq + 1);
+        
+        if (key == "searchEngine") settings_.defaultSearchEngine = static_cast<SearchEngine>(std::stoi(val));
+        else if (key == "trackHistory") settings_.trackHistory = (val == "1");
+        else if (key == "acceptCookies") settings_.acceptCookies = (val == "1");
+        else if (key == "doNotTrack") settings_.doNotTrack = (val == "1");
+        else if (key == "darkMode") settings_.darkMode = (val == "1");
+        else if (key == "fontSize") settings_.fontSize = std::stoi(val);
+        else if (key == "fontFamily") settings_.fontFamily = val;
+        else if (key == "downloadPath") settings_.downloadPath = val;
+        else if (key == "askWhereToSave") settings_.askWhereToSave = (val == "1");
+        else if (key == "enableJavaScript") settings_.enableJavaScript = (val == "1");
+        else if (key == "enableImages") settings_.enableImages = (val == "1");
+        else if (key == "enablePlugins") settings_.enablePlugins = (val == "1");
+    }
+    
+    std::cout << "[SettingsStore] Loaded settings from: " << filepath << std::endl;
     return true;
 }
 
 bool SettingsStore::save(const std::string& filepath) {
     filepath_ = filepath;
-    // TODO: JSON saving
-    std::cout << "[SettingsStore] Save to: " << filepath << std::endl;
+    std::ofstream file(filepath, std::ios::trunc);
+    if (!file.is_open()) {
+        std::cerr << "[SettingsStore] Failed to save: " << filepath << std::endl;
+        return false;
+    }
+    
+    file << "searchEngine=" << static_cast<int>(settings_.defaultSearchEngine) << "\n";
+    file << "trackHistory=" << settings_.trackHistory << "\n";
+    file << "acceptCookies=" << settings_.acceptCookies << "\n";
+    file << "doNotTrack=" << settings_.doNotTrack << "\n";
+    file << "darkMode=" << settings_.darkMode << "\n";
+    file << "fontSize=" << settings_.fontSize << "\n";
+    file << "fontFamily=" << settings_.fontFamily << "\n";
+    file << "downloadPath=" << settings_.downloadPath << "\n";
+    file << "askWhereToSave=" << settings_.askWhereToSave << "\n";
+    file << "enableJavaScript=" << settings_.enableJavaScript << "\n";
+    file << "enableImages=" << settings_.enableImages << "\n";
+    file << "enablePlugins=" << settings_.enablePlugins << "\n";
+    
+    std::cout << "[SettingsStore] Saved settings to: " << filepath << std::endl;
     return true;
 }
 

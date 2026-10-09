@@ -223,10 +223,58 @@ bool BookmarkManager::load(const std::string& filepath) {
         return false;
     }
     
-    // TODO: Proper JSON parsing (for now, just log)
     impl_->filepath = filepath;
-    std::cout << "[BookmarkManager] Loaded from " << filepath << std::endl;
     
+    // Parse the JSON written by save()
+    std::string content((std::istreambuf_iterator<char>(file)),
+                         std::istreambuf_iterator<char>());
+    
+    size_t loaded = 0;
+    size_t pos = 0;
+    while ((pos = content.find("\"url\": \"", pos)) != std::string::npos) {
+        auto extractField = [&](const std::string& field, size_t searchFrom) -> std::string {
+            std::string needle = "\"" + field + "\": \"";
+            auto fpos = content.find(needle, searchFrom);
+            if (fpos == std::string::npos) return "";
+            fpos += needle.size();
+            auto end = content.find('"', fpos);
+            if (end == std::string::npos) return "";
+            return content.substr(fpos, end - fpos);
+        };
+        auto extractInt = [&](const std::string& field, size_t searchFrom) -> int {
+            std::string needle = "\"" + field + "\": ";
+            auto fpos = content.find(needle, searchFrom);
+            if (fpos == std::string::npos) return 0;
+            fpos += needle.size();
+            try { return std::stoi(content.substr(fpos)); }
+            catch (...) { return 0; }
+        };
+        
+        // Find the enclosing object boundaries
+        auto objStart = content.rfind('{', pos);
+        auto objEnd = content.find('}', pos);
+        if (objStart == std::string::npos || objEnd == std::string::npos) break;
+        
+        std::string url = extractField("url", objStart);
+        if (url.empty()) { pos = objEnd + 1; continue; }
+        
+        Bookmark bookmark;
+        bookmark.id = extractInt("id", objStart);
+        if (bookmark.id == 0) bookmark.id = impl_->nextId++;
+        else if (bookmark.id >= impl_->nextId) impl_->nextId = bookmark.id + 1;
+        bookmark.url = url;
+        bookmark.title = extractField("title", objStart);
+        bookmark.folder = extractField("folder", objStart);
+        bookmark.dateAdded = std::chrono::system_clock::now();
+        
+        impl_->bookmarks[bookmark.id] = bookmark;
+        impl_->urlToId[url] = bookmark.id;
+        loaded++;
+        
+        pos = objEnd + 1;
+    }
+    
+    std::cout << "[BookmarkManager] Loaded " << loaded << " bookmarks from " << filepath << std::endl;
     return true;
 }
 

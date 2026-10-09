@@ -134,6 +134,7 @@ public:
             }
         }
         for (auto id : toRemove) entries_.erase(id);
+        usedSize_ = (freed > usedSize_) ? 0 : usedSize_ - freed;
         stats_.compactions++;
         return freed;
     }
@@ -208,7 +209,9 @@ private:
 
         if (oldestCycle == UINT64_MAX) return false;
 
-        entries_[victimId].valid = false;
+        size_t victimSize = entries_[victimId].codeSize;
+        usedSize_ = (victimSize > usedSize_) ? 0 : usedSize_ - victimSize;
+        entries_.erase(victimId);
         stats_.evictions++;
         return true;
     }

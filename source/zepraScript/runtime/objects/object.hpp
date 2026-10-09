@@ -226,6 +226,10 @@ public:
         }
     }
     
+    // GC management flag — true for objects allocated via GCHeap
+    bool isGCManaged() const { return gcManaged_; }
+    void setGCManaged(bool managed) { gcManaged_ = managed; }
+    
     // Internal slots
     Value internalSlot(const std::string& name) const;
     void setInternalSlot(const std::string& name, Value value);
@@ -235,6 +239,7 @@ protected:
     Object* prototype_ = nullptr;
     bool extensible_ = true;
     bool gcMarked_ = false;
+    bool gcManaged_ = false;            // True when allocated via GCHeap
     uint32_t shapeId_ = 0;          // Shape identifier for IC
     static uint32_t nextShapeId_;   // Global shape counter
     

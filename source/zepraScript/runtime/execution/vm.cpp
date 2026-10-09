@@ -33,6 +33,7 @@
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <unordered_set>
 #include "runtime/execution/event_loop.hpp"
 
 namespace Zepra::Runtime {
@@ -53,7 +54,11 @@ VM::VM(Context* context) : context_(context), jit_(this) {
     setGlobal("Infinity", Value::number(std::numeric_limits<double>::infinity()));
 }
 
-VM::~VM() = default;
+VM::~VM() {
+    // GCHeap owns all managed objects — just clear the reference map.
+    // When ScriptContext destroys its GCHeap, all objects are freed.
+    globals_.clear();
+}
 
 ExecutionResult VM::execute(const Bytecode::BytecodeChunk* chunk) {
     ExecutionResult result;
@@ -66,6 +71,7 @@ ExecutionResult VM::execute(const Bytecode::BytecodeChunk* chunk) {
     
     chunk_ = chunk;
     ip_ = 0;
+    terminationRequested_ = false;
     
     // Set current VM for callbacks
     VM* previousVM = currentVM_;
@@ -90,33 +96,29 @@ ExecutionResult VM::execute(const Bytecode::BytecodeChunk* chunk) {
 }
 
 void VM::run() {
-    // Cache code pointer and size — avoids virtual dispatch per iteration
     const auto& codeVec = chunk_->code();
     const size_t codeSize = codeVec.size();
     
-    // Fast path: no resource monitor or GC heap → skip periodic checks entirely
-    const bool needsPeriodicChecks = (resourceMonitor_ != nullptr) || (gcHeap_ != nullptr);
+    instructionCounter_ = 0;
     
     while (__builtin_expect(ip_ < codeSize, 1)) {
         if (__builtin_expect(isYielding_ || terminationRequested_, 0)) break;
         
-        if (needsPeriodicChecks) {
-            instructionCounter_++;
-            if (__builtin_expect(instructionCounter_ >= LIMIT_CHECK_INTERVAL, 0)) {
-                instructionCounter_ = 0;
-                
-                if (resourceMonitor_) {
-                    resourceMonitor_->addInstructions(LIMIT_CHECK_INTERVAL);
-                    if (!resourceMonitor_->checkLimits()) {
-                        terminationRequested_ = true;
-                        throw SecurityError(SecurityError::Type::Timeout, 
-                            "Execution limit exceeded");
-                    }
+        instructionCounter_++;
+        if (__builtin_expect(instructionCounter_ >= LIMIT_CHECK_INTERVAL, 0)) {
+            instructionCounter_ = 0;
+            
+            if (resourceMonitor_) {
+                resourceMonitor_->addInstructions(LIMIT_CHECK_INTERVAL);
+                if (!resourceMonitor_->checkLimits()) {
+                    terminationRequested_ = true;
+                    throw SecurityError(SecurityError::Type::Timeout,
+                        "Execution limit exceeded");
                 }
-                
-                if (gcHeap_) {
-                    gcHeap_->maybeCollect();
-                }
+            }
+            
+            if (gcHeap_) {
+                gcHeap_->maybeCollect();
             }
         }
         

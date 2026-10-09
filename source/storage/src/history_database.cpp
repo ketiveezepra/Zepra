@@ -7,6 +7,7 @@
 
 #include "storage/history_database.h"
 #include <iostream>
+#include <fstream>
 #include <algorithm>
 #include <map>
 
@@ -204,15 +205,76 @@ void HistoryDatabase::clearBefore(std::chrono::system_clock::time_point cutoff) 
 
 bool HistoryDatabase::load(const std::string& filepath) {
     impl_->filepath = filepath;
-    // TODO: Implement JSON loading
-    std::cout << "[HistoryDatabase] Load from: " << filepath << std::endl;
+    std::ifstream file(filepath);
+    if (!file.is_open()) {
+        std::cout << "[HistoryDatabase] No existing history file: " << filepath << std::endl;
+        return false;
+    }
+    
+    std::string line;
+    size_t loaded = 0;
+    while (std::getline(file, line)) {
+        if (line.empty()) continue;
+        
+        // Minimal JSONL parsing: {"url":"...","title":"...","visitCount":N,"lastVisit":EPOCH}
+        auto extractString = [&](const std::string& key) -> std::string {
+            std::string needle = "\"" + key + "\":\"";
+            auto pos = line.find(needle);
+            if (pos == std::string::npos) return "";
+            pos += needle.size();
+            auto end = line.find('"', pos);
+            if (end == std::string::npos) return "";
+            return line.substr(pos, end - pos);
+        };
+        auto extractInt = [&](const std::string& key) -> int64_t {
+            std::string needle = "\"" + key + "\":";
+            auto pos = line.find(needle);
+            if (pos == std::string::npos) return 0;
+            pos += needle.size();
+            try { return std::stoll(line.substr(pos)); }
+            catch (...) { return 0; }
+        };
+        
+        std::string url = extractString("url");
+        if (url.empty()) continue;
+        
+        HistoryEntry entry;
+        entry.id = impl_->nextId++;
+        entry.url = url;
+        entry.title = extractString("title");
+        entry.visitCount = static_cast<int32_t>(extractInt("visitCount"));
+        int64_t epoch = extractInt("lastVisit");
+        entry.lastVisit = std::chrono::system_clock::from_time_t(static_cast<time_t>(epoch));
+        entry.firstVisit = entry.lastVisit;
+        
+        impl_->entries[url] = entry;
+        loaded++;
+    }
+    
+    std::cout << "[HistoryDatabase] Loaded " << loaded << " entries from: " << filepath << std::endl;
     return true;
 }
 
 bool HistoryDatabase::save(const std::string& filepath) {
     impl_->filepath = filepath;
-    // TODO: Implement JSON saving
-    std::cout << "[HistoryDatabase] Save to: " << filepath << std::endl;
+    std::ofstream file(filepath, std::ios::trunc);
+    if (!file.is_open()) {
+        std::cerr << "[HistoryDatabase] Failed to save: " << filepath << std::endl;
+        return false;
+    }
+    
+    for (const auto& pair : impl_->entries) {
+        const HistoryEntry& e = pair.second;
+        auto epoch = std::chrono::system_clock::to_time_t(e.lastVisit);
+        // JSONL: one entry per line, crash-safe
+        file << "{\"url\":\"" << e.url 
+             << "\",\"title\":\"" << e.title 
+             << "\",\"visitCount\":" << e.visitCount 
+             << ",\"lastVisit\":" << epoch << "}\n";
+    }
+    
+    std::cout << "[HistoryDatabase] Saved " << impl_->entries.size() 
+              << " entries to: " << filepath << std::endl;
     return true;
 }
 

@@ -28,42 +28,26 @@
 
 namespace Zepra::WebCore {
 
-// Internal state — owns VM and Context lifetime
-static std::unique_ptr<Zepra::Runtime::Context> s_vmContext;
-static std::unique_ptr<Zepra::Runtime::VM> s_vm;
-static bool s_vmReady = false;
-
-static void initVM() {
-    if (s_vmReady) return;
-    
+ScriptContext::ScriptContext() : vm_(nullptr), vmReady_(false) {
     try {
-        // Create VM (Context wraps VM — circular reference, VM owns execution)
-        s_vm = std::make_unique<Zepra::Runtime::VM>(nullptr);
-        s_vmContext = std::make_unique<Zepra::Runtime::Context>(s_vm.get());
+        ownedVm_ = std::make_unique<Zepra::Runtime::VM>(nullptr);
+        ownedContext_ = std::make_unique<Zepra::Runtime::Context>(ownedVm_.get());
         
-        // Create global object with builtins (console, Math, JSON, etc.)
-        auto* globalObj = new Zepra::Runtime::GlobalObject(s_vmContext.get());
-        s_vm->setGlobal("globalThis", Zepra::Runtime::Value::object(globalObj));
+        auto* globalObj = new Zepra::Runtime::GlobalObject(ownedContext_.get());
+        ownedVm_->setGlobal("globalThis", Zepra::Runtime::Value::object(globalObj));
         
-        s_vmReady = true;
-        std::cout << "[ScriptContext] ZepraScript VM initialized" << std::endl;
+        vm_ = ownedVm_.get();
+        vmReady_ = true;
+        std::cout << "[ScriptContext] Per-tab VM initialized" << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "[ScriptContext] VM init failed: " << e.what() << std::endl;
-        s_vm.reset();
-        s_vmContext.reset();
-        s_vmReady = false;
-    }
-}
-
-ScriptContext::ScriptContext() : vm_(nullptr) {
-    initVM();
-    if (s_vmReady) {
-        vm_ = s_vm.get();
+        ownedVm_.reset();
+        ownedContext_.reset();
     }
 }
 
 ScriptContext::~ScriptContext() {
-    // VM lifetime managed by statics
+    // Per-instance VM destroyed automatically by unique_ptr
 }
 
 void ScriptContext::initialize(DOMDocument* document) {
@@ -80,7 +64,7 @@ ScriptResult ScriptContext::evaluate(const std::string& code, const std::string&
         return result;
     }
     
-    if (!vm_ || !s_vmReady) {
+    if (!vm_ || !vmReady_) {
         result.success = false;
         result.error = "VM not available";
         return result;

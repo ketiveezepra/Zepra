@@ -142,6 +142,14 @@ public:
      */
     void maybeCollect();
     
+    /**
+     * @brief Set root scanner callback for VM globals/stack/frames.
+     * Called during markFromRoots() to discover live objects not tracked
+     * via explicit addRoot() calls.
+     */
+    using RootScannerFn = std::function<void(std::function<void(Object*)>)>;
+    void setRootScanner(RootScannerFn scanner) { rootScanner_ = std::move(scanner); }
+    
 private:
     // Young generation (bump-pointer)
     char* youngStart_ = nullptr;
@@ -173,6 +181,9 @@ private:
     void sweepOld();
     void promoteObject(ObjectHeader* header);
     void traceObject(Object* obj);
+    
+    // Root scanner callback (VM globals, stack)
+    RootScannerFn rootScanner_;
 };
 
 // Template implementation
@@ -210,6 +221,7 @@ T* GCHeap::allocate(Args&&... args) {
     
     // Construct object after header
     T* obj = new (header->object()) T(std::forward<Args>(args)...);
+    obj->setGCManaged(true);
     
     stats_.objectsAllocated++;
     stats_.totalAllocated += totalSize;
