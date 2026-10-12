@@ -7,10 +7,12 @@
 
 #include "config.hpp"
 #include "runtime/objects/value.hpp"
+#include "runtime/objects/object.hpp"  // ObjectType (allocObject default argument)
 #include "environment.hpp"
 #include "bytecode/opcode.hpp"
 #include <vector>
 #include <memory>
+#include <functional>
 #include <stack>
 #include <unordered_map>
 #include "runtime/handles/inline_cache.hpp"

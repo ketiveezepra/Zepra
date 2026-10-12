@@ -542,6 +542,12 @@ if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU")
         "libiconv-2.dll"
         "libglib-2.0-0.dll"
         "libpcre2-8-0.dll"
+        # The exe links libgcc/libstdc++ statically, but the MSYS2 DLLs above
+        # (harfbuzz, graphite2) import them, and -Bstatic does not stick for
+        # winpthread once a dependency pulls -lpthread
+        "libwinpthread-1.dll"
+        "libgcc_s_seh-1.dll"
+        "libstdc++-6.dll"
     )
     foreach(DLL ${RUNTIME_DLLS})
         if(EXISTS "${MINGW_BIN_DIR}/${DLL}")

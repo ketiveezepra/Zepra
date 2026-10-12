@@ -14,6 +14,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <cstdint>
 
 // Forward declarations (WebCore)
 namespace Zepra::WebCore {

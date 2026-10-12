@@ -9,6 +9,8 @@
 #include "nx_pdf_lexer.h"
 #include <string_view>
 #include <memory>
+#include <vector>
+#include <cstdint>
 
 namespace nxrender {
 namespace pdf {

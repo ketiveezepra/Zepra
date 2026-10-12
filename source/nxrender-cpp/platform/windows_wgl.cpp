@@ -125,12 +125,81 @@ static Modifiers getModifiers() {
 }
 
 // =============================================================================
+// UTF-8 <-> UTF-16 (Win32 APIs are UTF-16; NXRender strings are UTF-8)
+// =============================================================================
+
+static std::wstring utf8ToWide(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
+
+static std::string wideToUtf8(const wchar_t* w) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1) return {};
+    std::string s(static_cast<size_t>(n - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+static void appendUtf8(std::string& out, uint32_t cp) {
+    if (cp < 0x80) {
+        out += static_cast<char>(cp);
+    } else if (cp < 0x800) {
+        out += static_cast<char>(0xC0 | (cp >> 6));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out += static_cast<char>(0xE0 | (cp >> 12));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else {
+        out += static_cast<char>(0xF0 | (cp >> 18));
+        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    }
+}
+
+// WM_CHAR delivers UTF-16 code units; characters outside the BMP arrive as a
+// high/low surrogate pair in two consecutive messages.
+static wchar_t g_pendingHighSurrogate = 0;
+
+static bool decodeCharMessage(WPARAM unit, uint32_t& cp) {
+    wchar_t u = static_cast<wchar_t>(unit);
+    if (u >= 0xD800 && u <= 0xDBFF) {
+        g_pendingHighSurrogate = u;
+        return false;
+    }
+    if (u >= 0xDC00 && u <= 0xDFFF) {
+        if (!g_pendingHighSurrogate) return false;
+        cp = 0x10000 + ((static_cast<uint32_t>(g_pendingHighSurrogate) - 0xD800) << 10)
+                     + (static_cast<uint32_t>(u) - 0xDC00);
+        g_pendingHighSurrogate = 0;
+        return true;
+    }
+    g_pendingHighSurrogate = 0;
+    cp = u;
+    return true;
+}
+
+static void dispatchTextInput(uint32_t cp) {
+    if (cp < 32 || cp == 0x7F) return;  // control characters are handled as keys
+    Event event;
+    event.type = EventType::TextInput;
+    appendUtf8(event.textInput, cp);
+    NXRender::dispatchEvent(event);
+}
+
+// =============================================================================
 // Win32 Window Procedure
 // =============================================================================
 
 // Forward declarations
 static HWND  g_hwnd  = nullptr;
 static bool  g_running = true;
+static HCURSOR g_currentCursor = nullptr;
 
 static LRESULT CALLBACK ZepraWndProc(HWND hwnd, UINT msg,
                                       WPARAM wParam, LPARAM lParam) {
@@ -183,7 +252,31 @@ static LRESULT CALLBACK ZepraWndProc(HWND hwnd, UINT msg,
             event.key.key   = mapVKey(wParam);
             event.key.repeat = (lParam & (1 << 30)) != 0;
             event.key.modifiers = getModifiers();
+
+            // TranslateMessage has already queued the WM_CHAR for this key.
+            // Attach printable ASCII to the KeyDown itself, exactly like the
+            // X11 backend does with XLookupString; anything else is delivered
+            // as a TextInput event.
+            uint32_t pendingText = 0;
+            MSG charMsg;
+            if (msg == WM_KEYDOWN &&
+                PeekMessageW(&charMsg, hwnd, WM_CHAR, WM_CHAR, PM_REMOVE)) {
+                uint32_t cp = 0;
+                if (!decodeCharMessage(charMsg.wParam, cp) &&
+                    PeekMessageW(&charMsg, hwnd, WM_CHAR, WM_CHAR, PM_REMOVE)) {
+                    decodeCharMessage(charMsg.wParam, cp);
+                }
+                if (cp >= 32 && cp < 127) {
+                    event.textInput = std::string(1, static_cast<char>(cp));
+                } else {
+                    pendingText = cp;
+                }
+            }
+
             NXRender::dispatchEvent(event);
+            if (pendingText) dispatchTextInput(pendingText);
+            // Let the system see Alt combinations (Alt+F4, Alt+Space menu)
+            if (msg == WM_SYSKEYDOWN) break;
             return 0;
         }
 
@@ -195,30 +288,14 @@ static LRESULT CALLBACK ZepraWndProc(HWND hwnd, UINT msg,
             event.key.repeat = false;
             event.key.modifiers = getModifiers();
             NXRender::dispatchEvent(event);
+            if (msg == WM_SYSKEYUP) break;
             return 0;
         }
 
+        // Characters not consumed by a WM_KEYDOWN (IME commits, Alt+numpad)
         case WM_CHAR: {
-            if (wParam >= 32) {
-                Event event;
-                event.type = EventType::TextInput;
-                // Convert codepoint to UTF-8 string
-                char buf[4];
-                if (wParam < 0x80) {
-                    buf[0] = static_cast<char>(wParam);
-                    event.textInput = std::string(buf, 1);
-                } else if (wParam < 0x800) {
-                    buf[0] = static_cast<char>(0xC0 | (wParam >> 6));
-                    buf[1] = static_cast<char>(0x80 | (wParam & 0x3F));
-                    event.textInput = std::string(buf, 2);
-                } else {
-                    buf[0] = static_cast<char>(0xE0 | (wParam >> 12));
-                    buf[1] = static_cast<char>(0x80 | ((wParam >> 6) & 0x3F));
-                    buf[2] = static_cast<char>(0x80 | (wParam & 0x3F));
-                    event.textInput = std::string(buf, 3);
-                }
-                NXRender::dispatchEvent(event);
-            }
+            uint32_t cp = 0;
+            if (decodeCharMessage(wParam, cp)) dispatchTextInput(cp);
             return 0;
         }
 
@@ -262,10 +339,13 @@ static LRESULT CALLBACK ZepraWndProc(HWND hwnd, UINT msg,
         }
 
         case WM_MOUSEWHEEL: {
+            // Unlike other mouse messages, WM_MOUSEWHEEL reports screen coordinates
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &pt);
             Event event;
             event.type = EventType::MouseWheel;
-            event.mouse.x = static_cast<float>(GET_X_LPARAM(lParam));
-            event.mouse.y = static_cast<float>(GET_Y_LPARAM(lParam));
+            event.mouse.x = static_cast<float>(pt.x);
+            event.mouse.y = static_cast<float>(pt.y);
             event.mouse.wheelDelta = static_cast<float>(
                 GET_WHEEL_DELTA_WPARAM(wParam)) / WHEEL_DELTA;
             event.mouse.modifiers = getModifiers();
@@ -287,11 +367,7 @@ static LRESULT CALLBACK ZepraWndProc(HWND hwnd, UINT msg,
                 for (UINT i = 0; i < count; i++) {
                     wchar_t buf[MAX_PATH];
                     DragQueryFileW(hDrop, i, buf, MAX_PATH);
-                    // Convert wide to narrow (UTF-8 simplified: ASCII subset)
-                    std::string path;
-                    for (int j = 0; buf[j]; j++)
-                        path += static_cast<char>(buf[j] & 0x7F);
-                    event.droppedFiles.push_back(path);
+                    event.droppedFiles.push_back(wideToUtf8(buf));
                 }
                 NXRender::dispatchEvent(event);
             }
@@ -299,9 +375,20 @@ static LRESULT CALLBACK ZepraWndProc(HWND hwnd, UINT msg,
             return 0;
         }
 
+        // Without this, DefWindowProc resets the cursor to the class cursor on
+        // every mouse move and setCursor() never sticks.
+        case WM_SETCURSOR: {
+            if (LOWORD(lParam) == HTCLIENT && g_currentCursor) {
+                SetCursor(g_currentCursor);
+                return TRUE;
+            }
+            break;
+        }
+
         default:
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            break;
     }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 // =============================================================================
@@ -335,7 +422,7 @@ public:
         RECT  rect  = { 0, 0, width, height };
         AdjustWindowRect(&rect, style, FALSE);
 
-        std::wstring wtitle(title.begin(), title.end());
+        std::wstring wtitle = utf8ToWide(title);
         hwnd_ = CreateWindowExW(
             WS_EX_ACCEPTFILES,   // Enable drag-and-drop
             L"ZepraWGLWindow", wtitle.c_str(),
@@ -375,6 +462,7 @@ public:
         cursorHand_  = LoadCursor(nullptr, IDC_HAND);
         cursorText_  = LoadCursor(nullptr, IDC_IBEAM);
         cursorCross_ = LoadCursor(nullptr, IDC_CROSS);
+        g_currentCursor = cursorArrow_;
 
         ShowWindow(hwnd_, SW_SHOW);
         UpdateWindow(hwnd_);
@@ -423,8 +511,7 @@ public:
     // -------------------------------------------------------------------------
     void setTitle(const std::string& title) override {
         if (hwnd_) {
-            std::wstring wtitle(title.begin(), title.end());
-            SetWindowTextW(hwnd_, wtitle.c_str());
+            SetWindowTextW(hwnd_, utf8ToWide(title).c_str());
         }
     }
 
@@ -438,6 +525,7 @@ public:
             case CursorType::Text:      c = cursorText_;  break;
             case CursorType::Crosshair: c = cursorCross_; break;
         }
+        g_currentCursor = c;
         SetCursor(c);
     }
 
