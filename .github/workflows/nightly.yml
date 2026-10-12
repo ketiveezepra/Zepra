@@ -1,9 +1,9 @@
 name: Nightly Build
 
 on:
-  schedule:
-    # Runs at 00:00 UTC every day
-    - cron: '0 0 * * *'
+  # Daily schedule paused while the browser is in alpha; re-enable with:
+  # schedule:
+  #   - cron: '0 0 * * *'   # 00:00 UTC every day
   workflow_dispatch: # Allow manual trigger from GitHub UI
 
 concurrency:

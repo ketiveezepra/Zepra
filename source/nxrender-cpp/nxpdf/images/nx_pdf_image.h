@@ -8,6 +8,7 @@
 #include "../parser/nx_pdf_objects.h"
 #include <string>
 #include <vector>
+#include <cstdint>
 
 namespace nxrender {
 namespace pdf {

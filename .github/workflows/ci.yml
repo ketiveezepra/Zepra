@@ -1,0 +1,76 @@
+name: CI
+
+# Build check for pull requests. Builds only — nothing is packaged or released.
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ============================================================================
+  # Linux — same configuration as ./build.sh
+  # ============================================================================
+  linux:
+    name: Linux (x86-64, NXRender)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config \
+            libx11-dev libxrandr-dev libgl-dev \
+            libfreetype-dev libharfbuzz-dev \
+            libssl-dev libcurl4-openssl-dev zlib1g-dev \
+            libsdl2-dev libjson-c-dev
+
+      - name: Configure
+        run: cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DUSE_NXRENDER=ON
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+  # ============================================================================
+  # Windows — MSYS2 UCRT64 (GCC), Win32/WGL backend
+  # ============================================================================
+  windows:
+    name: Windows (x86-64, NXRender)
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          pacboy: >-
+            gcc:p cmake:p ninja:p pkgconf:p
+            freetype:p harfbuzz:p
+            openssl:p curl:p zlib:p
+
+      - name: Configure
+        run: cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DUSE_NXRENDER=ON
+
+      - name: Build
+        run: cmake --build build --parallel

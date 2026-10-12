@@ -10,7 +10,7 @@
  * Platform strategy:
  *   Linux  — pthread_getattr_np() + pthread_attr_getstack()
  *   macOS  — pthread_get_stackaddr_np() + pthread_get_stacksize_np()
- *   Windows — VirtualQuery() on current stack pointer
+ *   Windows — GetCurrentThreadStackLimits()
  *
  * Guard reservation: 64 KB above the platform limit (traps before SIGSEGV).
  */
@@ -58,20 +58,13 @@ static bool probeThreadStack(void** outBase, size_t* outSize) {
     return true;
 
 #elif defined(_WIN32)
-    // Walk the virtual address space of the current stack pointer.
-    MEMORY_BASIC_INFORMATION mbi;
-    uintptr_t sp;
-#  if defined(_M_X64) || defined(__x86_64__)
-    sp = (uintptr_t)_AddressOfReturnAddress();
-#  else
-    sp = (uintptr_t)&sp;
-#  endif
-    if (VirtualQuery(reinterpret_cast<LPCVOID>(sp), &mbi, sizeof(mbi)) == 0)
-        return false;
-    *outBase = mbi.AllocationBase;
-    *outSize = static_cast<size_t>(
-        reinterpret_cast<uintptr_t>(mbi.AllocationBase) +
-        mbi.RegionSize - reinterpret_cast<uintptr_t>(mbi.AllocationBase));
+    // Full reserved stack range of this thread (Windows 8+); same shape as
+    // pthread_attr_getstack: lowest address plus total size.
+    ULONG_PTR low = 0, high = 0;
+    GetCurrentThreadStackLimits(&low, &high);
+    if (high <= low) return false;
+    *outBase = reinterpret_cast<void*>(low);
+    *outSize = static_cast<size_t>(high - low);
     return true;
 
 #else
