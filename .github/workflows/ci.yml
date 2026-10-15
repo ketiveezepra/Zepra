@@ -31,7 +31,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y \
             build-essential ninja-build pkg-config \
-            libx11-dev libxrandr-dev libgl-dev \
+            libx11-dev libxrandr-dev libgl-dev libglu1-mesa-dev \
             libfreetype-dev libharfbuzz-dev \
             libssl-dev libcurl4-openssl-dev zlib1g-dev \
             libsdl2-dev libjson-c-dev
@@ -39,8 +39,9 @@ jobs:
       - name: Configure
         run: cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DUSE_NXRENDER=ON
 
+      # -k 0: keep going after a failure so one run reports every error
       - name: Build
-        run: cmake --build build --parallel $(nproc)
+        run: cmake --build build --parallel $(nproc) -- -k 0
 
   # ============================================================================
   # Windows — MSYS2 UCRT64 (GCC), Win32/WGL backend
@@ -73,4 +74,4 @@ jobs:
         run: cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DUSE_NXRENDER=ON
 
       - name: Build
-        run: cmake --build build --parallel
+        run: cmake --build build --parallel -- -k 0
