@@ -3006,7 +3006,7 @@ void renderStartPage(float x, float y, float w, float h) {
     QuickLink links[] = {
         {"MialInbox.svg", "Mail", 0x5080DC, "https://mail.ketivee.com"},
         {"ringingBell.svg", "News", 0x8C64C8, "https://news.ketivee.com"},
-        {"Film.svg", "Videos", 0xC878A0, "https://watch.ketivee.com"},
+        {"film.svg", "Videos", 0xC878A0, "https://watch.ketivee.com"},
         {"Picture.svg", "Images", 0xDC6464, "https://photos.ketivee.com"}
     };
     
@@ -4797,7 +4797,7 @@ bool loadResources() {
         "Calendar.svg", "MialInbox.svg", "creative.svg", "docs.svg",
         "DebitCard.svg", "KetiveeStudio.svg", "3dSpace.svg",
         // Start page
-        "zepra.svg", "Film.svg", "Picture.svg", "krtivee.svg",
+        "zepra.svg", "film.svg", "Picture.svg", "krtivee.svg",
         // End marker
         nullptr
     };
@@ -5073,7 +5073,7 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
         "avtar.svg", "globe.svg", "devtool.svg", "help.svg", "star.svg",
         "Calendar.svg", "MialInbox.svg", "creative.svg", "docs.svg",
         "DebitCard.svg", "KetiveeStudio.svg", "3dSpace.svg",
-        "zepra.svg", "Film.svg", "Picture.svg", "krtivee.svg",
+        "zepra.svg", "film.svg", "Picture.svg", "krtivee.svg",
         nullptr
     };
     for (int i = 0; icons[i]; i++) {
