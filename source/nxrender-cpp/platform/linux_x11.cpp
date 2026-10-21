@@ -294,9 +294,15 @@ public:
                     XSendEvent(display_, xdndSourceWindow_, False, NoEventMask, (XEvent*)&m);
                     XFlush(display_);
                 }
+            } else if (ev.type == SelectionRequest) {
+                // Another client wants a selection we own (clipboard copy)
+                if (nativeEventHook_) nativeEventHook_(&ev);
             }
         }
     }
+
+    void* nativeDisplay() const override { return display_; }
+    unsigned long nativeWindow() const override { return window_; }
     
     void swapBuffers() override {
         if (display_ && window_) {

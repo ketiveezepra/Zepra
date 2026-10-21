@@ -18,6 +18,8 @@
 // GL extension proc loader (file-local — needed for FBO/wglGetProcAddress)
 #ifdef _WIN32
 #   define GET_GL_PROC(type, name) type name = (type)wglGetProcAddress(#name)
+#elif defined(__APPLE__)
+#   define GET_GL_PROC(type, name) type name = (type)nxAppleGetProcAddress(#name)
 #else
 #   include <GL/glx.h>
 #   define GET_GL_PROC(type, name) type name = (type)glXGetProcAddress((const GLubyte*)#name)

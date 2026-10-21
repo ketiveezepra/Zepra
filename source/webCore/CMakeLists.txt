@@ -81,6 +81,10 @@ else()
         "dom/*.cpp"
         "core/*.cpp"
     )
+    if(APPLE)
+        # X11-only key table, not used by the browser (input goes through NXRender)
+        list(FILTER WEBCORE_SOURCES EXCLUDE REGEX "browser/keyboard_handler[.]cpp$")
+    endif()
     
     if(WEBCORE_SOURCES)
         # Find OpenGL for GPU rendering

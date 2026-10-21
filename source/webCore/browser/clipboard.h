@@ -6,6 +6,7 @@
  * Platform-specific clipboard support:
  *   Linux/NeolyxOS: X11 selections (CLIPBOARD + PRIMARY)
  *   Windows:        Win32 clipboard API (OpenClipboard / SetClipboardData)
+ *   macOS:          NSPasteboard (via NXRender's macos_clipboard.h)
  */
 
 #ifndef ZEPRA_CLIPBOARD_H
@@ -15,9 +16,44 @@
 #include <cstring>
 
 // ============================================================================
+// Platform: macOS  (NSPasteboard)
+// ============================================================================
+#if defined(__APPLE__)
+
+#include "platform/macos_clipboard.h"
+
+namespace ZepraBrowser {
+
+class Clipboard {
+public:
+    static Clipboard& instance() {
+        static Clipboard inst;
+        return inst;
+    }
+
+    bool copy(const std::string& text) {
+        if (!NXRender::macClipboardSetText(text)) return false;
+        copiedText_ = text;
+        return true;
+    }
+
+    std::string paste() {
+        return NXRender::macClipboardGetText();
+    }
+
+    const std::string& getCopiedText() const { return copiedText_; }
+
+private:
+    Clipboard() = default;
+    std::string copiedText_;
+};
+
+} // namespace ZepraBrowser
+
+// ============================================================================
 // Platform: Linux / NeolyxOS  (X11 selections)
 // ============================================================================
-#ifndef _WIN32
+#elif !defined(_WIN32)
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
@@ -91,7 +127,10 @@ public:
     void handleSelectionRequest(XSelectionRequestEvent& event) {
         if (!display_) return;
         
-        XSelectionEvent response;
+        // ICCCM: obsolete clients send property None and expect the target name
+        Atom property = (event.property != None) ? event.property : event.target;
+
+        XSelectionEvent response = {};
         response.type = SelectionNotify;
         response.display = event.display;
         response.requestor = event.requestor;
@@ -102,16 +141,16 @@ public:
         
         if (event.target == targets_) {
             Atom targets[] = { targets_, utf8_, XA_STRING };
-            XChangeProperty(display_, event.requestor, event.property,
+            XChangeProperty(display_, event.requestor, property,
                            XA_ATOM, 32, PropModeReplace,
                            (unsigned char*)targets, 3);
-            response.property = event.property;
+            response.property = property;
         }
         else if (event.target == utf8_ || event.target == XA_STRING) {
-            XChangeProperty(display_, event.requestor, event.property,
+            XChangeProperty(display_, event.requestor, property,
                            event.target, 8, PropModeReplace,
                            (unsigned char*)copiedText_.c_str(), copiedText_.length());
-            response.property = event.property;
+            response.property = property;
         }
         
         XSendEvent(display_, event.requestor, False, 0, (XEvent*)&response);

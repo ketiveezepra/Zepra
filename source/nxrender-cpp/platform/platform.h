@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 
 namespace NXRender {
@@ -47,6 +48,22 @@ public:
      */
     enum class CursorType { Arrow, Hand, Text, Crosshair };
     virtual void setCursor(CursorType type) { (void)type; }
+
+    /**
+     * @brief Native window-system handles, for OS integrations such as the
+     *        clipboard (X11: Display* and Window). Null/0 when not applicable.
+     */
+    virtual void* nativeDisplay() const { return nullptr; }
+    virtual unsigned long nativeWindow() const { return 0; }
+
+    /**
+     * @brief Receives raw OS events the backend does not handle itself
+     *        (X11: XEvent*, e.g. SelectionRequest).
+     */
+    void setNativeEventHook(std::function<void(void*)> hook) { nativeEventHook_ = std::move(hook); }
+
+protected:
+    std::function<void(void*)> nativeEventHook_;
 };
 
 // Factory function implemented by backend

@@ -101,8 +101,12 @@ if(WIN32)
     set(PLATFORM_LIBS ws2_32 wininet opengl32 gdi32 shell32)
     
 elseif(APPLE)
-    # macOS-specific settings
-    find_package(SDL2 REQUIRED)
+    # macOS-specific settings (NXRender mode needs no SDL2)
+    if(NOT USE_NXRENDER)
+        find_package(SDL2 REQUIRED)
+    endif()
+    find_package(Freetype REQUIRED)
+    find_package(OpenSSL REQUIRED)
 
     set(PLATFORM_LIBS "")
     
@@ -353,6 +357,10 @@ if(USE_NXRENDER)
             Freetype::Freetype
             user32 gdi32 opengl32 ws2_32
         )
+    elseif(APPLE)
+        # macOS: Cocoa/NSOpenGL frameworks come with nxrender (no X11, no SDL2)
+        find_package(Freetype REQUIRED)
+        target_link_libraries(${EXECUTABLE_NAME} Freetype::Freetype)
     else()
         # Linux: X11/GLX/FreeType/SDL2 as before
         find_package(X11 REQUIRED)
@@ -448,7 +456,12 @@ find_package(PkgConfig QUIET)
 if(NOT WIN32 AND PkgConfig_FOUND)
     pkg_check_modules(JSON_C QUIET json-c)
     if(JSON_C_FOUND)
-        target_link_libraries(${EXECUTABLE_NAME} ${JSON_C_LIBRARIES})
+        if(APPLE)
+            # Homebrew prefix is not on the default linker path: full paths
+            target_link_libraries(${EXECUTABLE_NAME} ${JSON_C_LINK_LIBRARIES})
+        else()
+            target_link_libraries(${EXECUTABLE_NAME} ${JSON_C_LIBRARIES})
+        endif()
         target_include_directories(${EXECUTABLE_NAME} PRIVATE ${JSON_C_INCLUDE_DIRS})
     endif()
 endif()
@@ -469,7 +482,8 @@ endif()
 
 # Link engine libraries (zepraScript, webCore, integration, platform)
 # Use linker group for static libs to resolve circular dependencies
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+# (Apple's ld has no --start-group and resolves archives in any order)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
     target_link_libraries(${EXECUTABLE_NAME}
         -Wl,--start-group
         zepra-core

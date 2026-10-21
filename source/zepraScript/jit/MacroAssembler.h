@@ -83,6 +83,10 @@ namespace Reg {
     constexpr Register xmm1 = {1, RegClass::FPR};
     constexpr Register xmm2 = {2, RegClass::FPR};
     constexpr Register xmm3 = {3, RegClass::FPR};
+
+    // Architecture-neutral roles used by shared lowering code
+    constexpr Register floatReturn = xmm0;
+    constexpr Register scratch2 = r10;
     
 #elif defined(__aarch64__) || defined(_M_ARM64)
     // ARM64 registers
@@ -99,6 +103,9 @@ namespace Reg {
     constexpr Register x10 = {10, RegClass::GPR};
     constexpr Register x11 = {11, RegClass::GPR};
     constexpr Register x12 = {12, RegClass::GPR};
+    constexpr Register x13 = {13, RegClass::GPR};
+    constexpr Register x14 = {14, RegClass::GPR};
+    constexpr Register x15 = {15, RegClass::GPR};
     constexpr Register x16 = {16, RegClass::GPR};
     constexpr Register x17 = {17, RegClass::GPR};
     constexpr Register x29 = {29, RegClass::Special};  // FP
@@ -120,6 +127,20 @@ namespace Reg {
     constexpr Register v1 = {1, RegClass::FPR};
     constexpr Register v2 = {2, RegClass::FPR};
     constexpr Register v3 = {3, RegClass::FPR};
+
+    // Scalar double views of v0-v7 (AAPCS64 argument/result registers)
+    constexpr Register d0 = {0, RegClass::FPR};
+    constexpr Register d1 = {1, RegClass::FPR};
+    constexpr Register d2 = {2, RegClass::FPR};
+    constexpr Register d3 = {3, RegClass::FPR};
+    constexpr Register d4 = {4, RegClass::FPR};
+    constexpr Register d5 = {5, RegClass::FPR};
+    constexpr Register d6 = {6, RegClass::FPR};
+    constexpr Register d7 = {7, RegClass::FPR};
+
+    // Architecture-neutral roles used by shared lowering code
+    constexpr Register floatReturn = d0;
+    constexpr Register scratch2 = x17;   // IP1, never allocated
 #endif
 }
 

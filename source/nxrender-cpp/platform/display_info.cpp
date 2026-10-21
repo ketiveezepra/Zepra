@@ -15,6 +15,8 @@
 #  define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <CoreGraphics/CoreGraphics.h>
 #endif
 
 namespace NXRender {
@@ -121,6 +123,37 @@ void DisplayInfo::queryFromOS() {
     }
 
     metrics_.devicePixelRatio = metrics_.dpi / 96.0f;
+    if (metrics_.devicePixelRatio < 0.5f) metrics_.devicePixelRatio = 1.0f;
+    if (metrics_.devicePixelRatio > 4.0f) metrics_.devicePixelRatio = 4.0f;
+
+    std::cout << "[DisplayInfo] Screen: " << metrics_.screenWidth << "x" << metrics_.screenHeight
+              << " DPI: " << metrics_.dpi
+              << " DPR: " << metrics_.devicePixelRatio << std::endl;
+#elif defined(__APPLE__)
+    // Screen size in points; device pixel ratio from the current display mode
+    CGDirectDisplayID displayId = CGMainDisplayID();
+    metrics_.screenWidth = static_cast<int>(CGDisplayPixelsWide(displayId));
+    metrics_.screenHeight = static_cast<int>(CGDisplayPixelsHigh(displayId));
+
+    metrics_.devicePixelRatio = 1.0f;
+    if (CGDisplayModeRef mode = CGDisplayCopyDisplayMode(displayId)) {
+        size_t points = CGDisplayModeGetWidth(mode);
+        size_t pixels = CGDisplayModeGetPixelWidth(mode);
+        if (points > 0 && pixels > 0) {
+            metrics_.devicePixelRatio = static_cast<float>(pixels) / static_cast<float>(points);
+        }
+        CGDisplayModeRelease(mode);
+    }
+
+    // Physical DPI from the reported panel width (millimetres)
+    CGSize sizeMm = CGDisplayScreenSize(displayId);
+    if (sizeMm.width > 0.0) {
+        metrics_.dpi = static_cast<float>(metrics_.screenWidth * metrics_.devicePixelRatio
+                                          / (sizeMm.width / 25.4));
+    } else {
+        metrics_.dpi = 72.0f * metrics_.devicePixelRatio;
+    }
+
     if (metrics_.devicePixelRatio < 0.5f) metrics_.devicePixelRatio = 1.0f;
     if (metrics_.devicePixelRatio > 4.0f) metrics_.devicePixelRatio = 4.0f;
 

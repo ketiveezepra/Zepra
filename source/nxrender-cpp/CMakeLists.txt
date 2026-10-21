@@ -217,7 +217,12 @@ find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
     pkg_check_modules(HARFBUZZ REQUIRED harfbuzz)
     target_include_directories(nxrender PRIVATE ${HARFBUZZ_INCLUDE_DIRS})
-    set(HARFBUZZ_LINK_LIBS ${HARFBUZZ_LIBRARIES})
+    if(APPLE)
+        # Homebrew prefix is not on the default linker path: full paths
+        set(HARFBUZZ_LINK_LIBS ${HARFBUZZ_LINK_LIBRARIES})
+    else()
+        set(HARFBUZZ_LINK_LIBS ${HARFBUZZ_LIBRARIES})
+    endif()
 else()
     # Windows / systems without pkg-config
     find_library(HARFBUZZ_LIB NAMES harfbuzz)
@@ -259,7 +264,14 @@ if(WIN32)
 endif()
 
 if(APPLE)
-    target_compile_definitions(nxrender PUBLIC ZEPRA_PLATFORM_MACOS)
+    # macOS: Cocoa + NSOpenGL backend (Objective-C++, ARC)
+    enable_language(OBJCXX)
+    target_sources(nxrender PRIVATE platform/macos_cocoa.mm)
+    set_source_files_properties(platform/macos_cocoa.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(nxrender PUBLIC
+        "-framework Cocoa" "-framework OpenGL" "-framework CoreGraphics")
+    target_compile_definitions(nxrender PUBLIC ZEPRA_PLATFORM_MACOS GL_SILENCE_DEPRECATION)
 endif()
 
 # Install

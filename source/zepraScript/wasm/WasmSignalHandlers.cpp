@@ -15,9 +15,9 @@
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/mman.h>
-#include <ucontext.h>
-#if ZEPRA_PLATFORM_POSIX
 #include <unistd.h>
+#if defined(__linux__)
+#include <ucontext.h>   // macOS: ucontext_t comes from <signal.h>
 #endif
 #endif
 
@@ -106,7 +106,11 @@ static void handleWasmFault(int signum, siginfo_t* info, void* context) {
     
     // Get PC (Program Counter) from context
     uintptr_t pc = 0;
-#if defined(__x86_64__)
+#if defined(__APPLE__) && defined(__aarch64__)
+    pc = ctx->uc_mcontext->__ss.__pc;
+#elif defined(__APPLE__) && defined(__x86_64__)
+    pc = ctx->uc_mcontext->__ss.__rip;
+#elif defined(__x86_64__)
     pc = ctx->uc_mcontext.gregs[REG_RIP];
 #elif defined(__aarch64__)
     pc = ctx->uc_mcontext.pc;

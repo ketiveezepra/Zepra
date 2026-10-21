@@ -118,6 +118,9 @@ target_include_directories(nxcrypto_tests PRIVATE
 target_link_libraries(nxcrypto_tests nxcrypto GTest::gtest GTest::gtest_main)
 if(WIN32)
     target_link_libraries(nxcrypto_tests ${OPENSSL_LIBRARIES})
+elseif(APPLE)
+    # Homebrew OpenSSL is not on the default linker path; use the found paths
+    target_link_libraries(nxcrypto_tests ${OPENSSL_LIBRARIES})
 else()
     target_link_libraries(nxcrypto_tests pthread ssl crypto)
 endif()
@@ -139,6 +142,9 @@ target_link_libraries(nxrender_tests
 )
 if(WIN32)
     target_link_libraries(nxrender_tests opengl32 gdi32)
+elseif(APPLE)
+    # Cocoa/OpenGL frameworks come with nxrender
+    target_link_libraries(nxrender_tests pthread)
 else()
     target_link_libraries(nxrender_tests GL X11 pthread)
 endif()

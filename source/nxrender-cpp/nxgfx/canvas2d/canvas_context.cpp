@@ -34,6 +34,8 @@ static void loadCanvasFBOFunctions() {
     };
 #elif _WIN32
     auto load = [](const char* name) { return reinterpret_cast<void*>(wglGetProcAddress(name)); };
+#elif defined(__APPLE__)
+    auto load = [](const char* name) { return nxAppleGetProcAddress(name); };
 #else
     auto load = [](const char*) -> void* { return nullptr; };
 #endif
