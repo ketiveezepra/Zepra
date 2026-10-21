@@ -17,6 +17,7 @@
 namespace Zepra::Runtime { 
     class VM; 
     class Context; // Internal context
+    class Object;
 }
 
 namespace Zepra::WebCore {
@@ -67,6 +68,10 @@ public:
     void clearTimeout(int id);
     void clearInterval(int id);
     void processTimers();
+
+    /// Runs the requestAnimationFrame callbacks registered before this frame,
+    /// passing the performance.now() timestamp
+    void runAnimationFrames();
     
     // Global variables
     void setGlobal(const std::string& name, const std::string& value);
@@ -133,6 +138,15 @@ private:
     // Timers
     std::vector<TimerCallback> timers_;
     int nextTimerId_ = 1;
+    int scheduleTimer(int id, std::function<void()> callback, int delay, bool repeating);
+
+    // JS functions passed to setTimeout/setInterval/requestAnimationFrame are
+    // kept in a hidden global object so the garbage collector keeps them alive
+    Zepra::Runtime::Object* callbackStore_ = nullptr;
+    std::vector<int> animationFrameQueue_;
+    double timeOriginMs_ = 0;   // performance.now() origin
+    void callStoredCallback(const std::string& key, bool passTimestamp, double timestampMs);
+    void removeStoredCallback(const std::string& key);
     
     // Event listeners for lifecycle events
     std::vector<std::function<void()>> domContentLoadedListeners_;
