@@ -20,6 +20,8 @@ std::unique_ptr<Program> Parser::parseProgram() {
     std::vector<StmtPtr> body;
     
     while (!isAtEnd()) {
+        const uint32_t startOffset = currentToken_.start.offset;
+        const TokenType startType = currentToken_.type;
         try {
             auto stmt = parseDeclaration();
             if (stmt) {
@@ -27,6 +29,14 @@ std::unique_ptr<Program> Parser::parseProgram() {
             }
         } catch (...) {
             synchronize();
+        }
+        // Every iteration must consume input. A statement parser can return
+        // without consuming (e.g. on a lexer error token such as an
+        // unterminated string), which would otherwise loop forever.
+        if (!isAtEnd() && currentToken_.start.offset == startOffset &&
+            currentToken_.type == startType) {
+            error(startType == TokenType::Error ? currentToken_.value : "Unexpected token");
+            advance();
         }
     }
     
