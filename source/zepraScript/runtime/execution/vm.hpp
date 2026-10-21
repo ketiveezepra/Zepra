@@ -77,6 +77,7 @@ struct VMCallFrame {
     size_t slotBase = 0;
     Value thisValue;
     const Bytecode::BytecodeChunk* savedChunk = nullptr;  // Caller's chunk for iterative calls
+    bool isConstruct = false;  // 'new' / super(): a non-object return yields 'this'
 };
 
 /**
