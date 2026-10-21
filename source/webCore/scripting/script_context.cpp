@@ -29,6 +29,8 @@
 namespace Zepra::WebCore {
 
 ScriptContext::ScriptContext() : vm_(nullptr), vmReady_(false) {
+    timeOriginMs_ = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
     try {
         ownedVm_ = std::make_unique<Zepra::Runtime::VM>(nullptr);
         ownedContext_ = std::make_unique<Zepra::Runtime::Context>(ownedVm_.get());
@@ -186,12 +188,15 @@ void ScriptContext::log(const std::string& message) {
     }
 }
 
-int ScriptContext::setTimeout(std::function<void()> callback, int delay) {
-    int id = nextTimerId_++;
+int ScriptContext::scheduleTimer(int id, std::function<void()> callback, int delay, bool repeating) {
     double now = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
-    timers_.push_back({id, callback, delay, false, now + delay});
+    timers_.push_back({id, std::move(callback), delay, repeating, now + delay});
     return id;
+}
+
+int ScriptContext::setTimeout(std::function<void()> callback, int delay) {
+    return scheduleTimer(nextTimerId_++, std::move(callback), delay, false);
 }
 
 int ScriptContext::setInterval(std::function<void()> callback, int interval) {
@@ -215,21 +220,60 @@ void ScriptContext::processTimers() {
     double now = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     
-    for (auto it = timers_.begin(); it != timers_.end(); ) {
-        if (now >= it->scheduledTime) {
-            if (it->callback) {
-                it->callback();
-            }
-            if (it->repeating) {
-                it->scheduledTime = now + it->delay;
-                ++it;
-            } else {
-                it = timers_.erase(it);
-            }
-        } else {
-            ++it;
-        }
+    // Collect due timers first: callbacks may add or clear timers, which
+    // would invalidate an iterator into timers_
+    std::vector<int> due;
+    for (const auto& t : timers_) {
+        if (now >= t.scheduledTime) due.push_back(t.id);
     }
+    for (int id : due) {
+        auto it = std::find_if(timers_.begin(), timers_.end(),
+            [id](const TimerCallback& t) { return t.id == id; });
+        if (it == timers_.end()) continue;  // cleared by an earlier callback
+        std::function<void()> callback = it->callback;
+        if (it->repeating) {
+            it->scheduledTime = now + std::max(it->delay, 1);
+        } else {
+            timers_.erase(it);
+        }
+        if (callback) callback();
+    }
+}
+
+void ScriptContext::runAnimationFrames() {
+    if (animationFrameQueue_.empty()) return;
+    const double timestampMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now().time_since_epoch()).count() - timeOriginMs_;
+    // Callbacks requested while these run belong to the next frame
+    std::vector<int> queue;
+    queue.swap(animationFrameQueue_);
+    for (int id : queue) {
+        const std::string key = "r" + std::to_string(id);
+        callStoredCallback(key, true, timestampMs);
+        removeStoredCallback(key);
+    }
+}
+
+void ScriptContext::callStoredCallback(const std::string& key, bool passTimestamp, double timestampMs) {
+    using namespace Zepra::Runtime;
+    if (!vm_ || !callbackStore_ || !callbackStore_->has(key)) return;
+    Value fnValue = callbackStore_->get(key);
+    if (!fnValue.isObject()) return;
+    auto* fn = dynamic_cast<Function*>(fnValue.asObject());
+    if (!fn) return;
+    std::vector<Value> args;
+    if (passTimestamp) args.push_back(Value::number(timestampMs));
+    try {
+        vm_->call(fn, Value::undefined(), args);
+    } catch (const std::exception& e) {
+        if (consoleHandler_) consoleHandler_("error", std::string("Uncaught exception in callback: ") + e.what());
+    } catch (...) {
+        if (consoleHandler_) consoleHandler_("error", "Uncaught exception in callback");
+    }
+}
+
+void ScriptContext::removeStoredCallback(const std::string& key) {
+    if (callbackStore_) callbackStore_->deleteProperty(key);
 }
 
 void ScriptContext::setGlobal(const std::string& name, const std::string& value) {
@@ -349,28 +393,50 @@ void ScriptContext::setupWindowGlobals() {
     vm_->setGlobal("console", Value::object(consoleObj));
     
     // setTimeout(callback, delay)
+    callbackStore_ = new Object();
+    vm_->setGlobal("__zepraPendingCallbacks__", Value::object(callbackStore_));
+
+    // setTimeout/setInterval(callback | code, delay)
+    auto scheduleJsTimer = [this](const std::vector<Value>& args, bool repeating) -> Value {
+        if (args.empty()) return Value::number(0);
+        int delay = args.size() > 1 ? std::max(0, (int)args[1].toNumber()) : 0;
+        int id = nextTimerId_++;
+        std::function<void()> run;
+        if (args[0].isObject() && args[0].asObject()->isFunction()) {
+            const std::string key = "t" + std::to_string(id);
+            callbackStore_->set(key, args[0]);
+            run = [this, key, repeating] {
+                callStoredCallback(key, false, 0);
+                if (!repeating) removeStoredCallback(key);
+            };
+        } else {
+            const std::string code = args[0].toString();
+            run = [this, code] { evaluate(code, "<timer>"); };
+        }
+        return Value::number(scheduleTimer(id, std::move(run), delay, repeating));
+    };
+
     auto* setTimeoutFn = createNativeFunction("setTimeout",
-        [this](Context*, const std::vector<Value>& args) -> Value {
-            // For now, just register as timer with delay
-            int delay = args.size() > 1 ? (int)args[1].toNumber() : 0;
-            int id = setTimeout([]{}, delay);
-            return Value::number(id);
+        [scheduleJsTimer](Context*, const std::vector<Value>& args) -> Value {
+            return scheduleJsTimer(args, false);
         }, 2);
     vm_->setGlobal("setTimeout", Value::object(setTimeoutFn));
     
     // setInterval(callback, interval)
     auto* setIntervalFn = createNativeFunction("setInterval",
-        [this](Context*, const std::vector<Value>& args) -> Value {
-            int interval = args.size() > 1 ? (int)args[1].toNumber() : 0;
-            int id = setInterval([]{}, interval);
-            return Value::number(id);
+        [scheduleJsTimer](Context*, const std::vector<Value>& args) -> Value {
+            return scheduleJsTimer(args, true);
         }, 2);
     vm_->setGlobal("setInterval", Value::object(setIntervalFn));
     
     // clearTimeout / clearInterval
     auto* clearTimeoutFn = createNativeFunction("clearTimeout",
         [this](Context*, const std::vector<Value>& args) -> Value {
-            if (!args.empty()) clearTimeout((int)args[0].toNumber());
+            if (!args.empty()) {
+                int id = (int)args[0].toNumber();
+                clearTimeout(id);
+                removeStoredCallback("t" + std::to_string(id));
+            }
             return Value::undefined();
         }, 1);
     vm_->setGlobal("clearTimeout", Value::object(clearTimeoutFn));
@@ -442,17 +508,40 @@ void ScriptContext::setupWindowGlobals() {
     windowObj->set("getComputedStyle", Value::object(getComputedStyleFn));
     vm_->setGlobal("getComputedStyle", Value::object(getComputedStyleFn));
     
-    // window.requestAnimationFrame (stub — returns id, doesn't schedule)
+    // window.requestAnimationFrame(callback) — runs before the next paint
     auto* rafFn = createNativeFunction("requestAnimationFrame",
-        [this](Context*, const std::vector<Value>&) -> Value {
-            return Value::number(nextTimerId_++);
+        [this](Context*, const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isObject() || !args[0].asObject()->isFunction()) {
+                return Value::number(0);
+            }
+            int id = nextTimerId_++;
+            callbackStore_->set("r" + std::to_string(id), args[0]);
+            animationFrameQueue_.push_back(id);
+            return Value::number(id);
         }, 1);
     windowObj->set("requestAnimationFrame", Value::object(rafFn));
+
+    // performance.now() — milliseconds since this page's script context began
+    auto* performanceObj = new Object();
+    auto* perfNowFn = createNativeFunction("now",
+        [this](Context*, const std::vector<Value>&) -> Value {
+            double now = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            return Value::number(now - timeOriginMs_);
+        }, 0);
+    performanceObj->set("now", Value::object(perfNowFn));
+    windowObj->set("performance", Value::object(performanceObj));
+    vm_->setGlobal("performance", Value::object(performanceObj));
     vm_->setGlobal("requestAnimationFrame", Value::object(rafFn));
     
     // window.cancelAnimationFrame (no-op)
     auto* cafFn = createNativeFunction("cancelAnimationFrame",
-        [](Context*, const std::vector<Value>&) -> Value {
+        [this](Context*, const std::vector<Value>& args) -> Value {
+            if (args.empty()) return Value::undefined();
+            int id = (int)args[0].toNumber();
+            animationFrameQueue_.erase(std::remove(animationFrameQueue_.begin(),
+                animationFrameQueue_.end(), id), animationFrameQueue_.end());
+            removeStoredCallback("r" + std::to_string(id));
             return Value::undefined();
         }, 1);
     windowObj->set("cancelAnimationFrame", Value::object(cafFn));

@@ -712,10 +712,11 @@ void VM::dispatch(Opcode op) {
                     pop();
                 }
                 
-                // Constructor semantics: if this was a 'new' call
-                // (frame.thisValue is an object) and the constructor
-                // didn't explicitly return an object, return 'this'
-                if (frame.thisValue.isObject() && !result.isObject()) {
+                // Constructor semantics: if this was a 'new' call and the
+                // constructor didn't explicitly return an object, return
+                // 'this'. (Method calls also have an object 'this' and must
+                // return their own result.)
+                if (frame.isConstruct && !result.isObject()) {
                     result = frame.thisValue;
                 }
                 
@@ -818,6 +819,8 @@ void VM::dispatch(Opcode op) {
                     frame.savedChunk = chunk_;
                     pushCallFrame(frame);
                 
+                    // Slot 0 = 'this' (the compiler reserves it; params start at 1)
+                    push(receiver);
                     for (const auto& arg : args) {
                         push(arg);
                     }
@@ -1159,6 +1162,7 @@ void VM::dispatch(Opcode op) {
                 frame.returnAddress = ip_;
                 frame.slotBase = stack_.size();
                 frame.thisValue = Value::object(newObj);
+                frame.isConstruct = true;
                 frame.savedChunk = chunk_;
                 pushCallFrame(frame);
                 
@@ -1482,6 +1486,7 @@ void VM::dispatch(Opcode op) {
                 frame.returnAddress = ip_;
                 frame.slotBase = stack_.size();
                 frame.thisValue = thisValue;
+                frame.isConstruct = true;  // super(...) runs the parent constructor
                 frame.savedChunk = chunk_;
                 pushCallFrame(frame);
                 
@@ -1864,7 +1869,8 @@ Value VM::executeCallback(Function* fn, Value thisValue, const std::vector<Value
         size_t savedIP = ip_;
         size_t savedStackBase = stack_.size();
         
-        // Push arguments onto stack (they become local slots 0, 1, 2...)
+        // Slot 0 = 'this', arguments from slot 1 (same layout as OP_CALL)
+        push(thisValue);
         for (const auto& arg : args) {
             push(arg);
         }
