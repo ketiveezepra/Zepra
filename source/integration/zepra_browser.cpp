@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -426,14 +427,21 @@ using ZepraBrowser::LayoutBox;
 using ZepraBrowser::LayoutType;
 // using ZepraBrowser::g_layoutRoot; // No, we allow separate root for now? Or g_layoutRoot is local here.
 
+// Element whose boxes buildLayoutFromDOM is currently creating; addChild
+// records it on each new box so hit-testing can find the DOM element.
+static DOMElement* g_layoutOwner = nullptr;
+
 // Helper to add child (using std::list for stable pointers)
 static LayoutBox* addChild(LayoutBox* parent) {
     if (!parent) return nullptr;
     parent->children.emplace_back();
+    parent->children.back().domElement = g_layoutOwner;
     return &parent->children.back();  // Pointer stays valid with std::list
 }
 
 static std::unique_ptr<LayoutBox> g_layoutRoot;
+// Box screen positions are set while painting; hit-testing waits for a paint
+static bool g_layoutPainted = false;
 
 // Forward declarations
 void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inAnchor, const std::string& anchorHref, const std::string& anchorTarget);
@@ -492,10 +500,7 @@ HttpResponse httpGet(const std::string& url) {
     
     // Handle file:// protocol
     if (url.substr(0, 7) == "file://") {
-        std::string path = url.substr(7);
-        if (!path.empty() && path[0] == '~') {
-            path = Zepra::Platform::expandHomePath(path);
-        }
+        std::string path = Zepra::Platform::fileUrlToPath(url);
         
         std::ifstream file(path);
         if (file.is_open()) {
@@ -594,10 +599,7 @@ std::vector<uint8_t> httpGetBinary(const std::string& url) {
     
     // Check if file:// protocol
     if (url.substr(0, 7) == "file://") {
-        std::string path = url.substr(7);
-        if (!path.empty() && path[0] == '~') {
-            path = Zepra::Platform::expandHomePath(path);
-        }
+        std::string path = Zepra::Platform::fileUrlToPath(url);
         
         std::ifstream file(path, std::ios::binary);
         if (file.is_open()) {
@@ -886,90 +888,11 @@ std::string resolveUrl(const std::string& base, const std::string& href) {
 
 // Parse HTML with WebCore and extract styled content
 #ifdef USE_WEBCORE
-void parseWithWebCore(const std::string& html) {
-    // CRITICAL: Cancel pending image loads before clearing layout boxes
-    // Prevents use-after-free when worker threads hold stale pointers
-    ZepraBrowser::g_lazyImageLoader.cancelAll();
-    
-    g_styledLines.clear();
-    
-    // WORKAROUND: Extract CSS from raw HTML before parsing (HTMLParser drops head children)
-    std::vector<std::string> rawStyles = extractStylesFromRawHTML(html);
-
-    // Extract body inline styles (e.g. background-color) before parsing 
-    std::string bodyStyle = extractBodyInlineStyle(html);
-    
-    // Parse HTML to DOM (use original HTML - HTMLParser handles structure correctly)
-    HTMLParser parser;
-    g_document = parser.parse(html);
-    
-    if (!g_document) {
-        std::cerr << "[WebCore] Failed to parse HTML" << std::endl;
-        return;
-    }
-    
-    // Initialize CSS engine
-    g_cssEngine = std::make_unique<CSSEngine>();
-    g_cssEngine->initialize(g_document.get());
-    
-    // Load user-agent stylesheet (browser defaults)
-    g_cssEngine->addStyleSheet(
-        Zepra::WebCore::ZepraUAStylesheet::getStylesheet(),
-        StyleOrigin::UserAgent
-    );
-    
-    // Extract <style> elements and load <link rel="stylesheet"> external CSS
-    auto* headEl = g_document->head();
-    if (headEl) {
-        for (size_t i = 0; i < headEl->childNodes().size(); i++) {
-            if (auto* el = dynamic_cast<DOMElement*>(headEl->childNodes()[i].get())) {
-                std::string tag = el->tagName();
-                std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
-                
-                // Inline <style> elements
-                if (tag == "style") {
-                    g_cssEngine->addStyleSheet(el->textContent(), StyleOrigin::Author);
-                }
-                // External <link rel="stylesheet"> elements
-                else if (tag == "link") {
-                    std::string rel = el->getAttribute("rel");
-                    std::transform(rel.begin(), rel.end(), rel.begin(), ::tolower);
-                    if (rel == "stylesheet" || rel.find("stylesheet") != std::string::npos) {
-                        std::string href = el->getAttribute("href");
-                        if (!href.empty()) {
-                            // Resolve relative URL
-                            std::string cssUrl = resolveUrl(g_currentUrl, href);
-                            // std::cout << "[CSS] Loading external stylesheet: " << cssUrl << std::endl;
-                            
-                            // Fetch the CSS file
-                            HttpResponse cssResult = httpGet(cssUrl);
-                            if (cssResult.success && !cssResult.data.empty()) {
-                                // std::cout << "[CSS] Loaded " << cssResult.data.size() << " bytes of CSS" << std::endl;
-                                g_cssEngine->addStyleSheet(cssResult.data, StyleOrigin::Author);
-                            } else {
-                                std::cerr << "[CSS] Failed to load: " << cssResult.error << std::endl;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // FALLBACK: Add CSS extracted from raw HTML (when HTMLParser fails to add style elements to head)
-    if (rawStyles.size() > 0) {
-        // std::cout << "[CSS] Adding " << rawStyles.size() << " stylesheets from raw HTML extraction" << std::endl;
-        for (const auto& css : rawStyles) {
-            g_cssEngine->addStyleSheet(css, StyleOrigin::Author);
-        }
-    }
-    
-    // Add extracted body element style
-    if (!bodyStyle.empty()) {
-        // std::cout << "[CSS] Adding extracted body inline style: " << bodyStyle << std::endl;
-        g_cssEngine->addStyleSheet(bodyStyle, StyleOrigin::Author);
-    }
-    
+// Computes styles for g_document and rebuilds the layout box tree from it.
+// Used on page load and when :hover/:active/:focus state changes; the DOM,
+// scripts and scroll position are left untouched.
+static void rebuildLayoutTree() {
+    g_layoutPainted = false;
     // Compute styles
     g_cssEngine->computeStyles();
     // std::cout << "[CSS] Styles computed" << std::endl;
@@ -1089,6 +1012,96 @@ void parseWithWebCore(const std::string& html) {
     int totalBoxes = countBoxes(*g_layoutRoot);
     std::cout << "[Layout] Built layout tree: " << totalBoxes << " total boxes, "
               << g_layoutRoot->children.size() << " direct children" << std::endl;
+}
+
+void parseWithWebCore(const std::string& html) {
+    // CRITICAL: Cancel pending image loads before clearing layout boxes
+    // Prevents use-after-free when worker threads hold stale pointers
+    ZepraBrowser::g_lazyImageLoader.cancelAll();
+    
+    g_styledLines.clear();
+    
+    // WORKAROUND: Extract CSS from raw HTML before parsing (HTMLParser drops head children)
+    std::vector<std::string> rawStyles = extractStylesFromRawHTML(html);
+
+    // Extract body inline styles (e.g. background-color) before parsing 
+    std::string bodyStyle = extractBodyInlineStyle(html);
+    
+    // The old document's elements are about to be destroyed
+    Zepra::WebCore::interactionState() = {};
+
+    // Parse HTML to DOM (use original HTML - HTMLParser handles structure correctly)
+    HTMLParser parser;
+    g_document = parser.parse(html);
+    
+    if (!g_document) {
+        std::cerr << "[WebCore] Failed to parse HTML" << std::endl;
+        return;
+    }
+    
+    // Initialize CSS engine
+    g_cssEngine = std::make_unique<CSSEngine>();
+    g_cssEngine->initialize(g_document.get());
+    
+    // Load user-agent stylesheet (browser defaults)
+    g_cssEngine->addStyleSheet(
+        Zepra::WebCore::ZepraUAStylesheet::getStylesheet(),
+        StyleOrigin::UserAgent
+    );
+    
+    // Extract <style> elements and load <link rel="stylesheet"> external CSS
+    auto* headEl = g_document->head();
+    if (headEl) {
+        for (size_t i = 0; i < headEl->childNodes().size(); i++) {
+            if (auto* el = dynamic_cast<DOMElement*>(headEl->childNodes()[i].get())) {
+                std::string tag = el->tagName();
+                std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
+                
+                // Inline <style> elements
+                if (tag == "style") {
+                    g_cssEngine->addStyleSheet(el->textContent(), StyleOrigin::Author);
+                }
+                // External <link rel="stylesheet"> elements
+                else if (tag == "link") {
+                    std::string rel = el->getAttribute("rel");
+                    std::transform(rel.begin(), rel.end(), rel.begin(), ::tolower);
+                    if (rel == "stylesheet" || rel.find("stylesheet") != std::string::npos) {
+                        std::string href = el->getAttribute("href");
+                        if (!href.empty()) {
+                            // Resolve relative URL
+                            std::string cssUrl = resolveUrl(g_currentUrl, href);
+                            // std::cout << "[CSS] Loading external stylesheet: " << cssUrl << std::endl;
+                            
+                            // Fetch the CSS file
+                            HttpResponse cssResult = httpGet(cssUrl);
+                            if (cssResult.success && !cssResult.data.empty()) {
+                                // std::cout << "[CSS] Loaded " << cssResult.data.size() << " bytes of CSS" << std::endl;
+                                g_cssEngine->addStyleSheet(cssResult.data, StyleOrigin::Author);
+                            } else {
+                                std::cerr << "[CSS] Failed to load: " << cssResult.error << std::endl;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // FALLBACK: Add CSS extracted from raw HTML (when HTMLParser fails to add style elements to head)
+    if (rawStyles.size() > 0) {
+        // std::cout << "[CSS] Adding " << rawStyles.size() << " stylesheets from raw HTML extraction" << std::endl;
+        for (const auto& css : rawStyles) {
+            g_cssEngine->addStyleSheet(css, StyleOrigin::Author);
+        }
+    }
+    
+    // Add extracted body element style
+    if (!bodyStyle.empty()) {
+        // std::cout << "[CSS] Adding extracted body inline style: " << bodyStyle << std::endl;
+        g_cssEngine->addStyleSheet(bodyStyle, StyleOrigin::Author);
+    }
+    
+    rebuildLayoutTree();
     
     // Debug DOM children
     if (g_document->body()) {
@@ -1280,6 +1293,9 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
     // Process child nodes
     for (size_t i = 0; i < element->childNodes().size(); i++) {
         DOMNode* child = element->childNodes()[i].get();
+        // Text boxes belong to this element; element children own their boxes
+        auto* childAsElement = dynamic_cast<DOMElement*>(child);
+        g_layoutOwner = childAsElement ? childAsElement : element;
         
         if (auto* textNode = dynamic_cast<DOMText*>(child)) {
             // TEXT NODE → Create LayoutBox directly
@@ -3266,6 +3282,7 @@ void render() {
             if (tab.id == g_activeTabId) { scrollY = tab.scrollY; break; }
         }
         ZepraBrowser::paintBox(*g_layoutRoot, contentX, contentY, contentY + contentH, scrollY);
+        g_layoutPainted = true;
         for (const auto& hitBox : g_linkHitBoxes) {
             if (g_mouseX >= hitBox.x && g_mouseX < hitBox.x + hitBox.w &&
                 g_mouseY >= hitBox.y && g_mouseY < hitBox.y + hitBox.h) {
@@ -3308,6 +3325,7 @@ void render() {
                     }
                 }
                 ZepraBrowser::paintBox(*g_layoutRoot, contentX + 20, contentY + 20, maxY, scrollY);
+                g_layoutPainted = true;
                 
                 // Check if mouse is over any link hit box for pointer cursor
                 for (const auto& hitBox : g_linkHitBoxes) {
@@ -4054,6 +4072,7 @@ void onNewTab() {
     g_layoutRoot = nullptr;
     g_document = nullptr;
     g_cssEngine = nullptr;
+    Zepra::WebCore::interactionState() = {};
 }
 
 void onCloseTab(int tabId) {
@@ -4118,7 +4137,8 @@ void onSelectTab(int tabId) {
             g_currentUrl = tab.url;
             g_pageTitle = tab.title;
             
-            // Restore per-tab DOM and CSS engine
+            // Restore per-tab DOM and CSS engine; hover/focus belong to the old page
+            Zepra::WebCore::interactionState() = {};
             if (tab.document) {
                 g_document = std::move(tab.document);
                 g_cssEngine = std::move(tab.cssEngine);
@@ -4828,6 +4848,50 @@ bool loadResources() {
 // Event Handler bridge (Correctly placed)
 // extern removal
 
+// Deepest DOM element whose box contains the point (screen coordinates)
+static DOMElement* findElementAt(LayoutBox* box, float x, float y) {
+    if (!box) return nullptr;
+    for (auto it = box->children.rbegin(); it != box->children.rend(); ++it) {
+        if (DOMElement* el = findElementAt(&(*it), x, y)) return el;
+    }
+    if (x >= box->screenX && x < box->screenX + box->width &&
+        y >= box->screenY && y < box->screenY + box->height) {
+        return box->domElement;
+    }
+    return nullptr;
+}
+
+static LayoutBox* findBoxForElement(LayoutBox* box, DOMElement* element) {
+    if (!box || !element) return nullptr;
+    if (box->domElement == element) return box;
+    for (auto& child : box->children) {
+        if (LayoutBox* found = findBoxForElement(&child, element)) return found;
+    }
+    return nullptr;
+}
+
+// Records the hovered / pressed / focused elements and, when that changes a
+// style the page actually uses (:hover, :active, :focus), restyles and
+// rebuilds the box tree. The DOM, scripts and scroll position are kept.
+static void setInteractionState(DOMElement* hovered, DOMElement* active, DOMElement* focused) {
+    auto& state = Zepra::WebCore::interactionState();
+    bool restyle = g_cssEngine && g_document && g_layoutRoot &&
+        ((state.hovered != hovered && g_cssEngine->usesHoverSelectors()) ||
+         (state.active != active && g_cssEngine->usesActiveSelectors()) ||
+         (state.focused != focused && g_cssEngine->usesFocusSelectors()));
+    state.hovered = hovered;
+    state.active = active;
+    state.focused = focused;
+    if (!restyle) return;
+
+    DOMElement* focusedElement = g_focusedBox ? g_focusedBox->domElement : nullptr;
+    // Queued image loads point at boxes of the tree being replaced
+    ZepraBrowser::g_lazyImageLoader.cancelAll();
+    g_styledLines.clear();
+    rebuildLayoutTree();
+    g_focusedBox = findBoxForElement(g_layoutRoot.get(), focusedElement);
+}
+
 void handleNXEvent(const NXRender::Event& event) {
     if (event.type == NXRender::EventType::Close) {
         g_running = false;
@@ -4862,6 +4926,13 @@ void handleNXEvent(const NXRender::Event& event) {
              g_mouseX = x; 
              g_mouseY = y;
              
+             // :hover state (content area only)
+             if (g_layoutRoot && g_layoutPainted) {
+                 const auto& state = Zepra::WebCore::interactionState();
+                 DOMElement* hovered = (y > TOPBAR_HEIGHT) ? findElementAt(g_layoutRoot.get(), x, y) : nullptr;
+                 setInteractionState(hovered, state.active, state.focused);
+             }
+
              // Link hover detection - show URL in status bar
              if (g_layoutRoot) {
                  LayoutBox* hoverBox = findBoxAt(g_layoutRoot.get(), x, y);
@@ -4886,6 +4957,14 @@ void handleNXEvent(const NXRender::Event& event) {
                  
                  ::g_mouseHandler.handleLeftClick(x, y); 
                  g_mouseDown = true;
+
+                 // :active on the pressed element; :focus follows the focused input
+                 if (g_layoutRoot && g_layoutPainted) {
+                     const auto& state = Zepra::WebCore::interactionState();
+                     DOMElement* pressed = (y > TOPBAR_HEIGHT) ? findElementAt(g_layoutRoot.get(), x, y) : nullptr;
+                     DOMElement* focused = g_focusedBox ? g_focusedBox->domElement : nullptr;
+                     setInteractionState(state.hovered, pressed, focused);
+                 }
              } else if (event.mouse.button == NXRender::MouseButton::Right) {
                  auto& ctxMenu = g_mouseHandler.getContextMenu();
                  if (ctxMenu.visible) {
@@ -4898,6 +4977,10 @@ void handleNXEvent(const NXRender::Event& event) {
              if (event.mouse.button == NXRender::MouseButton::Left) {
                  ::g_mouseHandler.handleLeftRelease(x, y); 
                  g_mouseDown = false;
+                 if (g_layoutRoot) {
+                     const auto& state = Zepra::WebCore::interactionState();
+                     setInteractionState(state.hovered, nullptr, state.focused);
+                 }
              }
         } else if (event.type == NXRender::EventType::MouseWheel) {
              for (auto& tab : g_tabs) {
@@ -5109,6 +5192,18 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
     initLayoutEngine();
     std::cout << " OK" << std::endl;
     
+    // Start URL from the command line: zepra_browser [URL | file path]
+    if (argc > 1 && argv[1][0] != '-') {
+        std::string startArg = argv[1];
+        std::error_code ec;
+        if (startArg.find("://") == std::string::npos &&
+            std::filesystem::is_regular_file(startArg, ec)) {
+            std::string path = std::filesystem::absolute(startArg, ec).generic_string();
+            startArg = (path.front() == '/' ? "file://" : "file:///") + path;
+        }
+        g_currentUrl = startArg;
+    }
+
     // Create initial tab (CRITICAL: Must be done before entering main loop)
     std::cout << "[Init] Creating initial tab..." << std::flush;
     if (g_tabs.empty()) {

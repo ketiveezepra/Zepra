@@ -39,6 +39,19 @@ enum class StyleOrigin {
 };
 
 /**
+ * @brief Live user-interaction state consulted when matching :hover, :active,
+ *        :focus and :focus-within. The browser updates it and restyles.
+ */
+struct InteractionState {
+    DOMElement* hovered = nullptr;   // deepest element under the pointer
+    DOMElement* active = nullptr;    // element under a pressed primary button
+    DOMElement* focused = nullptr;   // element with keyboard focus
+};
+
+/// Interaction state of the current document (single document per process)
+InteractionState& interactionState();
+
+/**
  * @brief Matched rule with cascade info
  */
 struct MatchedRule {
@@ -240,6 +253,12 @@ public:
     /// Style resolver
     StyleResolver& resolver() { return resolver_; }
 
+    /// Whether any loaded stylesheet uses :hover / :active / :focus, i.e.
+    /// whether a change of interaction state can change computed styles
+    bool usesHoverSelectors() const { return usesHover_; }
+    bool usesActiveSelectors() const { return usesActive_; }
+    bool usesFocusSelectors() const { return usesFocus_; }
+
     /// Check @supports condition
     bool supports(const std::string& property, const std::string& value);
     bool supportsCondition(const std::string& condition);
@@ -253,6 +272,9 @@ private:
     CSSParser parser_;
     StyleResolver resolver_;
     std::vector<std::shared_ptr<CSSStyleSheet>> stylesheets_;
+    bool usesHover_ = false;
+    bool usesActive_ = false;
+    bool usesFocus_ = false;
 };
 
 } // namespace Zepra::WebCore

@@ -177,6 +177,44 @@ static inline std::string expandHomePath(const std::string& path) {
 }
 
 /**
+ * @brief Convert a file:// URL to a local filesystem path
+ *
+ * Decodes %XX escapes and expands a leading ~. On Windows the drive form
+ * file:///C:/dir/page.html becomes C:/dir/page.html (the slash before the
+ * drive letter is part of the URL, not the path).
+ */
+static inline std::string fileUrlToPath(const std::string& url) {
+    std::string rest = url.compare(0, 7, "file://") == 0 ? url.substr(7) : url;
+    if (rest.compare(0, 10, "localhost/") == 0) rest = rest.substr(9);
+
+    auto hexValue = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::string path;
+    path.reserve(rest.size());
+    for (size_t i = 0; i < rest.size(); ++i) {
+        if (rest[i] == '%' && i + 2 < rest.size() &&
+            hexValue(rest[i + 1]) >= 0 && hexValue(rest[i + 2]) >= 0) {
+            path += static_cast<char>(hexValue(rest[i + 1]) * 16 + hexValue(rest[i + 2]));
+            i += 2;
+        } else {
+            path += rest[i];
+        }
+    }
+
+#if ZEPRA_OS_WINDOWS
+    if (path.size() >= 3 && path[0] == '/' && path[2] == ':' &&
+        ((path[1] >= 'A' && path[1] <= 'Z') || (path[1] >= 'a' && path[1] <= 'z'))) {
+        path.erase(0, 1);
+    }
+#endif
+    return expandHomePath(path);
+}
+
+/**
  * @brief Get the path separator for the current OS
  */
 static inline char pathSeparator() {

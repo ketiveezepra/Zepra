@@ -17,6 +17,7 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <unordered_map>
 
@@ -33,6 +34,7 @@ struct PendingImage {
     std::string url;          // Image URL
     int priority;             // Higher = load first (viewport images get higher priority)
     int tabId;                // Tab that requested this image
+    uint64_t generation = 0;  // Loader generation when queued (see cancelAll)
     
     bool operator<(const PendingImage& other) const {
         return priority < other.priority; // Lower priority = later in queue
@@ -141,9 +143,20 @@ private:
         std::vector<uint8_t> pixels;
         int width;
         int height;
+        uint64_t generation = 0;
+        std::string url;           // raster images: key for textureCache_
+        std::string errorText;     // non-empty: show this placeholder instead
+        uint32_t errorColor = 0;
     };
     std::vector<RawImage> rawImages_;
     std::mutex rawMutex_;
+
+    // Bumped by cancelAll(): results queued under an older generation refer
+    // to layout boxes that may have been destroyed, and are dropped.
+    std::atomic<uint64_t> generation_{0};
+
+    // Hands a failure placeholder to the main thread (workers never touch boxes)
+    void queueError(const PendingImage& pending, const char* text, uint32_t color);
     
     // Worker threads
     std::vector<std::thread> workers_;
@@ -153,8 +166,13 @@ private:
     // Texture creator (main thread callback)
     TextureCreator textureCreator_;
     
-    // URL cache to avoid duplicate loads
-    std::unordered_map<std::string, uint32_t> textureCache_;
+    // URL cache to avoid duplicate loads (filled when a texture is created)
+    struct CachedTexture {
+        uint32_t textureId;
+        int width;
+        int height;
+    };
+    std::unordered_map<std::string, CachedTexture> textureCache_;
     std::mutex cacheMutex_;
 };
 

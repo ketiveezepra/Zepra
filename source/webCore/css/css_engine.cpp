@@ -420,6 +420,9 @@ void CSSEngine::initialize(DOMDocument* doc) {
 }
 
 void CSSEngine::addStyleSheet(const std::string& css, StyleOrigin origin) {
+    usesHover_  = usesHover_  || css.find(":hover") != std::string::npos;
+    usesActive_ = usesActive_ || css.find(":active") != std::string::npos;
+    usesFocus_  = usesFocus_  || css.find(":focus") != std::string::npos;
     auto sheet = parser_.parse(css);
     if (sheet) {
         resolver_.addStyleSheet(std::move(sheet), origin);

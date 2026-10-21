@@ -19,6 +19,11 @@
 
 namespace Zepra::WebCore {
 
+InteractionState& interactionState() {
+    static InteractionState state;
+    return state;
+}
+
 // ============================================================================
 // MatchedRule comparison (cascade ordering)
 // ============================================================================
@@ -571,18 +576,69 @@ bool CSSCascade::compoundSelectorMatches(DOMElement* element, const std::string&
             // Pseudo-elements (::before, ::after) — skip (not rendered)
             if (isPseudoElement) continue;
             
-            // Fast-path: UI state pseudo-classes — no DOM walk needed
-            // These are the most common in stylesheets (Tailwind, Bootstrap, etc.)
-            if (pseudoName == "hover" || pseudoName == "focus" || 
-                pseudoName == "active" || pseudoName == "visited" ||
-                pseudoName == "link" || pseudoName == "enabled" ||
-                pseudoName == "disabled" || pseudoName == "checked" ||
-                pseudoName == "placeholder-shown" || pseudoName == "focus-within" ||
-                pseudoName == "focus-visible" || pseudoName == "target" ||
-                pseudoName == "default" || pseudoName == "indeterminate" ||
-                pseudoName == "placeholder" || pseudoName == "selection" ||
-                pseudoName == "read-only" || pseudoName == "read-write") {
-                continue; // Match true for static rendering
+            // UI state pseudo-classes: match the live interaction state and the
+            // element's attributes (see InteractionState in css_engine.hpp)
+            if (pseudoName == "hover" || pseudoName == "active" ||
+                pseudoName == "focus" || pseudoName == "focus-visible" ||
+                pseudoName == "focus-within") {
+                const InteractionState& state = interactionState();
+                auto isSelfOrAncestorOf = [element](DOMElement* target) {
+                    for (DOMNode* n = target; n; n = n->parentNode()) {
+                        if (n == static_cast<DOMNode*>(element)) return true;
+                    }
+                    return false;
+                };
+                bool matches = false;
+                if (pseudoName == "hover") {
+                    matches = state.hovered && isSelfOrAncestorOf(state.hovered);
+                } else if (pseudoName == "active") {
+                    matches = state.active && isSelfOrAncestorOf(state.active);
+                } else if (pseudoName == "focus-within") {
+                    matches = state.focused && isSelfOrAncestorOf(state.focused);
+                } else {
+                    matches = state.focused == element;
+                }
+                if (!matches) return false;
+                continue;
+            }
+            if (pseudoName == "link" || pseudoName == "any-link" || pseudoName == "visited" ||
+                pseudoName == "enabled" || pseudoName == "disabled" ||
+                pseudoName == "checked" || pseudoName == "placeholder-shown" ||
+                pseudoName == "read-only" || pseudoName == "read-write" ||
+                pseudoName == "target" || pseudoName == "default" ||
+                pseudoName == "indeterminate" ||
+                pseudoName == "placeholder" || pseudoName == "selection") {
+                std::string tagLower = element->tagName();
+                std::transform(tagLower.begin(), tagLower.end(), tagLower.begin(), ::tolower);
+                const bool isFormControl = tagLower == "input" || tagLower == "button" ||
+                    tagLower == "select" || tagLower == "textarea" ||
+                    tagLower == "option" || tagLower == "optgroup" || tagLower == "fieldset";
+                const bool isTextField = tagLower == "input" || tagLower == "textarea";
+                bool matches = false;
+                if (pseudoName == "link" || pseudoName == "any-link") {
+                    matches = (tagLower == "a" || tagLower == "area") && element->hasAttribute("href");
+                } else if (pseudoName == "disabled") {
+                    matches = isFormControl && element->hasAttribute("disabled");
+                } else if (pseudoName == "enabled") {
+                    matches = isFormControl && !element->hasAttribute("disabled");
+                } else if (pseudoName == "checked") {
+                    matches = (tagLower == "input" && element->hasAttribute("checked")) ||
+                              (tagLower == "option" && element->hasAttribute("selected"));
+                } else if (pseudoName == "placeholder-shown") {
+                    matches = isTextField && element->hasAttribute("placeholder") &&
+                              element->getAttribute("value").empty();
+                } else if (pseudoName == "read-write") {
+                    matches = isTextField && !element->hasAttribute("readonly") &&
+                              !element->hasAttribute("disabled");
+                } else if (pseudoName == "read-only") {
+                    matches = !(isTextField && !element->hasAttribute("readonly") &&
+                                !element->hasAttribute("disabled"));
+                }
+                // :visited never matches (no history styling); :target, :default,
+                // :indeterminate and the legacy single-colon pseudo-elements
+                // (:placeholder, :selection) are not rendered.
+                if (!matches) return false;
+                continue;
             }
             
             // Structural pseudo-classes — require DOM tree walks
@@ -627,8 +683,6 @@ bool CSSCascade::compoundSelectorMatches(DOMElement* element, const std::string&
                 // :where(sel) — same as :is() but zero specificity
                 if (!pseudoArg.empty() && !selectorMatches(element, pseudoArg)) return false;
             }
-            // :hover, :focus, :active, :visited, :link — UI state, match true for now
-            // :placeholder, :disabled, :checked — form state, skip
         }
         else if (std::isalnum(compound[i]) || compound[i] == '-' || compound[i] == '_') {
             // Tag selector
