@@ -15,6 +15,8 @@
 #include <memory>
 #include <cstdint>
 
+namespace Zepra::WebCore { class DOMElement; }
+
 namespace ZepraBrowser {
 
 // =============================================================================
@@ -87,6 +89,9 @@ struct LayoutBox {
     // Cached screen position (calculated during paint)
     mutable float screenX = 0;
     mutable float screenY = 0;
+
+    // DOM element this box was generated for (hit-testing for :hover/:active)
+    Zepra::WebCore::DOMElement* domElement = nullptr;
     
     // Box model
     float marginTop = 0, marginRight = 0, marginBottom = 0, marginLeft = 0;
