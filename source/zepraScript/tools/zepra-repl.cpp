@@ -23,6 +23,8 @@
 #include "runtime/objects/function.hpp"
 #include "runtime/async/promise.hpp"
 #include "runtime/execution/vm.hpp"
+#include "runtime/execution/context.hpp"
+#include "runtime/execution/global_object.hpp"
 #include "builtins/console.hpp"
 #include "builtins/math.hpp"
 #include "builtins/json.hpp"
@@ -823,6 +825,13 @@ int main(int argc, char* argv[]) {
     // Create VM
     Runtime::VM vm(nullptr);
     setupGlobals(vm);
+
+    // The engine's standard library replaces the REPL's minimal stand-ins
+    // above (the REPL keeps its own console)
+    Runtime::Context context(&vm);
+    auto* globalObject = new Runtime::GlobalObject(&context);
+    globalObject->initialize();
+    globalObject->installInto(vm, {"console"});
     
     // Check for file argument
     if (argc > 1) {

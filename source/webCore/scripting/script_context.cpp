@@ -15,6 +15,7 @@
 
 // ZepraScript internal headers
 #include "runtime/execution/vm.hpp"
+#include "runtime/execution/Sandbox.h"
 #include "runtime/execution/context.hpp"
 #include "runtime/execution/global_object.hpp"
 #include "runtime/objects/function.hpp"
@@ -27,6 +28,39 @@
 #include "builtins/console.hpp"
 
 namespace Zepra::WebCore {
+
+namespace {
+// Each page script or callback runs under limits, so a runaway script
+// (endless loop, unbounded allocation) is stopped instead of freezing the
+// browser or exhausting the machine's memory.
+class ScriptRunGuard {
+public:
+    explicit ScriptRunGuard(Zepra::Runtime::VM* vm) : vm_(vm), monitor_(limits()) {
+        if (vm_) {
+            previous_ = vm_->resourceMonitor();
+            vm_->setSandbox(&monitor_);
+        }
+    }
+    ~ScriptRunGuard() {
+        if (vm_) vm_->setSandbox(previous_);
+    }
+    ScriptRunGuard(const ScriptRunGuard&) = delete;
+    ScriptRunGuard& operator=(const ScriptRunGuard&) = delete;
+
+private:
+    static Zepra::Runtime::ExecutionLimits limits() {
+        Zepra::Runtime::ExecutionLimits l;
+        l.maxExecutionTime = std::chrono::seconds(10);
+        l.maxMemoryGrowthBytes = size_t(1024) * 1024 * 1024;  // 1 GB per run
+        l.maxHeapBytes = SIZE_MAX;  // heap counters are not maintained; RSS growth is
+        return l;
+    }
+
+    Zepra::Runtime::VM* vm_;
+    Zepra::Runtime::ResourceMonitor monitor_;
+    Zepra::Runtime::ResourceMonitor* previous_ = nullptr;
+};
+} // namespace
 
 ScriptContext::ScriptContext() : vm_(nullptr), vmReady_(false) {
     timeOriginMs_ = std::chrono::duration<double, std::milli>(
@@ -143,6 +177,7 @@ ScriptResult ScriptContext::evaluate(const std::string& code, const std::string&
         }
         
         // Execute bytecode on VM
+        ScriptRunGuard guard(vm_);
         auto execResult = vm_->execute(chunk.get());
         
         auto t2 = std::chrono::steady_clock::now();
@@ -264,6 +299,7 @@ void ScriptContext::callStoredCallback(const std::string& key, bool passTimestam
     std::vector<Value> args;
     if (passTimestamp) args.push_back(Value::number(timestampMs));
     try {
+        ScriptRunGuard guard(vm_);
         vm_->call(fn, Value::undefined(), args);
     } catch (const std::exception& e) {
         if (consoleHandler_) consoleHandler_("error", std::string("Uncaught exception in callback: ") + e.what());

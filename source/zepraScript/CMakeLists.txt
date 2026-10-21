@@ -36,6 +36,7 @@ set(ZEPRA_CORE_SOURCES
     runtime/execution/execution_context.cpp
     runtime/execution/isolated_global.cpp
     runtime/execution/sandbox.cpp
+    runtime/execution/process_memory.cpp
     runtime/execution/scheduler.cpp
     runtime/execution/stack_frame.cpp
     runtime/gc_object_visitor.cpp
@@ -447,7 +448,7 @@ endif()
 
 if(WIN32)
     # Windows: Winsock2 for networking (fetch.cpp), advapi32 for crypto APIs
-    target_link_libraries(zepra-core PUBLIC ws2_32 advapi32)
+    target_link_libraries(zepra-core PUBLIC ws2_32 advapi32 psapi)
     target_compile_definitions(zepra-core PRIVATE
         _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()

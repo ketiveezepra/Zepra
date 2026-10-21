@@ -1840,6 +1840,9 @@ Value VM::call(Function* function, Value thisValue, const std::vector<Value>& ar
     if (!function) {
         return Value::undefined();
     }
+    // A host call from outside any script (timer, animation frame) starts a
+    // fresh run, like execute(): a previous run's termination does not apply
+    if (callDepth() == 0) terminationRequested_ = false;
     
     // Use executeCallback for proper execution
     return executeCallback(function, thisValue, args);

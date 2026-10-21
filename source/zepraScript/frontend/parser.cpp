@@ -19,7 +19,7 @@ Parser::Parser(const SourceCode* source) : lexer_(source) {
 std::unique_ptr<Program> Parser::parseProgram() {
     std::vector<StmtPtr> body;
     
-    while (!isAtEnd()) {
+    while (!isAtEnd() && errors_.size() < kMaxErrors) {
         const uint32_t startOffset = currentToken_.start.offset;
         const TokenType startType = currentToken_.type;
         try {
@@ -81,7 +81,9 @@ bool Parser::match(std::initializer_list<TokenType> types) {
 Token Parser::consume(TokenType type, const std::string& message) {
     if (check(type)) return advance();
     error(currentToken_, message);
-    return currentToken_;
+    // Returning without advancing would leave every caller's loop on the
+    // same token forever; abandon the statement instead.
+    throw ParseError(message);
 }
 
 bool Parser::isAtEnd() {
@@ -147,7 +149,7 @@ void Parser::error(const std::string& message) {
 void Parser::error(const Token& token, const std::string& message) {
     std::string err = std::to_string(token.start.line) + ":" +
                       std::to_string(token.start.column) + ": " + message;
-    errors_.push_back(err);
+    if (errors_.size() < kMaxErrors) errors_.push_back(err);
 }
 
 #ifndef NDEBUG

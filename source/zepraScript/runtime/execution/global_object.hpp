@@ -13,6 +13,7 @@ namespace Zepra::Runtime {
 
 // Forward declarations
 class Context;
+class VM;
 
 /**
  * @brief The JavaScript global object
@@ -27,6 +28,13 @@ public:
      * @brief Initialize all built-in objects and functions
      */
     void initialize();
+
+    /**
+     * @brief Copy every own global (built-ins included) into the VM's global
+     *        table, which is what scripts resolve bare names against.
+     * @param except Names the embedder defines itself (e.g. its own console)
+     */
+    void installInto(VM& vm, const std::vector<std::string>& except = {}) const;
     
     // Built-in constructors
     Function* objectConstructor() const { return objectConstructor_; }

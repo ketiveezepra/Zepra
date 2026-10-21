@@ -71,8 +71,17 @@ bool Object::set(const std::string& key, Value value) {
     return true;
 }
 
+// Indices far beyond the current end (sparse arrays such as a[4e9], and the
+// well-known symbol IDs 0xFFFF00xx) go to keyed storage: growing the dense
+// array to them would allocate up to 32 GB. get/has/delete by index already
+// fall back to the keyed form.
+static constexpr size_t kMaxDenseGap = size_t(1) << 16;
+
 bool Object::set(uint32_t index, Value value) {
     if (index >= elements_.size()) {
+        if (index - elements_.size() > kMaxDenseGap) {
+            return set(std::to_string(index), value);
+        }
         elements_.resize(index + 1, Value::undefined());
     }
     elements_[index] = value;
@@ -600,6 +609,10 @@ void Array::fill(Value value, size_t start, size_t end) {
 
 void Array::set(size_t index, Value value) {
     if (index >= elements_.size()) {
+        if (index - elements_.size() > kMaxDenseGap) {
+            Object::set(std::to_string(index), value);
+            return;
+        }
         elements_.resize(index + 1, Value::undefined());
     }
     elements_[index] = value;

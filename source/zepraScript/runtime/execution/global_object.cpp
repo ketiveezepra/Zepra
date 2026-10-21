@@ -9,6 +9,7 @@
  */
 
 #include "runtime/execution/global_object.hpp"
+#include <algorithm>
 #include "builtins/console.hpp"
 #include "builtins/math.hpp"
 #include "builtins/json.hpp"
@@ -169,6 +170,13 @@ void GlobalObject::initialize() {
 
     // Global functions
     initializeGlobalFunctions();
+}
+
+void GlobalObject::installInto(VM& vm, const std::vector<std::string>& except) const {
+    for (const std::string& name : getOwnPropertyNames()) {
+        if (std::find(except.begin(), except.end(), name) != except.end()) continue;
+        vm.setGlobal(name, get(name));
+    }
 }
 
 void GlobalObject::initializeObjectConstructor() {

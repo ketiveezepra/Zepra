@@ -38,6 +38,11 @@ struct ExecutionLimits {
     // CPU limits
     uint64_t maxInstructions = 0;                 // 0 = unlimited
     std::chrono::milliseconds maxExecutionTime{0}; // 0 = unlimited
+
+    // Growth of the whole process's resident memory during one run,
+    // measured from the OS (0 = unlimited). Catches runaway allocation the
+    // heap counters do not see.
+    size_t maxMemoryGrowthBytes = 0;
     
     // Call depth
     size_t maxCallStackDepth = 10000;             // Recursion limit
@@ -131,11 +136,15 @@ struct SecurityPolicy {
 /**
  * @brief Tracks and enforces resource limits during execution
  */
+/// Resident memory of this process in bytes (0 if unavailable)
+size_t processResidentBytes();
+
 class ResourceMonitor {
 public:
     explicit ResourceMonitor(const ExecutionLimits& limits)
         : limits_(limits)
-        , startTime_(std::chrono::steady_clock::now()) {}
+        , startTime_(std::chrono::steady_clock::now())
+        , startResidentBytes_(limits.maxMemoryGrowthBytes ? processResidentBytes() : 0) {}
     
     // Instruction counting
     void addInstructions(uint64_t count) {
@@ -175,12 +184,22 @@ public:
         return callDepth_ < limits_.maxCallStackDepth;
     }
     
+    // Process memory growth; the OS query is only made every 64th call
+    bool checkMemoryGrowth() const {
+        if (limits_.maxMemoryGrowthBytes == 0 || startResidentBytes_ == 0) return true;
+        if (++memoryCheckCounter_ % 64 != 0) return true;
+        size_t rss = processResidentBytes();
+        return rss == 0 || rss < startResidentBytes_ ||
+               rss - startResidentBytes_ < limits_.maxMemoryGrowthBytes;
+    }
+
     // Combined check - call periodically in hot loops
     bool checkLimits() const {
-        return checkInstructionLimit() && 
-               checkTimeout() && 
-               checkHeapLimit() && 
-               checkStackLimit();
+        return checkInstructionLimit() &&
+               checkTimeout() &&
+               checkHeapLimit() &&
+               checkStackLimit() &&
+               checkMemoryGrowth();
     }
     
     // Statistics
@@ -199,6 +218,8 @@ public:
 private:
     ExecutionLimits limits_;
     std::chrono::steady_clock::time_point startTime_;
+    size_t startResidentBytes_ = 0;
+    mutable uint32_t memoryCheckCounter_ = 0;
     
     std::atomic<uint64_t> instructionCount_{0};
     std::atomic<size_t> heapUsed_{0};
