@@ -270,6 +270,11 @@ public:
             "C:\\Windows\\Fonts\\tahoma.ttf",
             "C:\\Windows\\Fonts\\verdana.ttf",
             "C:\\Windows\\Fonts\\calibri.ttf",
+#elif defined(__APPLE__)
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+            "/System/Library/Fonts/Geneva.ttf",
 #else
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",

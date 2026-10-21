@@ -48,6 +48,9 @@ static void loadFilterGLFunctions() {
 #elif defined(_WIN32)
     #define FLOAD(name) nxf_##name = reinterpret_cast<decltype(nxf_##name)>( \
         wglGetProcAddress(#name))
+#elif defined(__APPLE__)
+    #define FLOAD(name) nxf_##name = reinterpret_cast<decltype(nxf_##name)>( \
+        nxAppleGetProcAddress(#name))
 #else
     #define FLOAD(name) (void)0
 #endif

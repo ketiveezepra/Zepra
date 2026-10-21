@@ -7,7 +7,11 @@
 
 #include "nxgfx/context3d.h"
 #include "nxgfx/gl_includes.h"
+#ifdef __APPLE__
+#include <OpenGL/glu.h>
+#else
 #include <GL/glu.h>
+#endif
 #include <cmath>
 
 namespace NXRender {

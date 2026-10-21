@@ -75,3 +75,25 @@ jobs:
 
       - name: Build
         run: cmake --build build --parallel -- -k 0
+
+  # ============================================================================
+  # macOS — Apple Silicon, AppleClang, Cocoa/NSOpenGL backend
+  # ============================================================================
+  macos:
+    name: macOS (arm64, NXRender)
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: brew install ninja pkg-config freetype harfbuzz openssl@3 json-c
+
+      - name: Configure
+        run: cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DUSE_NXRENDER=ON -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+
+      - name: Build
+        run: cmake --build build --parallel $(sysctl -n hw.ncpu) -- -k 0

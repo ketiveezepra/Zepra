@@ -259,7 +259,14 @@ if(WIN32)
 endif()
 
 if(APPLE)
-    target_compile_definitions(nxrender PUBLIC ZEPRA_PLATFORM_MACOS)
+    # macOS: Cocoa + NSOpenGL backend (Objective-C++, ARC)
+    enable_language(OBJCXX)
+    target_sources(nxrender PRIVATE platform/macos_cocoa.mm)
+    set_source_files_properties(platform/macos_cocoa.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(nxrender PUBLIC
+        "-framework Cocoa" "-framework OpenGL" "-framework CoreGraphics")
+    target_compile_definitions(nxrender PUBLIC ZEPRA_PLATFORM_MACOS GL_SILENCE_DEPRECATION)
 endif()
 
 # Install

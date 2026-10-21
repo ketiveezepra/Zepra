@@ -139,6 +139,9 @@ target_link_libraries(nxrender_tests
 )
 if(WIN32)
     target_link_libraries(nxrender_tests opengl32 gdi32)
+elseif(APPLE)
+    # Cocoa/OpenGL frameworks come with nxrender
+    target_link_libraries(nxrender_tests pthread)
 else()
     target_link_libraries(nxrender_tests GL X11 pthread)
 endif()

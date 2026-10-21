@@ -24,8 +24,35 @@
 #   ifdef __MINGW32__
 #       include <GL/glext.h>
 #   endif
+#elif defined(__APPLE__)
+#   ifndef GL_SILENCE_DEPRECATION
+#       define GL_SILENCE_DEPRECATION
+#   endif
+#   include <OpenGL/gl.h>
+#   include <OpenGL/glext.h>
+#   include <dlfcn.h>
+#   include <cstring>
+#   include <string>
 #else
 #   include <GL/gl.h>
+#endif
+
+#ifdef __APPLE__
+// macOS has no glXGetProcAddress/wglGetProcAddress: OpenGL.framework exports
+// every entry point. NXRender runs in a legacy (2.1) context because it uses
+// the fixed-function pipeline, and there vertex array objects exist only as
+// APPLE_vertex_array_object.
+inline void* nxAppleGetProcAddress(const char* name) {
+    static const char* const kAppleVertexArrayFuncs[] = {
+        "glGenVertexArrays", "glBindVertexArray", "glDeleteVertexArrays", "glIsVertexArray"
+    };
+    for (const char* fn : kAppleVertexArrayFuncs) {
+        if (std::strcmp(name, fn) == 0) {
+            return dlsym(RTLD_DEFAULT, (std::string(name) + "APPLE").c_str());
+        }
+    }
+    return dlsym(RTLD_DEFAULT, name);
+}
 #endif
 
 // ── OpenGL 1.2+ constants that may be absent from Windows gl.h ──────────────

@@ -6,6 +6,7 @@
 #include <hb-ft.h>
 #include <cstring>
 #include <algorithm>
+#include <cstdlib>
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -95,6 +96,19 @@ void FontFallbackManager::discoverSystemFonts() {
     if (localAppData) {
         std::string userFonts = std::string(localAppData) + "\\Microsoft\\Windows\\Fonts";
         scanFontDirectory(userFonts);
+    }
+#elif defined(__APPLE__)
+    static const char* fontDirs[] = {
+        "/System/Library/Fonts",
+        "/System/Library/Fonts/Supplemental",
+        "/Library/Fonts",
+        nullptr
+    };
+    for (int i = 0; fontDirs[i]; i++) {
+        scanFontDirectory(fontDirs[i]);
+    }
+    if (const char* home = std::getenv("HOME")) {
+        scanFontDirectory(std::string(home) + "/Library/Fonts");
     }
 #else
     static const char* fontDirs[] = {
