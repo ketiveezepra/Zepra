@@ -91,7 +91,10 @@ public:
     void handleSelectionRequest(XSelectionRequestEvent& event) {
         if (!display_) return;
         
-        XSelectionEvent response;
+        // ICCCM: obsolete clients send property None and expect the target name
+        Atom property = (event.property != None) ? event.property : event.target;
+
+        XSelectionEvent response = {};
         response.type = SelectionNotify;
         response.display = event.display;
         response.requestor = event.requestor;
@@ -102,16 +105,16 @@ public:
         
         if (event.target == targets_) {
             Atom targets[] = { targets_, utf8_, XA_STRING };
-            XChangeProperty(display_, event.requestor, event.property,
+            XChangeProperty(display_, event.requestor, property,
                            XA_ATOM, 32, PropModeReplace,
                            (unsigned char*)targets, 3);
-            response.property = event.property;
+            response.property = property;
         }
         else if (event.target == utf8_ || event.target == XA_STRING) {
-            XChangeProperty(display_, event.requestor, event.property,
+            XChangeProperty(display_, event.requestor, property,
                            event.target, 8, PropModeReplace,
                            (unsigned char*)copiedText_.c_str(), copiedText_.length());
-            response.property = event.property;
+            response.property = property;
         }
         
         XSendEvent(display_, event.requestor, False, 0, (XEvent*)&response);

@@ -185,6 +185,19 @@ bool shouldQuit();
 enum class CursorType { Arrow, Hand, Text };
 void setCursor(CursorType type);
 
+/**
+ * @brief Native window-system handles of the main window (X11: Display*,
+ *        Window), for OS integrations such as the clipboard. Null/0 elsewhere.
+ */
+void* nativeDisplay();
+unsigned long nativeWindow();
+
+/**
+ * @brief Receive raw OS events the platform backend does not handle itself
+ *        (X11: XEvent*, e.g. SelectionRequest).
+ */
+void setNativeEventHook(std::function<void(void*)> hook);
+
 // =========================================================================
 // Debug Overlay
 // =========================================================================

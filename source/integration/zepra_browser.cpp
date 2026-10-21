@@ -5000,6 +5000,20 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
     }
     std::cout << " OK" << std::endl;
 
+#ifdef __linux__
+    // X11 clipboard: copy() needs our display/window to take selection
+    // ownership, and other clients' SelectionRequests must be answered.
+    ZepraBrowser::Clipboard::instance().init(
+        static_cast<::Display*>(NXRender::nativeDisplay()),
+        static_cast<::Window>(NXRender::nativeWindow()));
+    NXRender::setNativeEventHook([](void* nativeEvent) {
+        XEvent* ev = static_cast<XEvent*>(nativeEvent);
+        if (ev->type == SelectionRequest) {
+            ZepraBrowser::Clipboard::instance().handleSelectionRequest(ev->xselectionrequest);
+        }
+    });
+#endif
+
     // Set compositor background to dark theme (prevents white flash)
     if (NXRender::compositor()) {
         NXRender::compositor()->setBackgroundColor(NXRender::Color(0x0D1117));
