@@ -498,8 +498,10 @@ void HTML5Tokenizer::processTagName(char32_t c) {
     } else if (c == '>') {
         if (current_.type == HTML5TokenType::StartTag)
             lastStartTagName_ = current_.tagName;
-        emitCurrentTag();
+        // Switch state before emitting: the tree builder may change it while
+        // handling the tag (e.g. <script> -> ScriptData)
         state_ = TokenizerState::Data;
+        emitCurrentTag();
     } else if (isASCIIUpper(c)) {
         current_.tagName += toLowerASCII(c);
     } else if (c == '\0') {
@@ -567,8 +569,10 @@ void HTML5Tokenizer::processAfterAttributeName(char32_t c) {
         commitCurrentAttribute();
         if (current_.type == HTML5TokenType::StartTag)
             lastStartTagName_ = current_.tagName;
-        emitCurrentTag();
+        // Switch state before emitting: the tree builder may change it while
+        // handling the tag (e.g. <script> -> ScriptData)
         state_ = TokenizerState::Data;
+        emitCurrentTag();
     } else if (c == kEOF) {
         // parse error
         emitEOF();
@@ -593,8 +597,10 @@ void HTML5Tokenizer::processBeforeAttributeValue(char32_t c) {
         commitCurrentAttribute();
         if (current_.type == HTML5TokenType::StartTag)
             lastStartTagName_ = current_.tagName;
-        emitCurrentTag();
+        // Switch state before emitting: the tree builder may change it while
+        // handling the tag (e.g. <script> -> ScriptData)
         state_ = TokenizerState::Data;
+        emitCurrentTag();
     } else {
         state_ = TokenizerState::AttributeValueUnquoted;
         reconsume(c);
@@ -643,8 +649,10 @@ void HTML5Tokenizer::processAttributeValueUnquoted(char32_t c) {
         commitCurrentAttribute();
         if (current_.type == HTML5TokenType::StartTag)
             lastStartTagName_ = current_.tagName;
-        emitCurrentTag();
+        // Switch state before emitting: the tree builder may change it while
+        // handling the tag (e.g. <script> -> ScriptData)
         state_ = TokenizerState::Data;
+        emitCurrentTag();
     } else if (c == '\0') {
         currentAttrValue_ += utf8Encode(0xFFFD);
     } else if (c == kEOF) {
@@ -665,8 +673,10 @@ void HTML5Tokenizer::processAfterAttributeValueQuoted(char32_t c) {
         commitCurrentAttribute();
         if (current_.type == HTML5TokenType::StartTag)
             lastStartTagName_ = current_.tagName;
-        emitCurrentTag();
+        // Switch state before emitting: the tree builder may change it while
+        // handling the tag (e.g. <script> -> ScriptData)
         state_ = TokenizerState::Data;
+        emitCurrentTag();
     } else if (c == kEOF) {
         emitEOF();
     } else {
@@ -682,8 +692,10 @@ void HTML5Tokenizer::processSelfClosingStartTag(char32_t c) {
         current_.selfClosing = true;
         if (current_.type == HTML5TokenType::StartTag)
             lastStartTagName_ = current_.tagName;
-        emitCurrentTag();
+        // Switch state before emitting: the tree builder may change it while
+        // handling the tag (e.g. <script> -> ScriptData)
         state_ = TokenizerState::Data;
+        emitCurrentTag();
     } else if (c == kEOF) {
         emitEOF();
     } else {
@@ -1471,7 +1483,7 @@ void HTML5Tokenizer::processRCDATAEndTagName(char32_t c) {
     if ((isWhitespace(c) || c == '/' || c == '>') && isAppropriateEndTagToken()) {
         if (isWhitespace(c)) state_ = TokenizerState::BeforeAttributeName;
         else if (c == '/') state_ = TokenizerState::SelfClosingStartTag;
-        else { emitCurrentTag(); state_ = TokenizerState::Data; }
+        else { state_ = TokenizerState::Data; emitCurrentTag(); }
     } else if (isASCIIAlpha(c)) {
         current_.tagName += toLowerASCII(c);
         temporaryBuffer_ += utf8Encode(c);
@@ -1513,7 +1525,7 @@ void HTML5Tokenizer::processRAWTEXTEndTagName(char32_t c) {
     if ((isWhitespace(c) || c == '/' || c == '>') && isAppropriateEndTagToken()) {
         if (isWhitespace(c)) state_ = TokenizerState::BeforeAttributeName;
         else if (c == '/') state_ = TokenizerState::SelfClosingStartTag;
-        else { emitCurrentTag(); state_ = TokenizerState::Data; }
+        else { state_ = TokenizerState::Data; emitCurrentTag(); }
     } else if (isASCIIAlpha(c)) {
         current_.tagName += toLowerASCII(c);
         temporaryBuffer_ += utf8Encode(c);
@@ -1559,7 +1571,7 @@ void HTML5Tokenizer::processScriptDataEndTagName(char32_t c) {
     if ((isWhitespace(c) || c == '/' || c == '>') && isAppropriateEndTagToken()) {
         if (isWhitespace(c)) state_ = TokenizerState::BeforeAttributeName;
         else if (c == '/') state_ = TokenizerState::SelfClosingStartTag;
-        else { emitCurrentTag(); state_ = TokenizerState::Data; }
+        else { state_ = TokenizerState::Data; emitCurrentTag(); }
     } else if (isASCIIAlpha(c)) {
         current_.tagName += toLowerASCII(c);
         temporaryBuffer_ += utf8Encode(c);
@@ -1677,7 +1689,7 @@ void HTML5Tokenizer::processScriptDataEscapedEndTagName(char32_t c) {
     if ((isWhitespace(c) || c == '/' || c == '>') && isAppropriateEndTagToken()) {
         if (isWhitespace(c)) state_ = TokenizerState::BeforeAttributeName;
         else if (c == '/') state_ = TokenizerState::SelfClosingStartTag;
-        else { emitCurrentTag(); state_ = TokenizerState::Data; }
+        else { state_ = TokenizerState::Data; emitCurrentTag(); }
     } else if (isASCIIAlpha(c)) {
         current_.tagName += toLowerASCII(c);
         temporaryBuffer_ += utf8Encode(c);
