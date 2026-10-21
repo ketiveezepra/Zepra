@@ -82,7 +82,9 @@ void LazyImageLoader::queueImage(LayoutBox* box, const std::string& url,
         auto it = textureCache_.find(url);
         if (it != textureCache_.end()) {
             // Already loaded - update box directly
-            box->textureId = it->second;
+            box->textureId = it->second.textureId;
+            box->width = (float)it->second.width;
+            box->height = (float)it->second.height;
             box->text = ""; // Clear placeholder
             // std::cout << "[LazyImageLoader] Cache hit: " << url.substr(url.rfind('/') + 1) << std::endl;
             return;
@@ -94,6 +96,7 @@ void LazyImageLoader::queueImage(LayoutBox* box, const std::string& url,
     pending.url = url;
     pending.priority = priority;
     pending.tabId = tabId;
+    pending.generation = generation_.load();
     
     {
         std::lock_guard<std::mutex> lock(pendingMutex_);
@@ -126,6 +129,12 @@ void LazyImageLoader::cancelAll() {
         pendingQueue_.pop();
     }
     pendingCount_ = 0;
+    // Images already taken by a worker still point at the old boxes
+    ++generation_;
+    {
+        std::lock_guard<std::mutex> rawLock(rawMutex_);
+        rawImages_.clear();
+    }
     std::cout << "[LazyImageLoader] All pending images cancelled" << std::endl;
 }
 
@@ -133,8 +142,15 @@ void LazyImageLoader::pollCompleted(std::vector<ImageResult>& results, int maxRe
     // First, process raw images that need texture creation (main thread only)
     {
         std::lock_guard<std::mutex> lock(rawMutex_);
+        const uint64_t currentGeneration = generation_.load();
         for (auto& raw : rawImages_) {
-            if (!raw.box) continue;
+            if (!raw.box || raw.generation != currentGeneration) continue;
+
+            if (!raw.errorText.empty()) {
+                raw.box->text = raw.errorText;
+                raw.box->color = raw.errorColor;
+                continue;
+            }
             
             // SVG data (tagged with negative width)
             if (raw.width < 0) {
@@ -157,6 +173,10 @@ void LazyImageLoader::pollCompleted(std::vector<ImageResult>& results, int maxRe
                     raw.box->width = (float)raw.width;
                     raw.box->height = (float)raw.height;
                     raw.box->text = "";
+                    if (!raw.url.empty()) {
+                        std::lock_guard<std::mutex> cacheLock(cacheMutex_);
+                        textureCache_[raw.url] = {texId, raw.width, raw.height};
+                    }
                     
                     // std::cout << "[LazyImageLoader] Texture created: " << raw.width 
                     //           << "x" << raw.height << std::endl;
@@ -214,6 +234,19 @@ void LazyImageLoader::workerThread() {
     }
     
     std::cout << "[LazyImageLoader] Worker thread stopped" << std::endl;
+}
+
+void LazyImageLoader::queueError(const PendingImage& pending, const char* text, uint32_t color) {
+    if (!pending.box) return;
+    std::lock_guard<std::mutex> lock(rawMutex_);
+    RawImage raw;
+    raw.box = pending.box;
+    raw.width = 0;
+    raw.height = 0;
+    raw.generation = pending.generation;
+    raw.errorText = text;
+    raw.errorColor = color;
+    rawImages_.push_back(std::move(raw));
 }
 
 ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
@@ -443,6 +476,7 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
                 std::lock_guard<std::mutex> lock(rawMutex_);
                 RawImage raw;
                 raw.box = pending.box;
+                raw.generation = pending.generation;
                 raw.width = (int)svgW;
                 raw.height = (int)svgH;
                 // Store SVG XML as pixel data marker (main thread detects this)
@@ -464,10 +498,7 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
         // Unknown format - show warning instead of trying to decode
         if (!isRaster) {
             result.error = "Unknown image format (" + detectedFormat + ")";
-            if (pending.box) {
-                pending.box->text = "[IMG: Unknown]";
-                pending.box->color = 0xFF6600; // Orange for warnings
-            }
+            queueError(pending, "[IMG: Unknown]", 0xFF6600); // Orange for warnings
             // std::cout << "[LazyImageLoader] Skipping unknown format: " << pending.url.substr(0, 80) << std::endl;
             return result;
         }
@@ -479,10 +510,7 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
         
         if (!pixels) {
             result.error = stbi_failure_reason();
-            if (pending.box) {
-                pending.box->text = "[IMG: Decode Failed]";
-                pending.box->color = 0xFF0000;
-            }
+            queueError(pending, "[IMG: Decode Failed]", 0xFF0000);
             return result;
         }
         
@@ -495,6 +523,8 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
             std::lock_guard<std::mutex> lock(rawMutex_);
             RawImage raw;
             raw.box = pending.box;
+            raw.generation = pending.generation;
+            raw.url = pending.url;
             raw.width = w;
             raw.height = h;
             raw.pixels.assign(pixels, pixels + (w * h * 4));
@@ -508,10 +538,7 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
         
     } catch (const std::exception& e) {
         result.error = e.what();
-        if (pending.box) {
-            pending.box->text = "[IMG: Error]";
-            pending.box->color = 0xFF0000;
-        }
+        queueError(pending, "[IMG: Error]", 0xFF0000);
     }
     
     return result;
