@@ -347,6 +347,18 @@ void setCursor(CursorType type) {
     }
 }
 
+void* nativeDisplay() {
+    return g_platform ? g_platform->nativeDisplay() : nullptr;
+}
+
+unsigned long nativeWindow() {
+    return g_platform ? g_platform->nativeWindow() : 0;
+}
+
+void setNativeEventHook(std::function<void(void*)> hook) {
+    if (g_platform) g_platform->setNativeEventHook(std::move(hook));
+}
+
 bool shouldQuit() {
     return g_quitRequested;
 }
