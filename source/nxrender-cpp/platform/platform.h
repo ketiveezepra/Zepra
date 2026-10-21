@@ -53,6 +53,11 @@ public:
      * @brief Native window-system handles, for OS integrations such as the
      *        clipboard (X11: Display* and Window). Null/0 when not applicable.
      */
+    /**
+     * @brief Synchronise buffer swaps with the display refresh, if supported
+     */
+    virtual void setVSync(bool enabled) { (void)enabled; }
+
     virtual void* nativeDisplay() const { return nullptr; }
     virtual unsigned long nativeWindow() const { return 0; }
 

@@ -9,6 +9,7 @@
 #include "platform/platform.h"
 #include <memory>
 #include <chrono>
+#include <thread>
 #include <algorithm>
 #include <iostream>
 
@@ -186,6 +187,7 @@ bool initWithOptions(const InitOptions& options) {
 
     if (options.vsync) {
         g_compositor->setVsyncEnabled(true);
+        g_platform->setVSync(true);
     }
 
     setTheme(Theme::light());
@@ -324,9 +326,17 @@ void render() {
 }
 
 void run() {
+    // Without vsync, swapBuffers returns immediately and the loop would spin a
+    // whole CPU core; cap it at ~60 frames per second.
+    constexpr auto kFrameBudget = std::chrono::microseconds(16667);
     while (g_running && !g_quitRequested) {
+        auto frameStart = std::chrono::steady_clock::now();
         processEvents();
         render();
+        auto elapsed = std::chrono::steady_clock::now() - frameStart;
+        if (elapsed < kFrameBudget) {
+            std::this_thread::sleep_for(kFrameBudget - elapsed);
+        }
     }
 }
 

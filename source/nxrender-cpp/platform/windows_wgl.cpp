@@ -509,6 +509,17 @@ public:
     }
 
     // -------------------------------------------------------------------------
+    void setVSync(bool enabled) override {
+        // WGL_EXT_swap_control; needs the context current (done in init)
+        using SwapIntervalFn = BOOL (WINAPI*)(int);
+        auto swapInterval = reinterpret_cast<SwapIntervalFn>(
+            reinterpret_cast<void*>(wglGetProcAddress("wglSwapIntervalEXT")));
+        if (hglrc_ && swapInterval) {
+            swapInterval(enabled ? 1 : 0);
+        }
+    }
+
+    // -------------------------------------------------------------------------
     void setTitle(const std::string& title) override {
         if (hwnd_) {
             SetWindowTextW(hwnd_, utf8ToWide(title).c_str());
