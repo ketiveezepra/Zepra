@@ -38,6 +38,9 @@ static void loadRTGLFunctions() {
 #elif defined(_WIN32)
     #define RTLOAD(name) rt_##name = reinterpret_cast<decltype(rt_##name)>( \
         wglGetProcAddress(#name))
+#elif defined(__APPLE__)
+    #define RTLOAD(name) rt_##name = reinterpret_cast<decltype(rt_##name)>( \
+        nxAppleGetProcAddress(#name))
 #else
     #define RTLOAD(name) (void)0
 #endif

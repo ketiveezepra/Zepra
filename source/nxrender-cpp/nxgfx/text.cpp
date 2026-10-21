@@ -47,6 +47,11 @@ struct TextRenderer::Impl {
             "C:\\Windows\\Fonts\\segoeui.ttf",   // Segoe UI (Windows 7+)
             "C:\\Windows\\Fonts\\arial.ttf",      // Arial fallback
             "C:\\Windows\\Fonts\\tahoma.ttf",     // Tahoma fallback
+#elif defined(__APPLE__)
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+            "/System/Library/Fonts/Geneva.ttf",
 #else
             // Linux / NeolyxOS paths (unchanged)
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",

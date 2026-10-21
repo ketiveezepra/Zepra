@@ -56,6 +56,9 @@ static void loadBatchGLFunctions() {
 #elif defined(_WIN32)
     #define BLOAD(name) nxb_##name = reinterpret_cast<decltype(nxb_##name)>( \
         wglGetProcAddress(#name))
+#elif defined(__APPLE__)
+    #define BLOAD(name) nxb_##name = reinterpret_cast<decltype(nxb_##name)>( \
+        nxAppleGetProcAddress(#name))
 #else
     #define BLOAD(name) (void)0
 #endif

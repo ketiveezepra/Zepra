@@ -6,6 +6,7 @@
  * Platform-specific clipboard support:
  *   Linux/NeolyxOS: X11 selections (CLIPBOARD + PRIMARY)
  *   Windows:        Win32 clipboard API (OpenClipboard / SetClipboardData)
+ *   macOS:          NSPasteboard (via NXRender's macos_clipboard.h)
  */
 
 #ifndef ZEPRA_CLIPBOARD_H
@@ -15,9 +16,44 @@
 #include <cstring>
 
 // ============================================================================
+// Platform: macOS  (NSPasteboard)
+// ============================================================================
+#if defined(__APPLE__)
+
+#include "platform/macos_clipboard.h"
+
+namespace ZepraBrowser {
+
+class Clipboard {
+public:
+    static Clipboard& instance() {
+        static Clipboard inst;
+        return inst;
+    }
+
+    bool copy(const std::string& text) {
+        if (!NXRender::macClipboardSetText(text)) return false;
+        copiedText_ = text;
+        return true;
+    }
+
+    std::string paste() {
+        return NXRender::macClipboardGetText();
+    }
+
+    const std::string& getCopiedText() const { return copiedText_; }
+
+private:
+    Clipboard() = default;
+    std::string copiedText_;
+};
+
+} // namespace ZepraBrowser
+
+// ============================================================================
 // Platform: Linux / NeolyxOS  (X11 selections)
 // ============================================================================
-#ifndef _WIN32
+#elif !defined(_WIN32)
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>

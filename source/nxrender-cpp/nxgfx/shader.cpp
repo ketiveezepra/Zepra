@@ -69,6 +69,8 @@ static void* getGLProc(const char* name) {
     return reinterpret_cast<void*>(glXGetProcAddress(reinterpret_cast<const GLubyte*>(name)));
 #elif _WIN32
     return reinterpret_cast<void*>(wglGetProcAddress(name));
+#elif defined(__APPLE__)
+    return nxAppleGetProcAddress(name);
 #else
     return nullptr;
 #endif

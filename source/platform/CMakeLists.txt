@@ -29,11 +29,8 @@ if(WIN32)
     )
 endif()
 
-if(APPLE)
-    list(APPEND PLATFORM_SOURCES
-        src/macos/window_system_macos.mm
-    )
-endif()
+# macOS: windows come from NXRender's Cocoa backend; WindowSystem has no
+# macOS implementation (nothing calls WindowSystem::create()).
 
 add_library(platform STATIC ${PLATFORM_SOURCES})
 
