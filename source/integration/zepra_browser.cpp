@@ -891,6 +891,9 @@ std::string resolveUrl(const std::string& base, const std::string& href) {
 // Computes styles for g_document and rebuilds the layout box tree from it.
 // Used on page load and when :hover/:active/:focus state changes; the DOM,
 // scripts and scroll position are left untouched.
+// DOM version (Zepra::WebCore::domMutationVersion) the layout tree reflects
+static uint64_t g_layoutDomVersion = 0;
+
 static void rebuildLayoutTree() {
     g_layoutPainted = false;
     // Compute styles
@@ -1012,6 +1015,30 @@ static void rebuildLayoutTree() {
     int totalBoxes = countBoxes(*g_layoutRoot);
     std::cout << "[Layout] Built layout tree: " << totalBoxes << " total boxes, "
               << g_layoutRoot->children.size() << " direct children" << std::endl;
+    // Recorded after building, so any DOM writes made while building cannot
+    // trigger a relayout on every frame
+    g_layoutDomVersion = Zepra::WebCore::domMutationVersion();
+}
+
+static LayoutBox* findBoxForElement(LayoutBox* box, DOMElement* element) {
+    if (!box || !element) return nullptr;
+    if (box->domElement == element) return box;
+    for (auto& child : box->children) {
+        if (LayoutBox* found = findBoxForElement(&child, element)) return found;
+    }
+    return nullptr;
+}
+
+// Restyles and rebuilds the box tree of the current document (after script
+// DOM changes or a :hover/:active/:focus change), keeping input focus.
+static void relayoutDocument() {
+    if (!g_document || !g_cssEngine) return;
+    DOMElement* focusedElement = g_focusedBox ? g_focusedBox->domElement : nullptr;
+    // Queued image loads point at boxes of the tree being replaced
+    ZepraBrowser::g_lazyImageLoader.cancelAll();
+    g_styledLines.clear();
+    rebuildLayoutTree();
+    g_focusedBox = findBoxForElement(g_layoutRoot.get(), focusedElement);
 }
 
 void parseWithWebCore(const std::string& html) {
@@ -1201,6 +1228,11 @@ void parseWithWebCore(const std::string& html) {
         g_scriptContext->evaluate("if (typeof window !== 'undefined' && typeof window.onload === 'function') { window.onload(); }", "zepra://internal/onload");
     }
     std::cout << "[JS] DOMContentLoaded and Window Load fired" << std::endl;
+
+    // The box tree was built before scripts ran; show their DOM changes
+    if (Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
+        relayoutDocument();
+    }
 }
 
 // =============================================================================
@@ -3230,6 +3262,15 @@ void render() {
         g_asyncLoadComplete = false;
     }
     
+    // === SCRIPT TIMERS AND ANIMATION FRAMES ===
+    if (g_scriptContext) {
+        g_scriptContext->processTimers();
+        g_scriptContext->runAnimationFrames();
+        if (g_layoutRoot && Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
+            relayoutDocument();
+        }
+    }
+
     // === LAZY IMAGE LOADER POLL ===
     // Process completed background image loads and create textures
     {
@@ -4143,6 +4184,7 @@ void onSelectTab(int tabId) {
                 g_document = std::move(tab.document);
                 g_cssEngine = std::move(tab.cssEngine);
                 g_layoutRoot = std::move(tab.layoutRoot);
+                g_layoutDomVersion = Zepra::WebCore::domMutationVersion();
             } else {
                 g_document = nullptr;
                 g_cssEngine = nullptr;
@@ -4861,15 +4903,6 @@ static DOMElement* findElementAt(LayoutBox* box, float x, float y) {
     return nullptr;
 }
 
-static LayoutBox* findBoxForElement(LayoutBox* box, DOMElement* element) {
-    if (!box || !element) return nullptr;
-    if (box->domElement == element) return box;
-    for (auto& child : box->children) {
-        if (LayoutBox* found = findBoxForElement(&child, element)) return found;
-    }
-    return nullptr;
-}
-
 // Records the hovered / pressed / focused elements and, when that changes a
 // style the page actually uses (:hover, :active, :focus), restyles and
 // rebuilds the box tree. The DOM, scripts and scroll position are kept.
@@ -4883,13 +4916,7 @@ static void setInteractionState(DOMElement* hovered, DOMElement* active, DOMElem
     state.active = active;
     state.focused = focused;
     if (!restyle) return;
-
-    DOMElement* focusedElement = g_focusedBox ? g_focusedBox->domElement : nullptr;
-    // Queued image loads point at boxes of the tree being replaced
-    ZepraBrowser::g_lazyImageLoader.cancelAll();
-    g_styledLines.clear();
-    rebuildLayoutTree();
-    g_focusedBox = findBoxForElement(g_layoutRoot.get(), focusedElement);
+    relayoutDocument();
 }
 
 void handleNXEvent(const NXRender::Event& event) {

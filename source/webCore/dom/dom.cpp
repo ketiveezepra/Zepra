@@ -40,8 +40,13 @@ DOMNode* DOMNode::nextSibling() const {
     return nullptr;
 }
 
+static uint64_t s_domMutationVersion = 0;
+uint64_t domMutationVersion() { return s_domMutationVersion; }
+void noteDomMutation() { ++s_domMutationVersion; }
+
 DOMNode* DOMNode::appendChild(std::unique_ptr<DOMNode> child) {
     if (!child) return nullptr;
+    noteDomMutation();
     
     child->parent_ = this;
     child->document_ = this->document_;
@@ -52,6 +57,7 @@ DOMNode* DOMNode::appendChild(std::unique_ptr<DOMNode> child) {
 
 DOMNode* DOMNode::insertBefore(std::unique_ptr<DOMNode> child, DOMNode* refChild) {
     if (!child) return nullptr;
+    noteDomMutation();
     
     child->parent_ = this;
     child->document_ = this->document_;
@@ -76,6 +82,7 @@ std::unique_ptr<DOMNode> DOMNode::removeChild(DOMNode* child) {
         if (it->get() == child) {
             std::unique_ptr<DOMNode> removed = std::move(*it);
             children_.erase(it);
+            noteDomMutation();
             removed->parent_ = nullptr;
             return removed;
         }
@@ -93,6 +100,7 @@ DOMNode* DOMNode::replaceChild(std::unique_ptr<DOMNode> newChild, DOMNode* oldCh
             oldChild->parent_ = nullptr;
             DOMNode* ptr = newChild.get();
             *it = std::move(newChild);
+            noteDomMutation();
             return ptr;
         }
     }
@@ -145,10 +153,11 @@ std::string DOMElement::getAttribute(const std::string& name) const {
 
 void DOMElement::setAttribute(const std::string& name, const std::string& value) {
     attributes_[name] = value;
+    noteDomMutation();
 }
 
 void DOMElement::removeAttribute(const std::string& name) {
-    attributes_.erase(name);
+    if (attributes_.erase(name)) noteDomMutation();
 }
 
 bool DOMElement::hasAttribute(const std::string& name) const {
@@ -176,6 +185,7 @@ std::string DOMElement::innerHTML() const {
 void DOMElement::setInnerHTML(const std::string& html) {
     // Clear children first
     children_.clear();
+    noteDomMutation();
     // Would parse HTML here - stub
 }
 
@@ -193,6 +203,7 @@ std::string DOMElement::textContent() const {
 
 void DOMElement::setTextContent(const std::string& text) {
     children_.clear();
+    noteDomMutation();
     if (!text.empty()) {
         appendChild(std::make_unique<DOMText>(text));
     }

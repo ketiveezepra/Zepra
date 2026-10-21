@@ -17,6 +17,11 @@ namespace Zepra::WebCore {
 
 class DOMNode;
 class DOMElement;
+
+/// Incremented on every change to the DOM tree, text or attributes; the
+/// renderer compares it to know when the layout must be rebuilt.
+uint64_t domMutationVersion();
+void noteDomMutation();
 class DOMDocument;
 class RenderNode;
 
@@ -93,11 +98,11 @@ public:
     
     std::string nodeName() const override { return "#text"; }
     std::string nodeValue() const override { return data_; }
-    void setNodeValue(const std::string& value) override { data_ = value; }
+    void setNodeValue(const std::string& value) override { data_ = value; noteDomMutation(); }
     
     const std::string& data() const { return data_; }
-    void setData(const std::string& data) { data_ = data; }
-    void appendData(const std::string& extra) { data_ += extra; }
+    void setData(const std::string& data) { data_ = data; noteDomMutation(); }
+    void appendData(const std::string& extra) { data_ += extra; noteDomMutation(); }
     size_t length() const { return data_.length(); }
     
     std::unique_ptr<DOMNode> cloneNode(bool deep) const override;
@@ -115,7 +120,7 @@ public:
     
     std::string nodeName() const override { return "#comment"; }
     std::string nodeValue() const override { return data_; }
-    void setNodeValue(const std::string& value) override { data_ = value; }
+    void setNodeValue(const std::string& value) override { data_ = value; noteDomMutation(); }
     const std::string& data() const { return data_; }
     
     std::unique_ptr<DOMNode> cloneNode(bool deep) const override;
