@@ -7,3 +7,6 @@ build/** linguist-vendored
 build_nxrender/** linguist-vendored
 */build/** linguist-vendored
 **/CMakeFiles/** linguist-vendored
+
+# Byte-exact test fixtures (PDF xref offsets break if line endings change)
+*.pdf binary

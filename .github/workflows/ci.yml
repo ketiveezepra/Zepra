@@ -43,6 +43,9 @@ jobs:
       - name: Build
         run: cmake --build build --parallel $(nproc) -- -k 0
 
+      - name: NXRender tests
+        run: ctest --test-dir build/test -R "NxRenderTests|NxPdfTest" --output-on-failure
+
   # ============================================================================
   # Windows — MSYS2 UCRT64 (GCC), Win32/WGL backend
   # ============================================================================
@@ -75,3 +78,6 @@ jobs:
 
       - name: Build
         run: cmake --build build --parallel -- -k 0
+
+      - name: NXRender tests
+        run: ctest --test-dir build/test -R "NxRenderTests|NxPdfTest" --output-on-failure

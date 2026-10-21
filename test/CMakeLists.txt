@@ -153,7 +153,8 @@ target_link_libraries(nxpdf_test nxrender z Freetype::Freetype)
 if(NOT WIN32)
     target_link_libraries(nxpdf_test pthread)
 endif()
-add_test(NAME NxPdfTest COMMAND nxpdf_test)
+add_test(NAME NxPdfTest COMMAND nxpdf_test
+    ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hello.pdf "Hello NXRender")
 
 # =============================================================================
 # ZepraEngine Tests
