@@ -542,7 +542,7 @@ HttpResponse httpGet(const std::string& url) {
         config.readTimeoutMs = 30000;  // Increased for slow sites
         config.followRedirects = true;
         config.maxRedirects = 10;
-        config.verifySsl = false;  // Skip verification for now
+        config.verifySsl = true;  // reject untrusted or mismatched certificates
         config.userAgent = "ZepraBrowser/1.0 (NeolyxOS)";
         config.useCookies = true;
         
@@ -618,7 +618,7 @@ std::vector<uint8_t> httpGetBinary(const std::string& url) {
         config.readTimeoutMs = 30000;
         config.followRedirects = true;
         config.maxRedirects = 10;
-        config.verifySsl = false;
+        config.verifySsl = true;
         config.userAgent = "ZepraBrowser/1.0 (NeolyxOS)";
         
         Zepra::Networking::HttpClient client(config);
