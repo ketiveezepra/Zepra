@@ -118,6 +118,9 @@ target_include_directories(nxcrypto_tests PRIVATE
 target_link_libraries(nxcrypto_tests nxcrypto GTest::gtest GTest::gtest_main)
 if(WIN32)
     target_link_libraries(nxcrypto_tests ${OPENSSL_LIBRARIES})
+elseif(APPLE)
+    # Homebrew OpenSSL is not on the default linker path; use the found paths
+    target_link_libraries(nxcrypto_tests ${OPENSSL_LIBRARIES})
 else()
     target_link_libraries(nxcrypto_tests pthread ssl crypto)
 endif()

@@ -124,6 +124,12 @@ public:
         uint32_t insn = 0xD1000000 | ((imm12 & 0xFFF) << 10) | (rn << 5) | rd;
         emit32(insn);
     }
+
+    void subImm32(uint8_t rd, uint8_t rn, uint32_t imm12) {
+        // SUB Wd, Wn, #imm12
+        uint32_t insn = 0x51000000 | ((imm12 & 0xFFF) << 10) | (rn << 5) | rd;
+        emit32(insn);
+    }
     
     // Negate: NEG Xd, Xn = SUB Xd, XZR, Xn
     void neg64(uint8_t rd, uint8_t rn) {
@@ -772,6 +778,16 @@ public:
         emit32(insn);
     }
     
+    // Test bit and branch if zero: TBZ Wt, #bit, label (bit 0-31, byte offset)
+    static uint32_t encodeTbz32(uint8_t rt, uint8_t bit, int32_t offset) {
+        uint32_t imm14 = ((offset >> 2) & 0x3FFF);
+        return 0x36000000 | ((bit & 0x1Fu) << 19) | (imm14 << 5) | rt;
+    }
+
+    void tbz32(uint8_t rt, uint8_t bit, int32_t offset) {
+        emit32(encodeTbz32(rt, bit, offset));
+    }
+
     // Compare and branch if zero (64-bit)
     void cbz64(uint8_t rt, int32_t offset) {
         uint32_t imm19 = ((offset >> 2) & 0x7FFFF);

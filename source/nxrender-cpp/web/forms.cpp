@@ -187,7 +187,10 @@ std::unique_ptr<BoxNode> FormControlRenderer::renderInput(
     std::string displayText;
     if (textState && !textState->text.empty()) {
         if (state.type == "password") {
-            displayText = std::string(textState->text.size(), '\u2022');
+            // One bullet (U+2022, 3 bytes in UTF-8) per character of the value
+            for (unsigned char c : textState->text) {
+                if ((c & 0xC0) != 0x80) displayText += "\xE2\x80\xA2";
+            }
         } else {
             displayText = textState->text;
         }

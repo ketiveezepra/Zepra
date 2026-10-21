@@ -84,7 +84,8 @@ bool IncrementalGC::markStep() {
         processed++;
         
         // Traverse object references and add to queue
-        obj->visitRefs([this, &inQueue](Runtime::Object* ref) {
+        // inQueue is thread_local (not captured); visitRefs runs on this thread
+        obj->visitRefs([this](Runtime::Object* ref) {
             if (ref && !ref->isMarked() && inQueue.find(ref) == inQueue.end()) {
                 markQueue_.push_back(ref);
                 inQueue.insert(ref);

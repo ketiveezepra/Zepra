@@ -94,6 +94,9 @@ target_link_libraries(zeprascript-integration-tests
 if(WIN32)
     target_link_libraries(zeprascript-integration-tests PRIVATE
         ${OPENSSL_LIBRARIES} ws2_32)
+elseif(APPLE)
+    target_link_libraries(zeprascript-integration-tests PRIVATE
+        ${OPENSSL_LIBRARIES})
 else()
     target_link_libraries(zeprascript-integration-tests PRIVATE
         ssl crypto pthread)

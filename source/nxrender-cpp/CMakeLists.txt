@@ -217,7 +217,12 @@ find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
     pkg_check_modules(HARFBUZZ REQUIRED harfbuzz)
     target_include_directories(nxrender PRIVATE ${HARFBUZZ_INCLUDE_DIRS})
-    set(HARFBUZZ_LINK_LIBS ${HARFBUZZ_LIBRARIES})
+    if(APPLE)
+        # Homebrew prefix is not on the default linker path: full paths
+        set(HARFBUZZ_LINK_LIBS ${HARFBUZZ_LINK_LIBRARIES})
+    else()
+        set(HARFBUZZ_LINK_LIBS ${HARFBUZZ_LIBRARIES})
+    endif()
 else()
     # Windows / systems without pkg-config
     find_library(HARFBUZZ_LIB NAMES harfbuzz)

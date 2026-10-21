@@ -438,7 +438,7 @@ private:
         if (v->numInputs() >= 1) {
             Value* retVal = v->input(0);
             if (isFloat(retVal->type())) {
-                loadValue(retVal, JIT::Reg::xmm0);
+                loadValue(retVal, JIT::Reg::floatReturn);
             } else {
                 loadValue(retVal, JIT::Reg::returnValue);
             }
@@ -471,7 +471,7 @@ private:
         auto dst = regOf(v);
         if (dst.isReg() && dst.reg != JIT::Reg::returnValue) {
             if (isFloat(v->type())) {
-                masm_.movsd(dst.reg, JIT::Reg::xmm0);
+                masm_.movsd(dst.reg, JIT::Reg::floatReturn);
             } else {
                 masm_.mov(dst.reg, JIT::Reg::returnValue);
             }
@@ -546,7 +546,7 @@ private:
         if (!baseRa.isReg()) loadValue(base, baseReg);
 
         int32_t offset = 0;
-        JIT::Register valReg = valRa.isReg() ? valRa.reg : JIT::Reg::r10;
+        JIT::Register valReg = valRa.isReg() ? valRa.reg : JIT::Reg::scratch2;
         if (!valRa.isReg()) loadValue(val, valReg);
 
         (void)size;
