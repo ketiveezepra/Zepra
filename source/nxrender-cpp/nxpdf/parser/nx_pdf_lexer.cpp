@@ -8,6 +8,8 @@
 #include <cctype>
 #include <charconv>
 #include <cstdint>
+#include <cstdlib>
+#include <string>
 
 namespace nxrender {
 namespace pdf {
@@ -225,7 +227,12 @@ Token Lexer::ParseNumberOrKeyword() {
         if (isNumber) {
             if (hasDot) {
                 t.type = TokenType::Real;
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
                 std::from_chars(word.data(), word.data() + word.size(), t.realValue);
+#else
+                // libc++ without floating-point from_chars (Apple Clang)
+                t.realValue = std::strtod(std::string(word).c_str(), nullptr);
+#endif
             } else {
                 t.type = TokenType::Integer;
                 std::from_chars(word.data(), word.data() + word.size(), t.intValue);

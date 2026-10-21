@@ -3220,11 +3220,9 @@ void BaselineCompiler::emitTierUpCheck() {
     
     // Patch branch - calculate offset
     size_t skipTarget = codeBuffer_->offset();
-    // ARM64 TBZ uses 14-bit signed offset in units of 4 bytes
-    int32_t offset = static_cast<int32_t>((skipTarget - branchOffset) / 4);
-    // Patch the TBZ instruction at branchOffset
-    uint32_t insn = 0x36000000 | ((offset & 0x3FFF) << 5) | (17);
-    codeBuffer_->patch32(branchOffset, insn);
+    int32_t offset = static_cast<int32_t>(skipTarget - branchOffset);
+    // Patch the TBZ placeholder at branchOffset (tests sign bit 31 of w17)
+    codeBuffer_->patch32(branchOffset, ARM64Assembler::encodeTbz32(17, 31, offset));
 #endif
 
     // Record OSR entry point for this loop

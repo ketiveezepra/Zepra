@@ -15,7 +15,14 @@
 #include <memory>
 
 #ifdef ZEPRA_HAS_OPENGL
-#include <GL/gl.h>
+#ifdef __APPLE__
+#  ifndef GL_SILENCE_DEPRECATION
+#    define GL_SILENCE_DEPRECATION
+#  endif
+#  include <OpenGL/gl.h>
+#else
+#  include <GL/gl.h>
+#endif
 #endif
 
 // Windows winerror.h defines NO_ERROR as a macro (=0L).

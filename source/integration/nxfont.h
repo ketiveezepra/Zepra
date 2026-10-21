@@ -19,7 +19,14 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
-#include <GL/gl.h>
+#ifdef __APPLE__
+#  ifndef GL_SILENCE_DEPRECATION
+#    define GL_SILENCE_DEPRECATION
+#  endif
+#  include <OpenGL/gl.h>
+#else
+#  include <GL/gl.h>
+#endif
 
 namespace nxfont {
 

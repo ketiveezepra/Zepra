@@ -157,7 +157,7 @@ static MouseButton mapMouseButton(NSInteger buttonNumber) {
     if (urls.count == 0) return NO;
 
     Event event;
-    event.type = EventType::FileDrop;
+    event.type = NXRender::EventType::FileDrop;
     NSPoint p = [self convertPoint:[sender draggingLocation] fromView:nil];
     event.dropX = static_cast<float>(p.x);
     event.dropY = static_cast<float>(p.y);
@@ -185,7 +185,7 @@ static MouseButton mapMouseButton(NSInteger buttonNumber) {
 - (BOOL)windowShouldClose:(NSWindow*)sender {
     (void)sender;
     Event event;
-    event.type = EventType::Close;
+    event.type = NXRender::EventType::Close;
     NXRender::dispatchEvent(event);
     return NO;  // the app quits and Platform::shutdown() closes the window
 }
@@ -195,7 +195,7 @@ static MouseButton mapMouseButton(NSInteger buttonNumber) {
     [self.glContext update];
     NSSize size = window.contentView.bounds.size;
     Event event;
-    event.type = EventType::Resize;
+    event.type = NXRender::EventType::Resize;
     event.window.width  = static_cast<int>(size.width);
     event.window.height = static_cast<int>(size.height);
     NXRender::dispatchEvent(event);
@@ -204,14 +204,14 @@ static MouseButton mapMouseButton(NSInteger buttonNumber) {
 - (void)windowDidBecomeKey:(NSNotification*)notification {
     (void)notification;
     Event event;
-    event.type = EventType::Focus;
+    event.type = NXRender::EventType::Focus;
     NXRender::dispatchEvent(event);
 }
 
 - (void)windowDidResignKey:(NSNotification*)notification {
     (void)notification;
     Event event;
-    event.type = EventType::Blur;
+    event.type = NXRender::EventType::Blur;
     NXRender::dispatchEvent(event);
 }
 
@@ -351,7 +351,7 @@ private:
                     return true;
                 }
                 Event event;
-                event.type = EventType::KeyDown;
+                event.type = NXRender::EventType::KeyDown;
                 event.key.key = mapKeyCode(ev.keyCode);
                 event.key.repeat = ev.isARepeat;
                 event.key.modifiers = mapModifiers(ev.modifierFlags);
@@ -374,7 +374,7 @@ private:
                 NXRender::dispatchEvent(event);
                 if (!nonAscii.empty()) {
                     Event text;
-                    text.type = EventType::TextInput;
+                    text.type = NXRender::EventType::TextInput;
                     text.textInput = nonAscii;
                     NXRender::dispatchEvent(text);
                 }
@@ -383,7 +383,7 @@ private:
 
             case NSEventTypeKeyUp: {
                 Event event;
-                event.type = EventType::KeyUp;
+                event.type = NXRender::EventType::KeyUp;
                 event.key.key = mapKeyCode(ev.keyCode);
                 event.key.modifiers = mapModifiers(ev.modifierFlags);
                 NXRender::dispatchEvent(event);
@@ -398,7 +398,7 @@ private:
                 if (!contentPoint(ev, p)) return false;
                 [currentCursor_ set];
                 Event event;
-                event.type = EventType::MouseMove;
+                event.type = NXRender::EventType::MouseMove;
                 event.mouse.x = static_cast<float>(p.x);
                 event.mouse.y = static_cast<float>(p.y);
                 event.mouse.modifiers = mapModifiers(ev.modifierFlags);
@@ -418,7 +418,7 @@ private:
                             ev.type == NSEventTypeRightMouseDown ||
                             ev.type == NSEventTypeOtherMouseDown;
                 Event event;
-                event.type = down ? EventType::MouseDown : EventType::MouseUp;
+                event.type = down ? NXRender::EventType::MouseDown : NXRender::EventType::MouseUp;
                 event.mouse.x = static_cast<float>(p.x);
                 event.mouse.y = static_cast<float>(p.y);
                 event.mouse.button = mapMouseButton(ev.buttonNumber);
@@ -436,7 +436,7 @@ private:
                 if (ev.hasPreciseScrollingDeltas) dy /= 10.0;
                 if (dy == 0) return true;
                 Event event;
-                event.type = EventType::MouseWheel;
+                event.type = NXRender::EventType::MouseWheel;
                 event.mouse.x = static_cast<float>(p.x);
                 event.mouse.y = static_cast<float>(p.y);
                 event.mouse.wheelDelta = static_cast<float>(dy);
