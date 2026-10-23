@@ -680,9 +680,7 @@ Error::Error(const std::string& message, const std::string& name)
     , name_(name)
     , cause_(Value::undefined())
 {
-    // Set standard error properties
-    set("message", Value::string(new String(message)));
-    set("name", Value::string(new String(name)));
+    defineStandardProperties();
 }
 
 Error::Error(const std::string& message, const std::string& name, Value cause)
@@ -691,13 +689,24 @@ Error::Error(const std::string& message, const std::string& name, Value cause)
     , name_(name)
     , cause_(cause)
 {
-    set("message", Value::string(new String(message)));
-    set("name", Value::string(new String(name)));
-    
+    defineStandardProperties();
+
     // ES2022: Set cause property if provided
-    if (!cause.isUndefined()) {
-        set("cause", cause);
-    }
+    if (!cause.isUndefined()) defineHidden("cause", cause);
+}
+
+// Error properties are writable and configurable but not enumerable, so they
+// do not show up in for-in, Object.keys or JSON.stringify
+void Error::defineHidden(const std::string& key, Value value) {
+    PropertyDescriptor desc;
+    desc.value = value;
+    desc.attributes = PropertyAttribute::Writable | PropertyAttribute::Configurable;
+    defineProperty(key, desc);
+}
+
+void Error::defineStandardProperties() {
+    defineHidden("message", Value::string(new String(message_)));
+    defineHidden("name", Value::string(new String(name_)));
 }
 
 Error* Error::typeError(const std::string& message) {

@@ -8,6 +8,7 @@
 #include "runtime/objects/value.hpp"
 #include "runtime/objects/object.hpp"
 #include "runtime/objects/function.hpp"
+#include "runtime/objects/number_conversion.hpp"
 #include "runtime/builtins_api/bigint_object.hpp"
 #include <sstream>
 #include <cmath>
@@ -80,15 +81,8 @@ double Value::toNumber() const {
             return asBoolean() ? 1.0 : 0.0;
         case ValueType::Number:
             return asNumber();
-        case ValueType::String: {
-            const std::string& str = asString()->value();
-            if (str.empty()) return 0.0;
-            try {
-                return std::stod(str);
-            } catch (...) {
-                return std::nan("");
-            }
-        }
+        case ValueType::String:
+            return NumberConversion::stringToNumber(asString()->value());
         case ValueType::BigInt:
             throw std::runtime_error("TypeError: Cannot convert a BigInt value to a number");
         case ValueType::Object: {
@@ -101,10 +95,7 @@ double Value::toNumber() const {
                     Function* fn = static_cast<Function*>(valueOf.asObject());
                     Value result = fn->call(nullptr, Value::object(obj), {});
                     if (result.isNumber()) return result.asNumber();
-                    if (result.isString()) {
-                        try { return std::stod(result.toString()); }
-                        catch (...) { return std::nan(""); }
-                    }
+                    if (result.isString()) return NumberConversion::stringToNumber(result.toString());
                 }
             }
             return std::nan("");
@@ -122,17 +113,8 @@ std::string Value::toString() const {
             return "null";
         case ValueType::Boolean:
             return asBoolean() ? "true" : "false";
-        case ValueType::Number: {
-            double n = asNumber();
-            if (std::isnan(n)) return "NaN";
-            if (std::isinf(n)) return n > 0 ? "Infinity" : "-Infinity";
-            if (n == 0.0) return "0";
-            
-            // Format number
-            std::ostringstream oss;
-            oss << n;
-            return oss.str();
-        }
+        case ValueType::Number:
+            return NumberConversion::toString(asNumber());
         case ValueType::String:
             return asString()->value();
         case ValueType::Object: {

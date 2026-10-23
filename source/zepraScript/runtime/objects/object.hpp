@@ -371,6 +371,9 @@ public:
     static Error* withCause(const std::string& name, const std::string& message, Value cause);
     
 private:
+    void defineHidden(const std::string& key, Value value);
+    void defineStandardProperties();
+
     std::string message_;
     std::string name_;
     Value cause_;

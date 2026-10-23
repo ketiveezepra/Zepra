@@ -22,6 +22,7 @@ endif()
 # =============================================================================
 set(ZEPRASCRIPT_UNIT_TEST_SOURCES
     unit/value_tests.cpp
+    unit/number_conversion_tests.cpp
     unit/lexer_tests.cpp
     unit/parser_tests.cpp
     unit/vm_tests.cpp

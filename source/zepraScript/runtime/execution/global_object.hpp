@@ -56,7 +56,8 @@ public:
     Object* numberPrototype() const { return numberPrototype_; }
     Object* booleanPrototype() const { return booleanPrototype_; }
     Object* functionPrototype() const { return functionPrototype_; }
-    
+    Object* errorPrototype() const { return errorPrototype_; }
+
     // Built-in objects
     Object* mathObject() const { return mathObject_; }
     Object* jsonObject() const { return jsonObject_; }
@@ -103,7 +104,8 @@ private:
     Object* numberPrototype_ = nullptr;
     Object* booleanPrototype_ = nullptr;
     Object* functionPrototype_ = nullptr;
-    
+    Object* errorPrototype_ = nullptr;
+
     // Built-in objects
     Object* mathObject_ = nullptr;
     Object* jsonObject_ = nullptr;

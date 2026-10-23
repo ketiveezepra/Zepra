@@ -90,6 +90,7 @@ Value RegExpObject::exec(const std::string& str) {
     // Set index and input properties
     static_cast<Runtime::Object*>(arr)->set("index", Value::number(static_cast<double>(result.matchStart)));
     static_cast<Runtime::Object*>(arr)->set("input", Value::string(new Runtime::String(str)));
+    static_cast<Runtime::Object*>(arr)->set("groups", Value::undefined());
 
     return Value::object(arr);
 }

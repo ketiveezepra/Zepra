@@ -12,6 +12,7 @@ set(ZEPRA_CORE_SOURCES
 
     # Runtime — Objects
     runtime/objects/value.cpp
+    runtime/objects/number_conversion.cpp
     runtime/objects/object.cpp
     runtime/objects/function.cpp
     runtime/objects/symbol.cpp
@@ -254,6 +255,10 @@ set(ZEPRA_CORE_SOURCES
     builtins/string.cpp
     builtins/number.cpp
     builtins/boolean.cpp
+    builtins/error.cpp
+    builtins/global_functions.cpp
+    builtins/structured_clone.cpp
+    builtins/list_iterator.cpp
     builtins/math.cpp
     builtins/date.cpp
     builtins/console.cpp

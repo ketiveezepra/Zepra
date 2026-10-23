@@ -18,6 +18,11 @@
 #include "builtins/object_builtins.hpp"
 #include "builtins/number.hpp"
 #include "builtins/boolean.hpp"
+#include "builtins/builtin_helpers.hpp"
+#include "builtins/error.hpp"
+#include "builtins/global_functions.hpp"
+#include "builtins/structured_clone.hpp"
+#include "runtime/execution/context.hpp"
 #include "builtins/map.hpp"
 #include "builtins/set.hpp"
 #include "builtins/date.hpp"
@@ -37,108 +42,6 @@
 #include <stdexcept>
 
 namespace Zepra::Runtime {
-
-// ---------------------------------------------------------------------------
-// Global function implementations (non-inline, separate from lambdas)
-// These use the NativeFn signature: Value(Context*, const std::vector<Value>&)
-// ---------------------------------------------------------------------------
-
-static Value globalIsNaN(Context*, const std::vector<Value>& args) {
-    if (args.empty()) return Value::boolean(true);
-    return Value::boolean(std::isnan(args[0].toNumber()));
-}
-
-static Value globalIsFinite(Context*, const std::vector<Value>& args) {
-    if (args.empty()) return Value::boolean(false);
-    return Value::boolean(std::isfinite(args[0].toNumber()));
-}
-
-static Value globalParseInt(Context*, const std::vector<Value>& args) {
-    if (args.empty()) return Value::number(std::nan(""));
-    std::string str = args[0].toString();
-    int radix = args.size() > 1 ? static_cast<int>(args[1].toNumber()) : 10;
-    if (radix == 0) radix = 10;
-    try {
-        return Value::number(static_cast<double>(std::stoll(str, nullptr, radix)));
-    } catch (...) {
-        return Value::number(std::nan(""));
-    }
-}
-
-static Value globalParseFloat(Context*, const std::vector<Value>& args) {
-    if (args.empty()) return Value::number(std::nan(""));
-    try {
-        return Value::number(std::stod(args[0].toString()));
-    } catch (...) {
-        return Value::number(std::nan(""));
-    }
-}
-
-static Value globalEncodeURIComponent(Context*, const std::vector<Value>& args) {
-    if (args.empty()) return Value::object(new String("undefined"));
-    std::string input = args[0].toString();
-    std::string result;
-    result.reserve(input.size() * 3);
-    for (unsigned char c : input) {
-        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-            result += static_cast<char>(c);
-        } else {
-            char hex[4];
-            std::snprintf(hex, sizeof(hex), "%%%02X", c);
-            result += hex;
-        }
-    }
-    return Value::object(new String(result));
-}
-
-static Value globalDecodeURIComponent(Context*, const std::vector<Value>& args) {
-    if (args.empty()) return Value::object(new String("undefined"));
-    std::string input = args[0].toString();
-    std::string result;
-    for (size_t i = 0; i < input.size(); i++) {
-        if (input[i] == '%' && i + 2 < input.size()) {
-            unsigned int value = 0;
-            if (std::sscanf(input.c_str() + i + 1, "%2x", &value) == 1) {
-                result += static_cast<char>(value);
-                i += 2;
-                continue;
-            }
-        }
-        result += input[i];
-    }
-    return Value::object(new String(result));
-}
-
-static Value globalQueueMicrotask(Context*, const std::vector<Value>& args) {
-    if (!args.empty()) {
-        Function* fn = args[0].asFunction();
-        if (fn) {
-            MicrotaskQueue::instance().enqueue([fn]() {
-                // Enqueue for later execution via event loop
-            });
-        }
-    }
-    return Value::undefined();
-}
-
-// Error constructor factory: creates a native function that constructs Error objects
-static Function* createErrorConstructor(const std::string& errorName) {
-    return createNativeFunction(errorName,
-        [errorName](Context*, const std::vector<Value>& args) -> Value {
-            std::string message = args.empty() ? "" : args[0].toString();
-
-            // ES2022: options.cause
-            if (args.size() > 1 && args[1].isObject()) {
-                Object* opts = args[1].asObject();
-                Value cause = opts->get("cause");
-                if (!cause.isUndefined()) {
-                    return Value::object(Error::withCause(errorName, message, cause));
-                }
-            }
-
-            return Value::object(new Error(message, errorName));
-        }, 1);
-}
 
 // ---------------------------------------------------------------------------
 // GlobalObject
@@ -179,105 +82,171 @@ void GlobalObject::installInto(VM& vm, const std::vector<std::string>& except) c
     }
 }
 
+namespace {
+
+VM& vmOf(Context* context) {
+    VM* vm = context ? context->vm() : nullptr;
+    if (!vm) throw std::logic_error("GlobalObject needs a Context that belongs to a VM");
+    return *vm;
+}
+
+// Copies the properties of `from` onto `to` as built-in (non-enumerable) ones
+void copyAsBuiltins(Object* from, Object* to) {
+    for (const std::string& key : from->getOwnPropertyNames()) {
+        Builtins::defineHidden(to, key, from->get(key));
+    }
+}
+
+// Object(value): a new object, the value itself, or a wrapper for a primitive
+Value objectFromValue(VM& vm, const Value& value) {
+    if (value.isNull() || value.isUndefined()) {
+        auto* object = new Object();
+        object->setPrototype(vm.intrinsic(VM::Intrinsic::Object));
+        return Value::object(object);
+    }
+    if (value.isObject()) return value;
+    if (value.isNumber()) {
+        auto* wrapper = new Builtins::NumberObject(value.asNumber());
+        wrapper->setPrototype(vm.intrinsic(VM::Intrinsic::Number));
+        return Value::object(wrapper);
+    }
+    if (value.isBoolean()) {
+        auto* wrapper = new Builtins::BooleanObject(value.asBoolean());
+        wrapper->setPrototype(vm.intrinsic(VM::Intrinsic::Boolean));
+        return Value::object(wrapper);
+    }
+    if (value.isString()) {
+        auto* wrapper = new String(value.toString());
+        wrapper->setPrototype(vm.intrinsic(VM::Intrinsic::String));
+        return Value::object(wrapper);
+    }
+    return value;
+}
+
+} // namespace
+
 void GlobalObject::initializeObjectConstructor() {
-    objectPrototype_ = Builtins::ObjectBuiltin::createObjectPrototype(context_);
-    objectConstructor_ = static_cast<Function*>(
-        Builtins::ObjectBuiltin::createObjectConstructor(context_));
-    objectConstructor_->set("prototype", Value::object(objectPrototype_));
+    VM& vm = vmOf(context_);
+    objectPrototype_ = vm.intrinsic(VM::Intrinsic::Object);
+    objectConstructor_ = new Function("Object", [&vm](const FunctionCallInfo& info) -> Value {
+        return objectFromValue(vm, info.argument(0));
+    }, 1);
+
+    // The static methods (keys, assign, create, ...)
+    copyAsBuiltins(Builtins::ObjectBuiltin::createObjectConstructor(context_), objectConstructor_);
+    Builtins::defineHidden(objectConstructor_, "prototype", Value::object(objectPrototype_));
+    Builtins::defineHidden(objectPrototype_, "constructor", Value::object(objectConstructor_));
     set("Object", Value::object(objectConstructor_));
 }
 
 void GlobalObject::initializeArrayConstructor() {
-    arrayPrototype_ = Builtins::ArrayBuiltin::createArrayPrototype(context_);
-    arrayConstructor_ = createNativeFunction("Array",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::object(new Array({}));
-            if (args.size() == 1 && args[0].isNumber()) {
-                size_t len = static_cast<size_t>(args[0].asNumber());
-                return Value::object(new Array(std::vector<Value>(len, Value::undefined())));
+    VM& vm = vmOf(context_);
+    arrayPrototype_ = vm.intrinsic(VM::Intrinsic::Array);
+    arrayConstructor_ = new Function("Array", [](const FunctionCallInfo& info) -> Value {
+        const auto& args = info.arguments();
+        if (args.size() == 1 && args[0].isNumber()) {
+            // Array(n): n empty slots. Storage is dense, so an enormous n is refused
+            const double length = args[0].asNumber();
+            if (!(length >= 0) || length != std::floor(length) || length > 4294967295.0) {
+                throw JSError("RangeError", "Invalid array length");
             }
-            return Value::object(new Array(std::vector<Value>(args.begin(), args.end())));
-        }, 1);
+            if (length > static_cast<double>(1u << 22)) {
+                throw JSError("RangeError", "Array length too large");
+            }
+            return Value::object(new Array(std::vector<Value>(static_cast<size_t>(length), Value::undefined())));
+        }
+        return Value::object(new Array(std::vector<Value>(args.begin(), args.end())));
+    }, 1);
     arrayConstructor_->set("isArray", Value::object(
         new Function("isArray", Builtins::ArrayBuiltin::isArray, 1)));
     arrayConstructor_->set("from", Value::object(
         new Function("from", Builtins::ArrayBuiltin::from, 1)));
     arrayConstructor_->set("of", Value::object(
         new Function("of", Builtins::ArrayBuiltin::of, 0)));
-    arrayConstructor_->set("prototype", Value::object(arrayPrototype_));
+    Builtins::defineHidden(arrayConstructor_, "prototype", Value::object(arrayPrototype_));
+    Builtins::defineHidden(arrayPrototype_, "constructor", Value::object(arrayConstructor_));
     set("Array", Value::object(arrayConstructor_));
 }
 
 void GlobalObject::initializeStringConstructor() {
-    stringPrototype_ = Builtins::StringBuiltin::createStringPrototype(context_);
-    stringConstructor_ = createNativeFunction("String",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::object(new String(""));
-            return Value::object(new String(args[0].toString()));
-        }, 1);
-    stringConstructor_->set("prototype", Value::object(stringPrototype_));
+    VM& vm = vmOf(context_);
+    stringPrototype_ = vm.intrinsic(VM::Intrinsic::String);
+    Object* prototype = stringPrototype_;
+    stringConstructor_ = new Function("String", [&vm, prototype](const FunctionCallInfo& info) -> Value {
+        std::string text;
+        if (info.argumentCount() > 0) {
+            // ToString: objects run their toString()/valueOf()
+            const Value& arg = info.argument(0);
+            text = arg.isObject() ? vm.toPrimitiveValue(arg, true).toString() : arg.toString();
+        }
+        // `new String(x)` arrives with a fresh object that inherits from String.prototype
+        const Value self = info.thisValue();
+        if (self.isObject() && self.asObject()->prototype() == prototype &&
+            !dynamic_cast<String*>(self.asObject())) {
+            auto* wrapper = new String(text);
+            wrapper->setPrototype(prototype);
+            return Value::object(wrapper);
+        }
+        return Value::string(new String(text));
+    }, 1);
+    Builtins::StringBuiltin::installStatics(stringConstructor_);
+    Builtins::defineHidden(stringConstructor_, "prototype", Value::object(stringPrototype_));
+    Builtins::defineHidden(stringPrototype_, "constructor", Value::object(stringConstructor_));
     set("String", Value::object(stringConstructor_));
 }
 
 void GlobalObject::initializeNumberConstructor() {
-    numberPrototype_ = Builtins::NumberBuiltin::createNumberPrototype();
-    numberConstructor_ = createNativeFunction("Number",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::number(0.0);
-            return Value::number(args[0].toNumber());
-        }, 1);
+    VM& vm = vmOf(context_);
+    numberPrototype_ = vm.intrinsic(VM::Intrinsic::Number);
 
-    // Constants
-    numberConstructor_->set("MAX_SAFE_INTEGER", Value::number(9007199254740991.0));
-    numberConstructor_->set("MIN_SAFE_INTEGER", Value::number(-9007199254740991.0));
-    numberConstructor_->set("MAX_VALUE", Value::number(std::numeric_limits<double>::max()));
-    numberConstructor_->set("MIN_VALUE", Value::number(std::numeric_limits<double>::min()));
-    numberConstructor_->set("EPSILON", Value::number(std::numeric_limits<double>::epsilon()));
-    numberConstructor_->set("POSITIVE_INFINITY",
-        Value::number(std::numeric_limits<double>::infinity()));
-    numberConstructor_->set("NEGATIVE_INFINITY",
-        Value::number(-std::numeric_limits<double>::infinity()));
-    numberConstructor_->set("NaN", Value::number(std::nan("")));
-    numberConstructor_->set("prototype", Value::object(numberPrototype_));
+    // parseInt and parseFloat are shared with the Number constructor
+    Function* parseInt = Builtins::NumberBuiltin::createParseInt();
+    Function* parseFloat = Builtins::NumberBuiltin::createParseFloat();
+    numberConstructor_ = Builtins::NumberBuiltin::createNumberConstructor(numberPrototype_, parseFloat, parseInt);
     set("Number", Value::object(numberConstructor_));
+    Builtins::defineHidden(this, "parseInt", Value::object(parseInt));
+    Builtins::defineHidden(this, "parseFloat", Value::object(parseFloat));
 }
 
 void GlobalObject::initializeBooleanConstructor() {
-    booleanPrototype_ = Builtins::BooleanBuiltin::createBooleanPrototype();
-    booleanConstructor_ = createNativeFunction("Boolean",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::boolean(false);
-            return Value::boolean(args[0].toBoolean());
-        }, 1);
-    booleanConstructor_->set("prototype", Value::object(booleanPrototype_));
+    VM& vm = vmOf(context_);
+    booleanPrototype_ = vm.intrinsic(VM::Intrinsic::Boolean);
+    booleanConstructor_ = Builtins::BooleanBuiltin::createBooleanConstructor(booleanPrototype_);
     set("Boolean", Value::object(booleanConstructor_));
 }
 
 void GlobalObject::initializeFunctionConstructor() {
-    functionPrototype_ = new Object();
-    functionConstructor_ = createNativeFunction("Function",
-        [](Context*, const std::vector<Value>&) -> Value {
-            // Function() constructor requires eval — not supported for security
-            return Value::undefined();
-        }, 1);
-    functionConstructor_->set("prototype", Value::object(functionPrototype_));
+    VM& vm = vmOf(context_);
+    functionPrototype_ = vm.intrinsic(VM::Intrinsic::Function);
+    // new Function("...") compiles source text at run time, which the engine refuses
+    functionConstructor_ = new Function("Function", [](const FunctionCallInfo&) -> Value {
+        throw JSError("EvalError", "Code generation from strings is disallowed (Function constructor)");
+    }, 1);
+    Builtins::defineHidden(functionConstructor_, "prototype", Value::object(functionPrototype_));
+    Builtins::defineHidden(functionPrototype_, "constructor", Value::object(functionConstructor_));
     set("Function", Value::object(functionConstructor_));
 }
 
 void GlobalObject::initializeErrorConstructors() {
-    errorConstructor_ = createErrorConstructor("Error");
-    typeErrorConstructor_ = createErrorConstructor("TypeError");
-    syntaxErrorConstructor_ = createErrorConstructor("SyntaxError");
-    referenceErrorConstructor_ = createErrorConstructor("ReferenceError");
-    rangeErrorConstructor_ = createErrorConstructor("RangeError");
-
+    VM& vm = vmOf(context_);
+    errorPrototype_ = vm.intrinsic(VM::Intrinsic::Error);
+    errorConstructor_ = Builtins::ErrorBuiltin::createConstructor("Error", errorPrototype_, nullptr);
     set("Error", Value::object(errorConstructor_));
-    set("TypeError", Value::object(typeErrorConstructor_));
-    set("SyntaxError", Value::object(syntaxErrorConstructor_));
-    set("ReferenceError", Value::object(referenceErrorConstructor_));
-    set("RangeError", Value::object(rangeErrorConstructor_));
-    set("URIError", Value::object(createErrorConstructor("URIError")));
-    set("EvalError", Value::object(createErrorConstructor("EvalError")));
+
+    // Each subtype has its own prototype that inherits from Error.prototype
+    auto subtype = [this](const char* name) {
+        Function* constructor = Builtins::ErrorBuiltin::createConstructor(name, new Object(), errorConstructor_);
+        set(name, Value::object(constructor));
+        return constructor;
+    };
+    typeErrorConstructor_ = subtype("TypeError");
+    syntaxErrorConstructor_ = subtype("SyntaxError");
+    referenceErrorConstructor_ = subtype("ReferenceError");
+    rangeErrorConstructor_ = subtype("RangeError");
+    subtype("URIError");
+    subtype("EvalError");
+    set("AggregateError", Value::object(
+        Builtins::ErrorBuiltin::createAggregateErrorConstructor(new Object(), errorConstructor_)));
 }
 
 void GlobalObject::initializeMath() {
@@ -296,16 +265,17 @@ void GlobalObject::initializeConsole() {
 }
 
 void GlobalObject::initializeGlobalFunctions() {
-    set("isNaN", Value::object(createNativeFunction("isNaN", globalIsNaN, 1)));
-    set("isFinite", Value::object(createNativeFunction("isFinite", globalIsFinite, 1)));
-    set("parseInt", Value::object(createNativeFunction("parseInt", globalParseInt, 2)));
-    set("parseFloat", Value::object(createNativeFunction("parseFloat", globalParseFloat, 1)));
-    set("encodeURIComponent", Value::object(
-        createNativeFunction("encodeURIComponent", globalEncodeURIComponent, 1)));
-    set("decodeURIComponent", Value::object(
-        createNativeFunction("decodeURIComponent", globalDecodeURIComponent, 1)));
-    set("queueMicrotask", Value::object(
-        createNativeFunction("queueMicrotask", globalQueueMicrotask, 1)));
+    // parseInt and parseFloat are defined with Number
+    Builtins::defineHidden(this, "isNaN", Value::object(Builtins::NumberBuiltin::createIsNaN()));
+    Builtins::defineHidden(this, "isFinite", Value::object(Builtins::NumberBuiltin::createIsFinite()));
+    Builtins::defineHidden(this, "encodeURI", Value::object(Builtins::GlobalFunctions::createEncodeURI()));
+    Builtins::defineHidden(this, "encodeURIComponent",
+                           Value::object(Builtins::GlobalFunctions::createEncodeURIComponent()));
+    Builtins::defineHidden(this, "decodeURI", Value::object(Builtins::GlobalFunctions::createDecodeURI()));
+    Builtins::defineHidden(this, "decodeURIComponent",
+                           Value::object(Builtins::GlobalFunctions::createDecodeURIComponent()));
+    Builtins::defineHidden(this, "queueMicrotask",
+                           Value::object(Builtins::GlobalFunctions::createQueueMicrotask()));
 
     // Timer APIs — wired to EventLoop when available
     set("setTimeout", Value::object(new Function("setTimeout",
@@ -358,27 +328,10 @@ void GlobalObject::initializeGlobalFunctions() {
             return Value::undefined();
         }, 1)));
 
-    // atob / btoa — Base64 encoding/decoding
-    set("atob", Value::object(new Function("atob",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::undefined();
-            // Base64 decode (simplified — returns input for now)
-            return args[0];
-        }, 1)));
-
-    set("btoa", Value::object(new Function("btoa",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::undefined();
-            return args[0];
-        }, 1)));
-
-    // structuredClone
-    set("structuredClone", Value::object(new Function("structuredClone",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::undefined();
-            // Deep clone — for primitives, just return the value
-            return args[0];
-        }, 1)));
+    Builtins::defineHidden(this, "atob", Value::object(Builtins::GlobalFunctions::createAtob()));
+    Builtins::defineHidden(this, "btoa", Value::object(Builtins::GlobalFunctions::createBtoa()));
+    Builtins::defineHidden(this, "structuredClone",
+                           Value::object(Builtins::StructuredClone::createFunction()));
 
     // Symbol constructor + well-known symbols
     Object* symbolCtor = createNativeFunction("Symbol",
@@ -503,22 +456,6 @@ void GlobalObject::initializeGlobalFunctions() {
         }, 1);
     frCtor->set("prototype", Value::object(frProto));
     set("FinalizationRegistry", Value::object(frCtor));
-
-    // AggregateError constructor (ES2021 — used by Promise.any)
-    set("AggregateError", Value::object(createNativeFunction("AggregateError",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            std::vector<Value> errors;
-            if (!args.empty() && args[0].isObject()) {
-                auto* arr = dynamic_cast<Array*>(args[0].asObject());
-                if (arr) {
-                    for (size_t i = 0; i < arr->length(); i++) {
-                        errors.push_back(arr->get(i));
-                    }
-                }
-            }
-            std::string msg = args.size() > 1 ? args[1].toString() : "";
-            return Value::object(Error::aggregateError(msg, errors));
-        }, 2)));
 
 
     // RegExp constructor + prototype
