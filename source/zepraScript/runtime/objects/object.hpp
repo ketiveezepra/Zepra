@@ -157,10 +157,20 @@ public:
     // Property descriptor operations
     bool defineProperty(const std::string& key, const PropertyDescriptor& desc);
     std::optional<PropertyDescriptor> getOwnPropertyDescriptor(const std::string& key) const;
+
+    /**
+     * @brief Finds a named property on this object or its prototype chain
+     *
+     * Returns false when absent. Otherwise sets either `value` (a data
+     * property) or `accessor` (a getter/setter pair; `value` untouched).
+     */
+    bool lookupProperty(const std::string& key, Value& value,
+                        const PropertyDescriptor*& accessor) const;
     
     // Property enumeration
     std::vector<std::string> getOwnPropertyNames() const;
     std::vector<std::string> keys() const;  // Enumerable only
+    std::vector<std::string> orderedNamedKeys() const;  // Named keys, insertion order
     
     // Prototype chain
     Object* prototype() const { return prototype_; }

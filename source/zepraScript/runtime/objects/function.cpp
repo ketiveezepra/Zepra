@@ -11,6 +11,7 @@
 
 #include "runtime/objects/function.hpp"
 #include <algorithm>
+#include <stdexcept>
 #include "runtime/execution/environment.hpp"
 #include "runtime/execution/vm.hpp"
 
@@ -79,6 +80,40 @@ Function::Function(Function* target, Value boundThis, std::vector<Value> boundAr
     }
 }
 
+Function::Function(std::string name, size_t arity, bool isArrow, bool isGenerator, bool isAsync)
+    : Object(ObjectType::Function)
+    , name_(std::move(name))
+    , arity_(arity)
+    , isArrow_(isArrow)
+    , isAsync_(isAsync)
+    , isGenerator_(isGenerator) {}
+
+Function* Function::instantiateClosure() const {
+    auto* closure = new Function(name_, arity_, isArrow_, isGenerator_, isAsync_);
+    closure->bytecodeChunk_ = bytecodeChunk_;
+    closure->layout_ = layout_;
+    closure->hasLayout_ = hasLayout_;
+    closure->sourceFile_ = sourceFile_;
+    closure->sourceLine_ = sourceLine_;
+    closure->debugNames_ = debugNames_;
+    closure->setPrototype(prototype());
+    return closure;
+}
+
+const std::vector<std::string>& Function::localNames() const {
+    static const std::vector<std::string> none;
+    return debugNames_ ? debugNames_->locals : none;
+}
+
+const std::vector<std::string>& Function::paramNames() const {
+    static const std::vector<std::string> none;
+    return debugNames_ ? debugNames_->params : none;
+}
+
+void Function::setDebugNames(std::vector<std::string> params, std::vector<std::string> locals) {
+    debugNames_ = std::make_shared<const DebugNames>(DebugNames{std::move(params), std::move(locals)});
+}
+
 // =============================================================================
 // Function::call - Execute the function
 // =============================================================================
@@ -107,41 +142,17 @@ Value Function::call(Context* ctx, Value thisValue, const std::vector<Value>& ar
         return native_(ctx, args);
     }
     
-    // Handle bytecode-compiled functions via mini-VM execution
-    if (isCompiled() && bytecodeChunk_) {
-        // Create a temporary VM to execute the function
-        VM miniVM(ctx);
-        
-        // Set up arguments as locals/globals
-        for (size_t i = 0; i < args.size(); i++) {
-            // Simple argument passing - first args become locals
-            std::string argName = i < arity_ ? std::to_string(i) : "";
-            if (!argName.empty()) {
-                miniVM.setGlobal(argName, args[i]);
-            }
+    // Bytecode functions run on the VM executing the caller, with the same
+    // globals and frame layout as a call from script
+    if (isCompiled()) {
+        VM* vm = VM::current();
+        if (!vm) {
+            throw std::runtime_error("Cannot call '" + name_ + "' outside a running script");
         }
-        
-        // Execute the bytecode
-        auto result = miniVM.execute(bytecodeChunk_);
-        
-        if (result.status == ExecutionResult::Status::Success) {
-            return result.value;
-        }
-        
-        // On error, return undefined
-        return Value::undefined();
+        return vm->executeCallback(this, thisValue, args);
     }
-    
-    // Handle AST-based functions (not yet compiled)
-    // These require interpretation which needs the AST interpreter
-    // For now, return undefined - the full interpreter handles these
-    if (functionDecl_ || functionExpr_ || arrowExpr_) {
-        // AST-based execution would go here
-        // The bytecode compiler should compile these first
-        return Value::undefined();
-    }
-    
-    return Value::undefined();
+
+    throw std::runtime_error("Function '" + name_ + "' has no compiled body");
 }
 
 // =============================================================================
