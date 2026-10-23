@@ -141,7 +141,7 @@ ScriptResult ScriptContext::evaluate(const std::string& code, const std::string&
         
         if (parser.hasErrors()) {
             result.success = false;
-            result.error = "SyntaxError: Parse failed";
+            result.error = "SyntaxError: " + parser.errors().front();
             if (consoleHandler_) {
                 consoleHandler_("error", result.error);
             }
@@ -169,7 +169,9 @@ ScriptResult ScriptContext::evaluate(const std::string& code, const std::string&
         
         if (generator.hasErrors() || !chunk) {
             result.success = false;
-            result.error = "CompileError: Bytecode generation failed";
+            result.error = generator.errors().empty()
+                ? std::string("SyntaxError: Bytecode generation failed")
+                : "SyntaxError: " + generator.errors().front();
             if (consoleHandler_) {
                 consoleHandler_("error", result.error);
             }
@@ -390,16 +392,16 @@ void ScriptContext::setupWindowGlobals() {
         }, 2);
     vm_->setGlobal("prompt", Value::object(promptFn));
     
-    // console.log — bridge to console handler
-    auto handler = consoleHandler_;
+    // console.log — bridge to console handler. The handler is looked up on every
+    // call, so one installed (or replaced) after initialize() still gets output.
     auto* logFn = createNativeFunction("log",
-        [handler](Context*, const std::vector<Value>& args) -> Value {
+        [this](Context*, const std::vector<Value>& args) -> Value {
             std::string msg;
             for (size_t i = 0; i < args.size(); i++) {
                 if (i > 0) msg += " ";
                 msg += args[i].toString();
             }
-            if (handler) handler("log", msg);
+            if (consoleHandler_) consoleHandler_("log", msg);
             else std::cout << "[console.log] " << msg << std::endl;
             return Value::undefined();
         }, 0);  // variadic
@@ -408,20 +410,20 @@ void ScriptContext::setupWindowGlobals() {
     consoleObj->set("log", Value::object(logFn));
     
     auto* warnFn = createNativeFunction("warn",
-        [handler](Context*, const std::vector<Value>& args) -> Value {
+        [this](Context*, const std::vector<Value>& args) -> Value {
             std::string msg;
             for (auto& a : args) msg += a.toString() + " ";
-            if (handler) handler("warn", msg);
+            if (consoleHandler_) consoleHandler_("warn", msg);
             else std::cerr << "[console.warn] " << msg << std::endl;
             return Value::undefined();
         }, 0);
     consoleObj->set("warn", Value::object(warnFn));
     
     auto* errorFn = createNativeFunction("error",
-        [handler](Context*, const std::vector<Value>& args) -> Value {
+        [this](Context*, const std::vector<Value>& args) -> Value {
             std::string msg;
             for (auto& a : args) msg += a.toString() + " ";
-            if (handler) handler("error", msg);
+            if (consoleHandler_) consoleHandler_("error", msg);
             else std::cerr << "[console.error] " << msg << std::endl;
             return Value::undefined();
         }, 0);
