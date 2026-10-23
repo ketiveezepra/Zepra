@@ -19,7 +19,7 @@ Parser::Parser(const SourceCode* source) : lexer_(source) {
 std::unique_ptr<Program> Parser::parseProgram() {
     std::vector<StmtPtr> body;
     
-    while (!isAtEnd()) {
+    while (!isAtEnd() && errors_.size() < kMaxErrors) {
         const uint32_t startOffset = currentToken_.start.offset;
         const TokenType startType = currentToken_.type;
         try {
@@ -81,7 +81,9 @@ bool Parser::match(std::initializer_list<TokenType> types) {
 Token Parser::consume(TokenType type, const std::string& message) {
     if (check(type)) return advance();
     error(currentToken_, message);
-    return currentToken_;
+    // Returning without advancing would leave every caller's loop on the
+    // same token forever; abandon the statement instead.
+    throw ParseError(message);
 }
 
 bool Parser::isAtEnd() {
@@ -147,7 +149,7 @@ void Parser::error(const std::string& message) {
 void Parser::error(const Token& token, const std::string& message) {
     std::string err = std::to_string(token.start.line) + ":" +
                       std::to_string(token.start.column) + ": " + message;
-    errors_.push_back(err);
+    if (errors_.size() < kMaxErrors) errors_.push_back(err);
 }
 
 #ifndef NDEBUG
@@ -393,14 +395,27 @@ StmtPtr Parser::parseStatement() {
     return parseExpressionStatement();
 }
 
+// A statement parser that returns without consuming input would leave its
+// caller's loop on the same token forever.
+void Parser::requireProgress(uint32_t startOffset) {
+    if (!isAtEnd() && currentToken_.start.offset == startOffset) {
+        std::string message = currentToken_.type == TokenType::Error ? currentToken_.value
+                                                                     : "Unexpected token";
+        error(message);
+        throw ParseError(message);
+    }
+}
+
 StmtPtr Parser::parseBlockStatement() {
     std::vector<StmtPtr> statements;
     
     while (!check(TokenType::RightBrace) && !isAtEnd()) {
+        const uint32_t startOffset = currentToken_.start.offset;
         auto stmt = parseDeclaration();
         if (stmt) {
             statements.push_back(std::move(stmt));
         }
+        requireProgress(startOffset);
     }
     
     consume(TokenType::RightBrace, "Expected '}' after block");
@@ -614,10 +629,12 @@ StmtPtr Parser::parseSwitchStatement() {
         // Parse consequent statements until next case/default/closing brace
         while (!check(TokenType::Case) && !check(TokenType::Default) && 
                !check(TokenType::RightBrace) && !isAtEnd()) {
+            const uint32_t startOffset = currentToken_.start.offset;
             auto stmt = parseDeclaration();
             if (stmt) {
                 switchCase.consequent.push_back(std::move(stmt));
             }
+            requireProgress(startOffset);
         }
         
         cases.push_back(std::move(switchCase));
@@ -1112,10 +1129,9 @@ std::vector<ExprPtr> Parser::parseArguments() {
     if (!check(TokenType::RightParen)) {
         do {
             if (match(TokenType::DotDotDot)) {
-                // Spread element
-                ExprPtr arg = parseAssignmentExpression();
-                // Wrap in spread - for simplicity just add normally
-                args.push_back(std::move(arg));
+                // Spread argument: f(...args)
+                SourceLocation loc = previousToken_.start;
+                args.push_back(std::make_unique<SpreadExpr>(parseAssignmentExpression(), loc));
             } else {
                 args.push_back(parseAssignmentExpression());
             }
@@ -1182,7 +1198,9 @@ ExprPtr Parser::parsePrimaryExpression() {
         return std::make_unique<LiteralExpr>(nullptr, previousToken_.start);
     }
     if (match(TokenType::Undefined)) {
-        return std::make_unique<LiteralExpr>(LiteralExpr::LiteralValue{}, previousToken_.start);
+        // An identifier, not a literal: it can be shadowed. (LiteralValue has
+        // no undefined alternative; a default one would be the number 0.)
+        return std::make_unique<IdentifierExpr>("undefined", previousToken_.start);
     }
     
     // Regex literal: /pattern/flags → new RegExp("pattern", "flags")
@@ -1238,8 +1256,11 @@ ExprPtr Parser::parsePrimaryExpression() {
         return parseFunctionExpression();
     }
     
-    error("Unexpected token: " + std::string(Token::typeName(currentToken_.type)));
-    return nullptr;
+    // Nothing can start an expression here: abandon the statement, as
+    // consume() does, rather than return without consuming input
+    std::string message = "Unexpected token: " + std::string(Token::typeName(currentToken_.type));
+    error(message);
+    throw ParseError(message);
 }
 
 ExprPtr Parser::parseArrayLiteral() {
@@ -1254,10 +1275,8 @@ ExprPtr Parser::parseArrayLiteral() {
         
         if (match(TokenType::DotDotDot)) {
             // Spread element: [...arr]
-            ExprPtr spreadArg = parseAssignmentExpression();
-            // Mark as spread by wrapping in special node
-            // For now, just add it directly - compiler will handle
-            elements.push_back(std::move(spreadArg));
+            SourceLocation loc = previousToken_.start;
+            elements.push_back(std::make_unique<SpreadExpr>(parseAssignmentExpression(), loc));
         } else {
             elements.push_back(parseAssignmentExpression());
         }

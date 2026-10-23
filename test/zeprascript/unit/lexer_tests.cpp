@@ -63,15 +63,26 @@ TEST(LexerTests, Keywords) {
 }
 
 TEST(LexerTests, Operators) {
-    auto source = SourceCode::fromString("+ - * / === !== && ||");
+    // '/' only means division after an operand, so it follows a number here.
+    auto source = SourceCode::fromString("+ - * 1 / 2 === !== && ||");
     Lexer lexer(source.get());
-    
+
     EXPECT_EQ(lexer.nextToken().type, TokenType::Plus);
     EXPECT_EQ(lexer.nextToken().type, TokenType::Minus);
     EXPECT_EQ(lexer.nextToken().type, TokenType::Star);
+    EXPECT_EQ(lexer.nextToken().type, TokenType::Number);
     EXPECT_EQ(lexer.nextToken().type, TokenType::Slash);
+    EXPECT_EQ(lexer.nextToken().type, TokenType::Number);
     EXPECT_EQ(lexer.nextToken().type, TokenType::StrictEqual);
     EXPECT_EQ(lexer.nextToken().type, TokenType::StrictNotEqual);
     EXPECT_EQ(lexer.nextToken().type, TokenType::And);
     EXPECT_EQ(lexer.nextToken().type, TokenType::Or);
+}
+
+TEST(LexerTests, SlashAfterOperatorIsRegExp) {
+    auto source = SourceCode::fromString("* /ab+/g");
+    Lexer lexer(source.get());
+
+    EXPECT_EQ(lexer.nextToken().type, TokenType::Star);
+    EXPECT_EQ(lexer.nextToken().type, TokenType::RegExp);
 }

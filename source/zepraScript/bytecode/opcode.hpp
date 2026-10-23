@@ -12,6 +12,9 @@ namespace Zepra::Bytecode {
 
 /**
  * @brief Bytecode opcodes
+ *
+ * Operands that index the constant pool (names, functions, module paths)
+ * are 16-bit, big-endian; OP_CONSTANT is the one-byte short form.
  */
 enum class Opcode : uint8 {
     // Stack manipulation
@@ -23,7 +26,7 @@ enum class Opcode : uint8 {
     // Constants
     OP_CONSTANT,        // Push constant from pool
     OP_CONSTANT_LONG,   // Push constant (wide index)
-    OP_NIL,            // Push undefined
+    OP_NIL,            // Push null
     OP_TRUE,           // Push true
     OP_FALSE,          // Push false
     OP_ZERO,           // Push 0
@@ -89,10 +92,10 @@ enum class Opcode : uint8 {
     
     // Objects & Arrays
     OP_CREATE_OBJECT,
-    OP_CREATE_ARRAY,
+    OP_CREATE_ARRAY,   // u16 count: [e0..en-1] -> [array]
     OP_INIT_PROPERTY,
-    OP_INIT_ELEMENT,
-    OP_SPREAD,
+    OP_INIT_ELEMENT,   // [array, value] -> [array] (appends)
+    OP_SPREAD,         // [array, iterable] -> [array] (appends every item)
     
     // Control flow
     OP_JUMP,
@@ -131,8 +134,8 @@ enum class Opcode : uint8 {
     OP_FINALLY,
     
     // Iterators
-    OP_GET_ITERATOR,
-    OP_ITERATOR_NEXT,
+    OP_GET_ITERATOR,   // [iterable] -> [iterator]
+    OP_ITERATOR_NEXT,  // u16 exit offset: [iterator] -> [value], or [] and jump when done
     OP_FOR_IN,
     OP_FOR_OF,
     
@@ -149,6 +152,20 @@ enum class Opcode : uint8 {
     OP_EXPORT,         // Register exported value
     OP_IMPORT_BINDING, // Bind imported name to local
     
+    // Appended so existing opcode numbers do not change
+    OP_DUP2,           // [a, b]       -> [a, b, a, b]
+    OP_DUP_X1,         // [a, b]       -> [b, a, b]
+    OP_DUP_X2,         // [a, b, c]    -> [c, a, b, c]
+    OP_PICK,           // u8 n: copies the value n below the top to the top
+    OP_TO_NUMBER,      // Unary +
+    OP_DELETE_ELEMENT, // [obj, key] -> [bool]
+    OP_CALL_WITH_THIS, // u8 argc: [this, fn, args...] -> [result]
+    OP_CALL_SPREAD,    // [this, fn, argsArray] -> [result]
+    OP_NEW_SPREAD,     // [ctor, argsArray] -> [object]
+    OP_SUPER_APPLY,    // [argsArray, this, superclass] -> [result]
+    OP_OBJECT_REST,    // u8 n: [source, key1..keyn] -> [copy of source without those keys]
+    OP_GET_CALLEE,     // Pushes the running function (a named function expression's own name)
+
     // End marker
     OP_END
 };

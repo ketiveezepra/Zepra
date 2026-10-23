@@ -12,6 +12,7 @@
 #include "frontend/ast.hpp"
 #include <functional>
 #include <vector>
+#include <memory>
 #include <string>
 
 namespace Zepra::Bytecode {
@@ -139,6 +140,35 @@ public:
      * @brief Create a bound function
      */
     Function(Function* target, Value boundThis, std::vector<Value> boundArgs);
+
+    /**
+     * @brief Create a bytecode function; the compiler then sets its chunk and
+     * frame layout. arity is the expected argument count (fn.length).
+     */
+    Function(std::string name, size_t arity, bool isArrow, bool isGenerator, bool isAsync);
+
+    /**
+     * @brief Frame layout of a bytecode function, set by the compiler
+     *
+     * Parameter slots follow the receiver in slot 0; a rest parameter takes
+     * the last of them. Non-arrow functions reserve the slot after the
+     * parameters for `arguments`, which is filled only when the body reads it.
+     */
+    struct FrameLayout {
+        uint16_t parameterSlots = 0;
+        bool hasRest = false;
+        bool hasArgumentsSlot = false;
+        bool usesArguments = false;
+    };
+    void setFrameLayout(const FrameLayout& layout) { layout_ = layout; hasLayout_ = true; }
+    const FrameLayout* frameLayout() const { return hasLayout_ ? &layout_ : nullptr; }
+
+    /**
+     * @brief A new closure of this compiled function, made each time its
+     * function expression is evaluated: shares the bytecode and metadata,
+     * starts with no upvalues and no own properties.
+     */
+    Function* instantiateClosure() const;
     
     ~Function() override = default;
     
@@ -191,11 +221,11 @@ public:
     // Closure environment access for debugger
     Environment* getClosureEnvironment() const { return closure_; }
 
-    // Debug metadata for frame introspection
-    const std::vector<std::string>& localNames() const { return localNames_; }
-    const std::vector<std::string>& paramNames() const { return paramNames_; }
-    void setLocalNames(std::vector<std::string> names) { localNames_ = std::move(names); }
-    void setParamNames(std::vector<std::string> names) { paramNames_ = std::move(names); }
+    // Debug metadata for frame introspection (shared by every closure of
+    // the same compiled function)
+    const std::vector<std::string>& localNames() const;
+    const std::vector<std::string>& paramNames() const;
+    void setDebugNames(std::vector<std::string> params, std::vector<std::string> locals);
 
     // Call support
     Value call(Context* ctx, Value thisValue, const std::vector<Value>& args);
@@ -235,9 +265,14 @@ private:
     bool isAsync_ = false;
     bool isGenerator_ = false;
     std::string sourceFile_;
-    std::vector<std::string> localNames_;
-    std::vector<std::string> paramNames_;
+    struct DebugNames {
+        std::vector<std::string> params;
+        std::vector<std::string> locals;
+    };
+    std::shared_ptr<const DebugNames> debugNames_;
     uint32_t sourceLine_ = 0;
+    FrameLayout layout_;
+    bool hasLayout_ = false;
 };
 
 /**

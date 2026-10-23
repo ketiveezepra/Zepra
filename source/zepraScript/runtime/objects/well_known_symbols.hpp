@@ -9,6 +9,7 @@
  */
 
 #include <cstdint>
+#include <string>
 
 namespace Zepra::Runtime {
 
@@ -25,6 +26,16 @@ namespace WellKnownSymbols {
     constexpr uint32_t Replace       = 0xFFFF000A;
     constexpr uint32_t Search        = 0xFFFF000B;
     constexpr uint32_t Split         = 0xFFFF000C;
+}
+
+/**
+ * @brief Property key under which a symbol-keyed property is stored
+ *
+ * Objects have no separate symbol table yet, so symbol keys share the string
+ * key space under this form: distinct per symbol, and never an array index.
+ */
+inline std::string symbolPropertyKey(uint32_t symbolId) {
+    return "@@symbol:" + std::to_string(symbolId);
 }
 
 } // namespace Zepra::Runtime

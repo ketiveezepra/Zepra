@@ -9,6 +9,7 @@
 #include "ast.hpp"
 #include <memory>
 #include <vector>
+#include <stdexcept>
 #include <string>
 #include <functional>
 
@@ -20,6 +21,13 @@ namespace Zepra::Frontend {
  * Parses JavaScript source code into an AST using
  * recursive descent parsing.
  */
+/// Thrown when a construct cannot be parsed; parseProgram catches it,
+/// records the error and resynchronises at the next statement.
+class ParseError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
 class Parser {
 public:
     /**
@@ -60,6 +68,7 @@ private:
     
     // Synchronization for error recovery
     void synchronize();
+    void requireProgress(uint32_t startOffset);  // Throws ParseError if no token was consumed
     
     // Error handling
     void error(const std::string& message);
@@ -130,6 +139,7 @@ private:
     Token currentToken_;
     Token previousToken_;
     std::vector<std::string> errors_;
+    static constexpr size_t kMaxErrors = 100;  // stop parsing hopeless input
     
     // Parser state
     bool inLoop_ = false;

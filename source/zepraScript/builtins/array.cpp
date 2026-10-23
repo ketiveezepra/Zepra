@@ -11,10 +11,55 @@
 #include "runtime/objects/value.hpp"
 #include "runtime/execution/vm.hpp"
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 #include <stdexcept>
 
 namespace Zepra::Builtins {
+
+namespace {
+
+// A relative index argument: negative counts back from the end. Clamped to
+// [0, length]; `fallback` when the argument is undefined.
+size_t relativeIndex(const Runtime::Value& arg, size_t length, size_t fallback) {
+    if (arg.isUndefined()) return fallback;
+    double d = arg.toNumber();
+    if (std::isnan(d)) return 0;
+    d = d < 0 ? std::ceil(d) : std::floor(d);
+    if (d < 0) d = std::max(0.0, static_cast<double>(length) + d);
+    return static_cast<size_t>(std::min(d, static_cast<double>(length)));
+}
+
+// Array.prototype.sort order: stable, undefined values last, and by string
+// form unless a compare function is given. An exception thrown by the
+// compare function ends the sort and reaches the caller.
+void sortValues(std::vector<Runtime::Value>& values, const Runtime::Value& compare) {
+    auto defined = std::stable_partition(values.begin(), values.end(),
+        [](const Runtime::Value& v) { return !v.isUndefined(); });
+
+    Runtime::Function* compareFn = nullptr;
+    if (compare.isObject() && compare.asObject()->isFunction()) {
+        compareFn = static_cast<Runtime::Function*>(compare.asObject());
+    } else if (!compare.isUndefined()) {
+        throw std::runtime_error("The comparison function must be either a function or undefined");
+    }
+    Runtime::VM* vm = Runtime::VM::current();
+    if (compareFn && !vm) {
+        throw std::runtime_error("Array.prototype.sort called outside a running script");
+    }
+
+    // A merge sort: an inconsistent compare function gives an unspecified
+    // order, never an out-of-bounds access
+    std::stable_sort(values.begin(), defined, [&](const Runtime::Value& a, const Runtime::Value& b) {
+        if (compareFn) {
+            double result = vm->executeCallback(compareFn, Runtime::Value::undefined(), {a, b}).toNumber();
+            return result < 0;
+        }
+        return a.toString() < b.toString();
+    });
+}
+
+} // namespace
 
 // Array.isArray(value)
 Runtime::Value ArrayBuiltin::isArray(const Runtime::FunctionCallInfo& info) {
@@ -752,31 +797,94 @@ Runtime::Value ArrayBuiltin::toSorted(const Runtime::FunctionCallInfo& info) {
     Runtime::Array* arr = dynamic_cast<Runtime::Array*>(thisVal.asObject());
     if (!arr) return Runtime::Value::object(new Runtime::Array({}));
     
-    // Copy elements
-    std::vector<Runtime::Value> copy;
-    for (size_t i = 0; i < arr->length(); i++) {
-        copy.push_back(arr->at(i));
-    }
-    
-    // Get compare function if provided
-    Runtime::Function* compareFn = nullptr;
-    if (info.argumentCount() > 0 && info.argument(0).isObject()) {
-        compareFn = dynamic_cast<Runtime::Function*>(info.argument(0).asObject());
-    }
-    
-    // Sort the copy
-    std::sort(copy.begin(), copy.end(), [&](const Runtime::Value& a, const Runtime::Value& b) {
-        if (compareFn && compareFn->isBuiltin()) {
-            std::vector<Runtime::Value> args = {a, b};
-            Runtime::FunctionCallInfo callInfo(info.context(), Runtime::Value::undefined(), args);
-            Runtime::Value result = compareFn->builtinFunction()(callInfo);
-            return result.toNumber() < 0;
-        }
-        // Default string comparison
-        return a.toString() < b.toString();
-    });
-    
+    std::vector<Runtime::Value> copy = arr->elements();
+    sortValues(copy, info.argument(0));
     return Runtime::Value::object(new Runtime::Array(std::move(copy)));
+}
+
+// sort(compareFn?) - sorts in place and returns the array
+Runtime::Value ArrayBuiltin::sort(const Runtime::FunctionCallInfo& info) {
+    Runtime::Value thisVal = info.thisValue();
+    Runtime::Array* arr = thisVal.isObject() ? dynamic_cast<Runtime::Array*>(thisVal.asObject()) : nullptr;
+    if (!arr) return thisVal;
+
+    std::vector<Runtime::Value> sorted = arr->elements();
+    sortValues(sorted, info.argument(0));
+    for (size_t i = 0; i < sorted.size(); i++) {
+        arr->set(i, sorted[i]);
+    }
+    return thisVal;
+}
+
+// splice(start, deleteCount?, ...items) - returns the removed elements
+Runtime::Value ArrayBuiltin::splice(const Runtime::FunctionCallInfo& info) {
+    Runtime::Value thisVal = info.thisValue();
+    Runtime::Array* arr = thisVal.isObject() ? dynamic_cast<Runtime::Array*>(thisVal.asObject()) : nullptr;
+    if (!arr) return Runtime::Value::object(new Runtime::Array());
+
+    const size_t length = arr->length();
+    const size_t start = relativeIndex(info.argument(0), length, 0);
+    size_t deleteCount = 0;
+    if (info.argumentCount() == 1) {
+        deleteCount = length - start;
+    } else if (info.argumentCount() > 1) {
+        double d = info.argument(1).toNumber();
+        if (!std::isnan(d) && d > 0) {
+            deleteCount = static_cast<size_t>(std::min(std::floor(d), static_cast<double>(length - start)));
+        }
+    }
+
+    const auto& elements = arr->elements();
+    std::vector<Runtime::Value> removed(elements.begin() + static_cast<std::ptrdiff_t>(start),
+                                        elements.begin() + static_cast<std::ptrdiff_t>(start + deleteCount));
+    std::vector<Runtime::Value> items;
+    for (size_t i = 2; i < info.argumentCount(); i++) {
+        items.push_back(info.argument(i));
+    }
+    arr->splice(start, deleteCount, items);
+    return Runtime::Value::object(new Runtime::Array(std::move(removed)));
+}
+
+// lastIndexOf(searchElement, fromIndex?)
+Runtime::Value ArrayBuiltin::lastIndexOf(const Runtime::FunctionCallInfo& info) {
+    Runtime::Value thisVal = info.thisValue();
+    Runtime::Array* arr = thisVal.isObject() ? dynamic_cast<Runtime::Array*>(thisVal.asObject()) : nullptr;
+    if (!arr || arr->length() == 0) return Runtime::Value::number(-1);
+
+    const size_t length = arr->length();
+    double from = info.argumentCount() > 1 ? info.argument(1).toNumber() : static_cast<double>(length - 1);
+    if (std::isnan(from)) from = 0;
+    if (from < 0) from += static_cast<double>(length);
+    if (from < 0) return Runtime::Value::number(-1);
+    size_t i = static_cast<size_t>(std::min(std::floor(from), static_cast<double>(length - 1))) + 1;
+    while (i-- > 0) {
+        if (arr->at(i).strictEquals(info.argument(0))) {
+            return Runtime::Value::number(static_cast<double>(i));
+        }
+    }
+    return Runtime::Value::number(-1);
+}
+
+// copyWithin(target, start, end?) - copies a range inside the array
+Runtime::Value ArrayBuiltin::copyWithin(const Runtime::FunctionCallInfo& info) {
+    Runtime::Value thisVal = info.thisValue();
+    Runtime::Array* arr = thisVal.isObject() ? dynamic_cast<Runtime::Array*>(thisVal.asObject()) : nullptr;
+    if (!arr) return thisVal;
+
+    const size_t length = arr->length();
+    const size_t target = relativeIndex(info.argument(0), length, 0);
+    const size_t start = relativeIndex(info.argument(1), length, 0);
+    const size_t end = relativeIndex(info.argument(2), length, length);
+    if (start >= end || target >= length) return thisVal;
+
+    const size_t count = std::min(end - start, length - target);
+    const auto& elements = arr->elements();
+    std::vector<Runtime::Value> range(elements.begin() + static_cast<std::ptrdiff_t>(start),
+                                      elements.begin() + static_cast<std::ptrdiff_t>(start + count));
+    for (size_t i = 0; i < count; i++) {
+        arr->set(target + i, range[i]);
+    }
+    return thisVal;
 }
 
 // toReversed() - ES2023 - returns new reversed array (non-mutating)
@@ -1010,6 +1118,10 @@ Runtime::Object* ArrayBuiltin::createArrayPrototype(Runtime::Context*) {
     prototype->set("slice", Runtime::Value::object(new Runtime::Function("slice", slice, 2)));
     prototype->set("concat", Runtime::Value::object(new Runtime::Function("concat", concat, 1)));
     prototype->set("indexOf", Runtime::Value::object(new Runtime::Function("indexOf", indexOf, 1)));
+    prototype->set("lastIndexOf", Runtime::Value::object(new Runtime::Function("lastIndexOf", lastIndexOf, 1)));
+    prototype->set("splice", Runtime::Value::object(new Runtime::Function("splice", splice, 2)));
+    prototype->set("sort", Runtime::Value::object(new Runtime::Function("sort", sort, 1)));
+    prototype->set("copyWithin", Runtime::Value::object(new Runtime::Function("copyWithin", copyWithin, 2)));
     prototype->set("includes", Runtime::Value::object(new Runtime::Function("includes", includes, 1)));
     prototype->set("join", Runtime::Value::object(new Runtime::Function("join", join, 1)));
     prototype->set("reverse", Runtime::Value::object(new Runtime::Function("reverse", reverse, 0)));

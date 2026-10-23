@@ -111,7 +111,7 @@ target_include_directories(zeprascript-integration-tests
 
 target_compile_definitions(zeprascript-integration-tests
     PRIVATE
-        SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/.."
+        SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
 
 gtest_discover_tests(zeprascript-integration-tests)

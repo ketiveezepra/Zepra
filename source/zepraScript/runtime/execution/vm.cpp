@@ -44,6 +44,177 @@ using Zepra::Bytecode::BytecodeChunk;
 // Thread-local current VM for callback execution
 thread_local VM* VM::currentVM_ = nullptr;
 
+ThrownException::ThrownException(Value value)
+    : std::runtime_error([&value] {
+          // "Name: message" for error objects, the value itself otherwise
+          if (value.isObject()) {
+              Object* obj = value.asObject();
+              Value name = obj->get("name");
+              Value message = obj->get("message");
+              if (name.isString() || message.isString()) {
+                  std::string text = name.isString() ? name.toString() : "Error";
+                  if (message.isString()) text += ": " + message.toString();
+                  return text;
+              }
+          }
+          return value.toString();
+      }())
+    , value_(value) {}
+
+namespace {
+
+// An element key that is an array index: an integral number, or a canonical
+// numeric string such as "3" (for-in yields strings), below 2^32 - 1.
+bool toArrayIndex(const Value& key, uint32_t& index) {
+    if (key.isNumber()) {
+        double d = key.asNumber();
+        if (!(d >= 0.0) || d > 4294967294.0 || d != std::floor(d)) return false;
+        index = static_cast<uint32_t>(d);
+        return true;
+    }
+    if (key.isString()) {
+        const std::string& s = static_cast<String*>(key.asObject())->value();
+        if (s.empty() || s.size() > 10 || (s.size() > 1 && s[0] == '0')) return false;
+        uint64_t v = 0;
+        for (char c : s) {
+            if (c < '0' || c > '9') return false;
+            v = v * 10 + static_cast<uint64_t>(c - '0');
+        }
+        if (v > 4294967294ULL) return false;
+        index = static_cast<uint32_t>(v);
+        return true;
+    }
+    return false;
+}
+
+bool isNullish(const Value& value) {
+    return value.isNull() || value.isUndefined();
+}
+
+// Property name of a key that is not an array index
+std::string propertyKeyName(const Value& key) {
+    if (key.isString()) return static_cast<String*>(key.asObject())->value();
+    if (key.isSymbol()) return symbolPropertyKey(key.asSymbol());
+    return key.toString();
+}
+
+// How a value is named in a TypeError message
+std::string describeForError(const Value& value) {
+    if (value.isUndefined()) return "undefined";
+    if (value.isNull()) return "null";
+    if (value.isObject()) return value.asObject()->isFunction() ? "function" : "object";
+    std::string text = value.toString();
+    if (value.isString()) text = "\"" + text + "\"";
+    return text.size() > 40 ? text.substr(0, 40) + "..." : text;
+}
+
+// Bytes in the UTF-8 sequence that starts with `lead`
+size_t utf8SequenceLength(unsigned char lead) {
+    if (lead < 0x80) return 1;
+    if ((lead >> 5) == 0x6) return 2;
+    if ((lead >> 4) == 0xE) return 3;
+    if ((lead >> 3) == 0x1E) return 4;
+    return 1;  // Stray continuation byte: step over it
+}
+
+// The one Object.prototype used for objects the VM creates itself
+Object* defaultObjectPrototype() {
+    static Object* proto = Builtins::ObjectBuiltin::createObjectPrototype(nullptr);
+    return proto;
+}
+
+VM& runningVM() {
+    VM* vm = VM::current();
+    if (!vm) throw std::runtime_error("No script is running");
+    return *vm;
+}
+
+Function* thisFunction(const FunctionCallInfo& info, const char* method) {
+    Value fn = info.thisValue();
+    if (!fn.isObject() || !fn.asObject()->isFunction()) {
+        throw std::runtime_error(std::string("Function.prototype.") + method +
+                                 " called on a value that is not a function");
+    }
+    return static_cast<Function*>(fn.asObject());
+}
+
+// Arguments for apply(): an array, an array-like object, or nothing
+std::vector<Value> argumentList(const Value& list) {
+    if (list.isNull() || list.isUndefined()) return {};
+    if (!list.isObject()) {
+        throw std::runtime_error("CreateListFromArrayLike called on non-object");
+    }
+    Object* obj = list.asObject();
+    if (auto* array = dynamic_cast<Array*>(obj)) return array->elements();
+    double length = obj->get("length").toNumber();
+    std::vector<Value> args;
+    for (uint32_t i = 0; i < length && i < 65536; i++) args.push_back(obj->get(i));
+    return args;
+}
+
+// Function.prototype: what every function inherits when it does not define
+// the property itself
+Object* functionPrototype() {
+    static Object* proto = [] {
+        auto* p = new Object();
+        p->setPrototype(defaultObjectPrototype());
+        p->set("call", Value::object(new Function("call", [](const FunctionCallInfo& info) -> Value {
+            Function* fn = thisFunction(info, "call");
+            const auto& all = info.arguments();
+            std::vector<Value> args(all.size() > 1 ? all.begin() + 1 : all.end(), all.end());
+            return runningVM().executeCallback(fn, info.argument(0), args);
+        }, 1)));
+        p->set("apply", Value::object(new Function("apply", [](const FunctionCallInfo& info) -> Value {
+            Function* fn = thisFunction(info, "apply");
+            return runningVM().executeCallback(fn, info.argument(0), argumentList(info.argument(1)));
+        }, 2)));
+        p->set("bind", Value::object(new Function("bind", [](const FunctionCallInfo& info) -> Value {
+            Function* fn = thisFunction(info, "bind");
+            const auto& all = info.arguments();
+            std::vector<Value> bound(all.size() > 1 ? all.begin() + 1 : all.end(), all.end());
+            return Value::object(fn->bind(info.argument(0), bound));
+        }, 1)));
+        p->set("toString", Value::object(new Function("toString", [](const FunctionCallInfo& info) -> Value {
+            Function* fn = thisFunction(info, "toString");
+            return Value::string(new String("function " + fn->name() + "() { [native code] }"));
+        }, 0)));
+        return p;
+    }();
+    return proto;
+}
+
+// State of a for-of loop, spread or array destructuring. Arrays and other
+// indexed objects are read live, strings by code point, Map and Set from a
+// snapshot, everything else through its [Symbol.iterator]() object. The
+// values it holds are also stored as properties so a collector sees them.
+class IteratorState : public Object {
+public:
+    enum class Kind { Indexed, String, Protocol };
+
+    IteratorState(Kind kind, Value source) : kind_(kind), source_(source) {
+        set(" source", source);
+    }
+
+    void setNextMethod(Value next) {
+        nextMethod_ = next;
+        set(" next", next);
+    }
+
+    void setSnapshot(Array* snapshot) {
+        snapshot_ = snapshot;
+        set(" snapshot", Value::object(snapshot));
+    }
+
+    Kind kind_;
+    Value source_;
+    Value nextMethod_;
+    Array* snapshot_ = nullptr;
+    size_t position_ = 0;
+    bool done_ = false;
+};
+
+} // namespace
+
 VM::VM(Context* context) : context_(context), jit_(this) {
     stack_.reserve(ZEPRA_MAX_CALL_STACK_DEPTH * 256);
     heapStack_.reserve(HEAP_STACK_PREALLOC);
@@ -69,39 +240,76 @@ ExecutionResult VM::execute(const Bytecode::BytecodeChunk* chunk) {
         return result;
     }
     
-    chunk_ = chunk;
-    ip_ = 0;
     terminationRequested_ = false;
-    
+
     // Set current VM for callbacks
     VM* previousVM = currentVM_;
     currentVM_ = this;
-    
+
+    // The script runs in a frame of its own, like a function, so its block
+    // locals are addressed relative to where it started on the stack
+    const Bytecode::BytecodeChunk* savedChunk = chunk_;
+    const size_t savedIP = ip_;
+    const size_t savedDepth = callDepth();
+    const size_t savedStack = stack_.size();
+    const size_t savedHandlers = exceptionHandlers_.size();
+
+    VMCallFrame frame;
+    frame.returnAddress = SIZE_MAX;  // OP_RETURN leaves run() here
+    frame.slotBase = savedStack;
+    frame.savedChunk = savedChunk;
+    pushCallFrame(frame);
+    chunk_ = chunk;
+    ip_ = 0;
+
     try {
         run();
         result.status = ExecutionResult::Status::Success;
-        result.value = stack_.empty() ? Value::undefined() : pop();
-        
+        result.value = pop();
+
         // Drain microtask queue (promise callbacks, queueMicrotask)
         MicrotaskQueue::instance().process();
+    } catch (const ThrownException& e) {
+        result.status = ExecutionResult::Status::Exception;
+        result.value = e.value();
+        result.error = std::string("Uncaught ") + e.what();
+        unwindTo(savedDepth, savedStack, savedHandlers);
     } catch (const std::exception& e) {
         result.status = ExecutionResult::Status::Error;
         result.error = e.what();
+        unwindTo(savedDepth, savedStack, savedHandlers);
     }
-    
+    chunk_ = savedChunk;
+    ip_ = savedIP;
+
     // Restore previous VM
     currentVM_ = previousVM;
-    
+
     return result;
 }
 
+// Drops everything a failed run left behind: frames, stack values (closing
+// any upvalues over them) and exception handlers.
+void VM::unwindTo(size_t depth, size_t stackSize, size_t handlerCount) {
+    while (callDepth() > depth) popCallFrame();
+    if (stack_.size() > stackSize) {
+        closeUpvalues(stack_.data() + stackSize);
+        stack_.erase(stack_.begin() + static_cast<std::ptrdiff_t>(stackSize), stack_.end());
+    }
+    if (exceptionHandlers_.size() > handlerCount) exceptionHandlers_.resize(handlerCount);
+    isYielding_ = false;
+}
+
 void VM::run() {
-    const auto& codeVec = chunk_->code();
-    const size_t codeSize = codeVec.size();
-    
     instructionCounter_ = 0;
-    
-    while (__builtin_expect(ip_ < codeSize, 1)) {
+    ++runDepth_;
+    struct RunDepthGuard {
+        size_t& depth;
+        ~RunDepthGuard() { --depth; }
+    } runDepthGuard{runDepth_};
+
+    // Calls switch chunk_, so the end is checked against the current chunk
+    while (__builtin_expect(ip_ < chunk_->code().size(), 1)) {
         if (__builtin_expect(isYielding_ || terminationRequested_, 0)) break;
         
         instructionCounter_++;
@@ -123,8 +331,87 @@ void VM::run() {
         }
         
         Opcode op = static_cast<Opcode>(readByte());
-        dispatch(op);
+        try {
+            dispatch(op);
+        } catch (const SecurityError&) {
+            throw;  // Execution limits end the script; page code cannot catch them
+        } catch (const ThrownException& e) {
+            throwValue(e.value());  // From a builtin or callback: catchable here
+        } catch (const std::runtime_error& e) {
+            // Errors the engine detects become catchable JavaScript errors
+            const std::string message = e.what();
+            const bool tooDeep = message.find("tack overflow") != std::string::npos ||
+                                 message.find("call stack") != std::string::npos;
+            throwValue(makeError(tooDeep ? "RangeError" : "TypeError", message));
+        }
     }
+}
+
+void VM::throwValue(Value exception) {
+    // Handlers left by frames that are gone (generator suspension, unwound
+    // callbacks) cannot catch anything
+    while (!exceptionHandlers_.empty() &&
+           exceptionHandlers_.back().callStackLevel > callDepth()) {
+        exceptionHandlers_.pop_back();
+    }
+    // Only a handler installed by this run() can catch here: one from an
+    // outer run() is on the far side of native code, which must unwind first
+    if (exceptionHandlers_.empty() || exceptionHandlers_.back().runDepth != runDepth_) {
+        throw ThrownException(exception);
+    }
+    ExceptionHandler handler = exceptionHandlers_.back();
+    exceptionHandlers_.pop_back();
+
+    while (callDepth() > handler.callStackLevel) popCallFrame();
+    if (stack_.size() > handler.stackLevel) {
+        closeUpvalues(stack_.data() + handler.stackLevel);
+        stack_.erase(stack_.begin() + static_cast<std::ptrdiff_t>(handler.stackLevel), stack_.end());
+    }
+    chunk_ = handler.chunk;
+    ip_ = handler.catchAddress;
+    exceptionValue_ = exception;
+    hasException_ = true;
+}
+
+// ToPrimitive: an object's valueOf()/toString() result, in hint order. An
+// array without usable methods joins its elements, as Array.prototype.toString
+// does; other objects fall back to their default string form.
+Value VM::toPrimitive(const Value& value, bool preferString) {
+    if (!value.isObject()) return value;
+    const char* first = preferString ? "toString" : "valueOf";
+    const char* second = preferString ? "valueOf" : "toString";
+    for (const char* name : {first, second}) {
+        Value method = getProperty(value, name);
+        if (method.isObject() && method.asObject()->isFunction()) {
+            Value result = executeCallback(static_cast<Function*>(method.asObject()), value, {});
+            if (!result.isObject()) return result;
+        }
+    }
+    if (auto* array = dynamic_cast<Array*>(value.asObject())) {
+        std::string joined;
+        const auto& elements = array->elements();
+        for (size_t i = 0; i < elements.size(); i++) {
+            if (i > 0) joined += ",";
+            if (!isNullish(elements[i])) joined += toPrimitive(elements[i], true).toString();
+        }
+        return Value::string(new String(joined));
+    }
+    return Value::string(new String(value.toString()));
+}
+
+void VM::toPrimitiveOperands(Value& a, Value& b) {
+    if (a.isObject()) a = toPrimitive(a, false);
+    if (b.isObject()) b = toPrimitive(b, false);
+}
+
+Value VM::makeError(const std::string& type, const std::string& message) {
+    auto* error = new Error(message, type);
+    Value ctor = getGlobal(type);
+    if (ctor.isObject()) {
+        Value proto = ctor.asObject()->get("prototype");
+        if (proto.isObject()) error->setPrototype(proto.asObject());
+    }
+    return Value::object(error);
 }
 
 bool VM::shouldTerminate() const {
@@ -174,299 +461,147 @@ void VM::dispatch(Opcode op) {
             break;
             
         case Opcode::OP_GET_LOCAL: {
-            uint8_t slot = readByte();
+            uint16_t slot = readShort();
             push(getLocal(slot));
             break;
         }
-        
+
         case Opcode::OP_SET_LOCAL: {
-            uint8_t slot = readByte();
+            uint16_t slot = readShort();
             setLocal(slot, peek());
             break;
         }
-        
-        case Opcode::OP_GET_GLOBAL: {
-            uint8_t nameIdx = readByte();
-            Value nameValue = chunk_->constant(nameIdx);
-            if (nameValue.isString()) {
-                const std::string& name = static_cast<String*>(nameValue.asObject())->value();
-                push(getGlobal(name));
-            }
-            break;
-        }
-        
-        case Opcode::OP_SET_GLOBAL: {
-            uint8_t nameIdx = readByte();
-            Value nameValue = chunk_->constant(nameIdx);
-            if (nameValue.isString()) {
-                const std::string& name = static_cast<String*>(nameValue.asObject())->value();
-                globals_[name] = peek();
-            }
-            break;
-        }
-        
-        case Opcode::OP_DEFINE_GLOBAL: {
-            uint8_t nameIdx = readByte();
-            Value nameValue = chunk_->constant(nameIdx);
-            if (nameValue.isString()) {
-                const std::string& name = static_cast<String*>(nameValue.asObject())->value();
-                globals_[name] = pop();
-            }
-            break;
-        }
-        
-        case Opcode::OP_GET_UPVALUE: {
-            uint8_t slot = readByte();
-            // Get current function from call stack (HYBRID)
-            if (callDepth() > 0 && currentFrame().function) {
-                RuntimeUpvalue* upvalue = currentFrame().function->upvalue(slot);
-                if (upvalue) {
-                    push(upvalue->get());
-                } else {
-                    push(Value::undefined());
-                }
-            } else {
-                push(Value::undefined());
-            }
-            break;
-        }
-        
-        case Opcode::OP_SET_UPVALUE: {
-            uint8_t slot = readByte();
-            Value value = peek();
-            if (callDepth() > 0 && currentFrame().function) {
-                RuntimeUpvalue* upvalue = currentFrame().function->upvalue(slot);
-                if (upvalue) {
-                    upvalue->set(value);
-                }
-            }
-            break;
-        }
-            
-        case Opcode::OP_GET_PROPERTY: {
-            size_t propSiteIP = ip_ - 1;  // IC key: bytecode offset of this access
-            uint8_t nameIdx = readByte();
-            Value nameValue = chunk_->constant(nameIdx);
-            Value objValue = pop();
-            
-            if (objValue.isObject()) {
-                Object* obj = objValue.asObject();
-                if (nameValue.isString()) {
-                    std::string name = static_cast<String*>(nameValue.asObject())->value();
-                    
-                    // Special case: 'length' — common hot path
-                    if (name == "length") {
-                        push(Value::number(static_cast<double>(obj->length())));
-                        break;
-                    }
-                    
-                    // IC fast path: check cached shape → direct slot access
-                    InlineCache* ic = icManager_.getIC(propSiteIP);
-                    if (ic) {
-                        uint32_t cachedOffset;
-                        if (ic->lookup(obj->shapeId(), cachedOffset)) {
-                            // IC hit — direct slot access, skip hash lookup
-                            push(obj->getPropertyBySlot(cachedOffset));
-                            break;
-                        }
-                    }
-                    
-                    // Slow path: check for accessor descriptor first
-                    auto desc = obj->getOwnPropertyDescriptor(name);
-                    if (desc && desc->isAccessorDescriptor() && desc->getter.isObject()) {
-                        Function* getterFn = dynamic_cast<Function*>(desc->getter.asObject());
-                        if (getterFn) {
-                            std::vector<Value> args;
-                            push(getterFn->call(nullptr, objValue, args));
-                            break;
-                        }
-                    }
 
-                    // Slow path: full property lookup
-                    Value result = obj->get(name);
-                    push(result);
-                    
-                    // Update IC with real slot offset for next access
-                    if (ic) {
-                        int32_t slot = obj->findPropertySlot(name);
-                        if (slot >= 0) {
-                            ic->update(obj->shapeId(), static_cast<uint32_t>(slot));
-                        }
-                    }
-                } else {
-                    push(Value::undefined());
-                }
-            } else if (objValue.isString()) {
-                if (nameValue.isString()) {
-                    std::string name = static_cast<String*>(nameValue.asObject())->value();
-                    if (name == "length") {
-                        String* str = static_cast<String*>(objValue.asObject());
-                        push(Value::number(static_cast<double>(str->value().length())));
-                    } else {
-                        static Object* stringProto = Builtins::StringBuiltin::createStringPrototype(nullptr);
-                        Value method = stringProto->get(name);
-                        push(method);
-                    }
-                } else {
-                    push(Value::undefined());
-                }
-            } else {
-                push(Value::undefined());
-            }
+        case Opcode::OP_GET_GLOBAL: {
+            push(getGlobal(constantString(readShort())));
             break;
         }
-        
+
+        case Opcode::OP_SET_GLOBAL: {
+            globals_[constantString(readShort())] = peek();
+            break;
+        }
+
+        case Opcode::OP_DEFINE_GLOBAL: {
+            globals_[constantString(readShort())] = pop();
+            break;
+        }
+
+        case Opcode::OP_GET_UPVALUE: {
+            uint16_t slot = readShort();
+            RuntimeUpvalue* upvalue = currentFrame().function
+                ? currentFrame().function->upvalue(slot) : nullptr;
+            push(upvalue ? upvalue->get() : Value::undefined());
+            break;
+        }
+
+        case Opcode::OP_SET_UPVALUE: {
+            uint16_t slot = readShort();
+            RuntimeUpvalue* upvalue = currentFrame().function
+                ? currentFrame().function->upvalue(slot) : nullptr;
+            if (upvalue) upvalue->set(peek());
+            break;
+        }
+
+        case Opcode::OP_GET_PROPERTY: {
+            const std::string& name = constantString(readShort());
+            Value target = pop();
+            push(getProperty(target, name));
+            break;
+        }
+
         case Opcode::OP_SET_PROPERTY: {
-            size_t setSiteIP = ip_ - 1;  // IC key for set site
-            uint8_t nameIdx = readByte();
-            Value nameValue = chunk_->constant(nameIdx);
+            const std::string& name = constantString(readShort());
             Value value = pop();
-            Value objValue = pop();
-            
-            if (objValue.isObject()) {
-                Object* obj = objValue.asObject();
-                if (nameValue.isString()) {
-                    const std::string& name = static_cast<String*>(nameValue.asObject())->value();
-                    
-                    // Check for accessor descriptor (setter)
-                    auto desc = obj->getOwnPropertyDescriptor(name);
-                    if (desc && desc->isAccessorDescriptor() && desc->setter.isObject()) {
-                        Function* setterFn = dynamic_cast<Function*>(desc->setter.asObject());
-                        if (setterFn) {
-                            std::vector<Value> args = {value};
-                            setterFn->call(nullptr, objValue, args);
-                        }
-                    } else {
-                        // IC fast path for set: direct slot access on shape match
-                        InlineCache* ic = icManager_.getIC(setSiteIP);
-                        uint32_t cachedOffset;
-                        if (ic && ic->lookup(obj->shapeId(), cachedOffset)) {
-                            obj->setPropertyBySlot(cachedOffset, value);
-                        } else {
-                            obj->set(name, value);
-                            // Cache the slot for next access
-                            if (ic) {
-                                int32_t slot = obj->findPropertySlot(name);
-                                if (slot >= 0) {
-                                    ic->update(obj->shapeId(), static_cast<uint32_t>(slot));
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Write barrier: notify GC of potential old→young reference
-                    if (value.isObject() && gcHeap_) {
-                        gcHeap_->writeBarrier(obj, value.asObject());
-                    }
-                }
-            }
+            Value target = pop();
+            setProperty(target, name, value);
             push(value);
             break;
         }
-        
+
         case Opcode::OP_GET_ELEMENT: {
-            Value index = pop();
-            Value array = pop();
-            
-            if (array.isObject()) {
-                if (index.isNumber()) {
-                    size_t idx = static_cast<size_t>(index.asNumber());
-                    push(array.asObject()->get(idx));
-                } else {
-                    // String or other key — resolve as property name
-                    std::string key = index.toString();
-                    push(array.asObject()->get(key));
-                }
-            } else {
-                push(Value::undefined());
-            }
+            Value key = pop();
+            Value target = pop();
+            push(getElement(target, key));
             break;
         }
-        
+
         case Opcode::OP_SET_ELEMENT: {
             Value value = pop();
-            Value index = pop();
-            Value array = pop();
-            
-            if (array.isObject()) {
-                if (index.isNumber()) {
-                    size_t idx = static_cast<size_t>(index.asNumber());
-                    array.asObject()->set(idx, value);
-                } else {
-                    std::string key = index.toString();
-                    array.asObject()->set(key, value);
-                }
-                
-                // Write barrier: notify GC of potential old→young reference
-                if (value.isObject() && gcHeap_) {
-                    gcHeap_->writeBarrier(array.asObject(), value.asObject());
-                }
-            }
+            Value key = pop();
+            Value target = pop();
+            setElement(target, key, value);
             push(value);
             break;
         }
-        
+
         // Arithmetic
         case Opcode::OP_ADD: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::add(a, b));
             break;
         }
-        
+
         case Opcode::OP_SUBTRACT: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::subtract(a, b));
             break;
         }
-        
+
         case Opcode::OP_MULTIPLY: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::multiply(a, b));
             break;
         }
-        
+
         case Opcode::OP_DIVIDE: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::divide(a, b));
             break;
         }
-        
+
         case Opcode::OP_MODULO: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::modulo(a, b));
             break;
         }
-        
+
         case Opcode::OP_POWER: {
             Value b = pop();
             Value a = pop();
-            if (a.isNumber() && b.isNumber()) {
-                push(Value::number(std::pow(a.asNumber(), b.asNumber())));
-            } else {
-                push(Value::number(std::nan("")));
-            }
+            toPrimitiveOperands(a, b);
+            push(Value::number(std::pow(a.toNumber(), b.toNumber())));
             break;
         }
-        
+
         case Opcode::OP_NEGATE: {
-            Value a = pop();
-            push(Value::negate(a));
+            push(Value::negate(toPrimitive(pop(), false)));
             break;
         }
-        
+
         // Comparison
         case Opcode::OP_EQUAL: {
             Value b = pop();
             Value a = pop();
+            // An object compared loosely with a primitive (other than null
+            // and undefined) is compared as its primitive value
+            if (a.isObject() != b.isObject() && !isNullish(a) && !isNullish(b)) {
+                toPrimitiveOperands(a, b);
+            }
             push(Value::boolean(a.equals(b)));
             break;
         }
-        
+
         case Opcode::OP_STRICT_EQUAL: {
             Value b = pop();
             Value a = pop();
@@ -477,10 +612,15 @@ void VM::dispatch(Opcode op) {
         case Opcode::OP_NOT_EQUAL: {
             Value b = pop();
             Value a = pop();
+            // An object compared loosely with a primitive (other than null
+            // and undefined) is compared as its primitive value
+            if (a.isObject() != b.isObject() && !isNullish(a) && !isNullish(b)) {
+                toPrimitiveOperands(a, b);
+            }
             push(Value::boolean(!a.equals(b)));
             break;
         }
-        
+
         case Opcode::OP_STRICT_NOT_EQUAL: {
             Value b = pop();
             Value a = pop();
@@ -491,31 +631,35 @@ void VM::dispatch(Opcode op) {
         case Opcode::OP_LESS: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::lessThan(a, b));
             break;
         }
-        
+
         case Opcode::OP_LESS_EQUAL: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::lessEqual(a, b));
             break;
         }
-        
+
         case Opcode::OP_GREATER: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::greaterThan(a, b));
             break;
         }
-        
+
         case Opcode::OP_GREATER_EQUAL: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::greaterEqual(a, b));
             break;
         }
-        
+
         // Logical
         case Opcode::OP_NOT: {
             Value a = pop();
@@ -527,51 +671,56 @@ void VM::dispatch(Opcode op) {
         case Opcode::OP_BITWISE_AND: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::bitwiseAnd(a, b));
             break;
         }
-        
+
         case Opcode::OP_BITWISE_OR: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::bitwiseOr(a, b));
             break;
         }
-        
+
         case Opcode::OP_BITWISE_XOR: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::bitwiseXor(a, b));
             break;
         }
-        
+
         case Opcode::OP_BITWISE_NOT: {
-            Value a = pop();
-            push(Value::bitwiseNot(a));
+            push(Value::bitwiseNot(toPrimitive(pop(), false)));
             break;
         }
-        
+
         case Opcode::OP_LEFT_SHIFT: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::leftShift(a, b));
             break;
         }
-        
+
         case Opcode::OP_RIGHT_SHIFT: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::rightShift(a, b));
             break;
         }
-        
+
         case Opcode::OP_UNSIGNED_RIGHT_SHIFT: {
             Value b = pop();
             Value a = pop();
+            toPrimitiveOperands(a, b);
             push(Value::unsignedRightShift(a, b));
             break;
         }
-        
+
         // Jumps
         case Opcode::OP_JUMP: {
             uint16_t offset = readShort();
@@ -604,280 +753,89 @@ void VM::dispatch(Opcode op) {
         // Functions
         case Opcode::OP_CALL: {
             uint8_t argCount = readByte();
-            
-            // Get the callee (function/object) from the stack
-            Value callee = peek(argCount);
-            
-            if (!callee.isObject()) {
-                throw std::runtime_error("Attempted to call non-callable value");
-            }
-            
-            Object* calleeObj = callee.asObject();
-            
-            // Check if it's a function
-            if (!calleeObj->isFunction()) {
-                throw std::runtime_error("Object is not callable");
-            }
-            
-            Function* function = static_cast<Function*>(calleeObj);
-
-            // JIT profiling: track call frequency for tier-up decisions
-            jitProfiler_.recordCall(reinterpret_cast<uintptr_t>(function));
-            
-            // Collect arguments from stack in correct order
-            // Stack: [callee, arg0, arg1, ...] with arg0 at bottom
-            std::vector<Value> args;
-            args.reserve(argCount);
-            for (int i = argCount - 1; i >= 0; i--) {
-                args.push_back(peek(i));
-            }
-            
-            // Pop arguments and callee from stack
-            popN(argCount + 1);
-            
-            // Execute the function
-            if (function->isBuiltin()) {
-                // Call builtin function with FunctionCallInfo
-                FunctionCallInfo info(context_, Value::undefined(), args);
-                Value result = function->builtinFunction()(info);
-                push(result);
-            } else if (function->isNative()) {
-                // Call native function
-                Value result = function->nativeFunction()(context_, args);
-                push(result);
-            } else if (function->isCompiled()) {
-                if (function->isGenerator()) {
-                    // Create GeneratorObject, skip execution
-                    // Try to get shared prototype from Context/GlobalObject
-                    Value genProtoValue = getGlobal("Generator").isObject() ? 
-                        getGlobal("Generator").asObject()->get("prototype") : Value::undefined();
-                    
-                    auto* genObj = new Builtins::GeneratorObject(function, Value::undefined(), args);
-                    if (genProtoValue.isObject()) {
-                        genObj->setPrototype(genProtoValue.asObject());
-                    }
-                    push(Value::object(genObj));
-                } else {
-                    // Compiled JavaScript function - push call frame and execute bytecode
-                    // Uses HYBRID TWO-STACK: native for fast path, heap for deep recursion
-                    VMCallFrame frame;
-                    frame.function = function;
-                    frame.returnAddress = ip_;
-                    frame.slotBase = stack_.size();
-                    frame.thisValue = Value::undefined();
-                    frame.savedChunk = chunk_;
-                    pushCallFrame(frame);
-                
-                    // Slot 0 = 'this' (undefined for normal calls, object for 'new')
-                    push(Value::undefined());
-                    for (const auto& arg : args) {
-                        push(arg);
-                    }
-                
-                    chunk_ = function->bytecodeChunk();
-                    ip_ = 0;
-                }
-            } else {
-                push(Value::undefined());
-            }
+            std::vector<Value> args = takeArguments(argCount);
+            Value callee = pop();
+            invoke(functionOrThrow(callee, describeForError(callee)), Value::undefined(), std::move(args));
             break;
         }
-        
+
         case Opcode::OP_RETURN: {
             Value result = pop();
-            
-            // If we have call frames, pop one and restore state (HYBRID STACK)
-            if (callDepth() > 0) {
-                VMCallFrame frame = popCallFrame();  // Hybrid: auto-switches heap/native
-                
-                // Check for callback sentinel - SIZE_MAX means exit run()
-                if (frame.returnAddress == SIZE_MAX) {
-                    // Callback return - push result and terminate
-                    closeUpvalues(&stack_[frame.slotBase]);
-                    while (stack_.size() > frame.slotBase) {
-                        pop();
-                    }
-                    push(result);
-                    ip_ = chunk_->code().size();  // Exit run() loop
-                    break;
-                }
-                
-                // Close upvalues that reference this frame's locals
-                // MUST happen before popping locals, otherwise upvalue
-                // pointers become dangling
-                closeUpvalues(&stack_[frame.slotBase]);
-                
-                // Pop locals for this frame
-                while (stack_.size() > frame.slotBase) {
-                    pop();
-                }
-                
-                // Constructor semantics: if this was a 'new' call and the
-                // constructor didn't explicitly return an object, return
-                // 'this'. (Method calls also have an object 'this' and must
-                // return their own result.)
-                if (frame.isConstruct && !result.isObject()) {
-                    result = frame.thisValue;
-                }
-                
-                // Push the return value
-                push(result);
-                
-                // Restore caller's chunk and IP
-                chunk_ = frame.savedChunk;
-                ip_ = frame.returnAddress;
-            } else {
-                // Top-level return - end execution
+
+            if (callDepth() == 0) {
+                // A chunk run without a frame: just stop
                 push(result);
                 ip_ = chunk_->code().size();
+                break;
+            }
+
+            VMCallFrame frame = popCallFrame();
+            // Close upvalues over this frame's locals before dropping them
+            if (stack_.size() > frame.slotBase) {
+                closeUpvalues(stack_.data() + frame.slotBase);
+                stack_.erase(stack_.begin() + static_cast<std::ptrdiff_t>(frame.slotBase), stack_.end());
+            }
+            // Handlers installed by the returning function go with it
+            while (!exceptionHandlers_.empty() &&
+                   exceptionHandlers_.back().callStackLevel > callDepth()) {
+                exceptionHandlers_.pop_back();
+            }
+
+            // 'new' and super(): a non-object result means the new object
+            if (frame.isConstruct && !result.isObject()) {
+                result = frame.thisValue;
+            }
+            push(result);
+
+            if (frame.returnAddress == SIZE_MAX) {
+                // Boundary of a script, callback or generator: leave this run()
+                ip_ = chunk_->code().size();
+            } else {
+                chunk_ = frame.savedChunk;
+                ip_ = frame.returnAddress;
             }
             break;
         }
-        
+
         case Opcode::OP_CALL_METHOD: {
-            // Stack layout: [receiver, arg0, arg1, ...]
-            // Operands: 1 byte method name constant index, 1 byte arg count
-            uint8_t nameIdx = readByte();
+            // [receiver, args...]; operands: method name (u16), arg count (u8)
+            const std::string& methodName = constantString(readShort());
             uint8_t argCount = readByte();
-            
-            // Get method name from constant pool
-            Value nameValue = chunk_->constant(nameIdx);
-            if (!nameValue.isString()) {
-                throw std::runtime_error("Invalid method name");
-            }
-            std::string methodName = static_cast<String*>(nameValue.asObject())->value();
-            
-            // Get receiver (below all arguments)
-            Value receiver = peek(argCount);
-            
-            // Handle string primitives - auto-box to String object
-            Object* obj = nullptr;
-            if (receiver.isString()) {
-                // String primitive - use the String object directly (it has prototype)
-                obj = receiver.asObject();
-            } else if (receiver.isObject()) {
-                obj = receiver.asObject();
-            } else {
-                throw std::runtime_error("Cannot call method on " + receiver.toString());
-            }
-            
-            // Look up the method on the receiver
-            Value method = obj->get(methodName);
-            
-            // If method not found on object, lookup on prototype
+            std::vector<Value> args = takeArguments(argCount);
+            Value receiver = pop();
+
+            Value method = getProperty(receiver, methodName);
             if (!method.isObject() || !method.asObject()->isFunction()) {
-                if (receiver.isString()) {
-                    static Object* stringProto = Builtins::StringBuiltin::createStringPrototype(nullptr);
-                    method = stringProto->get(methodName);
-                } else if (obj->isArray()) {
-                    static Object* arrayProto = Builtins::ArrayBuiltin::createArrayPrototype(nullptr);
-                    method = arrayProto->get(methodName);
-                }
+                throw std::runtime_error(describeForError(receiver) + "." + methodName +
+                                         " is not a function");
             }
-            
-            if (!method.isObject() || !method.asObject()->isFunction()) {
-                throw std::runtime_error("Method '" + methodName + "' is not a function");
-            }
-            
-            Function* function = static_cast<Function*>(method.asObject());
-            
-            // Collect arguments from stack
-            std::vector<Value> args;
-            args.reserve(argCount);
-            for (int i = argCount - 1; i >= 0; i--) {
-                args.push_back(peek(i));
-            }
-            
-            // Pop arguments and receiver
-            popN(argCount + 1);
-            
-            // Execute the method with receiver as 'this'
-            if (function->isBuiltin()) {
-                FunctionCallInfo info(context_, receiver, args);
-                Value result = function->builtinFunction()(info);
-                push(result);
-            } else if (function->isNative()) {
-                Value result = function->nativeFunction()(context_, args);
-                push(result);
-            } else if (function->isCompiled()) {
-                if (function->isGenerator()) {
-                    Value genProtoValue = getGlobal("Generator").isObject() ? 
-                        getGlobal("Generator").asObject()->get("prototype") : Value::undefined();
-                    
-                    auto* genObj = new Builtins::GeneratorObject(function, receiver, args);
-                    if (genProtoValue.isObject()) {
-                        genObj->setPrototype(genProtoValue.asObject());
-                    }
-                    push(Value::object(genObj));
-                } else {
-                    // Compiled function - execute with this binding
-                    VMCallFrame frame;
-                    frame.function = function;
-                    frame.returnAddress = ip_;
-                    frame.slotBase = stack_.size();
-                    frame.thisValue = receiver;
-                    frame.savedChunk = chunk_;
-                    pushCallFrame(frame);
-                
-                    // Slot 0 = 'this' (the compiler reserves it; params start at 1)
-                    push(receiver);
-                    for (const auto& arg : args) {
-                        push(arg);
-                    }
-                
-                    chunk_ = function->bytecodeChunk();
-                    ip_ = 0;
-                }
-            } else {
-                push(Value::undefined());
-            }
+            invoke(static_cast<Function*>(method.asObject()), receiver, std::move(args));
             break;
         }
-            
+
         case Opcode::OP_CLOSURE: {
-            // Read the function constant index
-            uint8_t funcIdx = readByte();
-            Value funcValue = chunk_->constant(funcIdx);
-            
-            // Get function object to add upvalues
-            Function* fn = funcValue.asObject() ? 
-                dynamic_cast<Function*>(funcValue.asObject()) : nullptr;
-            
-            // Read upvalue count and capture each one
-            uint8_t upvalueCount = readByte();
-            for (uint8_t i = 0; i < upvalueCount; i++) {
+            // Each evaluation makes a new closure with its own upvalues
+            uint16_t funcIdx = readShort();
+            uint16_t upvalueCount = readShort();
+            auto* fnTemplate = static_cast<Function*>(chunk_->constant(funcIdx).asObject());
+            Function* closure = fnTemplate->instantiateClosure();
+
+            VMCallFrame& frame = currentFrame();
+            for (uint16_t i = 0; i < upvalueCount; i++) {
                 uint8_t isLocal = readByte();
-                uint8_t index = readByte();
-                
-                if (fn) {
-                    RuntimeUpvalue* upvalue;
-                    if (isLocal) {
-                        // Capture from local stack slot
-                        upvalue = captureUpvalue(&stack_[currentFrame().slotBase + index]);
-                    } else {
-                        // Get from enclosing function's upvalues
-                        upvalue = currentFrame().function->upvalue(index);
-                    }
-                    fn->addUpvalue(upvalue);
+                uint16_t index = readShort();
+                RuntimeUpvalue* upvalue = nullptr;
+                if (isLocal) {
+                    upvalue = captureUpvalue(&stack_[frame.slotBase + index]);
+                } else if (frame.function) {
+                    upvalue = frame.function->upvalue(index);
                 }
+                closure->addUpvalue(upvalue);
             }
-            // Per ES spec: constructable functions get a .prototype property
-            // with a .constructor back-reference. Arrow functions are excluded.
-            if (fn && fn->isConstructor()) {
-                Value existingProto = fn->get("prototype");
-                if (!existingProto.isObject()) {
-                    static Object* objectProto = Builtins::ObjectBuiltin::createObjectPrototype(nullptr);
-                    Object* proto = new Object();
-                    proto->setPrototype(objectProto);
-                    proto->set("constructor", funcValue);
-                    fn->set("prototype", Value::object(proto));
-                }
-            }
-            
-            push(funcValue);
+            push(Value::object(closure));
             break;
         }
-            
+
         case Opcode::OP_CLOSE_UPVALUE: {
             // Close upvalue at top of stack
             if (!stack_.empty()) {
@@ -954,245 +912,72 @@ void VM::dispatch(Opcode op) {
             
         // Object creation
         case Opcode::OP_CREATE_ARRAY: {
-            uint8_t count = readByte();
-            std::vector<Value> elements;
-            for (int i = count - 1; i >= 0; i--) {
-                elements.insert(elements.begin(), stack_[stack_.size() - count + i]);
-            }
-            popN(count);
-            push(Value::object(new Array(std::move(elements))));
+            uint16_t count = readShort();
+            push(Value::object(new Array(takeArguments(count))));
             break;
         }
-        
+
         case Opcode::OP_CREATE_OBJECT: {
-            static Object* objectProto = Builtins::ObjectBuiltin::createObjectPrototype(nullptr);
             Object* obj = new Object();
-            obj->setPrototype(objectProto);
+            obj->setPrototype(defaultObjectPrototype());
             push(Value::object(obj));
             break;
         }
-            
+
         case Opcode::OP_INIT_PROPERTY: {
+            // Object literal entry: defines an own property, no setters run
             Value value = pop();
             Value key = pop();
             Value obj = peek();
-            
-            if (obj.isObject() && key.isString()) {
-                std::string propName = static_cast<String*>(key.asObject())->value();
-                obj.asObject()->set(propName, value);
+            if (obj.isObject()) {
+                uint32_t index;
+                if (toArrayIndex(key, index)) {
+                    obj.asObject()->set(index, value);
+                } else {
+                    obj.asObject()->set(propertyKeyName(key), value);
+                }
             }
             break;
         }
-        
+
         case Opcode::OP_GET_ITERATOR: {
             Value iterable = pop();
-            
-            // Create an iterator object with index tracking
-            Object* iterState = new Object();
-            iterState->set("__iterable", iterable);
-            iterState->set("__index", Value::number(0));
-            
-            if (iterable.isObject()) {
-                Object* obj = iterable.asObject();
-                // For Map, copy entries for iteration
-                if (auto* mapObj = dynamic_cast<Builtins::MapObject*>(obj)) {
-                    auto entries = mapObj->entries();
-                    Array* arr = new Array({});
-                    for (const auto& e : entries) {
-                        Array* pair = new Array({e.first, e.second});
-                        arr->push(Value::object(pair));
-                    }
-                    iterState->set("__entries", Value::object(arr));
-                    iterState->set("__length", Value::number(static_cast<double>(entries.size())));
-                }
-                // For Set, copy values
-                else if (auto* setObj = dynamic_cast<Builtins::SetObject*>(obj)) {
-                    auto vals = setObj->values();
-                    Array* arr = new Array(std::move(vals));
-                    iterState->set("__entries", Value::object(arr));
-                    iterState->set("__length", Value::number(static_cast<double>(setObj->size())));
-                }
-                // Arrays and strings use __iterable + __index directly
-                else {
-                    iterState->set("__length", Value::number(static_cast<double>(obj->length())));
-                }
-            } else if (iterable.isString()) {
-                String* str = static_cast<String*>(iterable.asObject());
-                iterState->set("__length", Value::number(static_cast<double>(str->value().length())));
-            }
-            
-            push(Value::object(iterState));
+            push(makeIterator(iterable));
             break;
         }
-        
+
         case Opcode::OP_ITERATOR_NEXT: {
-            Value iterValue = peek();
-            
-            if (!iterValue.isObject()) {
-                // Done — push {value: undefined, done: true}
-                Object* result = new Object();
-                result->set("value", Value::undefined());
-                result->set("done", Value::boolean(true));
-                push(Value::object(result));
-                break;
-            }
-            
-            Object* iterState = iterValue.asObject();
-            Value idxVal = iterState->get("__index");
-            Value lenVal = iterState->get("__length");
-            
-            size_t idx = static_cast<size_t>(idxVal.isNumber() ? idxVal.asNumber() : 0);
-            size_t len = static_cast<size_t>(lenVal.isNumber() ? lenVal.asNumber() : 0);
-            
-            Object* result = new Object();
-            
-            if (idx >= len) {
-                result->set("value", Value::undefined());
-                result->set("done", Value::boolean(true));
+            uint16_t exitOffset = readShort();
+            Value iterator = pop();
+            Value value;
+            if (iteratorStep(iterator, value)) {
+                push(value);
             } else {
-                // Get next value from entries array or iterable
-                Value entriesVal = iterState->get("__entries");
-                if (entriesVal.isObject()) {
-                    // Map/Set iterator — values stored in __entries array
-                    result->set("value", entriesVal.asObject()->get(idx));
-                } else {
-                    // Array/String — use __iterable directly
-                    Value iterable = iterState->get("__iterable");
-                    if (iterable.isObject()) {
-                        result->set("value", iterable.asObject()->get(idx));
-                    } else if (iterable.isString()) {
-                        // Character iteration for strings
-                        String* str = static_cast<String*>(iterable.asObject());
-                        std::string ch(1, str->value()[idx]);
-                        result->set("value", Value::string(new String(ch)));
-                    }
-                }
-                result->set("done", Value::boolean(false));
-                
-                // Advance index
-                iterState->set("__index", Value::number(static_cast<double>(idx + 1)));
+                ip_ += exitOffset;
             }
-            
-            push(Value::object(result));
             break;
         }
 
         case Opcode::OP_SPREAD: {
-            // Spread operator - expand array/iterable onto stack
+            // [array, iterable] -> [array]: appends every item
             Value iterable = pop();
-            
-            if (iterable.isObject()) {
-                Object* obj = iterable.asObject();
-                if (auto* arr = dynamic_cast<Array*>(obj)) {
-                    // Spread array elements onto stack
-                    for (size_t i = 0; i < arr->length(); i++) {
-                        push(arr->get(i));
-                    }
-                } else {
-                    // Non-array object: spread own enumerable values
-                    std::vector<std::string> keyNames = obj->keys();
-                    for (const auto& k : keyNames) {
-                        push(obj->get(k));
-                    }
-                }
-            } else if (iterable.isString()) {
-                // Spread string characters
-                std::string s = iterable.toString();
-                for (size_t i = 0; i < s.size(); i++) {
-                    push(Value::string(new String(std::string(1, s[i]))));
-                }
-            } else {
-                // Non-iterable — throw TypeError per ES spec
-                throw std::runtime_error("Value is not iterable (cannot spread)");
+            auto* target = dynamic_cast<Array*>(peek().asObject());
+            Value iterator = makeIterator(iterable);
+            Value value;
+            while (iteratorStep(iterator, value)) {
+                if (target) target->push(value);
             }
             break;
         }
-        
+
         case Opcode::OP_NEW: {
             uint8_t argCount = readByte();
-            
-            // Get the constructor (below all arguments)
-            Value callee = peek(argCount);
-            
-            if (!callee.isObject()) {
-                throw std::runtime_error("new requires a constructor");
-            }
-            
-            Object* calleeObj = callee.asObject();
-            if (!calleeObj->isFunction()) {
-                throw std::runtime_error("new requires a constructor function");
-            }
-            
-            Function* constructor = static_cast<Function*>(calleeObj);
-            
-            // Check if function is a valid constructor (not arrow function)
-            if (!constructor->isConstructor()) {
-                throw std::runtime_error(constructor->name() + " is not a constructor");
-            }
-            
-            // Collect arguments from stack
-            std::vector<Value> args;
-            args.reserve(argCount);
-            for (int i = argCount - 1; i >= 0; i--) {
-                args.push_back(peek(i));
-            }
-            
-            // Pop arguments and constructor from stack
-            popN(argCount + 1);
-            
-            // Create new object with constructor's prototype
-            Object* newObj = new Object();
-            Value prototypeVal = constructor->get("prototype");
-            if (prototypeVal.isObject()) {
-                newObj->setPrototype(prototypeVal.asObject());
-            }
-            
-            // Execute the constructor with new object as 'this'
-            Value result;
-            
-            if (constructor->isBuiltin()) {
-                FunctionCallInfo info(context_, Value::object(newObj), args);
-                result = constructor->builtinFunction()(info);
-            } else if (constructor->isNative()) {
-                result = constructor->nativeFunction()(context_, args);
-            } else if (constructor->isCompiled()) {
-                // Push call frame for compiled constructor
-                VMCallFrame frame;
-                frame.function = constructor;
-                frame.returnAddress = ip_;
-                frame.slotBase = stack_.size();
-                frame.thisValue = Value::object(newObj);
-                frame.isConstruct = true;
-                frame.savedChunk = chunk_;
-                pushCallFrame(frame);
-                
-                // Setup locals: push 'this' first, then arguments
-                push(Value::object(newObj));
-                for (const auto& arg : args) {
-                    push(arg);
-                }
-                
-                // Switch to constructor's bytecode
-                chunk_ = constructor->bytecodeChunk();
-                ip_ = 0;
-                
-                // The main loop continues with constructor's bytecode
-                // OP_RETURN will push the result
-                break;
-            } else {
-                // AST-based function - call construct method
-                result = constructor->construct(context_, args);
-            }
-            
-            // If constructor returned an object, use that; otherwise use newObj
-            if (result.isObject()) {
-                push(result);
-            } else {
-                push(Value::object(newObj));
-            }
+            std::vector<Value> args = takeArguments(argCount);
+            Value callee = pop();
+            constructValue(callee, std::move(args));
             break;
         }
-        
+
         // Type operations
         case Opcode::OP_TYPEOF: {
             Value a = pop();
@@ -1211,59 +996,32 @@ void VM::dispatch(Opcode op) {
         case Opcode::OP_INSTANCEOF: {
             Value constructorVal = pop();
             Value instance = pop();
-            
-            // Right-hand side must be callable
-            if (!constructorVal.isObject()) {
-                throw std::runtime_error("Right-hand side of 'instanceof' is not an object");
-            }
-            
-            Object* constructorObj = constructorVal.asObject();
-            if (!constructorObj->isFunction()) {
+
+            if (!constructorVal.isObject() || !constructorVal.asObject()->isFunction()) {
                 throw std::runtime_error("Right-hand side of 'instanceof' is not callable");
             }
-            
-            Function* constructor = static_cast<Function*>(constructorObj);
-            
-            // Check for custom @@hasInstance (Symbol.hasInstance)
-            Value hasInstanceSym = constructor->get("@@hasInstance");
-            if (hasInstanceSym.isObject() && hasInstanceSym.asObject()->isFunction()) {
-                Function* hasInstanceFn = static_cast<Function*>(hasInstanceSym.asObject());
-                FunctionCallInfo info(context_, constructorVal, {instance});
-                Value result = hasInstanceFn->builtinFunction()(info);
-                push(Value::boolean(result.toBoolean()));
-                break;
+            Function* constructor = static_cast<Function*>(constructorVal.asObject());
+            while (constructor->isBound() && constructor->boundTarget()) {
+                constructor = constructor->boundTarget();
             }
-            
-            // Standard instanceof: check prototype chain
-            Value prototypeVal = constructor->get("prototype");
-            if (!prototypeVal.isObject()) {
-                throw std::runtime_error("Function has non-object prototype property");
+
+            Object* prototype = ensurePrototypeObject(constructor);
+            if (!prototype) {
+                throw std::runtime_error("Function has non-object prototype in instanceof check");
             }
-            Object* prototype = prototypeVal.asObject();
-            
-            // Primitives are never instanceof anything
-            if (!instance.isObject()) {
-                push(Value::boolean(false));
-                break;
-            }
-            
-            // Walk the prototype chain
-            Object* obj = instance.asObject()->prototype();
-            while (obj != nullptr) {
-                if (obj == prototype) {
-                    push(Value::boolean(true));
-                    break;
+            bool found = false;
+            if (instance.isObject()) {
+                for (Object* obj = instance.asObject()->prototype(); obj; obj = obj->prototype()) {
+                    if (obj == prototype) {
+                        found = true;
+                        break;
+                    }
                 }
-                obj = obj->prototype();
             }
-            
-            // If we exited the loop without finding, result is false
-            if (obj == nullptr) {
-                push(Value::boolean(false));
-            }
+            push(Value::boolean(found));
             break;
         }
-            
+
         // Exceptions
         case Opcode::OP_THROW: {
             // Pop the exception value
@@ -1303,38 +1061,22 @@ void VM::dispatch(Opcode op) {
                 errObj->set("stack", Value::string(new String(stackStr)));
             }
             
-            // Find nearest exception handler
-            if (!exceptionHandlers_.empty()) {
-                ExceptionHandler handler = exceptionHandlers_.back();
-                exceptionHandlers_.pop_back();
-                
-                // Unwind stack to handler level
-                while (stack_.size() > handler.stackLevel) {
-                    pop();
-                }
-                
-                // Jump to catch block
-                ip_ = handler.catchAddress;
-            } else {
-                // No handler - propagate as runtime error
-                throw std::runtime_error("Uncaught exception: " + exceptionValue_.toString());
-            }
+            throwValue(exceptionValue_);
             break;
         }
             
         case Opcode::OP_TRY_BEGIN: {
-            // Read catch block offset
             uint16_t catchOffset = readShort();
-            
-            // Push exception handler
             ExceptionHandler handler;
             handler.catchAddress = ip_ + catchOffset;
             handler.stackLevel = stack_.size();
-            handler.callStackLevel = callDepth();  // HYBRID
+            handler.callStackLevel = callDepth();
+            handler.chunk = chunk_;
+            handler.runDepth = runDepth_;
             exceptionHandlers_.push_back(handler);
             break;
         }
-        
+
         case Opcode::OP_TRY_END:
             // End of try block without exception - pop handler
             if (!exceptionHandlers_.empty()) {
@@ -1356,7 +1098,7 @@ void VM::dispatch(Opcode op) {
         
         case Opcode::OP_IMPORT: {
             // Read module path constant index
-            uint8_t pathIdx = readByte();
+            uint16_t pathIdx = readShort();
             Value pathValue = chunk_->constant(pathIdx);
             if (!pathValue.isString()) {
                 throw std::runtime_error("Invalid module path");
@@ -1377,7 +1119,7 @@ void VM::dispatch(Opcode op) {
         
         case Opcode::OP_EXPORT: {
             // Read export name constant index
-            uint8_t nameIdx = readByte();
+            uint16_t nameIdx = readShort();
             Value nameValue = chunk_->constant(nameIdx);
             Value exportValue = pop();
             
@@ -1391,7 +1133,7 @@ void VM::dispatch(Opcode op) {
         
         case Opcode::OP_IMPORT_BINDING: {
             // Read binding name constant index  
-            readByte(); // consume binding name operand
+            readShort(); // consume binding name operand
             break;
         }
         case Opcode::OP_DEBUGGER: {
@@ -1400,27 +1142,28 @@ void VM::dispatch(Opcode op) {
         }
         // Class operations
         case Opcode::OP_INHERIT: {
+            // [subclass, superclass] -> [subclass]
             Value superclass = pop();
             Value subclass = peek(0);
-            if (!superclass.isObject() || !subclass.isObject()) {
-                throw std::runtime_error("Superclass and subclass must be objects");
+            if (!superclass.isObject() || !superclass.asObject()->isFunction()) {
+                throw std::runtime_error("Class extends value " + describeForError(superclass) +
+                                         " is not a constructor");
             }
-            if (!superclass.asObject()->isFunction() || !subclass.asObject()->isFunction()) {
-                throw std::runtime_error("Superclass and subclass must be constructors");
-            }
-            // Setup prototype chain: subclass.prototype.__proto__ = superclass.prototype
-            Value superProto = superclass.asObject()->get("prototype");
-            Value subProto = subclass.asObject()->get("prototype");
-            if (subProto.isObject() && superProto.isObject()) {
-                subProto.asObject()->setPrototype(superProto.asObject());
-            }
+            auto* sub = static_cast<Function*>(subclass.asObject());
+            auto* super = static_cast<Function*>(superclass.asObject());
+            // Instances inherit the parent's methods; the class its statics
+            Object* subProto = ensurePrototypeObject(sub);
+            Object* superProto = ensurePrototypeObject(super);
+            if (subProto && superProto) subProto->setPrototype(superProto);
+            sub->setPrototype(super);
             break;
         }
+
         case Opcode::OP_DEFINE_METHOD:
         case Opcode::OP_DEFINE_STATIC:
         case Opcode::OP_DEFINE_GETTER:
         case Opcode::OP_DEFINE_SETTER: {
-            uint8_t nameIdx = readByte();
+            uint16_t nameIdx = readShort();
             Value methodName = chunk_->constant(nameIdx);
             Value methodFunc = pop();
             Value classConstructor = peek(0);
@@ -1432,11 +1175,10 @@ void VM::dispatch(Opcode op) {
             String* nameStr = static_cast<String*>(methodName.asObject());
             Object* targetObj = classConstructor.asObject();
             
-            if (op != Opcode::OP_DEFINE_STATIC) {
+            if (op != Opcode::OP_DEFINE_STATIC && targetObj->isFunction()) {
                 // Add to prototype instead of constructor directly
-                Value proto = targetObj->get("prototype");
-                if (proto.isObject()) {
-                    targetObj = proto.asObject();
+                if (Object* proto = ensurePrototypeObject(static_cast<Function*>(targetObj))) {
+                    targetObj = proto;
                 }
             }
             
@@ -1456,52 +1198,14 @@ void VM::dispatch(Opcode op) {
             break;
         }
         case Opcode::OP_SUPER_CALL: {
+            // [args..., this, superclass]
             uint8_t argCount = readByte();
             Value superclass = pop();
             Value thisValue = pop();
-            
-            if (!superclass.isObject() || !superclass.asObject()->isFunction()) {
-                throw std::runtime_error("Superclass is not a constructor");
-            }
-            
-            Function* superConstructor = static_cast<Function*>(superclass.asObject());
-            
-            std::vector<Value> args;
-            args.reserve(argCount);
-            for (int i = 0; i < argCount; i++) {
-                args.push_back(pop());
-            }
-            // args were popped in reverse order, reverse them back
-            std::reverse(args.begin(), args.end());
-            
-            // Execute super constructor with 'this' value
-            if (superConstructor->isBuiltin()) {
-                FunctionCallInfo info(context_, thisValue, args);
-                push(superConstructor->builtinFunction()(info));
-            } else if (superConstructor->isNative()) {
-                push(superConstructor->nativeFunction()(context_, args));
-            } else if (superConstructor->isCompiled()) {
-                VMCallFrame frame;
-                frame.function = superConstructor;
-                frame.returnAddress = ip_;
-                frame.slotBase = stack_.size();
-                frame.thisValue = thisValue;
-                frame.isConstruct = true;  // super(...) runs the parent constructor
-                frame.savedChunk = chunk_;
-                pushCallFrame(frame);
-                
-                push(thisValue);
-                for (const auto& arg : args) {
-                    push(arg);
-                }
-                
-                chunk_ = superConstructor->bytecodeChunk();
-                ip_ = 0;
-            } else {
-                push(Value::undefined());
-            }
+            superConstruct(superclass, thisValue, takeArguments(argCount));
             break;
         }
+
         case Opcode::OP_FOR_IN: {
             Value obj = pop();
             if (obj.isObject()) {
@@ -1525,6 +1229,117 @@ void VM::dispatch(Opcode op) {
             Value b = pop();
             push(a);
             push(b);
+            break;
+        }
+
+        case Opcode::OP_DUP2: {         // [a, b] -> [a, b, a, b]
+            Value b = peek(0);
+            Value a = peek(1);
+            push(a);
+            push(b);
+            break;
+        }
+
+        case Opcode::OP_DUP_X1: {       // [a, b] -> [b, a, b]
+            Value b = pop();
+            Value a = pop();
+            push(b);
+            push(a);
+            push(b);
+            break;
+        }
+
+        case Opcode::OP_DUP_X2: {       // [a, b, c] -> [c, a, b, c]
+            Value c = pop();
+            Value b = pop();
+            Value a = pop();
+            push(c);
+            push(a);
+            push(b);
+            push(c);
+            break;
+        }
+
+        case Opcode::OP_PICK: {
+            uint8_t depth = readByte();
+            push(peek(depth));
+            break;
+        }
+
+        case Opcode::OP_TO_NUMBER:
+            push(Value::number(toPrimitive(pop(), false).toNumber()));
+            break;
+
+        case Opcode::OP_DELETE_ELEMENT: {
+            Value key = pop();
+            Value target = pop();
+            push(Value::boolean(deleteProperty(target, key)));
+            break;
+        }
+
+        case Opcode::OP_CALL_WITH_THIS: {
+            // [this, fn, args...]
+            uint8_t argCount = readByte();
+            std::vector<Value> args = takeArguments(argCount);
+            Value callee = pop();
+            Value thisValue = pop();
+            invoke(functionOrThrow(callee, describeForError(callee)), thisValue, std::move(args));
+            break;
+        }
+
+        case Opcode::OP_CALL_SPREAD: {
+            // [this, fn, argsArray]
+            Value argsArray = pop();
+            Value callee = pop();
+            Value thisValue = pop();
+            invoke(functionOrThrow(callee, describeForError(callee)), thisValue, arrayElements(argsArray));
+            break;
+        }
+
+        case Opcode::OP_NEW_SPREAD: {
+            // [ctor, argsArray]
+            Value argsArray = pop();
+            Value callee = pop();
+            constructValue(callee, arrayElements(argsArray));
+            break;
+        }
+
+        case Opcode::OP_SUPER_APPLY: {
+            // [argsArray, this, superclass]
+            Value superclass = pop();
+            Value thisValue = pop();
+            Value argsArray = pop();
+            superConstruct(superclass, thisValue, arrayElements(argsArray));
+            break;
+        }
+
+        case Opcode::OP_OBJECT_REST: {
+            // [source, key1..keyn] -> [copy of source's own enumerable
+            // properties without those keys]
+            uint8_t keyCount = readByte();
+            std::vector<Value> keys = takeArguments(keyCount);
+            Value source = pop();
+            if (source.isNull() || source.isUndefined()) {
+                throw std::runtime_error("Cannot destructure " + describeForError(source));
+            }
+            Object* rest = new Object();
+            rest->setPrototype(defaultObjectPrototype());
+            if (source.isObject()) {
+                std::unordered_set<std::string> excluded;
+                for (const auto& key : keys) excluded.insert(propertyKeyName(key));
+                for (const auto& name : source.asObject()->keys()) {
+                    if (excluded.count(name)) continue;
+                    Value key = Value::string(new String(name));
+                    setElement(Value::object(rest), key, getElement(source, key));
+                }
+            }
+            push(Value::object(rest));
+            break;
+        }
+
+        case Opcode::OP_GET_CALLEE: {
+            Function* callee = currentFrame().function;
+            push(callee ? Value::object(callee) : Value::undefined());
             break;
         }
 
@@ -1560,25 +1375,17 @@ void VM::dispatch(Opcode op) {
             Value obj = pop();
             Value key = pop();
             if (!obj.isObject()) {
-                throw std::runtime_error(
-                    "Cannot use 'in' operator to search for '" +
-                    key.toString() + "' in " + obj.toString());
+                throw std::runtime_error("Cannot use 'in' operator to search for '" +
+                                         key.toString() + "' in " + describeForError(obj));
             }
-            std::string keyStr;
-            if (key.isString()) {
-                keyStr = static_cast<String*>(key.asObject())->value();
+            Object* target = obj.asObject();
+            uint32_t index;
+            bool found;
+            if (toArrayIndex(key, index)) {
+                found = target->has(index);
             } else {
-                keyStr = key.toString();
-            }
-            // Walk prototype chain per ES spec
-            bool found = false;
-            Object* current = obj.asObject();
-            while (current) {
-                if (current->has(keyStr)) {
-                    found = true;
-                    break;
-                }
-                current = current->prototype();
+                std::string name = propertyKeyName(key);
+                found = target->has(name) || (target->isArray() && name == "length");
             }
             push(Value::boolean(found));
             break;
@@ -1586,16 +1393,9 @@ void VM::dispatch(Opcode op) {
 
         // Property deletion: `delete obj.prop`
         case Opcode::OP_DELETE_PROPERTY: {
-            uint8_t nameIdx = readByte();
-            Value nameVal = chunk_->constant(nameIdx);
-            Value obj = pop();
-            if (obj.isObject() && nameVal.isString()) {
-                String* nameStr = static_cast<String*>(nameVal.asObject());
-                bool deleted = obj.asObject()->deleteProperty(nameStr->value());
-                push(Value::boolean(deleted));
-            } else {
-                push(Value::boolean(true));
-            }
+            const std::string& name = constantString(readShort());
+            Value target = pop();
+            push(Value::boolean(deleteProperty(target, Value::string(new String(name)))));
             break;
         }
 
@@ -1719,7 +1519,7 @@ void VM::dispatch(Opcode op) {
 
         // Super property access: super.prop
         case Opcode::OP_SUPER_GET: {
-            uint8_t nameIndex = readByte();
+            uint16_t nameIndex = readShort();
             Value nameVal = chunk_->constant(nameIndex);
             std::string propName = nameVal.toString();
 
@@ -1840,106 +1640,562 @@ Value VM::call(Function* function, Value thisValue, const std::vector<Value>& ar
     if (!function) {
         return Value::undefined();
     }
-    
-    // Use executeCallback for proper execution
+    // A host call from outside any script (timer, animation frame) starts a
+    // fresh run, like execute(): a previous run's termination does not apply
+    if (callDepth() == 0) terminationRequested_ = false;
+
     return executeCallback(function, thisValue, args);
 }
 
-// Execute callback for array methods - handles native, builtin, and compiled functions
+// Runs fn to completion and returns its result, for builtins (array
+// callbacks, accessors, the iterator protocol) and the host. Compiled
+// functions run in a nested run(); an exception reaches the caller with the
+// VM state restored.
 Value VM::executeCallback(Function* fn, Value thisValue, const std::vector<Value>& args) {
     if (!fn) {
         return Value::undefined();
     }
-    
-    // Native function (simple signature)
-    if (fn->isNative()) {
-        return fn->nativeFunction()(context_, args);
+
+    std::vector<Value> callArgs = args;
+    while (fn->isBound() && fn->boundTarget()) {
+        std::vector<Value> combined = fn->boundArgs();
+        combined.insert(combined.end(), callArgs.begin(), callArgs.end());
+        callArgs = std::move(combined);
+        thisValue = fn->boundThis();
+        fn = fn->boundTarget();
     }
-    
-    // Builtin function (with FunctionCallInfo)
     if (fn->isBuiltin()) {
-        FunctionCallInfo info(context_, thisValue, args);
+        FunctionCallInfo info(context_, thisValue, callArgs);
         return fn->builtinFunction()(info);
     }
-    
-    // Compiled bytecode function - execute using this VM
-    if (fn->isCompiled() && fn->bytecodeChunk()) {
-        // Save VM state
-        const Bytecode::BytecodeChunk* savedChunk = chunk_;
-        size_t savedIP = ip_;
-        size_t savedStackBase = stack_.size();
-        
-        // Slot 0 = 'this', arguments from slot 1 (same layout as OP_CALL)
-        push(thisValue);
-        for (const auto& arg : args) {
-            push(arg);
+    if (fn->isNative()) {
+        return fn->nativeFunction()(context_, callArgs);
+    }
+    if (!fn->isCompiled()) {
+        throw std::runtime_error("Function '" + fn->name() + "' has no compiled body");
+    }
+    if (fn->isGenerator()) {
+        return makeGenerator(fn, thisValue, callArgs);
+    }
+
+    VM* previousVM = currentVM_;
+    currentVM_ = this;
+    const Bytecode::BytecodeChunk* savedChunk = chunk_;
+    const size_t savedIP = ip_;
+    const size_t savedDepth = callDepth();
+    const size_t savedStack = stack_.size();
+    const size_t savedHandlers = exceptionHandlers_.size();
+
+    Value result;
+    try {
+        enterFrame(fn, thisValue, callArgs, false, SIZE_MAX);
+        run();
+        if (callDepth() > savedDepth) {
+            throw std::runtime_error("Script execution was terminated");
         }
-        
-        // Push a call frame with sentinel return address to signal callback
-        // SIZE_MAX means "exit run() on return"
-        VMCallFrame frame;
-        frame.function = fn;
-        frame.returnAddress = SIZE_MAX;  // Sentinel: callback exit
-        frame.slotBase = savedStackBase;  // Args start here
-        frame.thisValue = thisValue;
-        frame.savedChunk = savedChunk;
-        pushCallFrame(frame);
-        
-        // Execute the function's bytecode
-        chunk_ = fn->bytecodeChunk();
-        ip_ = 0;
-        
-        try {
-            run();
-        } catch (const std::exception&) {
-            // Restore state on error
-            popCallFrame();
-            chunk_ = savedChunk;
-            ip_ = savedIP;
-            while (stack_.size() > savedStackBase) pop();
-            return Value::undefined();
-        }
-        
-        // Pop the call frame
-        popCallFrame();
-        
-        // Get return value (should be on stack)
-        Value result = stack_.size() > savedStackBase ? pop() : Value::undefined();
-        
-        // Clean up any remaining stack values from function
-        while (stack_.size() > savedStackBase) pop();
-        
-        // Restore VM state
+        result = pop();
+    } catch (...) {
+        unwindTo(savedDepth, savedStack, savedHandlers);
         chunk_ = savedChunk;
         ip_ = savedIP;
-        
-        return result;
+        currentVM_ = previousVM;
+        throw;
     }
-    
-    return Value::undefined();
+    chunk_ = savedChunk;
+    ip_ = savedIP;
+    currentVM_ = previousVM;
+    return result;
 }
 
 Value VM::construct(Function* constructor, const std::vector<Value>& args) {
     if (!constructor) {
         return Value::undefined();
     }
-
+    std::vector<Value> callArgs = args;
+    while (constructor->isBound() && constructor->boundTarget()) {
+        std::vector<Value> combined = constructor->boundArgs();
+        combined.insert(combined.end(), callArgs.begin(), callArgs.end());
+        callArgs = std::move(combined);
+        constructor = constructor->boundTarget();
+    }
     if (!constructor->isConstructor()) {
         throw std::runtime_error(constructor->name() + " is not a constructor");
     }
 
-    // Create new object with constructor's prototype
-    Object* newObj = new Object();
-    Value prototypeVal = constructor->get("prototype");
-    if (prototypeVal.isObject()) {
-        newObj->setPrototype(prototypeVal.asObject());
+    Object* instance = new Object();
+    Object* proto = ensurePrototypeObject(constructor);
+    instance->setPrototype(proto ? proto : defaultObjectPrototype());
+
+    Value result = executeCallback(constructor, Value::object(instance), callArgs);
+    return result.isObject() ? result : Value::object(instance);
+}
+
+// Calls fn from the interpreter loop: native and builtin functions run now
+// and push their result; a compiled function gets a frame, and the loop
+// continues in its bytecode.
+void VM::invoke(Function* fn, Value thisValue, std::vector<Value> args) {
+    while (fn->isBound() && fn->boundTarget()) {
+        std::vector<Value> combined = fn->boundArgs();
+        combined.insert(combined.end(), args.begin(), args.end());
+        args = std::move(combined);
+        thisValue = fn->boundThis();
+        fn = fn->boundTarget();
+    }
+    if (fn->isBuiltin()) {
+        FunctionCallInfo info(context_, thisValue, args);
+        push(fn->builtinFunction()(info));
+        return;
+    }
+    if (fn->isNative()) {
+        push(fn->nativeFunction()(context_, args));
+        return;
+    }
+    if (!fn->isCompiled()) {
+        throw std::runtime_error("Function '" + fn->name() + "' has no compiled body");
+    }
+    if (fn->isGenerator()) {
+        push(makeGenerator(fn, thisValue, args));
+        return;
+    }
+    jitProfiler_.recordCall(reinterpret_cast<uintptr_t>(fn));
+    enterFrame(fn, thisValue, args, false, ip_);
+}
+
+void VM::constructValue(const Value& callee, std::vector<Value> args) {
+    if (!callee.isObject() || !callee.asObject()->isFunction()) {
+        throw std::runtime_error(describeForError(callee) + " is not a constructor");
+    }
+    auto* ctor = static_cast<Function*>(callee.asObject());
+    while (ctor->isBound() && ctor->boundTarget()) {
+        std::vector<Value> combined = ctor->boundArgs();
+        combined.insert(combined.end(), args.begin(), args.end());
+        args = std::move(combined);
+        ctor = ctor->boundTarget();
+    }
+    if (!ctor->isConstructor()) {
+        throw std::runtime_error((ctor->name().empty() ? "function" : ctor->name()) +
+                                 " is not a constructor");
     }
 
-    // Call constructor with newObj as 'this'
-    Value result = executeCallback(constructor, Value::object(newObj), args);
+    Object* instance = new Object();
+    Object* proto = ensurePrototypeObject(ctor);
+    instance->setPrototype(proto ? proto : defaultObjectPrototype());
 
-    // If constructor returned an object, use that; otherwise use newObj
-    return result.isObject() ? result : Value::object(newObj);
+    if (ctor->isBuiltin()) {
+        FunctionCallInfo info(context_, Value::object(instance), args);
+        Value result = ctor->builtinFunction()(info);
+        push(result.isObject() ? result : Value::object(instance));
+        return;
+    }
+    if (ctor->isNative()) {
+        Value result = ctor->nativeFunction()(context_, args);
+        push(result.isObject() ? result : Value::object(instance));
+        return;
+    }
+    if (!ctor->isCompiled()) {
+        throw std::runtime_error("Function '" + ctor->name() + "' has no compiled body");
+    }
+    enterFrame(ctor, Value::object(instance), args, true, ip_);
+}
+
+// super(...) in a class constructor: runs the parent constructor on the
+// object being built.
+void VM::superConstruct(const Value& superclass, const Value& thisValue, std::vector<Value> args) {
+    if (!superclass.isObject() || !superclass.asObject()->isFunction()) {
+        throw std::runtime_error("Super constructor " + describeForError(superclass) +
+                                 " is not a constructor");
+    }
+    auto* parent = static_cast<Function*>(superclass.asObject());
+    while (parent->isBound() && parent->boundTarget()) {
+        std::vector<Value> combined = parent->boundArgs();
+        combined.insert(combined.end(), args.begin(), args.end());
+        args = std::move(combined);
+        parent = parent->boundTarget();
+    }
+    if (parent->isBuiltin()) {
+        FunctionCallInfo info(context_, thisValue, args);
+        push(parent->builtinFunction()(info));
+        return;
+    }
+    if (parent->isNative()) {
+        push(parent->nativeFunction()(context_, args));
+        return;
+    }
+    if (!parent->isCompiled()) {
+        throw std::runtime_error("Function '" + parent->name() + "' has no compiled body");
+    }
+    enterFrame(parent, thisValue, args, true, ip_);
+}
+
+void VM::enterFrame(Function* fn, Value thisValue, const std::vector<Value>& args,
+                    bool isConstruct, size_t returnAddress) {
+    VMCallFrame frame;
+    frame.function = fn;
+    frame.returnAddress = returnAddress;
+    frame.slotBase = stack_.size();
+    frame.thisValue = thisValue;
+    frame.isConstruct = isConstruct;
+    frame.savedChunk = chunk_;
+    pushCallFrame(frame);
+
+    push(thisValue);  // Slot 0
+    pushArguments(fn, args);
+    chunk_ = fn->bytecodeChunk();
+    ip_ = 0;
+}
+
+// Lays the arguments out in the callee's parameter slots: missing ones are
+// undefined, extras are dropped (they stay reachable through `arguments`),
+// and a rest parameter gets an array of the remainder.
+void VM::pushArguments(Function* fn, const std::vector<Value>& args) {
+    const Function::FrameLayout* layout = fn->frameLayout();
+    if (!layout) {
+        for (const auto& arg : args) push(arg);
+        return;
+    }
+    const size_t fixed = layout->parameterSlots - (layout->hasRest ? 1 : 0);
+    for (size_t i = 0; i < fixed; i++) {
+        push(i < args.size() ? args[i] : Value::undefined());
+    }
+    if (layout->hasRest) {
+        std::vector<Value> rest;
+        if (args.size() > fixed) rest.assign(args.begin() + static_cast<std::ptrdiff_t>(fixed), args.end());
+        push(Value::object(new Array(std::move(rest))));
+    }
+    if (layout->hasArgumentsSlot) {
+        push(layout->usesArguments ? Value::object(new Array(args)) : Value::undefined());
+    }
+}
+
+// Removes the top `count` values, returned in stack order.
+std::vector<Value> VM::takeArguments(size_t count) {
+    count = std::min(count, stack_.size());
+    std::vector<Value> args(stack_.end() - static_cast<std::ptrdiff_t>(count), stack_.end());
+    stack_.erase(stack_.end() - static_cast<std::ptrdiff_t>(count), stack_.end());
+    return args;
+}
+
+std::vector<Value> VM::arrayElements(const Value& array) {
+    if (array.isObject()) {
+        if (auto* arr = dynamic_cast<Array*>(array.asObject())) {
+            return arr->elements();
+        }
+    }
+    return {};
+}
+
+Function* VM::functionOrThrow(const Value& callee, const std::string& what) {
+    if (callee.isObject() && callee.asObject()->isFunction()) {
+        return static_cast<Function*>(callee.asObject());
+    }
+    throw std::runtime_error(what + " is not a function");
+}
+
+Value VM::makeGenerator(Function* fn, Value thisValue, const std::vector<Value>& args) {
+    auto* generator = new Builtins::GeneratorObject(fn, thisValue, args);
+    Value ctor = getGlobal("Generator");
+    Value proto = ctor.isObject() ? ctor.asObject()->get("prototype") : Value::undefined();
+    if (proto.isObject()) {
+        generator->setPrototype(proto.asObject());
+    } else {
+        static Object* generatorProto = Builtins::GeneratorBuiltin::createGeneratorPrototype();
+        generator->setPrototype(generatorProto);
+    }
+    return Value::object(generator);
+}
+
+// =============================================================================
+// Properties
+// =============================================================================
+
+const std::string& VM::constantString(size_t index) const {
+    static const std::string empty;
+    Value value = chunk_->constant(index);
+    return value.isString() ? static_cast<String*>(value.asObject())->value() : empty;
+}
+
+Object* VM::primitivePrototype(const Value& value) {
+    const char* ctorName = value.isString() ? "String"
+                         : value.isNumber() ? "Number"
+                         : value.isBoolean() ? "Boolean"
+                         : value.isSymbol() ? "Symbol" : nullptr;
+    if (!ctorName) return nullptr;
+    Value ctor = getGlobal(ctorName);
+    if (ctor.isObject()) {
+        Value proto = ctor.asObject()->get("prototype");
+        if (proto.isObject()) return proto.asObject();
+    }
+    return nullptr;
+}
+
+// A function's `prototype` object, created on first use: most functions are
+// never constructors, so building one per closure would waste an object.
+Object* VM::ensurePrototypeObject(Function* fn) {
+    if (!fn->isCompiled()) {
+        // Built-in constructors bring their own prototype
+        Value existing = fn->get("prototype");
+        return existing.isObject() ? existing.asObject() : nullptr;
+    }
+    if (fn->getOwnPropertyDescriptor("prototype")) {
+        Value existing = fn->get("prototype");
+        return existing.isObject() ? existing.asObject() : nullptr;
+    }
+    if (!fn->isCompiled() || !fn->isConstructor()) return nullptr;
+    Object* proto = new Object();
+    proto->setPrototype(defaultObjectPrototype());
+    proto->set("constructor", Value::object(fn));
+    fn->set("prototype", Value::object(proto));
+    return proto;
+}
+
+// obj.name: getters run with obj as `this`, primitives read through their
+// prototype, and reading from null or undefined is a TypeError.
+Value VM::getProperty(const Value& target, const std::string& name) {
+    if (target.isObject()) {
+        Object* obj = target.asObject();
+        if (obj->objectType() == ObjectType::Proxy) {
+            return obj->get(name);
+        }
+        if (obj->isArray() && name == "length") {
+            return Value::number(static_cast<double>(obj->length()));
+        }
+
+        Value value;
+        const PropertyDescriptor* accessor = nullptr;
+        if (obj->lookupProperty(name, value, accessor)) {
+            if (!accessor) return value;
+            if (accessor->getter.isObject() && accessor->getter.asObject()->isFunction()) {
+                return executeCallback(static_cast<Function*>(accessor->getter.asObject()), target, {});
+            }
+            return Value::undefined();
+        }
+
+        // Not stored: the built-in parts of arrays and functions
+        if (obj->isArray()) {
+            static Object* arrayProto = Builtins::ArrayBuiltin::createArrayPrototype(nullptr);
+            return arrayProto->get(name);
+        }
+        if (obj->isFunction()) {
+            auto* fn = static_cast<Function*>(obj);
+            if (name == "prototype") {
+                Object* proto = ensurePrototypeObject(fn);
+                return proto ? Value::object(proto) : Value::undefined();
+            }
+            if (name == "length") return Value::number(static_cast<double>(fn->arity()));
+            if (name == "name") return Value::string(new String(fn->name()));
+            return functionPrototype()->get(name);
+        }
+        return Value::undefined();
+    }
+
+    if (target.isString()) {
+        auto* str = static_cast<String*>(target.asObject());
+        if (name == "length") {
+            return Value::number(static_cast<double>(str->length()));
+        }
+        uint32_t index;
+        if (toArrayIndex(Value::string(new String(name)), index)) {
+            return index < str->length() ? str->charAt(index) : Value::undefined();
+        }
+        Object* proto = primitivePrototype(target);
+        Value method = proto ? proto->get(name) : Value::undefined();
+        if (method.isUndefined()) {
+            static Object* stringProto = Builtins::StringBuiltin::createStringPrototype(nullptr);
+            method = stringProto->get(name);
+        }
+        return method;
+    }
+
+    if (target.isNull() || target.isUndefined()) {
+        throw std::runtime_error("Cannot read properties of " + describeForError(target) +
+                                 " (reading '" + name + "')");
+    }
+    Object* proto = primitivePrototype(target);
+    return proto ? proto->get(name) : Value::undefined();
+}
+
+// obj[key]: array indices read the element storage, other keys are names.
+Value VM::getElement(const Value& target, const Value& key) {
+    uint32_t index;
+    if (toArrayIndex(key, index)) {
+        if (target.isObject() && target.asObject()->objectType() != ObjectType::Proxy) {
+            return target.asObject()->get(index);
+        }
+        if (target.isString()) {
+            auto* str = static_cast<String*>(target.asObject());
+            return index < str->length() ? str->charAt(index) : Value::undefined();
+        }
+    }
+    return getProperty(target, propertyKeyName(key));
+}
+
+// obj.name = value: a setter on the object or its prototype chain takes the
+// assignment; assigning to a primitive's property does nothing.
+void VM::setProperty(const Value& target, const std::string& name, const Value& value) {
+    if (!target.isObject()) {
+        if (target.isNull() || target.isUndefined()) {
+            throw std::runtime_error("Cannot set properties of " + describeForError(target) +
+                                     " (setting '" + name + "')");
+        }
+        return;
+    }
+    Object* obj = target.asObject();
+    if (obj->objectType() != ObjectType::Proxy) {
+        Value existing;
+        const PropertyDescriptor* accessor = nullptr;
+        if (obj->lookupProperty(name, existing, accessor) && accessor) {
+            if (accessor->setter.isObject() && accessor->setter.asObject()->isFunction()) {
+                executeCallback(static_cast<Function*>(accessor->setter.asObject()), target, {value});
+            }
+            return;
+        }
+        if (obj->isArray() && name == "length") {
+            const double length = value.toNumber();
+            if (!(length >= 0) || length > 4294967295.0 || length != std::floor(length)) {
+                throw ThrownException(makeError("RangeError", "Invalid array length"));
+            }
+            // Growing by more than this would allocate the elements; the
+            // dense storage cannot hold a sparse length
+            if (length > static_cast<double>(obj->length()) + (1u << 20)) {
+                throw ThrownException(makeError("RangeError", "Array length too large"));
+            }
+            obj->setLength(static_cast<size_t>(length));
+            return;
+        }
+    }
+    obj->set(name, value);
+    if (value.isObject() && gcHeap_) {
+        gcHeap_->writeBarrier(obj, value.asObject());
+    }
+}
+
+void VM::setElement(const Value& target, const Value& key, const Value& value) {
+    uint32_t index;
+    if (target.isObject() && target.asObject()->objectType() != ObjectType::Proxy &&
+        toArrayIndex(key, index)) {
+        Object* obj = target.asObject();
+        obj->set(index, value);
+        if (value.isObject() && gcHeap_) {
+            gcHeap_->writeBarrier(obj, value.asObject());
+        }
+        return;
+    }
+    setProperty(target, propertyKeyName(key), value);
+}
+
+bool VM::deleteProperty(const Value& target, const Value& key) {
+    if (target.isNull() || target.isUndefined()) {
+        throw std::runtime_error("Cannot convert " + describeForError(target) + " to object");
+    }
+    if (!target.isObject()) return true;
+    uint32_t index;
+    if (toArrayIndex(key, index)) {
+        return target.asObject()->deleteProperty(index);
+    }
+    return target.asObject()->deleteProperty(propertyKeyName(key));
+}
+
+// =============================================================================
+// Iteration
+// =============================================================================
+
+Value VM::makeIterator(const Value& iterable) {
+    using Kind = IteratorState::Kind;
+    if (iterable.isString()) {
+        return Value::object(new IteratorState(Kind::String, iterable));
+    }
+    if (!iterable.isObject()) {
+        throw std::runtime_error(describeForError(iterable) + " is not iterable");
+    }
+    Object* obj = iterable.asObject();
+    if (obj->isArray()) {
+        return Value::object(new IteratorState(Kind::Indexed, iterable));
+    }
+    if (auto* map = dynamic_cast<Builtins::MapObject*>(obj)) {
+        auto* entries = new Array();
+        for (const auto& entry : map->entries()) {
+            entries->push(Value::object(new Array({entry.first, entry.second})));
+        }
+        auto* state = new IteratorState(Kind::Indexed, iterable);
+        state->setSnapshot(entries);
+        return Value::object(state);
+    }
+    if (auto* set = dynamic_cast<Builtins::SetObject*>(obj)) {
+        auto* state = new IteratorState(Kind::Indexed, iterable);
+        state->setSnapshot(new Array(set->values()));
+        return Value::object(state);
+    }
+
+    Value factory = getProperty(iterable, symbolPropertyKey(WellKnownSymbols::Iterator));
+    if (factory.isObject() && factory.asObject()->isFunction()) {
+        Value iterator = executeCallback(static_cast<Function*>(factory.asObject()), iterable, {});
+        if (!iterator.isObject()) {
+            throw std::runtime_error("Result of the Symbol.iterator method is not an object");
+        }
+        auto* state = new IteratorState(Kind::Protocol, iterator);
+        state->setNextMethod(getProperty(iterator, "next"));
+        return Value::object(state);
+    }
+    // Array-likes (a length and indices), such as DOM collections
+    if (getProperty(iterable, "length").isNumber()) {
+        return Value::object(new IteratorState(Kind::Indexed, iterable));
+    }
+    throw std::runtime_error(describeForError(iterable) + " is not iterable");
+}
+
+bool VM::iteratorStep(const Value& iterator, Value& value) {
+    auto* state = iterator.isObject() ? dynamic_cast<IteratorState*>(iterator.asObject()) : nullptr;
+    if (!state) {
+        throw std::runtime_error("Value is not an iterator");
+    }
+    if (state->done_) return false;
+
+    switch (state->kind_) {
+        case IteratorState::Kind::Indexed: {
+            if (state->snapshot_) {
+                if (state->position_ < state->snapshot_->length()) {
+                    value = state->snapshot_->get(static_cast<uint32_t>(state->position_++));
+                    return true;
+                }
+                break;
+            }
+            Object* source = state->source_.asObject();
+            const double length = source->isArray()
+                ? static_cast<double>(source->length())
+                : getProperty(state->source_, "length").toNumber();
+            if (static_cast<double>(state->position_) < length) {
+                value = getElement(state->source_, Value::number(static_cast<double>(state->position_++)));
+                return true;
+            }
+            break;
+        }
+        case IteratorState::Kind::String: {
+            const std::string& text = static_cast<String*>(state->source_.asObject())->value();
+            if (state->position_ < text.size()) {
+                size_t bytes = std::min(utf8SequenceLength(static_cast<unsigned char>(text[state->position_])),
+                                        text.size() - state->position_);
+                value = Value::string(new String(text.substr(state->position_, bytes)));
+                state->position_ += bytes;
+                return true;
+            }
+            break;
+        }
+        case IteratorState::Kind::Protocol: {
+            const Value& next = state->nextMethod_;
+            if (!next.isObject() || !next.asObject()->isFunction()) {
+                throw std::runtime_error("Iterator has no next() method");
+            }
+            Value result = executeCallback(static_cast<Function*>(next.asObject()), state->source_, {});
+            if (!result.isObject()) {
+                throw std::runtime_error("Iterator result " + describeForError(result) + " is not an object");
+            }
+            if (getProperty(result, "done").isTruthy()) break;
+            value = getProperty(result, "value");
+            return true;
+        }
+    }
+    state->done_ = true;
+    return false;
 }
 
 // Upvalue management
@@ -2036,62 +2292,71 @@ Value VM::resumeGenerator(GeneratorFrame* frame, Value yieldVal, const std::vect
     if (!frame || frame->isCompleted) {
         return Value::undefined();
     }
-    
-    // Save current VM execution state
+
+    VM* previousVM = currentVM_;
+    currentVM_ = this;
     GeneratorFrame* savedGen = currentGenerator_;
     const Bytecode::BytecodeChunk* savedChunk = chunk_;
-    size_t savedIP = ip_;
-    
-    currentGenerator_ = frame;
-    isYielding_ = false;
-    yieldedValue_ = Value::undefined();
-    
-    chunk_ = frame->function->bytecodeChunk();
-    
-    if (!frame->isStarted) {
-        frame->isStarted = true;
-        ip_ = 0;
-        frame->stackBase = stack_.size();
-        
-        // Push initial args as locals
-        for (const auto& arg : args) {
-            push(arg);
-        }
-    } else {
-        // Restore stack and IP
-        ip_ = frame->suspendedIP;
-        for (const auto& val : frame->savedStack) {
-            push(val);
-        }
-        // Yield expression result is the value passed to next()
-        push(yieldVal);
-    }
-    
-    // Push call boundary marker
+    const size_t savedIP = ip_;
+    const size_t savedDepth = callDepth();
+    const size_t base = stack_.size();
+    const size_t savedHandlers = exceptionHandlers_.size();
+
+    // The body runs in a frame whose return ends this run()
     VMCallFrame callFrame;
     callFrame.function = frame->function;
-    callFrame.returnAddress = SIZE_MAX; // Custom marker to exit run() on return
-    callFrame.slotBase = stack_.size() - frame->savedStack.size() - args.size(); 
+    callFrame.returnAddress = SIZE_MAX;
+    callFrame.slotBase = base;
     callFrame.thisValue = frame->thisValue;
     callFrame.savedChunk = savedChunk;
     pushCallFrame(callFrame);
-    
-    // Execute until yield or return
-    run();
-    
-    // If we completed without yielding, it was a return
-    if (!isYielding_) {
-        frame->isCompleted = true;
-        // Result is at top of stack (left by OP_RETURN overriding SIZE_MAX)
-        yieldedValue_ = pop();
+
+    if (!frame->isStarted) {
+        frame->isStarted = true;
+        push(frame->thisValue);  // Slot 0
+        pushArguments(frame->function, args);
+        ip_ = 0;
+    } else {
+        for (const auto& value : frame->savedStack) {
+            push(value);
+        }
+        push(yieldVal);  // Value of the paused yield expression
+        ip_ = frame->suspendedIP;
     }
-    
-    // Restore VM state
+    frame->stackBase = base;
+    chunk_ = frame->function->bytecodeChunk();
+    currentGenerator_ = frame;
+    isYielding_ = false;
+
+    Value result;
+    try {
+        run();
+    } catch (...) {
+        frame->isCompleted = true;
+        frame->savedStack.clear();
+        unwindTo(savedDepth, base, savedHandlers);
+        currentGenerator_ = savedGen;
+        chunk_ = savedChunk;
+        ip_ = savedIP;
+        currentVM_ = previousVM;
+        throw;
+    }
+
+    if (isYielding_) {
+        // OP_YIELD saved the frame's values; drop the live ones and the frame
+        result = yieldedValue_;
+        unwindTo(savedDepth, base, savedHandlers);
+    } else {
+        frame->isCompleted = true;
+        frame->savedStack.clear();
+        result = pop();  // Left by OP_RETURN
+    }
+
     currentGenerator_ = savedGen;
     chunk_ = savedChunk;
     ip_ = savedIP;
-    
-    return yieldedValue_;
+    currentVM_ = previousVM;
+    return result;
 }
 
 } // namespace Zepra::Runtime

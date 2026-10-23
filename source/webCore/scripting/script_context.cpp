@@ -15,6 +15,7 @@
 
 // ZepraScript internal headers
 #include "runtime/execution/vm.hpp"
+#include "runtime/execution/Sandbox.h"
 #include "runtime/execution/context.hpp"
 #include "runtime/execution/global_object.hpp"
 #include "runtime/objects/function.hpp"
@@ -27,6 +28,39 @@
 #include "builtins/console.hpp"
 
 namespace Zepra::WebCore {
+
+namespace {
+// Each page script or callback runs under limits, so a runaway script
+// (endless loop, unbounded allocation) is stopped instead of freezing the
+// browser or exhausting the machine's memory.
+class ScriptRunGuard {
+public:
+    explicit ScriptRunGuard(Zepra::Runtime::VM* vm) : vm_(vm), monitor_(limits()) {
+        if (vm_) {
+            previous_ = vm_->resourceMonitor();
+            vm_->setSandbox(&monitor_);
+        }
+    }
+    ~ScriptRunGuard() {
+        if (vm_) vm_->setSandbox(previous_);
+    }
+    ScriptRunGuard(const ScriptRunGuard&) = delete;
+    ScriptRunGuard& operator=(const ScriptRunGuard&) = delete;
+
+private:
+    static Zepra::Runtime::ExecutionLimits limits() {
+        Zepra::Runtime::ExecutionLimits l;
+        l.maxExecutionTime = std::chrono::seconds(10);
+        l.maxMemoryGrowthBytes = size_t(1024) * 1024 * 1024;  // 1 GB per run
+        l.maxHeapBytes = SIZE_MAX;  // heap counters are not maintained; RSS growth is
+        return l;
+    }
+
+    Zepra::Runtime::VM* vm_;
+    Zepra::Runtime::ResourceMonitor monitor_;
+    Zepra::Runtime::ResourceMonitor* previous_ = nullptr;
+};
+} // namespace
 
 ScriptContext::ScriptContext() : vm_(nullptr), vmReady_(false) {
     timeOriginMs_ = std::chrono::duration<double, std::milli>(
@@ -107,7 +141,7 @@ ScriptResult ScriptContext::evaluate(const std::string& code, const std::string&
         
         if (parser.hasErrors()) {
             result.success = false;
-            result.error = "SyntaxError: Parse failed";
+            result.error = "SyntaxError: " + parser.errors().front();
             if (consoleHandler_) {
                 consoleHandler_("error", result.error);
             }
@@ -135,7 +169,9 @@ ScriptResult ScriptContext::evaluate(const std::string& code, const std::string&
         
         if (generator.hasErrors() || !chunk) {
             result.success = false;
-            result.error = "CompileError: Bytecode generation failed";
+            result.error = generator.errors().empty()
+                ? std::string("SyntaxError: Bytecode generation failed")
+                : "SyntaxError: " + generator.errors().front();
             if (consoleHandler_) {
                 consoleHandler_("error", result.error);
             }
@@ -143,6 +179,7 @@ ScriptResult ScriptContext::evaluate(const std::string& code, const std::string&
         }
         
         // Execute bytecode on VM
+        ScriptRunGuard guard(vm_);
         auto execResult = vm_->execute(chunk.get());
         
         auto t2 = std::chrono::steady_clock::now();
@@ -264,6 +301,7 @@ void ScriptContext::callStoredCallback(const std::string& key, bool passTimestam
     std::vector<Value> args;
     if (passTimestamp) args.push_back(Value::number(timestampMs));
     try {
+        ScriptRunGuard guard(vm_);
         vm_->call(fn, Value::undefined(), args);
     } catch (const std::exception& e) {
         if (consoleHandler_) consoleHandler_("error", std::string("Uncaught exception in callback: ") + e.what());
@@ -354,16 +392,16 @@ void ScriptContext::setupWindowGlobals() {
         }, 2);
     vm_->setGlobal("prompt", Value::object(promptFn));
     
-    // console.log — bridge to console handler
-    auto handler = consoleHandler_;
+    // console.log — bridge to console handler. The handler is looked up on every
+    // call, so one installed (or replaced) after initialize() still gets output.
     auto* logFn = createNativeFunction("log",
-        [handler](Context*, const std::vector<Value>& args) -> Value {
+        [this](Context*, const std::vector<Value>& args) -> Value {
             std::string msg;
             for (size_t i = 0; i < args.size(); i++) {
                 if (i > 0) msg += " ";
                 msg += args[i].toString();
             }
-            if (handler) handler("log", msg);
+            if (consoleHandler_) consoleHandler_("log", msg);
             else std::cout << "[console.log] " << msg << std::endl;
             return Value::undefined();
         }, 0);  // variadic
@@ -372,20 +410,20 @@ void ScriptContext::setupWindowGlobals() {
     consoleObj->set("log", Value::object(logFn));
     
     auto* warnFn = createNativeFunction("warn",
-        [handler](Context*, const std::vector<Value>& args) -> Value {
+        [this](Context*, const std::vector<Value>& args) -> Value {
             std::string msg;
             for (auto& a : args) msg += a.toString() + " ";
-            if (handler) handler("warn", msg);
+            if (consoleHandler_) consoleHandler_("warn", msg);
             else std::cerr << "[console.warn] " << msg << std::endl;
             return Value::undefined();
         }, 0);
     consoleObj->set("warn", Value::object(warnFn));
     
     auto* errorFn = createNativeFunction("error",
-        [handler](Context*, const std::vector<Value>& args) -> Value {
+        [this](Context*, const std::vector<Value>& args) -> Value {
             std::string msg;
             for (auto& a : args) msg += a.toString() + " ";
-            if (handler) handler("error", msg);
+            if (consoleHandler_) consoleHandler_("error", msg);
             else std::cerr << "[console.error] " << msg << std::endl;
             return Value::undefined();
         }, 0);
