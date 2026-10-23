@@ -68,6 +68,7 @@ private:
     
     // Synchronization for error recovery
     void synchronize();
+    void requireProgress(uint32_t startOffset);  // Throws ParseError if no token was consumed
     
     // Error handling
     void error(const std::string& message);
