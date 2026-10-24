@@ -143,6 +143,7 @@ private:
     // JS functions passed to setTimeout/setInterval/requestAnimationFrame are
     // kept in a hidden global object so the garbage collector keeps them alive
     Zepra::Runtime::Object* callbackStore_ = nullptr;
+    Zepra::Runtime::Object* globalObject_ = nullptr;  // the engine's built-ins (Object, Array, JSON, ...)
     std::vector<int> animationFrameQueue_;
     double timeOriginMs_ = 0;   // performance.now() origin
     void callStoredCallback(const std::string& key, bool passTimestamp, double timestampMs);
