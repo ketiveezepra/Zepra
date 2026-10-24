@@ -226,6 +226,15 @@ void Lexer::updateDivisionContext(TokenType type) {
         case TokenType::Null:
         case TokenType::Undefined:
         case TokenType::This:
+        case TokenType::Super:
+        // Contextual keywords that are also ordinary names: o.get / 2.
+        // (Not `of`: `for (x of /re/...)` is a regex.)
+        case TokenType::Get:
+        case TokenType::Set:
+        case TokenType::Static:
+        case TokenType::Async:
+        case TokenType::From:
+        case TokenType::As:
         case TokenType::RightParen:
         case TokenType::RightBracket:
         case TokenType::RightBrace:
@@ -790,6 +799,24 @@ const char* Token::typeName(TokenType type) {
         case TokenType::Else: return "else";
         case TokenType::For: return "for";
         case TokenType::While: return "while";
+        case TokenType::Class: return "class";
+        case TokenType::Extends: return "extends";
+        case TokenType::Super: return "super";
+        case TokenType::Static: return "static";
+        case TokenType::This: return "this";
+        case TokenType::New: return "new";
+        case TokenType::Async: return "async";
+        case TokenType::Await: return "await";
+        case TokenType::Yield: return "yield";
+        case TokenType::Get: return "get";
+        case TokenType::Set: return "set";
+        case TokenType::Arrow: return "=>";
+        case TokenType::DotDotDot: return "...";
+        case TokenType::Dot: return ".";
+        case TokenType::Comma: return ",";
+        case TokenType::Colon: return ":";
+        case TokenType::LeftBracket: return "[";
+        case TokenType::RightBracket: return "]";
         case TokenType::Plus: return "+";
         case TokenType::Minus: return "-";
         case TokenType::Star: return "*";

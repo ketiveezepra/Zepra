@@ -59,7 +59,8 @@ enum class NodeType : uint8 {
     ClassExpression,
     AwaitExpression,
     YieldExpression,
-    
+    SuperExpression,
+
     // Statements
     BlockStatement,
     ExpressionStatement,
@@ -204,6 +205,7 @@ struct ObjectProperty {
     bool computed = false;
     bool shorthand = false;
     bool method = false;
+    bool spread = false;  // { ...value }: key is null
     enum class Kind { Init, Get, Set } kind = Kind::Init;
 };
 
@@ -421,6 +423,15 @@ class ThisExpr : public Expression {
 public:
     explicit ThisExpr(SourceLocation loc = {})
         : Expression(NodeType::ThisExpression, loc) {}
+};
+
+/**
+ * @brief super, as the callee of super(...) or the object of super.x / super[x]
+ */
+class SuperExpr : public Expression {
+public:
+    explicit SuperExpr(SourceLocation loc = {})
+        : Expression(NodeType::SuperExpression, loc) {}
 };
 
 // =============================================================================
@@ -969,13 +980,18 @@ public:
     BlockStmt* body() const { return body_.get(); }
     bool isAsync() const { return async_; }
     bool isGenerator() const { return generator_; }
-    
+
+    // A method whose body, or an arrow inside it, refers to super
+    bool usesSuper() const { return usesSuper_; }
+    void setUsesSuper(bool usesSuper) { usesSuper_ = usesSuper; }
+
 private:
     std::string name_;
     std::vector<FunctionParam> params_;
     std::unique_ptr<BlockStmt> body_;
     bool async_;
     bool generator_;
+    bool usesSuper_ = false;
 };
 
 /**
@@ -984,13 +1000,24 @@ private:
 class ClassDecl : public Declaration {
 public:
     struct MethodDef {
-        std::string name;
+        std::string name;      // Static key as written (empty when computed)
+        ExprPtr key;           // Identifier, literal, or the computed expression
+        bool computed = false;
         std::unique_ptr<FunctionExpr> function;
         bool isStatic = false;
         bool isGetter = false;
         bool isSetter = false;
     };
-    
+
+    /// Field: `name = value;` (value may be null), evaluated per instance or,
+    /// when static, once on the class
+    struct FieldDef {
+        ExprPtr key;
+        bool computed = false;
+        ExprPtr value;
+        bool isStatic = false;
+    };
+
     ClassDecl(std::string name, ExprPtr superClass,
               std::unique_ptr<FunctionExpr> constructor,
               std::vector<MethodDef> methods,
@@ -1000,17 +1027,46 @@ public:
         , superClass_(std::move(superClass))
         , constructor_(std::move(constructor))
         , methods_(std::move(methods)) {}
-    
+
     const std::string& name() const { return name_; }
     Expression* superClass() const { return superClass_.get(); }
     FunctionExpr* constructor() const { return constructor_.get(); }
     const std::vector<MethodDef>& methods() const { return methods_; }
-    
+
+    // True when the class declares no constructor (one is synthesised)
+    bool hasImplicitConstructor() const { return implicitConstructor_; }
+    void setImplicitConstructor(bool implicit) { implicitConstructor_ = implicit; }
+
+    const std::vector<FieldDef>& fields() const { return fields_; }
+    void setFields(std::vector<FieldDef> fields, bool usesSuper) {
+        fields_ = std::move(fields);
+        fieldsUseSuper_ = usesSuper;
+    }
+    bool fieldsUseSuper() const { return fieldsUseSuper_; }
+
 private:
     std::string name_;
     ExprPtr superClass_;
     std::unique_ptr<FunctionExpr> constructor_;
     std::vector<MethodDef> methods_;
+    std::vector<FieldDef> fields_;
+    bool implicitConstructor_ = false;
+    bool fieldsUseSuper_ = false;
+};
+
+/**
+ * @brief Class expression: `class [Name] [extends X] { ... }` used as a value
+ */
+class ClassExpr : public Expression {
+public:
+    explicit ClassExpr(std::unique_ptr<ClassDecl> decl, SourceLocation loc = {})
+        : Expression(NodeType::ClassExpression, loc)
+        , decl_(std::move(decl)) {}
+
+    const ClassDecl* decl() const { return decl_.get(); }
+
+private:
+    std::unique_ptr<ClassDecl> decl_;
 };
 
 /**

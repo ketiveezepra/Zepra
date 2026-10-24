@@ -1155,15 +1155,40 @@ void BytecodeGenerator::compileFunction(const FunctionSource& source, Runtime::F
         addLocal(source.name, true);
     }
 
-    if (source.implicitSuperClass) {
-        // Derived class constructor: run the parent constructor first, with
-        // this constructor's arguments
+    if (source.usesSuper) {
+        emit(Opcode::OP_GET_CALLEE);
+        addLocal(" method", true);
+    }
+
+    if (source.implicitSuperCall) {
+        // constructor(...args) { super(...args); }
         int argumentsSlot = resolveLocal("arguments");
         emitLocal(Opcode::OP_GET_LOCAL, argumentsSlot);
         emitLocal(Opcode::OP_GET_LOCAL, 0);
-        compileExpression(source.implicitSuperClass);
+        emit(Opcode::OP_GET_CALLEE);
+        emit(Opcode::OP_GET_SUPER_BASE);
+        emit(static_cast<uint8_t>(SUPER_CONSTRUCTOR));
         emit(Opcode::OP_SUPER_APPLY);
         emit(Opcode::OP_POP);
+        emitFieldInitialization(true);
+    } else if (source.initializesFields) {
+        emitFieldInitialization(true);
+    }
+
+    if (source.fieldClass) {
+        // Field initializer: this.key = value, in declaration order
+        for (const auto& field : source.fieldClass->fields()) {
+            if (field.isStatic != source.staticFields) continue;
+            emitLocal(Opcode::OP_GET_LOCAL, 0);
+            emitPropertyKey(field.key.get(), field.computed);
+            if (field.value) {
+                compileExpression(field.value.get());
+            } else {
+                emitConstant(Runtime::Value::undefined());
+            }
+            emit(Opcode::OP_INIT_PROPERTY);
+            emit(Opcode::OP_POP);
+        }
     }
 
     if (source.expressionBody) {
@@ -1410,8 +1435,13 @@ void BytecodeGenerator::emitPatternElements(const Frontend::Expression* pattern,
         }
         rest = p->rest();
     } else {
+        // ({a, ...rest} = source): the spread entry is the rest target
         const auto* p = static_cast<const Frontend::ObjectExpr*>(pattern);
         for (const auto& prop : p->properties()) {
+            if (prop.spread) {
+                rest = prop.value.get();
+                continue;
+            }
             entries.push_back({prop.key.get(), prop.computed, prop.value.get()});
         }
     }
@@ -1593,6 +1623,13 @@ void BytecodeGenerator::compileExpression(const Frontend::Expression* expr) {
             break;
         case Frontend::NodeType::TemplateLiteral:
             compileTemplateLiteral(static_cast<const Frontend::TemplateLiteralExpr*>(expr));
+            break;
+        case Frontend::NodeType::ClassExpression:
+            compileClassExpression(static_cast<const Frontend::ClassExpr*>(expr));
+            break;
+        case Frontend::NodeType::SuperExpression:
+            error(expr, "'super' keyword unexpected here");
+            emitConstant(Runtime::Value::undefined());
             break;
         case Frontend::NodeType::SpreadElement:
             error(expr, "Unexpected spread element");
@@ -1969,6 +2006,28 @@ void BytecodeGenerator::compileCallExpression(const Frontend::CallExpr* expr) {
     const auto& args = expr->arguments();
     const bool spread = hasSpread(args);
 
+    if (callee->type() == Frontend::NodeType::SuperExpression) {
+        emitSuperCall(expr);
+        return;
+    }
+
+    if (callee->type() == Frontend::NodeType::MemberExpression &&
+        static_cast<const Frontend::MemberExpr*>(callee)->object()->type() ==
+            Frontend::NodeType::SuperExpression) {
+        // super.m(args): the parent's method, called on this
+        compileThisExpression(nullptr);
+        emitSuperProperty(static_cast<const Frontend::MemberExpr*>(callee));  // [this, fn]
+        if (spread) {
+            emitArgumentArray(args);
+            emit(Opcode::OP_CALL_SPREAD);
+        } else {
+            for (const auto& arg : args) compileExpression(arg.get());
+            emit(Opcode::OP_CALL_WITH_THIS);
+            emitArgCount(args.size());
+        }
+        return;
+    }
+
     if (callee->type() == Frontend::NodeType::MemberExpression) {
         const auto* member = static_cast<const Frontend::MemberExpr*>(callee);
 
@@ -2080,6 +2139,10 @@ void BytecodeGenerator::compileCallExpression(const Frontend::CallExpr* expr) {
 }
 
 void BytecodeGenerator::compileMemberExpression(const Frontend::MemberExpr* expr) {
+    if (expr->object()->type() == Frontend::NodeType::SuperExpression) {
+        emitSuperProperty(expr);
+        return;
+    }
     compileExpression(expr->object());
 
     auto emitAccess = [&]() {
@@ -2160,20 +2223,22 @@ void BytecodeGenerator::compileObjectExpression(const Frontend::ObjectExpr* expr
     emit(Opcode::OP_CREATE_OBJECT);
 
     for (const auto& prop : expr->properties()) {
-        std::string key;
-        if (prop.computed) {
-            compileExpression(prop.key.get());
-        } else if (staticPropertyKey(prop.key.get(), key)) {
-            size_t index = nameConstant(key);
-            if (index <= 255) {
-                emit(Opcode::OP_CONSTANT);
-                emit(static_cast<uint8_t>(index));
-            } else {
-                emit(Opcode::OP_CONSTANT_LONG);
-                emitShort(static_cast<uint16_t>(index));
-            }
-        } else {
-            error(prop.key.get(), "Invalid property name");
+        if (prop.spread) {
+            compileExpression(prop.value.get());
+            emit(Opcode::OP_OBJECT_SPREAD);
+            continue;
+        }
+        emitPropertyKey(prop.key.get(), prop.computed);
+        if (prop.method && prop.value->type() == Frontend::NodeType::FunctionExpression) {
+            // Methods, getters and setters know the object as their home
+            std::string name;
+            if (!prop.computed) staticPropertyKey(prop.key.get(), name);
+            compileMethod(static_cast<const Frontend::FunctionExpr*>(prop.value.get()), name);
+            uint8_t flags = MEMBER_ON_TARGET | MEMBER_ENUMERABLE;
+            if (prop.kind == Frontend::ObjectProperty::Kind::Get) flags |= MEMBER_GETTER;
+            if (prop.kind == Frontend::ObjectProperty::Kind::Set) flags |= MEMBER_SETTER;
+            emit(Opcode::OP_DEFINE_MEMBER);
+            emit(flags);
             continue;
         }
         compileExpression(prop.value.get());
@@ -2318,17 +2383,43 @@ void BytecodeGenerator::compileClassDeclaration(const Frontend::ClassDecl* decl)
     // refer to the class by name
     const int slot = reserveLexicalSlot(className);
 
+    compileClass(decl);                             // [ctor]
+    emit(Opcode::OP_DUP);                           // One copy for the static fields
+
+    if (slot < 0) {
+        emitNameOperand(Opcode::OP_DEFINE_GLOBAL, className);
+    } else {
+        emitLocal(Opcode::OP_SET_LOCAL, slot);
+        emit(Opcode::OP_POP);
+    }
+
+    emitStaticFields(decl);
+    emit(Opcode::OP_POP);
+}
+
+void BytecodeGenerator::compileClassExpression(const Frontend::ClassExpr* expr) {
+    compileClass(expr->decl());
+    emitStaticFields(expr->decl());
+}
+
+// Builds the class and leaves its constructor on the stack
+void BytecodeGenerator::compileClass(const Frontend::ClassDecl* decl) {
+    const std::string& className = decl->name();
+    bool hasInstanceFields = false;
+    for (const auto& field : decl->fields()) hasInstanceFields |= !field.isStatic;
+
     const Frontend::FunctionExpr* ctor = decl->constructor();
-    auto* ctorFn = new Runtime::Function(className, ctor ? expectedArgumentCount(ctor->params()) : 0,
+    auto* ctorFn = new Runtime::Function(className, expectedArgumentCount(ctor->params()),
                                          false, false, false);
     FunctionSource ctorSource;
     ctorSource.name = className;
     ctorSource.isMethod = true;
-    if (ctor) {
-        ctorSource.params = &ctor->params();
-        ctorSource.body = ctor->body();
-    }
-    ctorSource.implicitSuperClass = decl->superClass();
+    ctorSource.params = &ctor->params();
+    ctorSource.body = ctor->body();
+    ctorSource.usesSuper = ctor->usesSuper();
+    // A derived class's fields are initialized when super() returns
+    ctorSource.implicitSuperCall = decl->superClass() && decl->hasImplicitConstructor();
+    ctorSource.initializesFields = !decl->superClass() && hasInstanceFields;
     compileFunction(ctorSource, ctorFn);           // [ctor]
 
     if (decl->superClass()) {
@@ -2337,28 +2428,154 @@ void BytecodeGenerator::compileClassDeclaration(const Frontend::ClassDecl* decl)
     }
 
     for (const auto& method : decl->methods()) {
-        const Frontend::FunctionExpr* fnExpr = method.function.get();
-        auto* methodFn = new Runtime::Function(method.name, expectedArgumentCount(fnExpr->params()),
-                                               false, fnExpr->isGenerator(), fnExpr->isAsync());
-        FunctionSource source;
-        source.name = method.name;
-        source.params = &fnExpr->params();
-        source.body = fnExpr->body();
-        source.isMethod = true;
-        compileFunction(source, methodFn);          // [ctor, method]
-
-        Opcode define = Opcode::OP_DEFINE_METHOD;
-        if (method.isStatic) define = Opcode::OP_DEFINE_STATIC;
-        else if (method.isGetter) define = Opcode::OP_DEFINE_GETTER;
-        else if (method.isSetter) define = Opcode::OP_DEFINE_SETTER;
-        emitNameOperand(define, method.name);       // Pops the method; leaves [ctor]
+        emitPropertyKey(method.key.get(), method.computed);
+        compileMethod(method.function.get(), method.name);  // [ctor, key, method]
+        uint8_t flags = 0;
+        if (method.isGetter) flags |= MEMBER_GETTER;
+        if (method.isSetter) flags |= MEMBER_SETTER;
+        if (method.isStatic) flags |= MEMBER_ON_TARGET;
+        emit(Opcode::OP_DEFINE_MEMBER);
+        emit(flags);                                // Leaves [ctor]
     }
 
-    if (slot < 0) {
-        emitNameOperand(Opcode::OP_DEFINE_GLOBAL, className);
+    if (hasInstanceFields) {
+        compileFieldInitializer(decl, false);       // [ctor, initializer]
+        emit(Opcode::OP_SET_FIELD_INIT);
+    }
+    // Static fields: emitStaticFields, once the class is bound
+}
+
+// [ctor] -> [ctor]: static fields are set once, with the class as `this`,
+// after the class's name is bound so initializers can refer to it
+void BytecodeGenerator::emitStaticFields(const Frontend::ClassDecl* decl) {
+    bool hasStaticFields = false;
+    for (const auto& field : decl->fields()) hasStaticFields |= field.isStatic;
+    if (!hasStaticFields) return;
+    emit(Opcode::OP_DUP);
+    compileFieldInitializer(decl, true);            // [ctor, ctor, initializer]
+    emit(Opcode::OP_CALL_WITH_THIS);
+    emitArgCount(0);
+    emit(Opcode::OP_POP);
+}
+
+// Method, getter or setter of a class or object literal
+void BytecodeGenerator::compileMethod(const Frontend::FunctionExpr* fnExpr, const std::string& name) {
+    auto* fn = new Runtime::Function(name, expectedArgumentCount(fnExpr->params()),
+                                     false, fnExpr->isGenerator(), fnExpr->isAsync());
+    FunctionSource source;
+    source.name = name;
+    source.params = &fnExpr->params();
+    source.body = fnExpr->body();
+    source.isMethod = true;
+    source.usesSuper = fnExpr->usesSuper();
+    compileFunction(source, fn);
+}
+
+// A function that defines the class's instance or static fields on `this`
+void BytecodeGenerator::compileFieldInitializer(const Frontend::ClassDecl* decl, bool isStatic) {
+    auto* fn = new Runtime::Function(decl->name(), 0, false, false, false);
+    FunctionSource source;
+    source.name = decl->name();
+    source.isMethod = true;
+    source.fieldClass = decl;
+    source.staticFields = isStatic;
+    source.usesSuper = !isStatic && decl->fieldsUseSuper();
+    compileFunction(source, fn);
+}
+
+// Pushes a property key: the computed value, or the static name as a string
+void BytecodeGenerator::emitPropertyKey(const Frontend::Expression* key, bool computed) {
+    std::string name;
+    if (computed) {
+        compileExpression(key);
+    } else if (staticPropertyKey(key, name)) {
+        size_t index = nameConstant(name);
+        if (index <= 255) {
+            emit(Opcode::OP_CONSTANT);
+            emit(static_cast<uint8_t>(index));
+        } else {
+            emit(Opcode::OP_CONSTANT_LONG);
+            emitShort(static_cast<uint16_t>(index));
+        }
     } else {
-        emitLocal(Opcode::OP_SET_LOCAL, slot);
+        error(key, "Invalid property name");
+        emitConstant(Runtime::Value::undefined());
+    }
+}
+
+// =============================================================================
+// super
+// =============================================================================
+
+// The method, constructor or field initializer that super refers to: kept in
+// its " method" local, which arrows inside reach as an upvalue
+void BytecodeGenerator::emitActiveMethod(const Frontend::Expression* at) {
+    int slot = resolveLocal(" method");
+    if (slot != -1) {
+        emitLocal(Opcode::OP_GET_LOCAL, slot);
+        return;
+    }
+    int upvalue = resolveUpvalue(" method");
+    if (upvalue != -1) {
+        emitLocal(Opcode::OP_GET_UPVALUE, upvalue);
+        return;
+    }
+    error(at, "'super' keyword unexpected here");
+    emitConstant(Runtime::Value::undefined());
+}
+
+// Runs the class's instance field initializer on this: in a constructor's
+// prologue (the running function is the constructor), or after super()
+// returns (the constructor is the active method)
+void BytecodeGenerator::emitFieldInitialization(bool inConstructorPrologue) {
+    compileThisExpression(nullptr);
+    if (inConstructorPrologue) {
+        emit(Opcode::OP_GET_CALLEE);
+    } else {
+        emitActiveMethod(nullptr);
+    }
+    emit(Opcode::OP_INIT_FIELDS);
+    emit(Opcode::OP_POP);
+}
+
+// super(args): runs the parent constructor on this
+void BytecodeGenerator::emitSuperCall(const Frontend::CallExpr* expr) {
+    const auto& args = expr->arguments();
+    const bool spread = hasSpread(args);
+    if (spread) {
+        emitArgumentArray(args);
+    } else {
+        for (const auto& arg : args) compileExpression(arg.get());
+    }
+    compileThisExpression(nullptr);
+    emitActiveMethod(expr);
+    emit(Opcode::OP_GET_SUPER_BASE);
+    emit(static_cast<uint8_t>(SUPER_CONSTRUCTOR));
+    if (spread) {
+        emit(Opcode::OP_SUPER_APPLY);
+    } else {
+        emit(Opcode::OP_SUPER_CALL);
+        emitArgCount(args.size());
+    }
+    emitFieldInitialization(false);
+}
+
+// super.x / super[x]: leaves the value (the property of the home object's
+// prototype; a getter on it runs with this)
+void BytecodeGenerator::emitSuperProperty(const Frontend::MemberExpr* expr) {
+    compileThisExpression(nullptr);
+    emitActiveMethod(expr);
+    emit(Opcode::OP_GET_SUPER_BASE);
+    emit(static_cast<uint8_t>(SUPER_PROPERTY));    // [this, base]
+    if (expr->isComputed()) {
+        // The getter, if any, runs on the base rather than this
+        emit(Opcode::OP_SWAP);
         emit(Opcode::OP_POP);
+        compileExpression(expr->property());
+        emit(Opcode::OP_GET_ELEMENT);
+    } else {
+        emitNameOperand(Opcode::OP_SUPER_GET,
+            static_cast<const Frontend::IdentifierExpr*>(expr->property())->name());
     }
 }
 

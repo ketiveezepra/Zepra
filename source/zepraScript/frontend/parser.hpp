@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <functional>
+#include <unordered_set>
 
 namespace Zepra::Frontend {
 
@@ -80,6 +81,7 @@ private:
     StmtPtr parseVariableDeclaration();
     StmtPtr parseFunctionDeclaration(bool isAsync = false, bool isGenerator = false);
     StmtPtr parseClassDeclaration();
+    std::unique_ptr<ClassDecl> parseClass(bool requireName);
     StmtPtr parseBlockStatement();
     StmtPtr parseIfStatement();
     StmtPtr parseWhileStatement();
@@ -120,10 +122,16 @@ private:
     // Literal/specific parsing
     ExprPtr parseArrayLiteral();
     ExprPtr parseObjectLiteral();
-    ExprPtr parseFunctionExpression();
-    ExprPtr parseArrowFunction();
+    ExprPtr parseFunctionExpression(bool isAsync = false);
+    ExprPtr tryParseArrowFunction();
     ExprPtr parseClassExpression();
     ExprPtr parseTemplateLiteral();
+
+    // Property keys and methods shared by object literals and class bodies
+    ExprPtr parsePropertyKey(bool& computed);
+    bool startsPropertyKey(TokenType type) const;
+    std::unique_ptr<FunctionExpr> parseMethod(bool isAsync, bool isGenerator);
+    std::unique_ptr<BlockStmt> parseFunctionBody(bool* superFlag);
 
     // Destructuring patterns
     ExprPtr parseBindingPattern();
@@ -146,6 +154,11 @@ private:
     bool inSwitch_ = false;
     bool inFunction_ = false;
     bool noIn_ = false;  // Suppress 'in' as binary operator (for-loop init context)
+    // Set inside a method, constructor or field initializer (arrows keep the
+    // enclosing one): parsing `super` marks it. Null where super is a syntax error.
+    bool* superFlag_ = nullptr;
+    // Token offsets where an arrow function was tried and ruled out
+    std::unordered_set<uint32_t> notArrowAt_;
 
     // Labeled statement: `label: statement`
     StmtPtr parseLabeledStatement(const std::string& label);
