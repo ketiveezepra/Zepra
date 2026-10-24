@@ -22,6 +22,7 @@
 #include "builtins/error.hpp"
 #include "builtins/global_functions.hpp"
 #include "builtins/structured_clone.hpp"
+#include "builtins/symbol.hpp"
 #include "runtime/execution/context.hpp"
 #include "builtins/map.hpp"
 #include "builtins/set.hpp"
@@ -333,24 +334,9 @@ void GlobalObject::initializeGlobalFunctions() {
     Builtins::defineHidden(this, "structuredClone",
                            Value::object(Builtins::StructuredClone::createFunction()));
 
-    // Symbol constructor + well-known symbols
-    Object* symbolCtor = createNativeFunction("Symbol",
-        [](Context*, const std::vector<Value>&) -> Value {
-            static uint32_t nextId = 1;
-            return Value::symbol(nextId++);
-        }, 0);
-    symbolCtor->set("iterator",      Value::symbol(WellKnownSymbols::Iterator));
-    symbolCtor->set("toPrimitive",   Value::symbol(WellKnownSymbols::ToPrimitive));
-    symbolCtor->set("hasInstance",   Value::symbol(WellKnownSymbols::HasInstance));
-    symbolCtor->set("toStringTag",   Value::symbol(WellKnownSymbols::ToStringTag));
-    symbolCtor->set("species",       Value::symbol(WellKnownSymbols::Species));
-    symbolCtor->set("asyncIterator", Value::symbol(WellKnownSymbols::AsyncIterator));
-    symbolCtor->set("match",         Value::symbol(WellKnownSymbols::Match));
-    symbolCtor->set("replace",       Value::symbol(WellKnownSymbols::Replace));
-    symbolCtor->set("search",        Value::symbol(WellKnownSymbols::Search));
-    symbolCtor->set("split",         Value::symbol(WellKnownSymbols::Split));
-    symbolCtor->set("isConcatSpreadable", Value::symbol(WellKnownSymbols::IsConcatSpreadable));
-    set("Symbol", Value::object(symbolCtor));
+    // Symbol: the VM's Symbol.prototype is what symbol primitives inherit from
+    set("Symbol", Value::object(Builtins::SymbolBuiltin::createSymbolConstructor(
+        vmOf(context_).intrinsic(VM::Intrinsic::Symbol))));
 
     // Map constructor + prototype
     static Object* mapProto = Builtins::MapBuiltin::createMapPrototype();

@@ -24,6 +24,7 @@ ValueType Value::type() const {
     if (isBoolean()) return ValueType::Boolean;
     if (isNumber()) return ValueType::Number;
     if (isString()) return ValueType::String;
+    if (isSymbol()) return ValueType::Symbol;
     if (isBigInt()) return ValueType::BigInt;
     if (isObject()) return ValueType::Object;
     return ValueType::Undefined;
@@ -115,6 +116,7 @@ double Value::toNumber() const {
 }
 
 std::string Value::toString() const {
+    if (isSymbol()) return symbolDescriptiveString(asSymbol());
     switch (type()) {
         case ValueType::Undefined:
             return "undefined";
@@ -225,6 +227,10 @@ bool Value::strictEquals(const Value& other) const {
             return asString()->value() == other.asString()->value();
         case ValueType::Object:
             return asObject() == other.asObject();
+        case ValueType::Symbol:
+            return asSymbol() == other.asSymbol();
+        case ValueType::BigInt:
+            return asBigInt()->value() == other.asBigInt()->value();
         default:
             return false;
     }

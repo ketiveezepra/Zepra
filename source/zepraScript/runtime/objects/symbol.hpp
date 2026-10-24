@@ -7,6 +7,7 @@
 #include "config.hpp"
 #include "value.hpp"
 #include <string>
+#include <optional>
 #include <unordered_map>
 #include <atomic>
 #include <mutex>
@@ -76,5 +77,14 @@ private:
     Value asyncDispose_;
     Value metadata_;
 };
+
+/**
+ * The description a symbol was created with ("iterator" symbols report
+ * "Symbol.iterator"), or std::nullopt when it has none.
+ */
+std::optional<std::string> symbolDescription(uint32_t id);
+
+/** Symbol(description): what String(symbol) and symbol.toString() give. */
+std::string symbolDescriptiveString(uint32_t id);
 
 } // namespace Zepra::Runtime

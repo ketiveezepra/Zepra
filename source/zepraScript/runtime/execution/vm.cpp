@@ -28,6 +28,7 @@
 #include "builtins/boolean.hpp"
 #include "builtins/error.hpp"
 #include "builtins/list_iterator.hpp"
+#include "builtins/symbol.hpp"
 #include "builtins/array.hpp"
 #include "runtime/async/promise.hpp"
 #include "runtime/objects/well_known_symbols.hpp"
@@ -1009,6 +1010,8 @@ void VM::dispatch(Opcode op) {
             else if (a.isBoolean()) type = "boolean";
             else if (a.isNumber()) type = "number";
             else if (a.isString()) type = "string";
+            else if (a.isSymbol()) type = "symbol";
+            else if (a.isBigInt()) type = "bigint";
             else if (a.isObject() && dynamic_cast<Function*>(a.asObject())) type = "function";
             else type = "object";
             push(Value::string(new String(type)));
@@ -1951,7 +1954,7 @@ Object* VM::intrinsic(Intrinsic kind) {
             slot = Builtins::BooleanBuiltin::createBooleanPrototype();
             break;
         case Intrinsic::Symbol:
-            slot = new Object();
+            slot = Builtins::SymbolBuiltin::createSymbolPrototype();
             break;
         case Intrinsic::Error:
             slot = Builtins::ErrorBuiltin::createErrorPrototype();

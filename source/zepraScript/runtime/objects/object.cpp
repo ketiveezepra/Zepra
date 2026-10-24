@@ -233,11 +233,12 @@ std::vector<std::string> Object::getOwnPropertyNames() const {
         }
     }
     
-    // Add named properties, in insertion order
+    // Add named properties, in insertion order (symbol-keyed ones are not names)
     for (auto& key : orderedNamedKeys()) {
+        if (key.compare(0, 9, "@@symbol:") == 0) continue;
         names.push_back(std::move(key));
     }
-    
+
     return names;
 }
 
@@ -253,6 +254,7 @@ std::vector<std::string> Object::keys() const {
     
     // Add enumerable named properties, in insertion order
     for (auto& key : orderedNamedKeys()) {
+        if (key.compare(0, 9, "@@symbol:") == 0) continue;  // symbol keys are not string keys
         auto descIt = descriptors_.find(key);
         if (descIt == descriptors_.end() || descIt->second.isEnumerable()) {
             result.push_back(std::move(key));
