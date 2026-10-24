@@ -397,7 +397,11 @@ Value VM::toPrimitive(const Value& value, bool preferString) {
         }
         return Value::string(new String(joined));
     }
-    return Value::string(new String(value.toString()));
+    // A String wrapper without its prototype is its text; the rest use the
+    // default form (Value::toString would call back into this function)
+    Object* object = value.asObject();
+    if (auto* text = dynamic_cast<String*>(object)) return Value::string(new String(text->value()));
+    return Value::string(new String(object->isFunction() ? "[object Function]" : "[object Object]"));
 }
 
 void VM::toPrimitiveOperands(Value& a, Value& b) {

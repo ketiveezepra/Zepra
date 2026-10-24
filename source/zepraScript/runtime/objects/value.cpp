@@ -9,6 +9,8 @@
 #include "runtime/objects/object.hpp"
 #include "runtime/objects/function.hpp"
 #include "runtime/objects/number_conversion.hpp"
+#include "runtime/objects/symbol.hpp"
+#include "runtime/execution/vm.hpp"
 #include "runtime/builtins_api/bigint_object.hpp"
 #include <sstream>
 #include <cmath>
@@ -88,6 +90,13 @@ double Value::toNumber() const {
         case ValueType::Object: {
             // ToPrimitive → valueOf → toString coercion chain
             Object* obj = asObject();
+            if (obj && obj->objectType() != ObjectType::Proxy) {
+                // ToPrimitive with the number hint, then convert that
+                if (VM* vm = VM::current()) {
+                    const Value primitive = vm->toPrimitiveValue(*this, false);
+                    return primitive.isObject() ? std::nan("") : primitive.toNumber();
+                }
+            }
             if (obj) {
                 Value valueOf = obj->get("valueOf");
                 if (valueOf.isObject() && valueOf.asObject()->isFunction()) {
@@ -118,15 +127,17 @@ std::string Value::toString() const {
         case ValueType::String:
             return asString()->value();
         case ValueType::Object: {
+            // ToString of an object runs its toString()/valueOf(): "1,2" for
+            // [1, 2], "Error: x" for an error
             Object* obj = asObject();
-            if (obj) {
-                // Check object type for appropriate string representation
-                if (obj->isArray()) {
-                    return "[object Array]";
-                } else if (obj->isFunction()) {
-                    return "[object Function]";
+            if (obj && obj->objectType() != ObjectType::Proxy) {
+                if (VM* vm = VM::current()) {
+                    const Value primitive = vm->toPrimitiveValue(*this, true);
+                    if (!primitive.isObject()) return primitive.toString();
                 }
             }
+            if (obj && obj->isArray()) return "[object Array]";
+            if (obj && obj->isFunction()) return "[object Function]";
             return "[object Object]";
         }
         default:
