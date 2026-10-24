@@ -212,6 +212,16 @@ public:
     }
     size_t upvalueCount() const { return upvalues_.size(); }
 
+    // The object a method was defined on (a class prototype, a class, or an
+    // object literal): super.x reads from its prototype
+    Object* homeObject() const { return homeObject_; }
+    void setHomeObject(Object* home) { homeObject_ = home; }
+
+    // A class constructor's instance field initializers, run on each new
+    // object (base classes on entry, derived ones after super())
+    Function* fieldInitializer() const { return fieldInitializer_; }
+    void setFieldInitializer(Function* initializer) { fieldInitializer_ = initializer; }
+
     // Source metadata for debugging
     const std::string& sourceFile() const { return sourceFile_; }
     uint32_t sourceLine() const { return sourceLine_; }
@@ -259,7 +269,10 @@ private:
     
     // Upvalues for closures
     std::vector<RuntimeUpvalue*> upvalues_;
-    
+
+    Object* homeObject_ = nullptr;
+    Function* fieldInitializer_ = nullptr;
+
     // Function flags
     bool isArrow_ = false;
     bool isAsync_ = false;

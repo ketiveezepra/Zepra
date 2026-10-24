@@ -344,6 +344,7 @@ private:
     void invoke(Function* fn, Value thisValue, std::vector<Value> args);
     void constructValue(const Value& callee, std::vector<Value> args);
     void superConstruct(const Value& superclass, const Value& thisValue, std::vector<Value> args);
+    void rebindConstructedThis(Object* from, Object* to);
     void enterFrame(Function* fn, Value thisValue, const std::vector<Value>& args,
                     bool isConstruct, size_t returnAddress);
     void pushArguments(Function* fn, const std::vector<Value>& args);
@@ -356,6 +357,8 @@ private:
     // method calls, accessors and primitives
     const std::string& constantString(size_t index) const;
     Value getProperty(const Value& target, const std::string& name);
+    // A getter found on target runs with receiver as `this` (super.x)
+    Value getProperty(const Value& target, const std::string& name, const Value& receiver);
     Value getElement(const Value& target, const Value& key);
     void setProperty(const Value& target, const std::string& name, const Value& value);
     void setElement(const Value& target, const Value& key, const Value& value);

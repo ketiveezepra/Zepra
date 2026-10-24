@@ -78,8 +78,26 @@ bool Parser::match(std::initializer_list<TokenType> types) {
     return false;
 }
 
+// Words the lexer makes keywords that are ordinary identifiers outside
+// their own constructs: var get, function async(), (of) => ...
+static bool isContextualKeyword(TokenType type) {
+    switch (type) {
+        case TokenType::Get: case TokenType::Set: case TokenType::Of:
+        case TokenType::Static: case TokenType::From: case TokenType::As:
+        case TokenType::Async:
+            return true;
+        default:
+            return false;
+    }
+}
+
 Token Parser::consume(TokenType type, const std::string& message) {
     if (check(type)) return advance();
+    if (type == TokenType::Identifier && isContextualKeyword(currentToken_.type)) {
+        Token name = advance();
+        name.type = TokenType::Identifier;
+        return name;
+    }
     error(currentToken_, message);
     // Returning without advancing would leave every caller's loop on the
     // same token forever; abandon the statement instead.
@@ -181,13 +199,13 @@ StmtPtr Parser::parseDeclaration() {
         bool isGenerator = match(TokenType::Star);
         return parseFunctionDeclaration(false, isGenerator);
     }
-    // Handle 'async function' declarations
-    if (match(TokenType::Async)) {
-        if (match(TokenType::Function)) {
-            bool isGenerator = match(TokenType::Star);  // async function*
-            return parseFunctionDeclaration(true, isGenerator);
-        }
-        // Async arrow function or expression - fall through to parseStatement
+    // 'async function' declarations. Any other `async` (an async arrow, or
+    // an identifier) starts an expression statement.
+    if (check(TokenType::Async) && peek().type == TokenType::Function) {
+        advance();
+        advance();
+        bool isGenerator = match(TokenType::Star);  // async function*
+        return parseFunctionDeclaration(true, isGenerator);
     }
     if (match(TokenType::Class)) {
         return parseClassDeclaration();
@@ -244,50 +262,167 @@ StmtPtr Parser::parseFunctionDeclaration(bool isAsync, bool isGenerator) {
     consume(TokenType::LeftParen, "Expected '(' after function name");
     std::vector<FunctionParam> params = parseParameters();
     consume(TokenType::RightParen, "Expected ')' after parameters");
-    
+
     consume(TokenType::LeftBrace, "Expected '{' before function body");
-    auto body = std::unique_ptr<BlockStmt>(
-        static_cast<BlockStmt*>(parseBlockStatement().release())
-    );
-    
+    auto body = parseFunctionBody(nullptr);
+
     return std::make_unique<FunctionDecl>(name.value, std::move(params), std::move(body), isAsync, isGenerator);
 }
 
+// Body of a non-arrow function, after its '{'. superFlag is where a `super`
+// inside is recorded; null for plain functions, where super is an error.
+std::unique_ptr<BlockStmt> Parser::parseFunctionBody(bool* superFlag) {
+    bool* savedSuperFlag = superFlag_;
+    superFlag_ = superFlag;
+    std::unique_ptr<BlockStmt> body;
+    try {
+        body.reset(static_cast<BlockStmt*>(parseBlockStatement().release()));
+    } catch (...) {
+        superFlag_ = savedSuperFlag;
+        throw;
+    }
+    superFlag_ = savedSuperFlag;
+    return body;
+}
+
+// `(params) { body }` of a method, getter, setter or constructor
+std::unique_ptr<FunctionExpr> Parser::parseMethod(bool isAsync, bool isGenerator) {
+    consume(TokenType::LeftParen, "Expected '(' after method name");
+    std::vector<FunctionParam> params = parseParameters();
+    consume(TokenType::RightParen, "Expected ')' after parameters");
+    consume(TokenType::LeftBrace, "Expected '{' before method body");
+    bool usesSuper = false;
+    auto body = parseFunctionBody(&usesSuper);
+    auto method = std::make_unique<FunctionExpr>("", std::move(params), std::move(body),
+                                                 isAsync, isGenerator);
+    method->setUsesSuper(usesSuper);
+    return method;
+}
+
+// Tokens that can begin a property name, so that `get`, `set`, `async` and
+// `static` followed by one are modifiers rather than names themselves
+bool Parser::startsPropertyKey(TokenType type) const {
+    return isPropertyName(type) || type == TokenType::String || type == TokenType::Number ||
+           type == TokenType::LeftBracket;
+}
+
+// Identifier or keyword, string, number, or [computed]
+ExprPtr Parser::parsePropertyKey(bool& computed) {
+    computed = false;
+    if (match(TokenType::LeftBracket)) {
+        computed = true;
+        ExprPtr key = parseAssignmentExpression();
+        consume(TokenType::RightBracket, "Expected ']' after computed property name");
+        return key;
+    }
+    if (match(TokenType::String)) {
+        return std::make_unique<LiteralExpr>(previousToken_.value, previousToken_.start);
+    }
+    if (match(TokenType::Number)) {
+        return std::make_unique<LiteralExpr>(previousToken_.numericValue, previousToken_.start);
+    }
+    if (isPropertyName(currentToken_.type)) {
+        Token name = advance();
+        return std::make_unique<IdentifierExpr>(name.value, name.start);
+    }
+    error("Expected property name");
+    throw ParseError("Expected property name");
+}
+
 StmtPtr Parser::parseClassDeclaration() {
-    // class Name extends SuperClass { constructor() {} method() {} }
-    Token className = consume(TokenType::Identifier, "Expected class name");
-    
-    // extends SuperClass?
+    return parseClass(true);
+}
+
+// After `class`: [Name] [extends Expr] { members }
+std::unique_ptr<ClassDecl> Parser::parseClass(bool requireName) {
+    std::string className;
+    if (requireName || check(TokenType::Identifier)) {
+        className = consume(TokenType::Identifier, "Expected class name").value;
+    }
+
     ExprPtr superClass = nullptr;
     if (match(TokenType::Extends)) {
-        superClass = parsePrimaryExpression();
+        superClass = parseLeftHandSideExpression();
     }
-    
+
     consume(TokenType::LeftBrace, "Expected '{' before class body");
-    
-    // Parse class members
+
     std::unique_ptr<FunctionExpr> constructor = nullptr;
     std::vector<ClassDecl::MethodDef> methods;
-    
+    std::vector<ClassDecl::FieldDef> fields;
+    bool fieldsUseSuper = false;
+
     while (!check(TokenType::RightBrace) && !isAtEnd()) {
-        bool isStatic = match(TokenType::Static);
-        bool isGetter = match(TokenType::Get);
-        bool isSetter = !isGetter && match(TokenType::Set);
-        
-        Token methodName = consume(TokenType::Identifier, "Expected method name");
-        consume(TokenType::LeftParen, "Expected '(' after method name");
-        std::vector<FunctionParam> params = parseParameters();
-        consume(TokenType::RightParen, "Expected ')' after parameters");
-        consume(TokenType::LeftBrace, "Expected '{' before method body");
-        auto body = std::unique_ptr<BlockStmt>(static_cast<BlockStmt*>(parseBlockStatement().release()));
-        
-        auto methodFunc = std::make_unique<FunctionExpr>("", std::move(params), std::move(body));
-        
-        if (methodName.value == "constructor") {
+        if (match(TokenType::Semicolon)) continue;
+
+        // A modifier only when a member name follows it: `static(){}`,
+        // `get = 1` and `async;` name members called static, get and async
+        bool isStatic = false;
+        if (check(TokenType::Static) && (startsPropertyKey(peek().type) ||
+                                         peek().type == TokenType::Star)) {
+            advance();
+            isStatic = true;
+        }
+        bool isGetter = false, isSetter = false, isAsync = false;
+        if ((check(TokenType::Get) || check(TokenType::Set)) && startsPropertyKey(peek().type)) {
+            isGetter = check(TokenType::Get);
+            isSetter = !isGetter;
+            advance();
+        } else if (check(TokenType::Async) && (startsPropertyKey(peek().type) ||
+                                               peek().type == TokenType::Star)) {
+            advance();
+            isAsync = true;
+        }
+        bool isGenerator = !isGetter && !isSetter && match(TokenType::Star);
+
+        bool computed = false;
+        ExprPtr key = parsePropertyKey(computed);
+        std::string name;
+        if (!computed) {
+            if (key->type() == NodeType::Identifier) {
+                name = static_cast<IdentifierExpr*>(key.get())->name();
+            } else if (static_cast<LiteralExpr*>(key.get())->isString()) {
+                name = static_cast<LiteralExpr*>(key.get())->asString();
+            }
+        }
+
+        if (!check(TokenType::LeftParen) && !isGetter && !isSetter && !isAsync && !isGenerator) {
+            // Field: `name;` or `name = value;`
+            ClassDecl::FieldDef field;
+            field.key = std::move(key);
+            field.computed = computed;
+            field.isStatic = isStatic;
+            if (match(TokenType::Assign)) {
+                bool* savedSuperFlag = superFlag_;
+                bool usesSuper = false;
+                superFlag_ = &usesSuper;
+                try {
+                    field.value = parseAssignmentExpression();
+                } catch (...) {
+                    superFlag_ = savedSuperFlag;
+                    throw;
+                }
+                superFlag_ = savedSuperFlag;
+                if (usesSuper && isStatic) {
+                    error(previousToken_, "'super' in a static field initializer is not supported");
+                    throw ParseError("'super' in a static field initializer is not supported");
+                }
+                if (usesSuper) fieldsUseSuper = true;
+            }
+            match(TokenType::Semicolon);
+            fields.push_back(std::move(field));
+            continue;
+        }
+
+        auto methodFunc = parseMethod(isAsync, isGenerator);
+
+        if (!isStatic && !computed && name == "constructor" && !isGetter && !isSetter) {
             constructor = std::move(methodFunc);
         } else {
             ClassDecl::MethodDef method;
-            method.name = methodName.value;
+            method.name = name;
+            method.key = std::move(key);
+            method.computed = computed;
             method.function = std::move(methodFunc);
             method.isStatic = isStatic;
             method.isGetter = isGetter;
@@ -295,14 +430,18 @@ StmtPtr Parser::parseClassDeclaration() {
             methods.push_back(std::move(method));
         }
     }
-    
+
     consume(TokenType::RightBrace, "Expected '}' after class body");
-    
+
+    const bool implicitConstructor = !constructor;
     if (!constructor) {
         constructor = std::make_unique<FunctionExpr>("", std::vector<FunctionParam>(), std::make_unique<BlockStmt>(std::vector<StmtPtr>()));
     }
-    
-    return std::make_unique<ClassDecl>(className.value, std::move(superClass), std::move(constructor), std::move(methods));
+
+    auto decl = std::make_unique<ClassDecl>(className, std::move(superClass), std::move(constructor), std::move(methods));
+    decl->setImplicitConstructor(implicitConstructor);
+    decl->setFields(std::move(fields), fieldsUseSuper);
+    return decl;
 }
 
 std::vector<FunctionParam> Parser::parseParameters() {
@@ -741,91 +880,84 @@ ExprPtr Parser::parseExpression() {
     return expr;
 }
 
-ExprPtr Parser::parseAssignmentExpression() {
-    // Check for arrow function pattern: identifier => expr
-    // or (params) => expr
+// An arrow function starting at the current token: `x =>`, `(params) =>`,
+// or either after `async`. Returns null, having consumed nothing, when the
+// tokens ahead are not an arrow's parameter list.
+ExprPtr Parser::tryParseArrowFunction() {
+    const bool startsArrow =
+        (check(TokenType::Identifier) && peek().type == TokenType::Arrow) ||
+        check(TokenType::LeftParen) ||
+        (check(TokenType::Async) &&
+         (peek().type == TokenType::Identifier || peek().type == TokenType::LeftParen));
+    if (!startsArrow) return nullptr;
+    // A failed attempt re-parses its tokens as an expression, which tries
+    // again at every nested '(': remembering the misses keeps nested
+    // parentheses linear instead of exponential
+    const uint32_t startOffset = currentToken_.start.offset;
+    if (notArrowAt_.count(startOffset)) return nullptr;
+
+    const auto savedLexerState = lexer_.checkpoint();
+    const Token savedToken = currentToken_;
+    const Token savedPrevious = previousToken_;
+    const size_t savedErrorCount = errors_.size();
+#ifndef NDEBUG
+    const size_t savedLastOffset = lastTokenOffset_;
+    const int savedNoProgress = noProgressCount_;
+#endif
+    auto backtrack = [&]() -> ExprPtr {
+        lexer_.restore(savedLexerState);
+        currentToken_ = savedToken;
+        previousToken_ = savedPrevious;
+        errors_.resize(savedErrorCount);
+#ifndef NDEBUG
+        lastTokenOffset_ = savedLastOffset;
+        noProgressCount_ = savedNoProgress;
+#endif
+        notArrowAt_.insert(startOffset);
+        return nullptr;
+    };
+
+    const SourceLocation loc = currentToken_.start;
+    bool isAsync = false;
+    if (check(TokenType::Async)) {
+        advance();
+        isAsync = true;
+    }
+
+    std::vector<FunctionParam> params;
     if (check(TokenType::Identifier)) {
-        // Save lexer state for proper backtracking
-        auto savedLexerState = lexer_.checkpoint();
-        Token savedToken = currentToken_;
-        Token id = advance();
-        
-        if (match(TokenType::Arrow)) {
-            // Single parameter arrow: x => ...
-            std::vector<FunctionParam> params;
-            FunctionParam param;
-            param.pattern = std::make_unique<IdentifierExpr>(id.value);
-            params.push_back(std::move(param));
-            
-            // Parse body
-            std::variant<std::unique_ptr<BlockStmt>, ExprPtr> body;
-            if (check(TokenType::LeftBrace)) {
-                advance(); // consume {
-                body = std::unique_ptr<BlockStmt>(
-                    static_cast<BlockStmt*>(parseBlockStatement().release())
-                );
-            } else {
-                body = parseAssignmentExpression();
-            }
-            
-            return std::make_unique<ArrowFunctionExpr>(
-                std::move(params), std::move(body)
-            );
+        if (peek().type != TokenType::Arrow) return backtrack();
+        Token name = advance();
+        FunctionParam param;
+        param.pattern = std::make_unique<IdentifierExpr>(name.value, name.start);
+        params.push_back(std::move(param));
+    } else {
+        // `(a, b = 1, {c}, ...rest)`: anything parseParameters rejects is a
+        // parenthesised expression or a call such as async(x)
+        consume(TokenType::LeftParen, "Expected '('");
+        try {
+            params = parseParameters();
+        } catch (const ParseError&) {
+            return backtrack();
         }
-        
-        // Not arrow, restore lexer state completely
-        lexer_.restore(savedLexerState);
-        currentToken_ = savedToken;
+        if (!match(TokenType::RightParen)) return backtrack();
     }
-    
-    // Check for (params) => expr pattern
-    if (check(TokenType::LeftParen)) {
-        // Save lexer state for proper backtracking
-        auto savedLexerState = lexer_.checkpoint();
-        Token savedToken = currentToken_;
-        advance(); // consume (
-        
-        // Try to parse as parameters
-        std::vector<FunctionParam> params;
-        bool couldBeArrow = true;
-        
-        if (!check(TokenType::RightParen)) {
-            // Parse parameter list
-            do {
-                if (!check(TokenType::Identifier)) {
-                    couldBeArrow = false;
-                    break;
-                }
-                
-                FunctionParam param;
-                Token paramName = advance();
-                param.pattern = std::make_unique<IdentifierExpr>(paramName.value);
-                params.push_back(std::move(param));
-            } while (match(TokenType::Comma));
-        }
-        
-        if (couldBeArrow && match(TokenType::RightParen) && match(TokenType::Arrow)) {
-            // It's an arrow function!
-            std::variant<std::unique_ptr<BlockStmt>, ExprPtr> body;
-            if (check(TokenType::LeftBrace)) {
-                advance(); // consume {
-                body = std::unique_ptr<BlockStmt>(
-                    static_cast<BlockStmt*>(parseBlockStatement().release())
-                );
-            } else {
-                body = parseAssignmentExpression();
-            }
-            
-            return std::make_unique<ArrowFunctionExpr>(
-                std::move(params), std::move(body)
-            );
-        }
-        
-        // Not arrow function, restore lexer state completely
-        lexer_.restore(savedLexerState);
-        currentToken_ = savedToken;
+    if (!match(TokenType::Arrow)) return backtrack();
+
+    std::variant<std::unique_ptr<BlockStmt>, ExprPtr> body;
+    if (match(TokenType::LeftBrace)) {
+        body = std::unique_ptr<BlockStmt>(static_cast<BlockStmt*>(parseBlockStatement().release()));
+    } else {
+        body = parseAssignmentExpression();
     }
-    
+    return std::make_unique<ArrowFunctionExpr>(std::move(params), std::move(body), isAsync, loc);
+}
+
+ExprPtr Parser::parseAssignmentExpression() {
+    if (ExprPtr arrow = tryParseArrowFunction()) {
+        return arrow;
+    }
+
     // Normal assignment expression
     ExprPtr left = parseConditionalExpression();
     
@@ -1223,9 +1355,38 @@ ExprPtr Parser::parsePrimaryExpression() {
     if (match(TokenType::This)) {
         return std::make_unique<ThisExpr>(previousToken_.start);
     }
-    
-    // Identifier
-    if (match(TokenType::Identifier)) {
+
+    // super(...), super.x and super[x]; the compiler checks which is allowed
+    if (match(TokenType::Super)) {
+        if (!superFlag_) {
+            error(previousToken_, "'super' keyword unexpected here");
+            throw ParseError("'super' keyword unexpected here");
+        }
+        *superFlag_ = true;
+        if (!check(TokenType::LeftParen) && !check(TokenType::Dot) &&
+            !check(TokenType::LeftBracket)) {
+            error("'super' must be followed by an argument list or member access");
+            throw ParseError("'super' must be followed by an argument list or member access");
+        }
+        return std::make_unique<SuperExpr>(previousToken_.start);
+    }
+
+    // async function expression, or `async` used as a name
+    if (match(TokenType::Async)) {
+        if (match(TokenType::Function)) {
+            return parseFunctionExpression(true);
+        }
+        return std::make_unique<IdentifierExpr>("async", previousToken_.start);
+    }
+
+    // Class expression
+    if (match(TokenType::Class)) {
+        return parseClassExpression();
+    }
+
+    // Identifier, including contextual keywords used as names
+    if (match(TokenType::Identifier) || match({TokenType::Get, TokenType::Set, TokenType::Of,
+                                               TokenType::Static, TokenType::From, TokenType::As})) {
         return std::make_unique<IdentifierExpr>(previousToken_.value, previousToken_.start);
     }
     
@@ -1297,43 +1458,56 @@ ExprPtr Parser::parseObjectLiteral() {
     
     while (!check(TokenType::RightBrace) && !isAtEnd()) {
         ObjectProperty prop;
-        
-        // Property key
-        if (match(TokenType::LeftBracket)) {
-            // Computed property
-            prop.key = parseAssignmentExpression();
-            consume(TokenType::RightBracket, "Expected ']'");
-            prop.computed = true;
-        } else if (match(TokenType::String)) {
-            prop.key = std::make_unique<LiteralExpr>(previousToken_.value);
-        } else if (match(TokenType::Number)) {
-            prop.key = std::make_unique<LiteralExpr>(previousToken_.numericValue);
-        } else {
-            Token name = consume(TokenType::Identifier, "Expected property name");
-            prop.key = std::make_unique<IdentifierExpr>(name.value);
-            
-            // Shorthand: { x } = { x: x }
-            if (!check(TokenType::Colon) && !check(TokenType::LeftParen)) {
-                prop.value = std::make_unique<IdentifierExpr>(name.value);
-                prop.shorthand = true;
-                properties.push_back(std::move(prop));
-                
-                if (!check(TokenType::RightBrace)) {
-                    consume(TokenType::Comma, "Expected ',' between properties");
-                }
-                continue;
+
+        // Spread: { ...source }
+        if (match(TokenType::DotDotDot)) {
+            prop.spread = true;
+            prop.value = parseAssignmentExpression();
+            properties.push_back(std::move(prop));
+            if (!check(TokenType::RightBrace)) {
+                consume(TokenType::Comma, "Expected ',' between properties");
             }
+            continue;
         }
-        
-        // Method shorthand: { foo() {} }
-        if (match(TokenType::LeftParen)) {
-            std::vector<FunctionParam> params = parseParameters();
-            consume(TokenType::RightParen, "Expected ')'");
-            consume(TokenType::LeftBrace, "Expected '{'");
-            auto body = std::unique_ptr<BlockStmt>(
-                static_cast<BlockStmt*>(parseBlockStatement().release())
-            );
-            prop.value = std::make_unique<FunctionExpr>("", std::move(params), std::move(body));
+
+        // get/set/async are modifiers only when a property name follows:
+        // { get: 1 }, { get() {} } and { get } are properties named get
+        bool isAsync = false;
+        if ((check(TokenType::Get) || check(TokenType::Set)) && startsPropertyKey(peek().type)) {
+            prop.kind = check(TokenType::Get) ? ObjectProperty::Kind::Get : ObjectProperty::Kind::Set;
+            advance();
+        } else if (check(TokenType::Async) && (startsPropertyKey(peek().type) ||
+                                               peek().type == TokenType::Star)) {
+            advance();
+            isAsync = true;
+        }
+        const bool isGenerator = prop.kind == ObjectProperty::Kind::Init && match(TokenType::Star);
+
+        const TokenType keyType = currentToken_.type;
+        const Token keyToken = currentToken_;
+        prop.key = parsePropertyKey(prop.computed);
+
+        // Shorthand: { x } is { x: x }
+        if (prop.kind == ObjectProperty::Kind::Init && !isAsync && !isGenerator && !prop.computed &&
+            !check(TokenType::Colon) && !check(TokenType::LeftParen)) {
+            if (keyType != TokenType::Identifier && !isContextualKeyword(keyType)) {
+                error(keyToken, "Expected ':' after property key");
+                throw ParseError("Expected ':' after property key");
+            }
+            prop.value = std::make_unique<IdentifierExpr>(keyToken.value, keyToken.start);
+            prop.shorthand = true;
+            properties.push_back(std::move(prop));
+
+            if (!check(TokenType::RightBrace)) {
+                consume(TokenType::Comma, "Expected ',' between properties");
+            }
+            continue;
+        }
+
+        // Methods, getters and setters: { foo() {} }, { get x() {} }
+        if (prop.kind != ObjectProperty::Kind::Init || isAsync || isGenerator ||
+            check(TokenType::LeftParen)) {
+            prop.value = parseMethod(isAsync, isGenerator);
             prop.method = true;
         } else {
             consume(TokenType::Colon, "Expected ':' after property key");
@@ -1351,22 +1525,22 @@ ExprPtr Parser::parseObjectLiteral() {
     return std::make_unique<ObjectExpr>(std::move(properties));
 }
 
-ExprPtr Parser::parseFunctionExpression() {
+ExprPtr Parser::parseFunctionExpression(bool isAsync) {
+    const bool isGenerator = match(TokenType::Star);  // function*
     std::string name;
     if (check(TokenType::Identifier)) {
         name = advance().value;
     }
-    
+
     consume(TokenType::LeftParen, "Expected '(' after function");
     std::vector<FunctionParam> params = parseParameters();
     consume(TokenType::RightParen, "Expected ')' after parameters");
-    
+
     consume(TokenType::LeftBrace, "Expected '{' before function body");
-    auto body = std::unique_ptr<BlockStmt>(
-        static_cast<BlockStmt*>(parseBlockStatement().release())
-    );
-    
-    return std::make_unique<FunctionExpr>(std::move(name), std::move(params), std::move(body));
+    auto body = parseFunctionBody(nullptr);
+
+    return std::make_unique<FunctionExpr>(std::move(name), std::move(params), std::move(body),
+                                          isAsync, isGenerator);
 }
 
 ExprPtr Parser::parseTemplateLiteral() {
@@ -1419,6 +1593,7 @@ ExprPtr Parser::parseTemplateLiteral() {
         // Create a temporary parser for the expression
         auto exprSource = SourceCode::fromString(exprCode, "<template expression>");
         Parser exprParser(exprSource.get());
+        exprParser.superFlag_ = superFlag_;  // `${super.x}` inside a method
         ExprPtr expr = exprParser.parseExpression();
         
         if (expr) {
@@ -1455,15 +1630,9 @@ ExprPtr Parser::parseTemplateLiteral() {
     return result;
 }
 
-ExprPtr Parser::parseArrowFunction() {
-    // This is called when we've already identified it's an arrow function
-    // For simplicity, this is handled in parsePrimaryExpression for now
-    return nullptr;
-}
-
 ExprPtr Parser::parseClassExpression() {
-    error("Class expressions not yet implemented");
-    return nullptr;
+    const SourceLocation loc = previousToken_.start;
+    return std::make_unique<ClassExpr>(parseClass(false), loc);
 }
 
 // Free function helpers
@@ -1639,9 +1808,16 @@ ExprPtr Parser::parseObjectPattern() {
                 prop.value = std::make_unique<AssignmentPatternExpr>(std::move(prop.value), std::move(def));
             }
         } else {
-            // Regular key: identifier or string
-            Token keyToken = consume(TokenType::Identifier, "Expected property name");
-            prop.key = std::make_unique<IdentifierExpr>(keyToken.value, keyToken.start);
+            // Regular key: identifier, keyword, string or number. Only an
+            // identifier can stand alone as shorthand.
+            const Token keyToken = currentToken_;
+            bool computed = false;
+            prop.key = parsePropertyKey(computed);
+
+            if (keyToken.type != TokenType::Identifier && !isContextualKeyword(keyToken.type) &&
+                !check(TokenType::Colon)) {
+                consume(TokenType::Colon, "Expected ':' after property name in pattern");
+            }
 
             if (match(TokenType::Colon)) {
                 // {key: target}

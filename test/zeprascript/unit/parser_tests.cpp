@@ -287,3 +287,154 @@ TEST(ParserTests, ExportDeclaration) {
     
     ASSERT_NE(program, nullptr);
 }
+
+// =============================================================================
+// Classes, object literals and arrows (super, fields, accessors, async)
+// =============================================================================
+
+namespace {
+// Parses source that must be free of errors
+std::unique_ptr<Program> parseClean(const std::string& code) {
+    auto source = SourceCode::fromString(code, "test.js");
+    Parser parser(source.get());
+    auto program = parser.parseProgram();
+    EXPECT_FALSE(parser.hasErrors()) << (parser.hasErrors() ? parser.errors()[0] : "");
+    return program;
+}
+
+bool hasParseErrors(const std::string& code) {
+    auto source = SourceCode::fromString(code, "test.js");
+    Parser parser(source.get());
+    parser.parseProgram();
+    return parser.hasErrors();
+}
+} // namespace
+
+TEST(ParserTests, ClassFieldsAndSuper) {
+    auto program = parseClean(R"(
+        class B extends A {
+            x = 1;
+            static y = 2;
+            z;
+            constructor() { super(); }
+            m() { return super.m(); }
+            plain() { return 1; }
+        }
+    )");
+    ASSERT_EQ(program->body().size(), 1);
+    auto* decl = dynamic_cast<ClassDecl*>(program->body()[0].get());
+    ASSERT_NE(decl, nullptr);
+    ASSERT_EQ(decl->fields().size(), 3);
+    EXPECT_FALSE(decl->fields()[0].isStatic);
+    EXPECT_TRUE(decl->fields()[1].isStatic);
+    EXPECT_EQ(decl->fields()[2].value, nullptr);
+    EXPECT_FALSE(decl->hasImplicitConstructor());
+    EXPECT_TRUE(decl->constructor()->usesSuper());
+    ASSERT_EQ(decl->methods().size(), 2);
+    EXPECT_TRUE(decl->methods()[0].function->usesSuper());
+    EXPECT_FALSE(decl->methods()[1].function->usesSuper());
+}
+
+TEST(ParserTests, ClassMemberModifiersAndNames) {
+    auto program = parseClean(R"(
+        class C {
+            static get v() { return 1; }
+            get() { return 2; }
+            static() { return 3; }
+            async load() {}
+            *gen() {}
+            [key]() {}
+            'quoted'() {}
+        }
+    )");
+    auto* decl = dynamic_cast<ClassDecl*>(program->body()[0].get());
+    ASSERT_NE(decl, nullptr);
+    ASSERT_EQ(decl->methods().size(), 7);
+    EXPECT_TRUE(decl->methods()[0].isStatic && decl->methods()[0].isGetter);
+    EXPECT_EQ(decl->methods()[1].name, "get");
+    EXPECT_FALSE(decl->methods()[1].isGetter);
+    EXPECT_EQ(decl->methods()[2].name, "static");
+    EXPECT_FALSE(decl->methods()[2].isStatic);
+    EXPECT_TRUE(decl->methods()[3].function->isAsync());
+    EXPECT_TRUE(decl->methods()[4].function->isGenerator());
+    EXPECT_TRUE(decl->methods()[5].computed);
+    EXPECT_EQ(decl->methods()[6].name, "quoted");
+    EXPECT_TRUE(decl->hasImplicitConstructor());
+}
+
+TEST(ParserTests, ClassExpression) {
+    auto program = parseClean("var A = class Named extends B { f() {} };");
+    auto* decl = dynamic_cast<VariableDecl*>(program->body()[0].get());
+    ASSERT_NE(decl, nullptr);
+    auto* expr = decl->declarators()[0].init.get();
+    ASSERT_EQ(expr->type(), NodeType::ClassExpression);
+    auto* cls = static_cast<ClassExpr*>(expr)->decl();
+    EXPECT_EQ(cls->name(), "Named");
+    EXPECT_NE(cls->superClass(), nullptr);
+}
+
+TEST(ParserTests, ObjectLiteralAccessorsAndSpread) {
+    auto program = parseClean("var o = { get a() { return 1; }, set a(v) {}, get: 1, ...rest, get };");
+    auto* decl = dynamic_cast<VariableDecl*>(program->body()[0].get());
+    ASSERT_NE(decl, nullptr);
+    auto* obj = static_cast<ObjectExpr*>(decl->declarators()[0].init.get());
+    ASSERT_EQ(obj->properties().size(), 5);
+    EXPECT_EQ(obj->properties()[0].kind, ObjectProperty::Kind::Get);
+    EXPECT_EQ(obj->properties()[1].kind, ObjectProperty::Kind::Set);
+    EXPECT_EQ(obj->properties()[2].kind, ObjectProperty::Kind::Init);
+    EXPECT_TRUE(obj->properties()[3].spread);
+    EXPECT_TRUE(obj->properties()[4].shorthand);
+}
+
+TEST(ParserTests, AsyncAndDestructuringArrows) {
+    auto program = parseClean(R"(
+        var a = async x => x;
+        var b = async (p, q = 1) => p + q;
+        var c = ({ k }, [m], ...rest) => k;
+        var d = (1, 2);
+        var e = async(3);
+    )");
+    ASSERT_EQ(program->body().size(), 5);
+    auto initOf = [&](size_t i) {
+        return static_cast<VariableDecl*>(program->body()[i].get())->declarators()[0].init.get();
+    };
+    ASSERT_EQ(initOf(0)->type(), NodeType::ArrowFunction);
+    EXPECT_TRUE(static_cast<ArrowFunctionExpr*>(initOf(0))->isAsync());
+    ASSERT_EQ(initOf(1)->type(), NodeType::ArrowFunction);
+    EXPECT_TRUE(static_cast<ArrowFunctionExpr*>(initOf(1))->isAsync());
+    EXPECT_NE(static_cast<ArrowFunctionExpr*>(initOf(1))->params()[1].defaultValue, nullptr);
+    ASSERT_EQ(initOf(2)->type(), NodeType::ArrowFunction);
+    EXPECT_EQ(static_cast<ArrowFunctionExpr*>(initOf(2))->params().size(), 3);
+    EXPECT_EQ(initOf(3)->type(), NodeType::BinaryExpression);  // Comma operator
+    EXPECT_EQ(initOf(4)->type(), NodeType::CallExpression);    // async used as a name
+}
+
+TEST(ParserTests, AsyncArrowAsStatement) {
+    // `async` at the start of a statement must not be dropped
+    auto program = parseClean("async () => {};");
+    ASSERT_EQ(program->body().size(), 1);
+    auto* stmt = dynamic_cast<ExprStmt*>(program->body()[0].get());
+    ASSERT_NE(stmt, nullptr);
+    ASSERT_EQ(stmt->expression()->type(), NodeType::ArrowFunction);
+    EXPECT_TRUE(static_cast<ArrowFunctionExpr*>(stmt->expression())->isAsync());
+}
+
+TEST(ParserTests, SuperOutsideMethodsIsAnError) {
+    EXPECT_TRUE(hasParseErrors("function f() { return super.x; }"));
+    EXPECT_TRUE(hasParseErrors("super();"));
+    EXPECT_TRUE(hasParseErrors("class A { m() { function inner() { super.m(); } } }"));
+    EXPECT_FALSE(hasParseErrors("class A { m() { var f = () => super.m(); } }"));
+    EXPECT_FALSE(hasParseErrors("var o = { m() { return super.m(); } };"));
+}
+
+TEST(ParserTests, NestedParenthesesParseInLinearTime) {
+    // Each '(' is first tried as an arrow parameter list; without
+    // remembering failed attempts this nesting takes 2^40 steps
+    std::string code = "var v = ";
+    for (int i = 0; i < 40; i++) code += "(a = ";
+    code += "1";
+    for (int i = 0; i < 40; i++) code += ")";
+    code += ";";
+    auto program = parseClean(code);
+    ASSERT_EQ(program->body().size(), 1);
+}

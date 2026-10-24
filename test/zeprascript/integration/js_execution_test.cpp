@@ -75,7 +75,8 @@ protected:
         auto execResult = vm.execute(
             static_cast<const Zepra::Bytecode::BytecodeChunk*>(compiled));
 
-        if (execResult.status == ExecutionResult::Status::Error) {
+        // An uncaught exception (Status::Exception) also stops the script
+        if (execResult.status != ExecutionResult::Status::Success) {
             r.error = "Runtime error in " + filename + ": " + execResult.error;
             return r;
         }
@@ -86,6 +87,11 @@ protected:
             r.resultValue = result.asNumber();
         } else {
             r.error = "__result is not a number in " + filename;
+        }
+        // Scripts that run several checks name the ones that failed
+        Value failedNames = vm.getGlobal("__failedNames");
+        if (failedNames.isString()) {
+            r.error = "failed checks: " + failedNames.toString();
         }
 
         return r;
@@ -164,4 +170,18 @@ TEST_F(JSExecutionTest, Operators) {
     ASSERT_TRUE(r.compiled) << r.error;
     ASSERT_TRUE(r.executed) << r.error;
     EXPECT_EQ(r.resultValue, 1.0) << "Operator/typeof/bitwise test failed";
+}
+
+TEST_F(JSExecutionTest, ClassFeatures) {
+    auto r = runScript("11_class_features.js");
+    ASSERT_TRUE(r.compiled) << r.error;
+    ASSERT_TRUE(r.executed) << r.error;
+    EXPECT_EQ(r.resultValue, 1.0) << r.error;
+}
+
+TEST_F(JSExecutionTest, LiteralsAndArrows) {
+    auto r = runScript("12_literals_and_arrows.js");
+    ASSERT_TRUE(r.compiled) << r.error;
+    ASSERT_TRUE(r.executed) << r.error;
+    EXPECT_EQ(r.resultValue, 1.0) << r.error;
 }

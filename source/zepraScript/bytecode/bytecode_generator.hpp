@@ -201,11 +201,33 @@ private:
         bool isMethod = false;
         // Named function expression: its name is bound inside it
         bool bindsOwnName = false;
-        // Class constructor of a derived class: calls the parent constructor
-        // with its own arguments before the body runs
-        const Frontend::Expression* implicitSuperClass = nullptr;
+        // Constructor a derived class did not declare: calls the parent
+        // constructor with its own arguments
+        bool implicitSuperCall = false;
+        // Base class constructor of a class with instance fields: runs the
+        // field initializer before the body
+        bool initializesFields = false;
+        // The body refers to super: the running function is kept in a hidden
+        // local, " method", which arrows inside reach as an upvalue
+        bool usesSuper = false;
+        // Field initializer: the body defines fieldClass's instance (or,
+        // with staticFields, static) fields on `this`
+        const Frontend::ClassDecl* fieldClass = nullptr;
+        bool staticFields = false;
     };
     void compileFunction(const FunctionSource& source, Runtime::Function* fn);
+    void compileClass(const Frontend::ClassDecl* decl);  // Leaves the constructor
+    void compileClassExpression(const Frontend::ClassExpr* expr);
+    void emitStaticFields(const Frontend::ClassDecl* decl);
+    void compileMethod(const Frontend::FunctionExpr* fnExpr, const std::string& name);
+    void compileFieldInitializer(const Frontend::ClassDecl* decl, bool isStatic);
+    void emitPropertyKey(const Frontend::Expression* key, bool computed);
+
+    // super: the running method, found through " method"
+    void emitActiveMethod(const Frontend::Expression* at);
+    void emitSuperCall(const Frontend::CallExpr* expr);
+    void emitSuperProperty(const Frontend::MemberExpr* expr);  // [this, base, key?]
+    void emitFieldInitialization(bool inConstructorPrologue);
     void emitParameterPrologue(const std::vector<Frontend::FunctionParam>& params);
 
     // Statement lists hoist their function declarations: closures are

@@ -1,4 +1,4 @@
-# name | expression that must evaluate to true. A leading ! marks a known gap (tracked for the parser pass).
+# name | expression that must evaluate to true. A leading ! marks a known gap.
 let_const | (function(){ let a = 1; const b = 2; { let a = 5; } return a + b === 3; })()
 arrow_fn | ((x, y) => x * y)(3, 4) === 12
 arrow_this | (function(){ var o = { v: 7, f: function(){ return (() => this.v)(); } }; return o.f() === 7; })()
@@ -9,13 +9,13 @@ spread_call | Math.max(...[1, 5, 3]) === 5
 spread_array | [...[1, 2], 3].join(",") === "1,2,3"
 array_destructure | (function(){ var [a, , c] = [1, 2, 3]; return a === 1 && c === 3; })()
 object_destructure | (function(){ var { x, y: z } = { x: 1, y: 2 }; return x === 1 && z === 2; })()
-!object_spread | (function(){ var o = { ...{ a: 1 }, b: 2 }; return o.a === 1 && o.b === 2; })()
+object_spread | (function(){ var o = { ...{ a: 1 }, b: 2 }; return o.a === 1 && o.b === 2; })()
 shorthand_props | (function(){ var a = 1; var o = { a }; return o.a === 1; })()
 quoted_keys | (function(){ var o = { "a-b": 1, 2: "two" }; return o["a-b"] === 1 && o[2] === "two"; })()
-!keyword_keys | (function(){ var o = { get: 1, set: 2, default: 3, new: 4, class: 5 }; return o.get + o.set + o.default + o.new + o.class === 15; })()
+keyword_keys | (function(){ var o = { get: 1, set: 2, default: 3, new: 4, class: 5 }; return o.get + o.set + o.default + o.new + o.class === 15; })()
 method_shorthand | ({ f() { return 9; } }).f() === 9
-!literal_getter | ({ get v() { return 4; } }).v === 4
-!literal_setter | (function(){ var seen = 0; var o = { set v(x) { seen = x; } }; o.v = 6; return seen === 6; })()
+literal_getter | ({ get v() { return 4; } }).v === 4
+literal_setter | (function(){ var seen = 0; var o = { set v(x) { seen = x; } }; o.v = 6; return seen === 6; })()
 !define_getter | (function(){ var o = {}; Object.defineProperty(o, "x", { get: function(){ return 8; } }); return o.x === 8; })()
 computed_keys | (function(){ var k = "dyn"; var o = { [k + "1"]: 5 }; return o.dyn1 === 5; })()
 optional_chain | (function(){ var o = { a: { b: 2 } }; return o?.a?.b === 2 && o?.x?.y === undefined; })()
@@ -24,9 +24,9 @@ keys_order | Object.keys({ b: 1, a: 2, c: 3 }).join(",") === "b,a,c"
 for_in_order | (function(){ var r = []; for (var k in { z: 1, y: 2 }) r.push(k); return r.join(",") === "z,y"; })()
 for_of_array | (function(){ var s = 0; for (const v of [1, 2, 3]) s += v; return s === 6; })()
 for_of_string | (function(){ var r = ""; for (const c of "ab") r += c + "."; return r === "a.b."; })()
-!classes_basic | (function(){ class A { constructor(n){ this.n = n; } get(){ return this.n; } } return new A(3).get() === 3; })()
-!classes_extends | (function(){ class A { constructor(n){ this.n = n; } } class B extends A { constructor(n){ super(n); this.b = 1; } } var b = new B(4); return b.n === 4 && b.b === 1; })()
-!classes_super_method | (function(){ class A { hi(){ return "a"; } } class B extends A { hi(){ return super.hi() + "b"; } } return new B().hi() === "ab"; })()
+classes_basic | (function(){ class A { constructor(n){ this.n = n; } get(){ return this.n; } } return new A(3).get() === 3; })()
+classes_extends | (function(){ class A { constructor(n){ this.n = n; } } class B extends A { constructor(n){ super(n); this.b = 1; } } var b = new B(4); return b.n === 4 && b.b === 1; })()
+classes_super_method | (function(){ class A { hi(){ return "a"; } } class B extends A { hi(){ return super.hi() + "b"; } } return new B().hi() === "ab"; })()
 classes_static | (function(){ class A { static make(){ return 7; } } return A.make() === 7; })()
 classes_getter | (function(){ class A { get v(){ return 11; } } return new A().v === 11; })()
 instanceof_chain | (function(){ class A {} class B extends A {} var b = new B(); return b instanceof B && b instanceof A; })()
