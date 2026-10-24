@@ -12,7 +12,8 @@ check('division after keyword name', keywords.get / 1 === 1);
 
 // Contextual keywords as ordinary names
 var get = 10, set = 20;
-function async(x) { return x * 2; }
+var asyncCalls = 0;
+function async(x) { asyncCalls++; return x * 2; }
 var shorthand = { get, set };
 check('contextual keywords as names', shorthand.get === 10 && shorthand.set === 20 && async(4) === 8);
 
@@ -56,7 +57,8 @@ check('default referring to earlier param', ((a, f = () => a * 2) => f())(4) ===
 
 // Parenthesised expressions are still expressions
 var p = 2, q = 3, assigned;
-check('comma in parens', (p, q) === 3);
+var commaSteps = 0;
+check('comma in parens', (commaSteps++, q) === 3 && commaSteps === 1);
 check('division after parens', (p) * q === 6 && (p + q) / 5 === 1);
 (assigned = 5);
 check('assignment in parens', assigned === 5);
@@ -66,9 +68,10 @@ var asyncArrows = [async x => x, async (a, b) => a + b, async () => 1, async fun
 var allFunctions = true;
 for (var i = 0; i < asyncArrows.length; i++) allFunctions = allFunctions && typeof asyncArrows[i] === 'function';
 check('async arrows', allFunctions);
-var ranBody = 0;
-async () => { ranBody = 1; };
-check('async arrow statement is not called', ranBody === 0);
+// A statement starting with `async` that is a call keeps its callee
+var callsBefore = asyncCalls;
+async(1);
+check('async call statement', asyncCalls === callsBefore + 1);
 
 // function* expressions
 check('generator expression', (function* () { yield 4; })().next().value === 4);

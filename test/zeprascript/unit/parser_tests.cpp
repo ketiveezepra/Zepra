@@ -409,6 +409,16 @@ TEST(ParserTests, AsyncAndDestructuringArrows) {
     EXPECT_EQ(initOf(4)->type(), NodeType::CallExpression);    // async used as a name
 }
 
+TEST(ParserTests, AsyncArrowAsStatement) {
+    // `async` at the start of a statement must not be dropped
+    auto program = parseClean("async () => {};");
+    ASSERT_EQ(program->body().size(), 1);
+    auto* stmt = dynamic_cast<ExprStmt*>(program->body()[0].get());
+    ASSERT_NE(stmt, nullptr);
+    ASSERT_EQ(stmt->expression()->type(), NodeType::ArrowFunction);
+    EXPECT_TRUE(static_cast<ArrowFunctionExpr*>(stmt->expression())->isAsync());
+}
+
 TEST(ParserTests, SuperOutsideMethodsIsAnError) {
     EXPECT_TRUE(hasParseErrors("function f() { return super.x; }"));
     EXPECT_TRUE(hasParseErrors("super();"));
