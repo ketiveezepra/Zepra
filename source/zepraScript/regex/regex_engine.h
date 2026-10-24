@@ -8,6 +8,7 @@
 #pragma once
 
 #include "regex_bytecode.h"
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <optional>
@@ -22,6 +23,12 @@ struct MatchCapture {
         if (!matched()) return "";
         return input.substr(start, end - start);
     }
+};
+
+/** Thrown when a pattern backtracks past the step budget (a catastrophic pattern). */
+class RegexBudgetExceeded : public std::runtime_error {
+public:
+    RegexBudgetExceeded() : std::runtime_error("Regular expression is too complex: backtracking limit exceeded") {}
 };
 
 struct MatchResult {
@@ -71,6 +78,7 @@ private:
     RegexFlags flags_;
     std::vector<Thread> stack_;
     MatchResult result_;
+    uint64_t steps_ = 0;  // instructions run by the current exec(), bounded by kStepBudget
 };
 
 } // namespace Zepra::Regex
