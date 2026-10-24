@@ -1033,7 +1033,7 @@ void VM::dispatch(Opcode op) {
             }
             bool found = false;
             if (instance.isObject()) {
-                for (Object* obj = instance.asObject()->prototype(); obj; obj = obj->prototype()) {
+                for (Object* obj = prototypeOf(instance.asObject()); obj; obj = prototypeOf(obj)) {
                     if (obj == prototype) {
                         found = true;
                         break;
@@ -1965,6 +1965,15 @@ Object* VM::intrinsic(Intrinsic kind) {
     // Everything but Object.prototype itself inherits from it
     slot->setPrototype(intrinsic(Intrinsic::Object));
     return slot;
+}
+
+Object* VM::prototypeOf(Object* object) {
+    if (!object) return nullptr;
+    if (object->prototype()) return object->prototype();
+    // Arrays and functions inherit from their built-in prototype without storing a link
+    if (object->isArray()) return intrinsic(Intrinsic::Array);
+    if (object->isFunction()) return intrinsic(Intrinsic::Function);
+    return nullptr;
 }
 
 Object* VM::createFunctionPrototype() {

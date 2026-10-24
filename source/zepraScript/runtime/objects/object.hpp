@@ -146,6 +146,10 @@ public:
     virtual bool set(uint32_t index, Value value);
     virtual bool has(const std::string& key) const;
     virtual bool has(uint32_t index) const;
+
+    /** True when the property is stored on this object itself, not inherited (hasOwnProperty). */
+    bool hasOwnProperty(const std::string& key) const;
+
     virtual bool deleteProperty(const std::string& key);
     virtual bool deleteProperty(uint32_t index);
     

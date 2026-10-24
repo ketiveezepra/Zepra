@@ -213,6 +213,13 @@ public:
     Object* intrinsic(Intrinsic kind);
 
     /**
+     * @brief The [[Prototype]] of `object` as scripts see it: arrays and
+     * functions answer with their built-in prototype even though they store no
+     * link. Null at the end of a chain.
+     */
+    Object* prototypeOf(Object* object);
+
+    /**
      * @brief obj.name as script code reads it: accessors run with `target` as
      * their receiver, primitives read through their prototype, and reading
      * from null or undefined is a TypeError. Built-ins use this to honour

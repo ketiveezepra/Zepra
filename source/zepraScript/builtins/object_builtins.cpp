@@ -9,10 +9,31 @@
 #include "runtime/objects/object.hpp"
 #include "runtime/objects/function.hpp"
 #include "runtime/objects/value.hpp"
+#include "runtime/execution/vm.hpp"
+#include "runtime/objects/well_known_symbols.hpp"
 #include <algorithm>
 #include <stdexcept>
 
 namespace Zepra::Builtins {
+
+namespace {
+
+// hasOwnProperty: stored on the object itself, plus the properties arrays
+// and functions provide without storing them
+bool hasOwnKey(Runtime::Object* obj, const std::string& key) {
+    if (obj->hasOwnProperty(key)) return true;
+    if (obj->isArray()) return key == "length";
+    if (obj->isFunction()) return key == "length" || key == "name";
+    return false;
+}
+
+// The prototype scripts see, including the implicit one of arrays and functions
+Runtime::Object* prototypeOf(Runtime::Object* obj) {
+    Runtime::VM* vm = Runtime::VM::current();
+    return vm ? vm->prototypeOf(obj) : obj->prototype();
+}
+
+} // namespace
 
 // Object.keys(obj)
 Runtime::Value ObjectBuiltin::keys(const Runtime::FunctionCallInfo& info) {
@@ -224,9 +245,8 @@ Runtime::Value ObjectBuiltin::getPrototypeOf(const Runtime::FunctionCallInfo& in
         return Runtime::Value::null();
     }
     
-    Runtime::Object* obj = info.argument(0).asObject();
-    Runtime::Object* proto = obj->prototype();
-    
+    Runtime::Object* proto = prototypeOf(info.argument(0).asObject());
+
     return proto ? Runtime::Value::object(proto) : Runtime::Value::null();
 }
 
@@ -426,11 +446,7 @@ Runtime::Value ObjectBuiltin::hasOwn(const Runtime::FunctionCallInfo& info) {
         return Runtime::Value::boolean(false);
     }
     
-    Runtime::Object* obj = objVal.asObject();
-    std::string key = keyVal.toString();
-    
-    // Check if it's an own property (not inherited)
-    return Runtime::Value::boolean(obj->has(key));
+    return Runtime::Value::boolean(hasOwnKey(objVal.asObject(), keyVal.toString()));
 }
 
 // Object.groupBy(items, callback) - ES2024
@@ -493,10 +509,7 @@ Runtime::Value ObjectBuiltin::hasOwnProperty(const Runtime::FunctionCallInfo& in
         return Runtime::Value::boolean(false);
     }
     
-    Runtime::Object* obj = thisVal.asObject();
-    std::string key = info.argument(0).toString();
-    
-    return Runtime::Value::boolean(obj->has(key));
+    return Runtime::Value::boolean(hasOwnKey(thisVal.asObject(), info.argument(0).toString()));
 }
 
 // Object.prototype.isPrototypeOf(obj)
@@ -509,14 +522,10 @@ Runtime::Value ObjectBuiltin::isPrototypeOf(const Runtime::FunctionCallInfo& inf
     Runtime::Object* proto = thisVal.asObject();
     Runtime::Object* obj = info.argument(0).asObject();
     
-    Runtime::Object* current = obj->prototype();
-    while (current != nullptr) {
-        if (current == proto) {
-            return Runtime::Value::boolean(true);
-        }
-        current = current->prototype();
+    for (Runtime::Object* current = prototypeOf(obj); current != nullptr; current = prototypeOf(current)) {
+        if (current == proto) return Runtime::Value::boolean(true);
     }
-    
+
     return Runtime::Value::boolean(false);
 }
 
@@ -549,12 +558,23 @@ Runtime::Value ObjectBuiltin::toString(const Runtime::FunctionCallInfo& info) {
         return Runtime::Value::string(new Runtime::String("[object Undefined]"));
     }
     if (!thisVal.isObject()) {
-        return Runtime::Value::string(new Runtime::String("[object Object]"));
+        const char* primitive = thisVal.isString() ? "String" : thisVal.isNumber() ? "Number"
+                              : thisVal.isBoolean() ? "Boolean" : "Object";
+        return Runtime::Value::string(new Runtime::String(std::string("[object ") + primitive + "]"));
     }
-    
+
     Runtime::Object* obj = thisVal.asObject();
     std::string tag = "Object";
-    
+
+    // Symbol.toStringTag wins over the built-in kind (Map, Set, Promise, ...)
+    if (Runtime::VM* vm = Runtime::VM::current()) {
+        const Runtime::Value custom = vm->getMember(
+            thisVal, Runtime::symbolPropertyKey(Runtime::WellKnownSymbols::ToStringTag));
+        if (custom.isString()) {
+            return Runtime::Value::string(new Runtime::String("[object " + custom.toString() + "]"));
+        }
+    }
+
     switch (obj->objectType()) {
         case Runtime::ObjectType::Array: tag = "Array"; break;
         case Runtime::ObjectType::Function: tag = "Function"; break;
