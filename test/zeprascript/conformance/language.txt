@@ -16,7 +16,7 @@ keyword_keys | (function(){ var o = { get: 1, set: 2, default: 3, new: 4, class:
 method_shorthand | ({ f() { return 9; } }).f() === 9
 literal_getter | ({ get v() { return 4; } }).v === 4
 literal_setter | (function(){ var seen = 0; var o = { set v(x) { seen = x; } }; o.v = 6; return seen === 6; })()
-!define_getter | (function(){ var o = {}; Object.defineProperty(o, "x", { get: function(){ return 8; } }); return o.x === 8; })()
+define_getter | (function(){ var o = {}; Object.defineProperty(o, "x", { get: function(){ return 8; } }); return o.x === 8; })()
 computed_keys | (function(){ var k = "dyn"; var o = { [k + "1"]: 5 }; return o.dyn1 === 5; })()
 optional_chain | (function(){ var o = { a: { b: 2 } }; return o?.a?.b === 2 && o?.x?.y === undefined; })()
 nullish | (null ?? 5) === 5 && (0 ?? 5) === 0

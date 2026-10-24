@@ -10,6 +10,7 @@
 #include "runtime/objects/function.hpp"
 #include "runtime/objects/value.hpp"
 #include "runtime/execution/vm.hpp"
+#include "runtime/execution/js_error.hpp"
 #include "runtime/objects/well_known_symbols.hpp"
 #include <algorithm>
 #include <stdexcept>
@@ -301,8 +302,13 @@ Runtime::Value ObjectBuiltin::getOwnPropertyDescriptor(const Runtime::FunctionCa
     }
     
     Runtime::Object* result = new Runtime::Object();
-    result->set("value", desc->value);
-    result->set("writable", Runtime::Value::boolean(desc->isWritable()));
+    if (desc->isAccessorDescriptor()) {
+        result->set("get", desc->getter);
+        result->set("set", desc->setter);
+    } else {
+        result->set("value", desc->value);
+        result->set("writable", Runtime::Value::boolean(desc->isWritable()));
+    }
     result->set("enumerable", Runtime::Value::boolean(desc->isEnumerable()));
     result->set("configurable", Runtime::Value::boolean(desc->isConfigurable()));
     
@@ -319,33 +325,51 @@ Runtime::Value ObjectBuiltin::defineProperty(const Runtime::FunctionCallInfo& in
     std::string key = info.argument(1).toString();
     
     if (!info.argument(2).isObject()) {
-        throw std::runtime_error("Property descriptor must be an object");
+        throw Runtime::JSError("TypeError", "Property description must be an object: " + info.argument(2).toString());
     }
-    
+
     Runtime::Object* descObj = info.argument(2).asObject();
+    const bool hasGet = descObj->has("get");
+    const bool hasSet = descObj->has("set");
+    const bool hasValue = descObj->has("value");
+    const bool hasWritable = descObj->has("writable");
+    if ((hasGet || hasSet) && (hasValue || hasWritable)) {
+        throw Runtime::JSError("TypeError", "Invalid property descriptor. Cannot both specify accessors and a value or writable attribute");
+    }
+
+    // Fields the descriptor leaves out keep the property's current values;
+    // for a new property they default to undefined and false
     Runtime::PropertyDescriptor desc;
-    
-    Runtime::Value valueVal = descObj->get("value");
-    if (!valueVal.isUndefined()) {
-        desc.value = valueVal;
+    desc.attributes = Runtime::PropertyAttribute::None;
+    if (auto current = obj->getOwnPropertyDescriptor(key)) desc = *current;
+
+    auto accessorField = [descObj](const char* name) {
+        const Runtime::Value fn = descObj->get(name);
+        if (!fn.isUndefined() && !(fn.isObject() && fn.asObject()->isFunction())) {
+            throw Runtime::JSError("TypeError", std::string(name == std::string("get") ? "Getter" : "Setter") +
+                                   " must be a function: " + fn.toString());
+        }
+        return fn;
+    };
+    if (hasGet || hasSet) {
+        if (!desc.isAccessorDescriptor()) desc.value = Runtime::Value::undefined();
+        if (hasGet) desc.getter = accessorField("get");
+        if (hasSet) desc.setter = accessorField("set");
+        desc.attributes = desc.attributes & ~Runtime::PropertyAttribute::Writable;
+    } else if (hasValue || hasWritable) {
+        desc.getter = Runtime::Value::undefined();
+        desc.setter = Runtime::Value::undefined();
+        if (hasValue) desc.value = descObj->get("value");
     }
-    
-    Runtime::Value writableVal = descObj->get("writable");
-    Runtime::Value enumerableVal = descObj->get("enumerable");
-    Runtime::Value configurableVal = descObj->get("configurable");
-    
-    Runtime::PropertyAttribute attrs = Runtime::PropertyAttribute::None;
-    if (writableVal.isUndefined() || writableVal.toBoolean()) {
-        attrs = attrs | Runtime::PropertyAttribute::Writable;
-    }
-    if (enumerableVal.isUndefined() || enumerableVal.toBoolean()) {
-        attrs = attrs | Runtime::PropertyAttribute::Enumerable;
-    }
-    if (configurableVal.isUndefined() || configurableVal.toBoolean()) {
-        attrs = attrs | Runtime::PropertyAttribute::Configurable;
-    }
-    desc.attributes = attrs;
-    
+
+    auto applyFlag = [&](bool present, const char* name, Runtime::PropertyAttribute flag) {
+        if (!present) return;
+        desc.attributes = descObj->get(name).toBoolean() ? (desc.attributes | flag) : (desc.attributes & ~flag);
+    };
+    applyFlag(hasWritable, "writable", Runtime::PropertyAttribute::Writable);
+    applyFlag(descObj->has("enumerable"), "enumerable", Runtime::PropertyAttribute::Enumerable);
+    applyFlag(descObj->has("configurable"), "configurable", Runtime::PropertyAttribute::Configurable);
+
     obj->defineProperty(key, desc);
     
     return info.argument(0);

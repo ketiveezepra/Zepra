@@ -45,6 +45,10 @@ inline PropertyAttribute operator&(PropertyAttribute a, PropertyAttribute b) {
     return static_cast<PropertyAttribute>(static_cast<int>(a) & static_cast<int>(b));
 }
 
+inline PropertyAttribute operator~(PropertyAttribute a) {
+    return static_cast<PropertyAttribute>(~static_cast<int>(a) & static_cast<int>(PropertyAttribute::Default));
+}
+
 inline bool hasAttribute(PropertyAttribute attrs, PropertyAttribute flag) {
     return (static_cast<int>(attrs) & static_cast<int>(flag)) != 0;
 }
