@@ -1190,7 +1190,10 @@ void parseWithWebCore(const std::string& html) {
                         std::string code = child->textContent();
                         if (!code.empty()) {
                             std::cout << "[JS] Executing inline script (" << code.size() << " bytes)" << std::endl;
-                            g_scriptContext->evaluate(code, g_currentUrl);
+                            auto result = g_scriptContext->evaluate(code, g_currentUrl);
+                            if (!result.success) {
+                                std::cerr << "[JS] Uncaught error in inline script: " << result.error << std::endl;
+                            }
                         }
                     } else {
                         // External script — resolve URL and fetch
@@ -1200,7 +1203,10 @@ void parseWithWebCore(const std::string& html) {
                         if (scriptResp.success && !scriptResp.data.empty()) {
                             std::cout << "[JS] Executing external script (" 
                                       << scriptResp.data.size() << " bytes)" << std::endl;
-                            g_scriptContext->evaluate(scriptResp.data, scriptUrl);
+                            auto result = g_scriptContext->evaluate(scriptResp.data, scriptUrl);
+                            if (!result.success) {
+                                std::cerr << "[JS] Uncaught error in " << scriptUrl << ": " << result.error << std::endl;
+                            }
                         } else {
                             std::cerr << "[JS] Failed to load: " << scriptUrl << std::endl;
                         }
