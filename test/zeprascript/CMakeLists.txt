@@ -78,6 +78,7 @@ set(ZEPRASCRIPT_INTEGRATION_TEST_SOURCES
     integration/browser_vm_integration_test.cpp
     integration/js_execution_test.cpp
     integration/script_context_test.cpp
+    integration/conformance_test.cpp
 )
 
 add_executable(zeprascript-integration-tests ${ZEPRASCRIPT_INTEGRATION_TEST_SOURCES})
