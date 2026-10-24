@@ -352,9 +352,10 @@ void GlobalObject::initializeGlobalFunctions() {
     set("WeakSet", Value::object(Builtins::SetBuiltin::createWeakSetConstructor(weakSetProto)));
 
     // Date constructor + prototype
-    static Object* dateProto = Builtins::DateBuiltin::createDatePrototype();
+    Object* dateProto = Builtins::DateBuiltin::createDatePrototype();
+    dateProto->setPrototype(objectPrototype_);
     Object* dateCtor = createNativeFunction("Date",
-        [](Context* ctx, const std::vector<Value>& args) -> Value {
+        [dateProto](Context* ctx, const std::vector<Value>& args) -> Value {
             Value result = Builtins::DateBuiltin::constructor(ctx, args);
             if (result.isObject()) {
                 result.asObject()->setPrototype(dateProto);
@@ -367,6 +368,8 @@ void GlobalObject::initializeGlobalFunctions() {
             [](Context* ctx, const std::vector<Value>& args) -> Value {
                 return Builtins::DateBuiltin::now(ctx, args);
             }, 0)));
+    Builtins::defineHidden(dateCtor, "prototype", Value::object(dateProto));
+    Builtins::defineHidden(dateProto, "constructor", Value::object(dateCtor));
     set("Date", Value::object(dateCtor));
 
     // WeakMap constructor + prototype
@@ -433,19 +436,23 @@ void GlobalObject::initializeGlobalFunctions() {
 
 
     // RegExp constructor + prototype
-    static Object* regexpProto = Builtins::RegExpBuiltin::createRegExpPrototype();
+    Object* regexpProto = Builtins::RegExpBuiltin::createRegExpPrototype();
+    regexpProto->setPrototype(objectPrototype_);
     Object* regexpCtor = createNativeFunction("RegExp",
-        [](Context* ctx, const std::vector<Value>& args) -> Value {
+        [regexpProto](Context* ctx, const std::vector<Value>& args) -> Value {
             Value result = Builtins::RegExpBuiltin::constructor(ctx, args);
             if (result.isObject()) {
                 result.asObject()->setPrototype(regexpProto);
             }
             return result;
         }, 2);
+    Builtins::defineHidden(regexpCtor, "prototype", Value::object(regexpProto));
+    Builtins::defineHidden(regexpProto, "constructor", Value::object(regexpCtor));
     set("RegExp", Value::object(regexpCtor));
 
     // ArrayBuffer + TypedArray constructors
-    static Object* typedArrayProto = Builtins::TypedArrayBuiltin::createTypedArrayPrototype();
+    Object* typedArrayProto = Builtins::TypedArrayBuiltin::createTypedArrayPrototype();
+    typedArrayProto->setPrototype(objectPrototype_);
 
     set("ArrayBuffer", Value::object(
         createNativeFunction("ArrayBuffer", Builtins::TypedArrayBuiltin::arrayBufferConstructor, 1)));
