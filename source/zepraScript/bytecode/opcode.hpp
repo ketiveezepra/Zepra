@@ -124,7 +124,7 @@ enum class Opcode : uint8 {
     OP_DEFINE_GETTER,   // Define getter property
     OP_DEFINE_SETTER,   // Define setter property
     OP_SUPER_CALL,      // Call super constructor
-    OP_SUPER_GET,       // Get property from super prototype
+    OP_SUPER_GET,       // u16 name: [this, base] -> [base.name read with this as receiver]
     
     // Exception handling
     OP_THROW,
@@ -165,9 +165,28 @@ enum class Opcode : uint8 {
     OP_SUPER_APPLY,    // [argsArray, this, superclass] -> [result]
     OP_OBJECT_REST,    // u8 n: [source, key1..keyn] -> [copy of source without those keys]
     OP_GET_CALLEE,     // Pushes the running function (a named function expression's own name)
+    OP_DEFINE_MEMBER,  // u8 MemberFlags: [target, key, fn] -> [target]; class members, literal accessors
+    OP_GET_SUPER_BASE, // u8 SuperBase: [method] -> [parent constructor, or home object's prototype]
+    OP_OBJECT_SPREAD,  // [obj, source] -> [obj] with source's own enumerable properties copied
+    OP_SET_FIELD_INIT, // [ctor, initializer] -> [ctor]
+    OP_INIT_FIELDS,    // [this, ctor] -> [result]: runs ctor's field initializer on this, if any
 
     // End marker
     OP_END
+};
+
+/// OP_DEFINE_MEMBER flags
+enum MemberFlags : uint8_t {
+    MEMBER_GETTER = 1 << 0,
+    MEMBER_SETTER = 1 << 1,
+    MEMBER_ON_TARGET = 1 << 2,   // Define on the target itself, not a function target's prototype
+    MEMBER_ENUMERABLE = 1 << 3,  // Object literal members are; class members are not
+};
+
+/// OP_GET_SUPER_BASE operand
+enum SuperBase : uint8_t {
+    SUPER_CONSTRUCTOR = 0,  // super(...): the parent class
+    SUPER_PROPERTY = 1,     // super.x: the home object's prototype
 };
 
 /**

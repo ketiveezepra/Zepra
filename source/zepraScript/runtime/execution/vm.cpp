@@ -1343,6 +1343,132 @@ void VM::dispatch(Opcode op) {
             break;
         }
 
+        case Opcode::OP_DEFINE_MEMBER: {
+            // [target, key, fn] -> [target]. A class's prototype members go
+            // on its prototype; statics and object literal members on the
+            // target itself.
+            namespace BC = Zepra::Bytecode;
+            const uint8_t flags = readByte();
+            Value fn = pop();
+            Value key = pop();
+            Value target = peek();
+            if (!target.isObject()) {
+                throw std::runtime_error("Invalid target for member definition");
+            }
+            Object* home = target.asObject();
+            if (!(flags & BC::MEMBER_ON_TARGET) && home->isFunction()) {
+                if (Object* proto = ensurePrototypeObject(static_cast<Function*>(home))) {
+                    home = proto;
+                }
+            }
+            if (fn.isObject() && fn.asObject()->isFunction()) {
+                static_cast<Function*>(fn.asObject())->setHomeObject(home);
+            }
+
+            const std::string name = propertyKeyName(key);
+            PropertyAttribute attributes = PropertyAttribute::Configurable;
+            if (flags & BC::MEMBER_ENUMERABLE) attributes = attributes | PropertyAttribute::Enumerable;
+            PropertyDescriptor desc;
+            if (flags & (BC::MEMBER_GETTER | BC::MEMBER_SETTER)) {
+                // A getter and a setter of one name share the property
+                auto existing = home->getOwnPropertyDescriptor(name);
+                if (existing && existing->isAccessorDescriptor()) desc = *existing;
+                desc.value = Value::undefined();
+                if (flags & BC::MEMBER_GETTER) desc.getter = fn;
+                else desc.setter = fn;
+            } else {
+                desc.value = fn;
+                attributes = attributes | PropertyAttribute::Writable;
+            }
+            desc.attributes = attributes;
+            home->defineProperty(name, desc);
+            break;
+        }
+
+        case Opcode::OP_GET_SUPER_BASE: {
+            // [method] -> super(...)'s parent class, or super.x's base
+            const uint8_t mode = readByte();
+            Value methodValue = pop();
+            if (!methodValue.isObject() || !methodValue.asObject()->isFunction()) {
+                throw std::runtime_error("'super' keyword unexpected here");
+            }
+            auto* method = static_cast<Function*>(methodValue.asObject());
+            if (mode == Zepra::Bytecode::SUPER_CONSTRUCTOR) {
+                Object* parent = method->prototype();
+                push(parent ? Value::object(parent) : Value::null());
+                break;
+            }
+            // A class constructor's home object is its prototype
+            Object* home = method->homeObject();
+            if (!home) home = ensurePrototypeObject(method);
+            Object* base = home ? home->prototype() : nullptr;
+            push(base ? Value::object(base) : Value::null());
+            break;
+        }
+
+        case Opcode::OP_SUPER_GET: {
+            // [this, base] -> [base.name], getters running on this
+            const std::string& name = constantString(readShort());
+            Value base = pop();
+            Value thisValue = pop();
+            push(getProperty(base, name, thisValue));
+            break;
+        }
+
+        case Opcode::OP_OBJECT_SPREAD: {
+            // [obj, source] -> [obj]: { ...source } copies its own enumerable
+            // properties; null and undefined copy nothing
+            Value source = pop();
+            Value target = peek();
+            if (source.isString()) {
+                auto* str = static_cast<String*>(source.asObject());
+                for (uint32_t i = 0; i < str->length(); i++) {
+                    setElement(target, Value::number(i), str->charAt(i));
+                }
+            } else if (source.isObject()) {
+                Object* from = source.asObject();
+                for (uint32_t i = 0; from->isArray() && i < from->length(); i++) {
+                    setElement(target, Value::number(i), from->get(i));
+                }
+                for (const auto& name : from->keys()) {
+                    Value key = Value::string(new String(name));
+                    setElement(target, key, getElement(source, key));
+                }
+            }
+            break;
+        }
+
+        case Opcode::OP_SET_FIELD_INIT: {
+            // [ctor, initializer] -> [ctor]
+            Value initializer = pop();
+            Value ctor = peek();
+            if (ctor.isObject() && ctor.asObject()->isFunction() &&
+                initializer.isObject() && initializer.asObject()->isFunction()) {
+                auto* ctorFn = static_cast<Function*>(ctor.asObject());
+                auto* initFn = static_cast<Function*>(initializer.asObject());
+                ctorFn->setFieldInitializer(initFn);
+                initFn->setHomeObject(ensurePrototypeObject(ctorFn));
+            }
+            break;
+        }
+
+        case Opcode::OP_INIT_FIELDS: {
+            // [this, ctor] -> [result]: the class's field initializer runs on
+            // the new object; a class without fields pushes undefined
+            Value ctor = pop();
+            Value thisValue = pop();
+            Function* initializer = nullptr;
+            if (ctor.isObject() && ctor.asObject()->isFunction()) {
+                initializer = static_cast<Function*>(ctor.asObject())->fieldInitializer();
+            }
+            if (initializer) {
+                invoke(initializer, thisValue, {});
+            } else {
+                push(Value::undefined());
+            }
+            break;
+        }
+
         // Arithmetic increment/decrement
         case Opcode::OP_INCREMENT: {
             Value val = pop();
@@ -1513,34 +1639,6 @@ void VM::dispatch(Opcode op) {
             } else {
                 // LHS is null/undefined — discard it, evaluate RHS
                 pop();
-            }
-            break;
-        }
-
-        // Super property access: super.prop
-        case Opcode::OP_SUPER_GET: {
-            uint16_t nameIndex = readShort();
-            Value nameVal = chunk_->constant(nameIndex);
-            std::string propName = nameVal.toString();
-
-            // 'this' is at stack slot 0 in method context
-            Value thisVal = getLocal(0);
-            if (!thisVal.isObject()) {
-                throw std::runtime_error("'super' used in non-object context");
-            }
-
-            Object* thisObj = thisVal.asObject();
-            Object* proto = thisObj->prototype();
-            if (proto) {
-                // Get from super prototype (one level up)
-                Object* superProto = proto->prototype();
-                if (superProto) {
-                    push(superProto->get(propName));
-                } else {
-                    push(Value::undefined());
-                }
-            } else {
-                push(Value::undefined());
             }
             break;
         }
@@ -1812,19 +1910,42 @@ void VM::superConstruct(const Value& superclass, const Value& thisValue, std::ve
         args = std::move(combined);
         parent = parent->boundTarget();
     }
-    if (parent->isBuiltin()) {
-        FunctionCallInfo info(context_, thisValue, args);
-        push(parent->builtinFunction()(info));
-        return;
-    }
-    if (parent->isNative()) {
-        push(parent->nativeFunction()(context_, args));
+    if (parent->isBuiltin() || parent->isNative()) {
+        Value result;
+        if (parent->isBuiltin()) {
+            FunctionCallInfo info(context_, thisValue, args);
+            result = parent->builtinFunction()(info);
+        } else {
+            result = parent->nativeFunction()(context_, args);
+        }
+        // A built-in parent (Error, Array, Map...) makes its own object:
+        // that object becomes this, with the derived class's prototype
+        if (result.isObject() && thisValue.isObject() && result.asObject() != thisValue.asObject()) {
+            result.asObject()->setPrototype(thisValue.asObject()->prototype());
+            rebindConstructedThis(thisValue.asObject(), result.asObject());
+        }
+        push(result);
         return;
     }
     if (!parent->isCompiled()) {
         throw std::runtime_error("Function '" + parent->name() + "' has no compiled body");
     }
     enterFrame(parent, thisValue, args, true, ip_);
+}
+
+// The constructor frames building `from` (one per class in a derived chain)
+// now build `to`: their `this` slot, which arrows inside see through
+// upvalues, and the value `new` returns
+void VM::rebindConstructedThis(Object* from, Object* to) {
+    auto rebind = [&](VMCallFrame& frame) {
+        if (!frame.isConstruct || !frame.thisValue.isObject() || frame.thisValue.asObject() != from) {
+            return;
+        }
+        frame.thisValue = Value::object(to);
+        if (frame.slotBase < stack_.size()) stack_[frame.slotBase] = Value::object(to);
+    };
+    for (size_t i = 0; i < heapDepth_; i++) rebind(heapStack_[i]);
+    for (size_t i = 0; i < nativeDepth_; i++) rebind(nativeStack_[i]);
 }
 
 void VM::enterFrame(Function* fn, Value thisValue, const std::vector<Value>& args,
@@ -1951,6 +2072,10 @@ Object* VM::ensurePrototypeObject(Function* fn) {
 // obj.name: getters run with obj as `this`, primitives read through their
 // prototype, and reading from null or undefined is a TypeError.
 Value VM::getProperty(const Value& target, const std::string& name) {
+    return getProperty(target, name, target);
+}
+
+Value VM::getProperty(const Value& target, const std::string& name, const Value& receiver) {
     if (target.isObject()) {
         Object* obj = target.asObject();
         if (obj->objectType() == ObjectType::Proxy) {
@@ -1965,7 +2090,7 @@ Value VM::getProperty(const Value& target, const std::string& name) {
         if (obj->lookupProperty(name, value, accessor)) {
             if (!accessor) return value;
             if (accessor->getter.isObject() && accessor->getter.asObject()->isFunction()) {
-                return executeCallback(static_cast<Function*>(accessor->getter.asObject()), target, {});
+                return executeCallback(static_cast<Function*>(accessor->getter.asObject()), receiver, {});
             }
             return Value::undefined();
         }

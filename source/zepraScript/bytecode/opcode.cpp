@@ -27,6 +27,11 @@ const char* opcodeName(Opcode op) {
         case Opcode::OP_SUPER_APPLY: return "SUPER_APPLY";
         case Opcode::OP_OBJECT_REST: return "OBJECT_REST";
         case Opcode::OP_GET_CALLEE: return "GET_CALLEE";
+        case Opcode::OP_DEFINE_MEMBER: return "DEFINE_MEMBER";
+        case Opcode::OP_GET_SUPER_BASE: return "GET_SUPER_BASE";
+        case Opcode::OP_OBJECT_SPREAD: return "OBJECT_SPREAD";
+        case Opcode::OP_SET_FIELD_INIT: return "SET_FIELD_INIT";
+        case Opcode::OP_INIT_FIELDS: return "INIT_FIELDS";
         case Opcode::OP_CONSTANT: return "CONSTANT";
         case Opcode::OP_CONSTANT_LONG: return "CONSTANT_LONG";
         case Opcode::OP_NIL: return "NIL";
@@ -134,6 +139,8 @@ int opcodeOperandCount(Opcode op) {
         case Opcode::OP_PICK:
         case Opcode::OP_CALL_WITH_THIS:
         case Opcode::OP_OBJECT_REST:
+        case Opcode::OP_DEFINE_MEMBER:
+        case Opcode::OP_GET_SUPER_BASE:
             return 1;
         // 2-byte operand: constant-pool index, local/upvalue slot, count or
         // jump offset
@@ -247,8 +254,13 @@ int opcodeStackEffect(Opcode op) {
         case Opcode::OP_SET_PROPERTY:
         case Opcode::OP_DELETE_ELEMENT:
         case Opcode::OP_NEW_SPREAD:
+        case Opcode::OP_SUPER_GET:
+        case Opcode::OP_OBJECT_SPREAD:
+        case Opcode::OP_SET_FIELD_INIT:
+        case Opcode::OP_INIT_FIELDS:
             return -1;
         case Opcode::OP_INIT_PROPERTY:
+        case Opcode::OP_DEFINE_MEMBER:
         case Opcode::OP_SET_ELEMENT:
         case Opcode::OP_CALL_SPREAD:
         case Opcode::OP_SUPER_APPLY:
