@@ -230,6 +230,13 @@ public:
     /** ToPrimitive: objects run valueOf()/toString() (toString first when `preferString`). */
     Value toPrimitiveValue(const Value& value, bool preferString) { return toPrimitive(value, preferString); }
 
+    /**
+     * @brief Calls `each` with every value `iterable` yields (arrays, strings,
+     * Map and Set, or any object with [Symbol.iterator]); `each` returns false
+     * to stop early. Throws a TypeError when the value is not iterable.
+     */
+    void forOf(const Value& iterable, const std::function<bool(const Value&)>& each);
+
     /** A new error object of the given type ("TypeError", ...) with its prototype and stack. */
     Value newError(const std::string& type, const std::string& message) { return makeError(type, message); }
 

@@ -2216,6 +2216,14 @@ Value VM::makeIterator(const Value& iterable) {
     throw std::runtime_error(describeForError(iterable) + " is not iterable");
 }
 
+void VM::forOf(const Value& iterable, const std::function<bool(const Value&)>& each) {
+    const Value iterator = makeIterator(iterable);
+    Value value;
+    while (iteratorStep(iterator, value)) {
+        if (!each(value)) break;
+    }
+}
+
 bool VM::iteratorStep(const Value& iterator, Value& value) {
     auto* state = iterator.isObject() ? dynamic_cast<IteratorState*>(iterator.asObject()) : nullptr;
     if (!state) {

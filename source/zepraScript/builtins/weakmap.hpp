@@ -6,6 +6,7 @@
  */
 
 #include "../config.hpp"
+#include "runtime/objects/function.hpp"
 #include "runtime/objects/object.hpp"
 #include "runtime/objects/value.hpp"
 #include <unordered_map>
@@ -51,6 +52,9 @@ public:
     static Value deleteMethod(Runtime::Context* ctx, const std::vector<Value>& args);
     
     static Object* createWeakMapPrototype();
+
+    /** The WeakMap constructor (`new WeakMap(iterable)`). */
+    static Runtime::Function* createWeakMapConstructor(Object* prototype);
 };
 
 } // namespace Zepra::Builtins

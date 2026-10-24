@@ -338,25 +338,18 @@ void GlobalObject::initializeGlobalFunctions() {
     set("Symbol", Value::object(Builtins::SymbolBuiltin::createSymbolConstructor(
         vmOf(context_).intrinsic(VM::Intrinsic::Symbol))));
 
-    // Map constructor + prototype
-    static Object* mapProto = Builtins::MapBuiltin::createMapPrototype();
-    Object* mapCtor = createNativeFunction("Map",
-        [](Context*, const std::vector<Value>&) -> Value {
-            Builtins::MapObject* m = new Builtins::MapObject();
-            m->setPrototype(mapProto);
-            return Value::object(m);
-        }, 0);
-    set("Map", Value::object(mapCtor));
+    // Map, Set and WeakSet: one prototype per global object, inheriting from Object.prototype
+    Object* mapProto = Builtins::MapBuiltin::createMapPrototype();
+    mapProto->setPrototype(objectPrototype_);
+    set("Map", Value::object(Builtins::MapBuiltin::createMapConstructor(mapProto)));
 
-    // Set constructor + prototype
-    static Object* setProto = Builtins::SetBuiltin::createSetPrototype();
-    Object* setCtor = createNativeFunction("Set",
-        [](Context*, const std::vector<Value>&) -> Value {
-            Builtins::SetObject* s = new Builtins::SetObject();
-            s->setPrototype(setProto);
-            return Value::object(s);
-        }, 0);
-    set("Set", Value::object(setCtor));
+    Object* setProto = Builtins::SetBuiltin::createSetPrototype();
+    setProto->setPrototype(objectPrototype_);
+    set("Set", Value::object(Builtins::SetBuiltin::createSetConstructor(setProto)));
+
+    Object* weakSetProto = Builtins::SetBuiltin::createWeakSetPrototype();
+    weakSetProto->setPrototype(objectPrototype_);
+    set("WeakSet", Value::object(Builtins::SetBuiltin::createWeakSetConstructor(weakSetProto)));
 
     // Date constructor + prototype
     static Object* dateProto = Builtins::DateBuiltin::createDatePrototype();
@@ -377,14 +370,9 @@ void GlobalObject::initializeGlobalFunctions() {
     set("Date", Value::object(dateCtor));
 
     // WeakMap constructor + prototype
-    static Object* weakMapProto = Builtins::WeakMapBuiltin::createWeakMapPrototype();
-    Object* weakMapCtor = createNativeFunction("WeakMap",
-        [](Context*, const std::vector<Value>&) -> Value {
-            Builtins::WeakMapObject* wm = new Builtins::WeakMapObject();
-            wm->setPrototype(weakMapProto);
-            return Value::object(wm);
-        }, 0);
-    set("WeakMap", Value::object(weakMapCtor));
+    Object* weakMapProto = Builtins::WeakMapBuiltin::createWeakMapPrototype();
+    weakMapProto->setPrototype(objectPrototype_);
+    set("WeakMap", Value::object(Builtins::WeakMapBuiltin::createWeakMapConstructor(weakMapProto)));
 
     // WeakRef constructor + prototype (ES2021)
     Object* weakRefProto = new Object();
