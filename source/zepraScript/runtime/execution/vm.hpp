@@ -15,7 +15,7 @@
 #include <functional>
 #include <stack>
 #include <unordered_map>
-#include "runtime/handles/inline_cache.hpp"
+#include <stdexcept>
 #include "jit/jit_profiler.hpp"
 #include "jit/baseline_jit.hpp"
 
@@ -88,6 +88,23 @@ struct ExceptionHandler {
     size_t finallyAddress = 0;  // Jump target for finally block
     size_t stackLevel = 0;      // Stack size when try began
     size_t callStackLevel = 0;  // Call stack size when try began
+    const Bytecode::BytecodeChunk* chunk = nullptr;  // Chunk holding the handler
+    size_t runDepth = 0;        // run() nesting level that installed it
+};
+
+/**
+ * @brief A JavaScript exception crossing native code
+ *
+ * Thrown out of the interpreter when no handler in the current run() can
+ * catch a value; carries it through builtins and callbacks so an enclosing
+ * script's try/catch can catch it, or the host can report it.
+ */
+class ThrownException : public std::runtime_error {
+public:
+    explicit ThrownException(Value value);
+    const Value& value() const { return value_; }
+private:
+    Value value_;
 };
 
 /**
@@ -271,6 +288,43 @@ private:
     // Local variable access
     Value getLocal(size_t slot);
     void setLocal(size_t slot, Value value);
+
+    // Calls. invoke/constructValue/superConstruct run native functions at
+    // once (pushing the result) and enter compiled ones in this run loop.
+    void invoke(Function* fn, Value thisValue, std::vector<Value> args);
+    void constructValue(const Value& callee, std::vector<Value> args);
+    void superConstruct(const Value& superclass, const Value& thisValue, std::vector<Value> args);
+    void enterFrame(Function* fn, Value thisValue, const std::vector<Value>& args,
+                    bool isConstruct, size_t returnAddress);
+    void pushArguments(Function* fn, const std::vector<Value>& args);
+    std::vector<Value> takeArguments(size_t count);
+    std::vector<Value> arrayElements(const Value& array);
+    Function* functionOrThrow(const Value& callee, const std::string& what);
+    Value makeGenerator(Function* fn, Value thisValue, const std::vector<Value>& args);
+
+    // Properties: one implementation of the semantics for obj.name, obj[key],
+    // method calls, accessors and primitives
+    const std::string& constantString(size_t index) const;
+    Value getProperty(const Value& target, const std::string& name);
+    Value getElement(const Value& target, const Value& key);
+    void setProperty(const Value& target, const std::string& name, const Value& value);
+    void setElement(const Value& target, const Value& key, const Value& value);
+    bool deleteProperty(const Value& target, const Value& key);
+    Object* primitivePrototype(const Value& value);
+    Object* ensurePrototypeObject(Function* fn);
+
+    // Iteration (for-of, spread, array destructuring)
+    Value makeIterator(const Value& iterable);
+    bool iteratorStep(const Value& iterator, Value& value);
+
+    // Conversions that may run script (valueOf/toString)
+    Value toPrimitive(const Value& value, bool preferString);
+    void toPrimitiveOperands(Value& a, Value& b);
+
+    // Exceptions
+    void throwValue(Value exception);
+    Value makeError(const std::string& type, const std::string& message);
+    void unwindTo(size_t callDepth, size_t stackSize, size_t handlerCount);
     
     Context* context_;
     
@@ -335,6 +389,7 @@ private:
     std::vector<ExceptionHandler> exceptionHandlers_;
     Value exceptionValue_;
     bool hasException_ = false;
+    size_t runDepth_ = 0;  // Nesting of run(): callbacks and generators run inside builtins
     
     // Helper to capture/reuse upvalue
     RuntimeUpvalue* captureUpvalue(Value* local);
@@ -352,7 +407,6 @@ private:
     // Sandbox/Security support
     ResourceMonitor* resourceMonitor_ = nullptr;  // Resource limit tracking
     GCHeap* gcHeap_ = nullptr;                    // GC heap for safe-points/barriers
-    ICManager icManager_;                          // Inline cache for property access
     JIT::JITProfiler jitProfiler_;                  // Hot function detection
     JIT::BaselineJIT jit_;                          // Baseline JIT compiler
     std::unordered_map<void*, std::unique_ptr<JIT::CompiledCode>> jitCache_;

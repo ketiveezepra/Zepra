@@ -21,6 +21,9 @@ class ScriptContextTest : public ::testing::Test {
 protected:
     void SetUp() override {
         ctx_ = std::make_unique<ScriptContext>();
+        // Production code always calls initialize() after construction; the
+        // window/console/JSON/storage globals are installed there, not in the ctor.
+        ctx_->initialize(nullptr);
         consoleLogs_.clear();
         ctx_->setConsoleHandler([this](const std::string& level, const std::string& msg) {
             consoleLogs_.push_back({level, msg});

@@ -47,10 +47,14 @@ Runtime::Value GeneratorBuiltin::next(const Runtime::FunctionCallInfo& info) {
         return Runtime::Value::object(iterResult);
     }
 
-    Runtime::VM miniVM(info.context());
+    // The generator body runs on the VM executing the caller, with its globals
+    Runtime::VM* vm = Runtime::VM::current();
+    if (!vm) {
+        throw std::runtime_error("Generator.prototype.next called outside a running script");
+    }
     Runtime::Value yieldVal = info.argumentCount() > 0 ? info.argument(0) : Runtime::Value::undefined();
 
-    Runtime::Value result = miniVM.resumeGenerator(&(genObj->frame), yieldVal, genObj->initialArgs);
+    Runtime::Value result = vm->resumeGenerator(&(genObj->frame), yieldVal, genObj->initialArgs);
 
     Runtime::Object* iterResult = new Runtime::Object();
     iterResult->set("value", result);
@@ -138,14 +142,15 @@ Runtime::Object* GeneratorBuiltin::createGeneratorPrototype() {
         new Runtime::Function("throw", throw_, 1)));
 
     // ES2024 §27.5.3.5 Generator.prototype[@@iterator]()
-    proto->set(Runtime::WellKnownSymbols::Iterator, Runtime::Value::object(
+    proto->set(Runtime::symbolPropertyKey(Runtime::WellKnownSymbols::Iterator), Runtime::Value::object(
         new Runtime::Function("[Symbol.iterator]",
             [](const Runtime::FunctionCallInfo& info) -> Runtime::Value {
                 return info.thisValue();
             }, 0)));
 
     // ES2024 §27.5.3.6 Generator.prototype[@@toStringTag]
-    proto->set(Runtime::WellKnownSymbols::ToStringTag, Runtime::Value::string(new Runtime::String("Generator")));
+    proto->set(Runtime::symbolPropertyKey(Runtime::WellKnownSymbols::ToStringTag),
+               Runtime::Value::string(new Runtime::String("Generator")));
 
     return proto;
 }

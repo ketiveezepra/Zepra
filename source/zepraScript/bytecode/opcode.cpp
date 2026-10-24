@@ -15,6 +15,18 @@ const char* opcodeName(Opcode op) {
         case Opcode::OP_POP: return "POP";
         case Opcode::OP_DUP: return "DUP";
         case Opcode::OP_SWAP: return "SWAP";
+        case Opcode::OP_DUP2: return "DUP2";
+        case Opcode::OP_DUP_X1: return "DUP_X1";
+        case Opcode::OP_DUP_X2: return "DUP_X2";
+        case Opcode::OP_PICK: return "PICK";
+        case Opcode::OP_TO_NUMBER: return "TO_NUMBER";
+        case Opcode::OP_DELETE_ELEMENT: return "DELETE_ELEMENT";
+        case Opcode::OP_CALL_WITH_THIS: return "CALL_WITH_THIS";
+        case Opcode::OP_CALL_SPREAD: return "CALL_SPREAD";
+        case Opcode::OP_NEW_SPREAD: return "NEW_SPREAD";
+        case Opcode::OP_SUPER_APPLY: return "SUPER_APPLY";
+        case Opcode::OP_OBJECT_REST: return "OBJECT_REST";
+        case Opcode::OP_GET_CALLEE: return "GET_CALLEE";
         case Opcode::OP_CONSTANT: return "CONSTANT";
         case Opcode::OP_CONSTANT_LONG: return "CONSTANT_LONG";
         case Opcode::OP_NIL: return "NIL";
@@ -113,57 +125,69 @@ const char* opcodeName(Opcode op) {
 
 int opcodeOperandCount(Opcode op) {
     switch (op) {
-        // 1-byte operand
+        // 1-byte operand: argument count, depth or flag
         case Opcode::OP_CONSTANT:
+        case Opcode::OP_CALL:
+        case Opcode::OP_NEW:
+        case Opcode::OP_SUPER_CALL:
+        case Opcode::OP_YIELD:
+        case Opcode::OP_PICK:
+        case Opcode::OP_CALL_WITH_THIS:
+        case Opcode::OP_OBJECT_REST:
+            return 1;
+        // 2-byte operand: constant-pool index, local/upvalue slot, count or
+        // jump offset
+        case Opcode::OP_CONSTANT_LONG:
         case Opcode::OP_GET_LOCAL:
         case Opcode::OP_SET_LOCAL:
+        case Opcode::OP_GET_UPVALUE:
+        case Opcode::OP_SET_UPVALUE:
         case Opcode::OP_GET_GLOBAL:
         case Opcode::OP_SET_GLOBAL:
         case Opcode::OP_DEFINE_GLOBAL:
-        case Opcode::OP_GET_UPVALUE:
-        case Opcode::OP_SET_UPVALUE:
         case Opcode::OP_GET_PROPERTY:
         case Opcode::OP_SET_PROPERTY:
-        case Opcode::OP_INIT_PROPERTY:
         case Opcode::OP_DELETE_PROPERTY:
-        case Opcode::OP_CALL:
-        case Opcode::OP_CALL_METHOD:
-        case Opcode::OP_NEW:
-        case Opcode::OP_CLOSURE:
         case Opcode::OP_CREATE_ARRAY:
-        case Opcode::OP_CREATE_OBJECT:
-        case Opcode::OP_SUPER_CALL:
-        case Opcode::OP_SUPER_GET:
-        case Opcode::OP_INHERIT:
         case Opcode::OP_DEFINE_METHOD:
         case Opcode::OP_DEFINE_STATIC:
         case Opcode::OP_DEFINE_GETTER:
         case Opcode::OP_DEFINE_SETTER:
-        case Opcode::OP_CATCH:
+        case Opcode::OP_SUPER_GET:
         case Opcode::OP_IMPORT:
         case Opcode::OP_EXPORT:
         case Opcode::OP_IMPORT_BINDING:
-        case Opcode::OP_YIELD:
-        case Opcode::OP_LINE:
-            return 1;
-        // 2-byte operand (uint16_t)
-        case Opcode::OP_CONSTANT_LONG:
         case Opcode::OP_JUMP:
         case Opcode::OP_JUMP_IF_FALSE:
         case Opcode::OP_JUMP_IF_TRUE:
         case Opcode::OP_JUMP_IF_NIL:
         case Opcode::OP_LOOP:
+        case Opcode::OP_AND:
+        case Opcode::OP_OR:
+        case Opcode::OP_NULLISH:
         case Opcode::OP_CASE:
         case Opcode::OP_TRY_BEGIN:
+        case Opcode::OP_ITERATOR_NEXT:
+        case Opcode::OP_LINE:
             return 2;
+        // Method name index (2 bytes) + argument count (1 byte)
+        case Opcode::OP_CALL_METHOD:
+            return 3;
+        // Function index (2 bytes) + upvalue count (2 bytes), then three bytes
+        // (isLocal, 16-bit index) per upvalue
+        case Opcode::OP_CLOSURE:
+            return 4;
         default:
             return 0;
     }
 }
 
 int opcodeStackEffect(Opcode op) {
+    // Net change in stack height. Calls, OP_CREATE_ARRAY and OP_OBJECT_REST
+    // depend on their operands and report 0 here.
     switch (op) {
-        // Push 1
+        case Opcode::OP_DUP2:
+            return 2;
         case Opcode::OP_CONSTANT:
         case Opcode::OP_CONSTANT_LONG:
         case Opcode::OP_NIL:
@@ -172,24 +196,31 @@ int opcodeStackEffect(Opcode op) {
         case Opcode::OP_ZERO:
         case Opcode::OP_ONE:
         case Opcode::OP_DUP:
+        case Opcode::OP_DUP_X1:
+        case Opcode::OP_DUP_X2:
+        case Opcode::OP_PICK:
         case Opcode::OP_GET_LOCAL:
         case Opcode::OP_GET_GLOBAL:
         case Opcode::OP_GET_UPVALUE:
-        case Opcode::OP_TYPEOF:
+        case Opcode::OP_CREATE_OBJECT:
+        case Opcode::OP_CLOSURE:
         case Opcode::OP_IMPORT:
+        case Opcode::OP_CATCH:
+        case Opcode::OP_GET_CALLEE:
             return 1;
-        // Pop 1
         case Opcode::OP_POP:
-        case Opcode::OP_SET_LOCAL:
-        case Opcode::OP_SET_GLOBAL:
-        case Opcode::OP_SET_UPVALUE:
+        case Opcode::OP_DEFINE_GLOBAL:
         case Opcode::OP_CLOSE_UPVALUE:
         case Opcode::OP_THROW:
         case Opcode::OP_EXPORT:
         case Opcode::OP_RETURN:
         case Opcode::OP_INIT_ELEMENT:
-            return -1;
-        // Pop 2, push 1 → net -1
+        case Opcode::OP_SPREAD:
+        case Opcode::OP_INHERIT:
+        case Opcode::OP_DEFINE_METHOD:
+        case Opcode::OP_DEFINE_STATIC:
+        case Opcode::OP_DEFINE_GETTER:
+        case Opcode::OP_DEFINE_SETTER:
         case Opcode::OP_ADD:
         case Opcode::OP_SUBTRACT:
         case Opcode::OP_MULTIPLY:
@@ -212,24 +243,19 @@ int opcodeStackEffect(Opcode op) {
         case Opcode::OP_GREATER_EQUAL:
         case Opcode::OP_INSTANCEOF:
         case Opcode::OP_IN:
-        case Opcode::OP_SET_PROPERTY:
-        case Opcode::OP_SET_ELEMENT:
-        case Opcode::OP_INIT_PROPERTY:
-            return -1;
-        // Pop 1, push 1 → net 0
-        case Opcode::OP_NEGATE:
-        case Opcode::OP_BITWISE_NOT:
-        case Opcode::OP_NOT:
-        case Opcode::OP_INCREMENT:
-        case Opcode::OP_DECREMENT:
-        case Opcode::OP_GET_PROPERTY:
         case Opcode::OP_GET_ELEMENT:
-        case Opcode::OP_DELETE_PROPERTY:
-        case Opcode::OP_SPREAD:
-        case Opcode::OP_FOR_IN:
-        case Opcode::OP_FOR_OF:
-        case Opcode::OP_AWAIT:
-            return 0;
+        case Opcode::OP_SET_PROPERTY:
+        case Opcode::OP_DELETE_ELEMENT:
+        case Opcode::OP_NEW_SPREAD:
+            return -1;
+        case Opcode::OP_INIT_PROPERTY:
+        case Opcode::OP_SET_ELEMENT:
+        case Opcode::OP_CALL_SPREAD:
+        case Opcode::OP_SUPER_APPLY:
+            return -2;
+        // SET_LOCAL/SET_GLOBAL/SET_UPVALUE store and keep the value: net 0.
+        // ITERATOR_NEXT replaces the iterator with a value, or drops it and
+        // jumps when done.
         default:
             return 0;
     }

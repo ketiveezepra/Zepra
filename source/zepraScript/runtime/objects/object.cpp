@@ -71,8 +71,17 @@ bool Object::set(const std::string& key, Value value) {
     return true;
 }
 
+// Indices far beyond the current end (sparse arrays such as a[4e9], and the
+// well-known symbol IDs 0xFFFF00xx) go to keyed storage: growing the dense
+// array to them would allocate up to 32 GB. get/has/delete by index already
+// fall back to the keyed form.
+static constexpr size_t kMaxDenseGap = size_t(1) << 16;
+
 bool Object::set(uint32_t index, Value value) {
     if (index >= elements_.size()) {
+        if (index - elements_.size() > kMaxDenseGap) {
+            return set(std::to_string(index), value);
+        }
         elements_.resize(index + 1, Value::undefined());
     }
     elements_[index] = value;
@@ -106,13 +115,35 @@ bool Object::deleteProperty(const std::string& key) {
     }
     
     if (properties_.erase(key) > 0) {
-        // Invalidate slot index — rebuild on next access
         slotIndex_.erase(key);
-        // Don't shrink propertySlots_ — stale entries are harmless
-        // since IC validates shapeId before using the offset.
         shapeId_ = nextShapeId_++;  // Shape transition on delete
+        // The deleted key's slot stays behind; once stale slots outnumber
+        // live ones, rebuild the list so delete/re-add churn cannot grow it
+        if (propertySlots_.size() > 2 * properties_.size() + 8) {
+            std::vector<std::string> live = orderedNamedKeys();
+            propertySlots_ = std::move(live);
+            slotIndex_.clear();
+            for (uint32_t i = 0; i < propertySlots_.size(); i++) {
+                slotIndex_[propertySlots_[i]] = i;
+            }
+        }
     }
     return true;
+}
+
+// Named keys in insertion order. A key that was deleted and added again
+// counts at its newer slot.
+std::vector<std::string> Object::orderedNamedKeys() const {
+    std::vector<std::string> keys;
+    keys.reserve(properties_.size());
+    for (uint32_t i = 0; i < propertySlots_.size(); i++) {
+        const std::string& key = propertySlots_[i];
+        auto slot = slotIndex_.find(key);
+        if (slot != slotIndex_.end() && slot->second == i && properties_.count(key)) {
+            keys.push_back(key);
+        }
+    }
+    return keys;
 }
 
 bool Object::deleteProperty(uint32_t index) {
@@ -128,9 +159,35 @@ bool Object::defineProperty(const std::string& key, const PropertyDescriptor& de
         return false;
     }
     
+    if (properties_.find(key) == properties_.end()) {
+        uint32_t slot = static_cast<uint32_t>(propertySlots_.size());
+        propertySlots_.push_back(key);
+        slotIndex_[key] = slot;
+        shapeId_ = nextShapeId_++;
+    }
     descriptors_[key] = desc;
     properties_[key] = desc.value;
     return true;
+}
+
+bool Object::lookupProperty(const std::string& key, Value& value,
+                            const PropertyDescriptor*& accessor) const {
+    for (const Object* o = this; o; o = o->prototype_) {
+        if (!o->descriptors_.empty()) {
+            auto desc = o->descriptors_.find(key);
+            if (desc != o->descriptors_.end() && desc->second.isAccessorDescriptor()) {
+                accessor = &desc->second;
+                return true;
+            }
+        }
+        auto prop = o->properties_.find(key);
+        if (prop != o->properties_.end()) {
+            value = prop->second;
+            accessor = nullptr;
+            return true;
+        }
+    }
+    return false;
 }
 
 std::optional<PropertyDescriptor> Object::getOwnPropertyDescriptor(const std::string& key) const {
@@ -161,9 +218,9 @@ std::vector<std::string> Object::getOwnPropertyNames() const {
         }
     }
     
-    // Add named properties
-    for (const auto& [key, _] : properties_) {
-        names.push_back(key);
+    // Add named properties, in insertion order
+    for (auto& key : orderedNamedKeys()) {
+        names.push_back(std::move(key));
     }
     
     return names;
@@ -179,11 +236,11 @@ std::vector<std::string> Object::keys() const {
         }
     }
     
-    // Add enumerable named properties
-    for (const auto& [key, _] : properties_) {
+    // Add enumerable named properties, in insertion order
+    for (auto& key : orderedNamedKeys()) {
         auto descIt = descriptors_.find(key);
         if (descIt == descriptors_.end() || descIt->second.isEnumerable()) {
-            result.push_back(key);
+            result.push_back(std::move(key));
         }
     }
     
@@ -600,6 +657,10 @@ void Array::fill(Value value, size_t start, size_t end) {
 
 void Array::set(size_t index, Value value) {
     if (index >= elements_.size()) {
+        if (index - elements_.size() > kMaxDenseGap) {
+            Object::set(std::to_string(index), value);
+            return;
+        }
         elements_.resize(index + 1, Value::undefined());
     }
     elements_[index] = value;
