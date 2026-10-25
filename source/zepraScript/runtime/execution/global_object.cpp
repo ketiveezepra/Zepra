@@ -10,6 +10,7 @@
 
 #include "runtime/execution/global_object.hpp"
 #include <algorithm>
+#include "builtins/promise_builtin.hpp"
 #include "builtins/console.hpp"
 #include "builtins/math.hpp"
 #include "builtins/json.hpp"
@@ -515,118 +516,15 @@ void GlobalObject::initializeGlobalFunctions() {
     generatorFunc->set("prototype", Value::object(generatorProto));
     set("Generator", Value::object(generatorFunc));
 
-    // -----------------------------------------------------------------------
-    // Promise constructor + prototype
-    // -----------------------------------------------------------------------
-    static Object* promiseProto = new Object();
-
-    // Promise.prototype.then
-    promiseProto->set("then", Value::object(createNativeFunction("then",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            // 'this' would be the promise — simplified: return new pending promise
-            return Value::object(new Promise());
-        }, 2)));
-
-    // Promise.prototype.catch
-    promiseProto->set("catch", Value::object(createNativeFunction("catch",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            return Value::object(new Promise());
-        }, 1)));
-
-    // Promise.prototype.finally
-    promiseProto->set("finally", Value::object(createNativeFunction("finally",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            return Value::object(new Promise());
-        }, 1)));
-
-    // Promise constructor: new Promise((resolve, reject) => ...)
-    Object* promiseCtor = createNativeFunction("Promise",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* promise = new Promise();
-            if (!args.empty() && args[0].isObject() && args[0].asObject()->isFunction()) {
-                Function* executor = static_cast<Function*>(args[0].asObject());
-
-                // Create resolve and reject functions
-                auto* resolveFn = createNativeFunction("resolve",
-                    [promise](Context*, const std::vector<Value>& rArgs) -> Value {
-                        if (!rArgs.empty()) promise->resolve(rArgs[0]);
-                        else promise->resolve(Value::undefined());
-                        return Value::undefined();
-                    }, 1);
-
-                auto* rejectFn = createNativeFunction("reject",
-                    [promise](Context*, const std::vector<Value>& rArgs) -> Value {
-                        if (!rArgs.empty()) promise->reject(rArgs[0]);
-                        else promise->reject(Value::undefined());
-                        return Value::undefined();
-                    }, 1);
-
-                // Call executor(resolve, reject)
-                try {
-                    executor->call(nullptr, Value::undefined(),
-                        {Value::object(resolveFn), Value::object(rejectFn)});
-                } catch (const std::exception& e) {
-                    promise->reject(Value::object(new String(e.what())));
-                }
-            }
-            return Value::object(promise);
-        }, 1);
-
-    // Static methods
-    promiseCtor->set("resolve", Value::object(createNativeFunction("resolve",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            Value val = args.empty() ? Value::undefined() : args[0];
-            return Value::object(Promise::resolved(val));
-        }, 1)));
-
-    promiseCtor->set("reject", Value::object(createNativeFunction("reject",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            Value reason = args.empty() ? Value::undefined() : args[0];
-            return Value::object(Promise::rejected(reason));
-        }, 1)));
-
-    promiseCtor->set("all", Value::object(createNativeFunction("all",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            // Simplified: collect promises from iterable argument
-            if (args.empty() || !args[0].isObject()) {
-                return Value::object(Promise::rejected(
-                    Value::object(new String("Promise.all requires an iterable"))));
-            }
-            auto* arr = dynamic_cast<Array*>(args[0].asObject());
-            if (!arr) return Value::object(Promise::rejected(
-                Value::object(new String("Promise.all requires an array"))));
-
-            std::vector<Promise*> promises;
-            for (size_t i = 0; i < arr->length(); i++) {
-                Value v = arr->get(i);
-                if (auto* p = dynamic_cast<Promise*>(v.asObject())) {
-                    promises.push_back(p);
-                }
-            }
-            return Value::object(Promise::all(promises));
-        }, 1)));
-
-    promiseCtor->set("race", Value::object(createNativeFunction("race",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty() || !args[0].isObject()) {
-                return Value::object(Promise::rejected(
-                    Value::object(new String("Promise.race requires an iterable"))));
-            }
-            auto* arr = dynamic_cast<Array*>(args[0].asObject());
-            if (!arr) return Value::object(new Promise());
-
-            std::vector<Promise*> promises;
-            for (size_t i = 0; i < arr->length(); i++) {
-                Value v = arr->get(i);
-                if (auto* p = dynamic_cast<Promise*>(v.asObject())) {
-                    promises.push_back(p);
-                }
-            }
-            return Value::object(Promise::race(promises));
-        }, 1)));
-
-    promiseCtor->set("prototype", Value::object(promiseProto));
-    set("Promise", Value::object(promiseCtor));
+    // Promise: the VM's own Promise.prototype, which natively created
+    // promises (async functions) inherit from as well
+    {
+        Value aggregate = get("AggregateError");
+        Function* aggregateCtor = aggregate.isObject() && aggregate.asObject()->isFunction()
+            ? static_cast<Function*>(aggregate.asObject()) : nullptr;
+        Builtins::defineHidden(this, "Promise", Value::object(Builtins::PromiseBuiltin::createPromiseConstructor(
+            vmOf(context_).intrinsic(VM::Intrinsic::Promise), aggregateCtor)));
+    }
 
     // =========================================================================
     // WebAssembly namespace

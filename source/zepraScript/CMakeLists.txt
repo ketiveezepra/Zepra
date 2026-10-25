@@ -264,6 +264,7 @@ set(ZEPRA_CORE_SOURCES
     builtins/console.cpp
     builtins/json.cpp
     builtins/map.cpp
+    builtins/promise_builtin.cpp
     builtins/set.cpp
     builtins/regexp.cpp
     builtins/symbol.cpp

@@ -129,18 +129,25 @@ ScriptContext::ScriptContext() : vm_(nullptr), vmReady_(false) {
         ownedVm_ = std::make_unique<Zepra::Runtime::VM>(nullptr);
         ownedContext_ = std::make_unique<Zepra::Runtime::Context>(ownedVm_.get());
         
-        // The engine's own built-ins (Object, Array, Map, JSON, Error, ...).
-        // The embedder supplies the rest of the page environment itself: the
-        // console and timers route into the browser, and Promise, WebAssembly
-        // and the web APIs are defined in setupWindowGlobals().
+        // The engine's own built-ins (Object, Array, Map, JSON, Error,
+        // Promise, queueMicrotask, ...). The embedder supplies the rest of the
+        // page environment itself: the console and timers route into the
+        // browser, and WebAssembly and the web APIs are defined in
+        // setupWindowGlobals().
         auto* globalObj = new Zepra::Runtime::GlobalObject(ownedContext_.get());
         globalObj->initialize();
         globalObj->installInto(*ownedVm_, {"console", "setTimeout", "setInterval", "clearTimeout",
-                                           "clearInterval", "Promise", "WebAssembly"});
+                                           "clearInterval", "WebAssembly"});
         globalObject_ = globalObj;
 
         vm_ = ownedVm_.get();
         vmReady_ = true;
+        // Uncaught errors from microtasks and unhandled promise rejections
+        // reach the page console
+        vm_->setErrorReporter([this](const std::string& message) {
+            if (consoleHandler_) consoleHandler_("error", message);
+            else std::cerr << "[console.error] " << message << std::endl;
+        });
         std::cout << "[ScriptContext] Per-tab VM initialized" << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "[ScriptContext] VM init failed: " << e.what() << std::endl;
@@ -367,13 +374,25 @@ void ScriptContext::callStoredCallback(const std::string& key, bool passTimestam
     if (!fn) return;
     std::vector<Value> args;
     if (passTimestamp) args.push_back(Value::number(timestampMs));
+    // The callback is a task of its own: its microtasks run right after it,
+    // under the same limits, even when it threw. A run stopped by the limits
+    // takes its queued microtasks with it.
+    ScriptRunGuard guard(vm_);
     try {
-        ScriptRunGuard guard(vm_);
         vm_->call(fn, Value::undefined(), args);
     } catch (const std::exception& e) {
         if (consoleHandler_) consoleHandler_("error", std::string("Uncaught exception in callback: ") + e.what());
+        if (vm_->isTerminationRequested()) {
+            vm_->discardJobs();
+            return;
+        }
     } catch (...) {
         if (consoleHandler_) consoleHandler_("error", "Uncaught exception in callback");
+    }
+    try {
+        vm_->runMicrotasks();
+    } catch (const std::exception& e) {
+        if (consoleHandler_) consoleHandler_("error", std::string("Microtasks stopped: ") + e.what());
     }
 }
 
@@ -708,67 +727,6 @@ void ScriptContext::setupWindowGlobals() {
     vm_->setGlobal("history", Value::object(historyObj));
     windowObj->set("history", Value::object(historyObj));
     
-    // Promise (minimal stub for Next.js)
-    auto* promiseCtor = createNativeFunction("Promise",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* p = new Object();
-            p->set("then", Value::object(createNativeFunction("then",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            p->set("catch", Value::object(createNativeFunction("catch",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            return Value::object(p);
-        }, 1);
-    
-    promiseCtor->set("resolve", Value::object(createNativeFunction("resolve",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* p = new Object();
-            Value resolved = args.empty() ? Value::undefined() : args[0];
-            p->set("then", Value::object(createNativeFunction("then",
-                [resolved](Context*, const std::vector<Value>&) -> Value {
-                    return resolved;
-                }, 1)));
-            p->set("catch", Value::object(createNativeFunction("catch",
-                [resolved](Context*, const std::vector<Value>&) -> Value {
-                    return resolved;
-                }, 1)));
-            return Value::object(p);
-        }, 1)));
-        
-    promiseCtor->set("reject", Value::object(createNativeFunction("reject",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* p = new Object();
-            p->set("then", Value::object(createNativeFunction("then",
-                [](Context*, const std::vector<Value>&) -> Value {
-                    return Value::undefined();
-                }, 1)));
-            p->set("catch", Value::object(createNativeFunction("catch",
-                [](Context*, const std::vector<Value>&) -> Value {
-                    return Value::undefined();
-                }, 1)));
-            return Value::object(p);
-        }, 1)));
-
-    promiseCtor->set("all", Value::object(createNativeFunction("all",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* p = new Object();
-            p->set("then", Value::object(createNativeFunction("then",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            p->set("catch", Value::object(createNativeFunction("catch",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            return Value::object(p);
-        }, 1)));
-
-    promiseCtor->set("race", Value::object(createNativeFunction("race",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* p = new Object();
-            p->set("then", Value::object(createNativeFunction("then",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            p->set("catch", Value::object(createNativeFunction("catch",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            return Value::object(p);
-        }, 1)));
-
-    vm_->setGlobal("Promise", Value::object(promiseCtor));
     
     // MutationObserver — React uses this to track DOM mutations
     auto* mutObsCtor = createNativeFunction("MutationObserver",

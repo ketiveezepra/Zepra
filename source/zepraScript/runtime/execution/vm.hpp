@@ -14,6 +14,7 @@
 #include <memory>
 #include <functional>
 #include <stack>
+#include <deque>
 #include <unordered_map>
 #include <stdexcept>
 #include "jit/jit_profiler.hpp"
@@ -29,6 +30,7 @@ class GCHeap;
 class RuntimeUpvalue;
 class ResourceMonitor;
 struct SandboxConfig;
+class Promise;
 
 }  // namespace Zepra::Runtime
 
@@ -118,6 +120,23 @@ struct GeneratorFrame {
     Value thisValue;                  // 'this' binding
     bool isCompleted = false;         // Generator finished
     bool isStarted = false;           // Has been called at least once
+
+    // An async function's body: `await` suspends it like `yield`
+    bool isAsync = false;
+    size_t frameDepth = 0;            // Call depth of the body's frame while it runs
+    size_t handlerBase = 0;           // Handlers below this index belong to the caller
+
+    // What a suspension keeps besides the stack values: the try/catch
+    // handlers the body installed (stack levels relative to its base) and
+    // the closures' upvalues over its slots, reopened on the next resume
+    struct SavedHandler {
+        size_t catchAddress = 0;
+        size_t finallyAddress = 0;
+        size_t stackOffset = 0;
+        const Bytecode::BytecodeChunk* chunk = nullptr;
+    };
+    std::vector<SavedHandler> savedHandlers;
+    std::vector<std::pair<size_t, RuntimeUpvalue*>> savedUpvalues;
 };
 
 /**
@@ -139,9 +158,38 @@ public:
     Value call(Function* fn, Value thisValue, const std::vector<Value>& args);
     
     /**
-     * @brief Resume a suspended generator
+     * @brief Resume a suspended generator. With `isThrow` the value is thrown
+     * at the paused yield/await instead of becoming its result.
      */
-    Value resumeGenerator(GeneratorFrame* frame, Value yieldVal, const std::vector<Value>& args);
+    Value resumeGenerator(GeneratorFrame* frame, Value yieldVal, const std::vector<Value>& args,
+                          bool isThrow = false);
+
+    /**
+     * @brief Queue a job (promise reaction, queueMicrotask callback) on this
+     * VM's microtask queue
+     */
+    void enqueueJob(std::function<void()> job) { jobs_.push_back(std::move(job)); }
+    bool hasPendingJobs() const { return !jobs_.empty(); }
+    /// Drops queued jobs and pending rejections (a run stopped by its limits)
+    void discardJobs() { jobs_.clear(); pendingRejections_.clear(); }
+
+    /**
+     * @brief Microtask checkpoint: runs queued jobs, and the jobs they queue,
+     * until none are left, then reports rejections nobody handled. Does
+     * nothing while script code is on the stack or a checkpoint is running.
+     * Execution limits (SecurityError) end it and discard the queue.
+     */
+    void runMicrotasks();
+
+    /**
+     * @brief Where uncaught errors from jobs and unhandled promise rejections
+     * are reported ("Uncaught (in promise) ..."); stderr by default
+     */
+    void setErrorReporter(std::function<void(const std::string&)> reporter) { errorReporter_ = std::move(reporter); }
+    void reportError(const std::string& message);
+
+    /// HostPromiseRejectionTracker: a promise was rejected unhandled, or got its first handler
+    void trackPromiseRejection(Promise* promise, bool handled);
     
     /**
      * @brief Construct an object
@@ -209,7 +257,7 @@ public:
      * `prototype`, so `Array.prototype.x = ...` is seen by every array, and
      * methods on primitives resolve here without a global lookup.
      */
-    enum class Intrinsic { Object, Function, Array, String, Number, Boolean, Symbol, Error, Iterator, Count };
+    enum class Intrinsic { Object, Function, Array, String, Number, Boolean, Symbol, Error, Iterator, Promise, Count };
     Object* intrinsic(Intrinsic kind);
 
     /**
@@ -351,7 +399,14 @@ private:
     std::vector<Value> takeArguments(size_t count);
     std::vector<Value> arrayElements(const Value& array);
     Function* functionOrThrow(const Value& callee, const std::string& what);
+    Value runCompiled(Function* fn, Value thisValue, const std::vector<Value>& args, bool isConstruct);
     Value makeGenerator(Function* fn, Value thisValue, const std::vector<Value>& args);
+
+    // Async functions: the body runs as a resumable frame, the call returns its promise
+    struct AsyncFunctionState;
+    Value startAsyncFunction(Function* fn, Value thisValue, const std::vector<Value>& args);
+    void asyncStep(AsyncFunctionState* state, const Value& value, bool isThrow);
+    void suspendGenerator(Value yielded);
 
     // Properties: one implementation of the semantics for obj.name, obj[key],
     // method calls, accessors and primitives
@@ -457,6 +512,14 @@ private:
     GeneratorFrame* currentGenerator_ = nullptr;  // Active generator being executed
     bool isYielding_ = false;                     // Set when yield suspends execution
     Value yieldedValue_;                          // Value passed to yield
+    bool pendingResumeThrow_ = false;             // run() throws this first (throw into a resumed frame)
+    Value pendingResumeValue_;
+
+    // Microtask queue
+    std::deque<std::function<void()>> jobs_;
+    bool drainingJobs_ = false;
+    std::vector<Promise*> pendingRejections_;     // Rejected with no handler yet
+    std::function<void(const std::string&)> errorReporter_;
     
     // Sandbox/Security support
     ResourceMonitor* resourceMonitor_ = nullptr;  // Resource limit tracking

@@ -35,6 +35,7 @@
 #include "builtins/map.hpp"
 #include "builtins/set.hpp"
 #include "builtins/object_builtins.hpp"
+#include "builtins/promise_builtin.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -266,9 +267,6 @@ ExecutionResult VM::execute(const Bytecode::BytecodeChunk* chunk) {
         run();
         result.status = ExecutionResult::Status::Success;
         result.value = pop();
-
-        // Drain microtask queue (promise callbacks, queueMicrotask)
-        MicrotaskQueue::instance().process();
     } catch (const ThrownException& e) {
         result.status = ExecutionResult::Status::Exception;
         result.value = e.value();
@@ -281,6 +279,20 @@ ExecutionResult VM::execute(const Bytecode::BytecodeChunk* chunk) {
     }
     chunk_ = savedChunk;
     ip_ = savedIP;
+
+    // The outermost script is done, normally or by a throw: run the jobs it
+    // queued (promise reactions, queueMicrotask). A nested run leaves them to
+    // its caller; a run stopped by its limits discards them.
+    if (terminationRequested_) {
+        discardJobs();
+    } else {
+        try {
+            runMicrotasks();
+        } catch (const std::exception& e) {
+            result.status = ExecutionResult::Status::Error;
+            result.error = e.what();
+        }
+    }
 
     // Restore previous VM
     currentVM_ = previousVM;
@@ -307,6 +319,12 @@ void VM::run() {
         size_t& depth;
         ~RunDepthGuard() { --depth; }
     } runDepthGuard{runDepth_};
+
+    // A resumed generator or async function continues by throwing
+    if (pendingResumeThrow_) {
+        pendingResumeThrow_ = false;
+        throwValue(pendingResumeValue_);
+    }
 
     // Calls switch chunk_, so the end is checked against the current chunk
     while (__builtin_expect(ip_ < chunk_->code().size(), 1)) {
@@ -871,7 +889,17 @@ void VM::dispatch(Opcode op) {
         case Opcode::OP_AWAIT: {
             // await expression - unwrap Promise/thenable
             Value awaited = pop();
-            
+
+            // In an async function's own frame: suspend until the value
+            // settles (asyncStep resumes the frame with its result)
+            if (currentGenerator_ && currentGenerator_->isAsync &&
+                callDepth() == currentGenerator_->frameDepth) {
+                suspendGenerator(awaited);
+                break;
+            }
+
+            // Elsewhere (no async function to suspend): use a settled value
+            // as is; a pending one cannot be waited for
             // Convert to Promise if needed
             Promise* promise = AwaitHandler::toPromise(awaited);
             
@@ -879,23 +907,9 @@ void VM::dispatch(Opcode op) {
                 // Already resolved - push result and continue
                 push(promise->result());
             } else if (promise->state() == PromiseState::Rejected) {
-                // Rejected - throw error
-                throw std::runtime_error("Promise rejected: " + promise->result().toString());
+                throw ThrownException(promise->result());
             } else {
-                // Pending — schedule microtask to resume when settled
-                // In synchronous execution mode, drain the microtask queue
-                // to allow the promise to resolve
-                MicrotaskQueue::instance().process();
-                
-                // Re-check after draining
-                if (promise->state() == PromiseState::Fulfilled) {
-                    push(promise->result());
-                } else if (promise->state() == PromiseState::Rejected) {
-                    throw std::runtime_error("Promise rejected: " + promise->result().toString());
-                } else {
-                    // Still pending after drain — push undefined (no event loop)
-                    push(Value::undefined());
-                }
+                push(Value::undefined());
             }
             break;
         }
@@ -906,21 +920,9 @@ void VM::dispatch(Opcode op) {
             uint8_t delegate = readByte();  // 1 = yield*, 0 = yield
             
             if (currentGenerator_) {
-                // Save current state for resumption
-                currentGenerator_->suspendedIP = ip_;
-                currentGenerator_->savedStack.clear();
-                size_t base = currentGenerator_->stackBase;
-                for (size_t i = base; i < stack_.size(); i++) {
-                    currentGenerator_->savedStack.push_back(stack_[i]);
-                }
-                
-                // Store yielded value and set suspension flag
-                yieldedValue_ = yielded;
-                isYielding_ = true;
-                
                 // Exit run loop (will be resumed by next() call)
-                ip_ = chunk_->code().size();  // Force exit from run()
-                
+                suspendGenerator(yielded);
+
                 if (delegate) {
                     // yield* — yieldedValue_ already holds the inner iterator.
                     // The generator's next() method detects this as an iterable
@@ -1780,10 +1782,20 @@ Value VM::executeCallback(Function* fn, Value thisValue, const std::vector<Value
     if (!fn->isCompiled()) {
         throw std::runtime_error("Function '" + fn->name() + "' has no compiled body");
     }
+    if (fn->isAsync() && !fn->isGenerator()) {
+        return startAsyncFunction(fn, thisValue, callArgs);
+    }
     if (fn->isGenerator()) {
         return makeGenerator(fn, thisValue, callArgs);
     }
 
+    return runCompiled(fn, thisValue, callArgs, false);
+}
+
+// Runs a compiled function to completion in a nested run(). As a
+// constructor (`isConstruct`) a non-object result yields `this`, which
+// super() into a built-in parent may have replaced.
+Value VM::runCompiled(Function* fn, Value thisValue, const std::vector<Value>& callArgs, bool isConstruct) {
     VM* previousVM = currentVM_;
     currentVM_ = this;
     const Bytecode::BytecodeChunk* savedChunk = chunk_;
@@ -1794,7 +1806,7 @@ Value VM::executeCallback(Function* fn, Value thisValue, const std::vector<Value
 
     Value result;
     try {
-        enterFrame(fn, thisValue, callArgs, false, SIZE_MAX);
+        enterFrame(fn, thisValue, callArgs, isConstruct, SIZE_MAX);
         run();
         if (callDepth() > savedDepth) {
             throw std::runtime_error("Script execution was terminated");
@@ -1832,6 +1844,9 @@ Value VM::construct(Function* constructor, const std::vector<Value>& args) {
     Object* proto = ensurePrototypeObject(constructor);
     instance->setPrototype(proto ? proto : intrinsic(Intrinsic::Object));
 
+    if (constructor->isCompiled() && !constructor->isBuiltin() && !constructor->isNative()) {
+        return runCompiled(constructor, Value::object(instance), callArgs, true);
+    }
     Value result = executeCallback(constructor, Value::object(instance), callArgs);
     return result.isObject() ? result : Value::object(instance);
 }
@@ -1858,6 +1873,10 @@ void VM::invoke(Function* fn, Value thisValue, std::vector<Value> args) {
     }
     if (!fn->isCompiled()) {
         throw std::runtime_error("Function '" + fn->name() + "' has no compiled body");
+    }
+    if (fn->isAsync() && !fn->isGenerator()) {
+        push(startAsyncFunction(fn, thisValue, args));
+        return;
     }
     if (fn->isGenerator()) {
         push(makeGenerator(fn, thisValue, args));
@@ -2082,6 +2101,9 @@ Object* VM::intrinsic(Intrinsic kind) {
             break;
         case Intrinsic::Iterator:
             slot = Builtins::IteratorBuiltin::createIteratorPrototype();
+            break;
+        case Intrinsic::Promise:
+            slot = Builtins::PromiseBuiltin::createPromisePrototype();
             break;
         case Intrinsic::Count:
             return nullptr;
@@ -2494,9 +2516,16 @@ void VM::shrinkHeapIfNeeded() {
     }
 }
 
-Value VM::resumeGenerator(GeneratorFrame* frame, Value yieldVal, const std::vector<Value>& args) {
+Value VM::resumeGenerator(GeneratorFrame* frame, Value yieldVal, const std::vector<Value>& args,
+                          bool isThrow) {
     if (!frame || frame->isCompleted) {
+        if (isThrow) throw ThrownException(yieldVal);
         return Value::undefined();
+    }
+    if (isThrow && !frame->isStarted) {
+        // Thrown into before it ever ran: the body never starts
+        frame->isCompleted = true;
+        throw ThrownException(yieldVal);
     }
 
     VM* previousVM = currentVM_;
@@ -2516,6 +2545,9 @@ Value VM::resumeGenerator(GeneratorFrame* frame, Value yieldVal, const std::vect
     callFrame.thisValue = frame->thisValue;
     callFrame.savedChunk = savedChunk;
     pushCallFrame(callFrame);
+    frame->stackBase = base;
+    frame->frameDepth = callDepth();
+    frame->handlerBase = savedHandlers;
 
     if (!frame->isStarted) {
         frame->isStarted = true;
@@ -2526,10 +2558,37 @@ Value VM::resumeGenerator(GeneratorFrame* frame, Value yieldVal, const std::vect
         for (const auto& value : frame->savedStack) {
             push(value);
         }
-        push(yieldVal);  // Value of the paused yield expression
+        // Closures made before the suspension share the frame's variables
+        // again; one may have changed a value meanwhile
+        Value* bottom = stack_.data() + base;
+        for (auto it = frame->savedUpvalues.rbegin(); it != frame->savedUpvalues.rend(); ++it) {
+            Value* slot = bottom + it->first;
+            *slot = it->second->get();
+            it->second->reopen(slot);
+            it->second->next = openUpvalues_;
+            openUpvalues_ = it->second;
+        }
+        frame->savedUpvalues.clear();
+        // The try blocks the body was inside when it paused, for the run() below
+        for (const auto& saved : frame->savedHandlers) {
+            ExceptionHandler handler;
+            handler.catchAddress = saved.catchAddress;
+            handler.finallyAddress = saved.finallyAddress;
+            handler.stackLevel = base + saved.stackOffset;
+            handler.callStackLevel = frame->frameDepth;
+            handler.chunk = saved.chunk;
+            handler.runDepth = runDepth_ + 1;
+            exceptionHandlers_.push_back(handler);
+        }
+        frame->savedHandlers.clear();
+        if (isThrow) {
+            pendingResumeThrow_ = true;
+            pendingResumeValue_ = yieldVal;
+        } else {
+            push(yieldVal);  // Value of the paused yield/await expression
+        }
         ip_ = frame->suspendedIP;
     }
-    frame->stackBase = base;
     chunk_ = frame->function->bytecodeChunk();
     currentGenerator_ = frame;
     isYielding_ = false;
@@ -2538,6 +2597,7 @@ Value VM::resumeGenerator(GeneratorFrame* frame, Value yieldVal, const std::vect
     try {
         run();
     } catch (...) {
+        pendingResumeThrow_ = false;
         frame->isCompleted = true;
         frame->savedStack.clear();
         unwindTo(savedDepth, base, savedHandlers);
@@ -2548,10 +2608,17 @@ Value VM::resumeGenerator(GeneratorFrame* frame, Value yieldVal, const std::vect
         throw;
     }
 
+    bool terminated = false;
     if (isYielding_) {
-        // OP_YIELD saved the frame's values; drop the live ones and the frame
+        // suspendGenerator saved the frame; drop the live values and the frame
         result = yieldedValue_;
         unwindTo(savedDepth, base, savedHandlers);
+    } else if (callDepth() > savedDepth) {
+        // run() stopped before the body returned: the script was terminated
+        frame->isCompleted = true;
+        frame->savedStack.clear();
+        unwindTo(savedDepth, base, savedHandlers);
+        terminated = true;
     } else {
         frame->isCompleted = true;
         frame->savedStack.clear();
@@ -2562,7 +2629,175 @@ Value VM::resumeGenerator(GeneratorFrame* frame, Value yieldVal, const std::vect
     chunk_ = savedChunk;
     ip_ = savedIP;
     currentVM_ = previousVM;
+    if (terminated) throw std::runtime_error("Script execution was terminated");
     return result;
+}
+
+// Pauses the running generator or async body at a yield/await: keeps its
+// position, stack values, try handlers and the upvalues over its slots,
+// then leaves run(). resumeGenerator puts them back.
+void VM::suspendGenerator(Value yielded) {
+    GeneratorFrame* gen = currentGenerator_;
+    const size_t base = gen->stackBase;
+    gen->suspendedIP = ip_;
+    gen->savedStack.assign(stack_.begin() + static_cast<std::ptrdiff_t>(base), stack_.end());
+
+    gen->savedHandlers.clear();
+    for (size_t i = gen->handlerBase; i < exceptionHandlers_.size(); i++) {
+        const ExceptionHandler& handler = exceptionHandlers_[i];
+        if (handler.callStackLevel != gen->frameDepth) continue;
+        GeneratorFrame::SavedHandler saved;
+        saved.catchAddress = handler.catchAddress;
+        saved.finallyAddress = handler.finallyAddress;
+        saved.stackOffset = handler.stackLevel - base;
+        saved.chunk = handler.chunk;
+        gen->savedHandlers.push_back(saved);
+    }
+
+    gen->savedUpvalues.clear();
+    Value* bottom = stack_.data() + base;
+    for (RuntimeUpvalue* upvalue = openUpvalues_; upvalue && upvalue->location() >= bottom;
+         upvalue = upvalue->next) {
+        gen->savedUpvalues.emplace_back(static_cast<size_t>(upvalue->location() - bottom), upvalue);
+    }
+
+    yieldedValue_ = yielded;
+    isYielding_ = true;
+    ip_ = chunk_->code().size();  // Force exit from run()
+}
+
+// =============================================================================
+// Async functions
+// =============================================================================
+
+struct VM::AsyncFunctionState {
+    GeneratorFrame frame;
+    std::vector<Value> args;
+    Promise* promise = nullptr;
+};
+
+// Calling an async function: its promise is created first, then the body
+// runs synchronously up to its first await (or its end)
+Value VM::startAsyncFunction(Function* fn, Value thisValue, const std::vector<Value>& args) {
+    VM* previousVM = currentVM_;
+    currentVM_ = this;
+    auto* state = new AsyncFunctionState();
+    state->frame.function = fn;
+    state->frame.thisValue = thisValue;
+    state->frame.isAsync = true;
+    state->args = args;
+    state->promise = new Promise();
+    Promise* promise = state->promise;
+    try {
+        asyncStep(state, Value::undefined(), false);
+    } catch (...) {
+        currentVM_ = previousVM;
+        throw;
+    }
+    currentVM_ = previousVM;
+    return Value::object(promise);
+}
+
+// Runs the body from where it paused until the next await or its end. An
+// await subscribes to the awaited value (PromiseResolve + then) and the
+// body continues from that reaction; the end settles the function's promise.
+void VM::asyncStep(AsyncFunctionState* state, const Value& value, bool isThrow) {
+    Promise* promise = state->promise;
+    Value result;
+    Value thrown;
+    if (!catchAsValue(this, [&] { result = resumeGenerator(&state->frame, value, state->args, isThrow); }, thrown)) {
+        delete state;
+        promise->reject(thrown);
+        return;
+    }
+    if (state->frame.isCompleted) {
+        delete state;
+        promise->resolve(result);
+        return;
+    }
+    Promise* awaited = nullptr;
+    if (!catchAsValue(this, [&] { awaited = Promise::promiseResolve(result); }, thrown)) {
+        asyncStep(state, thrown, true);
+        return;
+    }
+    awaited->addNativeReactions(
+        [this, state](const Value& settled) { asyncStep(state, settled, false); },
+        [this, state](const Value& reason) { asyncStep(state, reason, true); });
+}
+
+// =============================================================================
+// Microtasks
+// =============================================================================
+
+void VM::runMicrotasks() {
+    if (drainingJobs_ || callDepth() > 0) return;
+    drainingJobs_ = true;
+    struct Restore {
+        VM* vm;
+        VM* previous;
+        ~Restore() {
+            vm->drainingJobs_ = false;
+            currentVM_ = previous;
+        }
+    } restore{this, currentVM_};
+    currentVM_ = this;
+
+    // Each job may be short, so the run loop's own limit checks would never
+    // fire for an endless chain of them: the drain checks the limits itself
+    static constexpr size_t LIMIT_CHECK_JOBS = 256;
+    size_t ran = 0;
+    try {
+        while (!jobs_.empty()) {
+            std::function<void()> job = std::move(jobs_.front());
+            jobs_.pop_front();
+            if (++ran % LIMIT_CHECK_JOBS == 0 && resourceMonitor_ && !resourceMonitor_->checkLimits()) {
+                terminationRequested_ = true;
+                throw SecurityError(SecurityError::Type::Timeout, "Execution limit exceeded");
+            }
+            try {
+                job();
+            } catch (const SecurityError&) {
+                throw;
+            } catch (const ThrownException& e) {
+                reportError(std::string("Uncaught ") + e.what());
+            } catch (const JSError& e) {
+                reportError("Uncaught " + e.type() + ": " + e.what());
+            } catch (const std::exception& e) {
+                if (terminationRequested_) throw;
+                reportError(std::string("Uncaught ") + e.what());
+            }
+        }
+    } catch (...) {
+        // A stopped run takes its queued work with it
+        jobs_.clear();
+        pendingRejections_.clear();
+        throw;
+    }
+
+    std::vector<Promise*> rejected;
+    rejected.swap(pendingRejections_);
+    for (Promise* promise : rejected) {
+        if (!promise->isHandled()) {
+            reportError(std::string("Uncaught (in promise) ") + ThrownException(promise->result()).what());
+        }
+    }
+}
+
+void VM::reportError(const std::string& message) {
+    if (errorReporter_) {
+        errorReporter_(message);
+    } else {
+        std::cerr << message << std::endl;
+    }
+}
+
+void VM::trackPromiseRejection(Promise* promise, bool handled) {
+    if (!handled) {
+        pendingRejections_.push_back(promise);
+    } else {
+        pendingRejections_.erase(std::remove(pendingRejections_.begin(), pendingRejections_.end(), promise),
+                                 pendingRejections_.end());
+    }
 }
 
 } // namespace Zepra::Runtime

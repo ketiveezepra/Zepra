@@ -1,0 +1,100 @@
+# name | expression that must evaluate to true. A leading '!' marks a known gap.
+#
+# Promise reactions run as microtasks after the script, before the test reads
+# __r. An asynchronous case therefore returns a placeholder ("pending") and
+# sets __r itself from a callback; if the callback never runs, the
+# placeholder fails the case. Orders are the ones Chrome (V8) prints.
+
+# ---- Constructor and shape ---------------------------------------------------
+promise_shape | typeof Promise === "function" && Promise.length === 1 && Promise.name === "Promise" && Promise.prototype.constructor === Promise && Object.prototype.toString.call(Promise.resolve()) === "[object Promise]" && Promise.resolve() instanceof Promise
+promise_requires_new | (function(){ try { Promise(function(){}); return false; } catch (e) { return e instanceof TypeError; } })()
+promise_requires_executor | (function(){ try { new Promise(1); return false; } catch (e) { return e instanceof TypeError; } })()
+promise_executor_sync | (function(){ var ran = false; new Promise(function(){ ran = true; }); return ran; })()
+promise_executor_args | (function(){ var a, b; new Promise(function(res, rej){ a = typeof res; b = typeof rej; }); return a === "function" && b === "function"; })()
+promise_then_returns_new | (function(){ var p = Promise.resolve(1); var q = p.then(); return q instanceof Promise && q !== p; })()
+promise_resolve_identity | (function(){ var p = Promise.resolve(1); return Promise.resolve(p) === p && Promise.reject(p) !== p; })()
+
+# ---- Reactions are asynchronous and ordered ----------------------------------
+promise_then_async | (function(){ var log = []; Promise.resolve().then(function(){ log.push("then"); }); log.push("sync"); Promise.resolve().then(function(){ __r = log.join() === "sync,then"; }); return "pending"; })()
+promise_then_value | (Promise.resolve(42).then(function(v){ __r = v === 42; }), "pending")
+promise_chain_values | (Promise.resolve(1).then(function(v){ return v + 1; }).then(function(v){ return v * 10; }).then(function(v){ __r = v === 20; }), "pending")
+promise_interleaved_chains | (function(){ var log = []; var p = Promise.resolve(); p.then(function(){ log.push("a1"); }).then(function(){ log.push("a2"); }); p.then(function(){ log.push("b1"); }).then(function(){ log.push("b2"); }).then(function(){ __r = log.join() === "a1,b1,a2,b2"; }); return "pending"; })()
+promise_queue_microtask_fifo | (function(){ var log = []; queueMicrotask(function(){ log.push("q1"); }); Promise.resolve().then(function(){ log.push("p1"); }); queueMicrotask(function(){ log.push("q2"); }); queueMicrotask(function(){ __r = log.join() === "q1,p1,q2"; }); return "pending"; })()
+promise_nested_microtask | (function(){ var log = []; queueMicrotask(function(){ log.push(1); queueMicrotask(function(){ log.push(3); }); }); queueMicrotask(function(){ log.push(2); }); Promise.resolve().then(function(){}).then(function(){}).then(function(){ __r = log.join() === "1,2,3"; }); return "pending"; })()
+promise_resolve_thenable_ticks | (function(){ var log = []; var p = Promise.resolve(); new Promise(function(r){ r(p); }).then(function(){ log.push("a"); }); p.then(function(){ log.push(1); }).then(function(){ log.push(2); }).then(function(){ log.push(3); }).then(function(){ __r = log.join() === "1,2,a,3"; }); return "pending"; })()
+promise_thenable_adopted | (Promise.resolve({ then: function(res){ res(7); } }).then(function(v){ __r = v === 7; }), "pending")
+promise_thenable_called_async | (function(){ var log = []; Promise.resolve({ then: function(res){ log.push("then"); res(); } }); log.push("sync"); Promise.resolve().then(function(){ __r = log.join() === "sync,then"; }); return "pending"; })()
+promise_thenable_throws | (Promise.resolve({ then: function(){ throw new RangeError("t"); } }).catch(function(e){ __r = e instanceof RangeError; }), "pending")
+promise_then_getter_throws | (function(){ var t = {}; Object.defineProperty(t, "then", { get: function(){ throw 5; } }); Promise.resolve(t).catch(function(e){ __r = e === 5; }); return "pending"; })()
+promise_first_settle_wins | (new Promise(function(res, rej){ res(1); rej(2); res(3); }).then(function(v){ __r = v === 1; }), "pending")
+promise_resolve_self_rejects | (function(){ var resolve; var p = new Promise(function(r){ resolve = r; }); resolve(p); p.catch(function(e){ __r = e instanceof TypeError; }); return "pending"; })()
+promise_then_non_callable | (Promise.resolve(3).then(null, 5).then(undefined).then(function(v){ __r = v === 3; }), "pending")
+promise_then_on_settled_later | (function(){ var p = Promise.resolve("x"); var log = []; p.then(function(v){ log.push(v); p.then(function(w){ __r = log.join() === "x" && w === "x"; }); }); return "pending"; })()
+
+# ---- Rejection, catch, finally -------------------------------------------------
+promise_executor_throw_rejects | (new Promise(function(){ throw new Error("e"); }).catch(function(e){ __r = e instanceof Error && e.message === "e"; }), "pending")
+promise_executor_throw_after_resolve | (new Promise(function(res){ res(1); throw new Error("ignored"); }).then(function(v){ __r = v === 1; }), "pending")
+promise_reject_passes_through | (Promise.reject(9).then(function(){ return "no"; }).catch(function(e){ __r = e === 9; }), "pending")
+promise_throw_in_then | (Promise.resolve().then(function(){ throw new TypeError("x"); }).catch(function(e){ __r = e instanceof TypeError && e.message === "x"; }), "pending")
+promise_engine_error_in_then | (Promise.resolve().then(function(){ return null.x; }).catch(function(e){ __r = e instanceof TypeError; }), "pending")
+promise_catch_recovers | (Promise.reject(1).catch(function(e){ return e + 1; }).then(function(v){ __r = v === 2; }), "pending")
+promise_catch_generic | (function(){ var called; var fake = { then: function(a, b){ called = typeof a === "undefined" && typeof b === "function"; return 1; } }; return Promise.prototype.catch.call(fake, function(){}) === 1 && called; })()
+promise_finally_value | (Promise.resolve(5).finally(function(){ return 99; }).then(function(v){ __r = v === 5; }), "pending")
+promise_finally_reason | (Promise.reject(5).finally(function(){}).catch(function(e){ __r = e === 5; }), "pending")
+promise_finally_no_args | (function(){ var args = -1; Promise.resolve(1).finally(function(){ args = arguments.length; }).then(function(){ __r = args === 0; }); return "pending"; })()
+promise_finally_throw_overrides | (Promise.resolve(1).finally(function(){ throw 2; }).catch(function(e){ __r = e === 2; }), "pending")
+promise_finally_waits | (function(){ var log = []; Promise.resolve(1).finally(function(){ return new Promise(function(r){ queueMicrotask(function(){ log.push("inner"); r(); }); }); }).then(function(v){ __r = v === 1 && log.join() === "inner"; }); return "pending"; })()
+
+# ---- Statics -------------------------------------------------------------------
+promise_all_values | (Promise.all([1, Promise.resolve(2), { then: function(r){ r(3); } }]).then(function(v){ __r = Array.isArray(v) && v.join() === "1,2,3"; }), "pending")
+promise_all_order | (function(){ var late = new Promise(function(r){ queueMicrotask(function(){ queueMicrotask(function(){ r("late"); }); }); }); Promise.all([late, "early"]).then(function(v){ __r = v[0] === "late" && v[1] === "early"; }); return "pending"; })()
+promise_all_empty | (Promise.all([]).then(function(v){ __r = Array.isArray(v) && v.length === 0; }), "pending")
+promise_all_rejects_first | (Promise.all([Promise.resolve(1), Promise.reject("bad"), Promise.reject("worse")]).catch(function(e){ __r = e === "bad"; }), "pending")
+promise_all_iterable | (Promise.all(new Set([1, 2])).then(function(v){ __r = v.join() === "1,2"; }), "pending")
+promise_all_not_iterable | (Promise.all(5).catch(function(e){ __r = e instanceof TypeError; }), "pending")
+promise_allsettled | (Promise.allSettled([Promise.resolve(1), Promise.reject(2)]).then(function(r){ __r = r.length === 2 && r[0].status === "fulfilled" && r[0].value === 1 && r[1].status === "rejected" && r[1].reason === 2 && !("reason" in r[0]); }), "pending")
+promise_race | (Promise.race([new Promise(function(){}), Promise.resolve("fast"), Promise.reject("slow")]).then(function(v){ __r = v === "fast"; }), "pending")
+promise_race_reject | (Promise.race([Promise.reject("r"), Promise.resolve(1)]).catch(function(e){ __r = e === "r"; }), "pending")
+promise_any | (Promise.any([Promise.reject(1), Promise.resolve(2), Promise.resolve(3)]).then(function(v){ __r = v === 2; }), "pending")
+promise_any_aggregate | (Promise.any([Promise.reject(1), Promise.reject(2)]).catch(function(e){ __r = e instanceof AggregateError && e.errors.join() === "1,2" && e.message === "All promises were rejected"; }), "pending")
+promise_any_empty | (Promise.any([]).catch(function(e){ __r = e instanceof AggregateError && e.errors.length === 0; }), "pending")
+promise_with_resolvers | (function(){ var w = Promise.withResolvers(); w.promise.then(function(v){ __r = v === "ok"; }); w.resolve("ok"); w.resolve("again"); return "pending"; })()
+promise_try | (function(){ var log = []; Promise.try(function(a, b){ log.push("sync"); return a + b; }, 1, 2).then(function(v){ log.push(v); }); Promise.try(function(){ throw 4; }).catch(function(e){ __r = log.join() === "sync,3" && e === 4; }); return "pending"; })()
+promise_statics_call | (Promise.resolve.call(Promise, 1) instanceof Promise) && (function(){ try { Promise.resolve.call(1, 1); return false; } catch (e) { return e instanceof TypeError; } })()
+
+# ---- Subclassing ---------------------------------------------------------------
+promise_subclass | (function(){ class P extends Promise {} var p = new P(function(r){ r(1); }); return p instanceof P && p instanceof Promise && p.then() instanceof P && P.resolve(2) instanceof P && Promise.resolve(p) !== p; })()
+promise_subclass_settles | (function(){ class P extends Promise {} P.resolve(3).then(function(v){ return v * 2; }).then(function(v){ __r = v === 6; }); return "pending"; })()
+promise_species | (function(){ class P extends Promise { static get [Symbol.species]() { return Promise; } } var t = new P(function(r){ r(); }).then(); return !(t instanceof P) && t instanceof Promise && Promise[Symbol.species] === Promise; })()
+
+# ---- async / await -------------------------------------------------------------
+async_returns_promise | (function(){ async function f(){ return 1; } var p = f(); return p instanceof Promise; })()
+async_return_value | (function(){ async function f(){ return 1; } f().then(function(v){ __r = v === 1; }); return "pending"; })()
+async_runs_sync_until_await | (function(){ var log = []; async function f(){ log.push("body"); await null; log.push("after"); } f(); log.push("sync"); Promise.resolve().then(function(){}).then(function(){ __r = log.join() === "body,sync,after"; }); return "pending"; })()
+async_await_value | (function(){ async function f(){ var a = await 1; var b = await Promise.resolve(2); var c = await { then: function(r){ r(3); } }; return a + b + c; } f().then(function(v){ __r = v === 6; }); return "pending"; })()
+async_await_one_tick | (function(){ var log = []; async function f(){ log.push("f1"); await undefined; log.push("f2"); } f(); Promise.resolve().then(function(){ log.push("p1"); }).then(function(){ log.push("p2"); }).then(function(){ __r = log.join() === "f1,sync,f2,p1,p2"; }); log.push("sync"); return "pending"; })()
+async_return_promise_ticks | (function(){ var log = []; async function g(){ return Promise.resolve(); } g().then(function(){ log.push("g"); }); Promise.resolve().then(function(){ log.push(1); }).then(function(){ log.push(2); }).then(function(){ log.push(3); }).then(function(){ __r = log.join() === "1,2,g,3"; }); return "pending"; })()
+async_throw_rejects | (function(){ async function f(){ throw new RangeError("r"); } var p = f(); p.catch(function(e){ __r = e instanceof RangeError && e.message === "r"; }); return "pending"; })()
+async_throw_after_await | (function(){ async function f(){ await 1; null.x; } f().catch(function(e){ __r = e instanceof TypeError; }); return "pending"; })()
+async_try_catch_await | (function(){ async function f(){ try { await Promise.reject("no"); return "missed"; } catch (e) { return "caught " + e; } } f().then(function(v){ __r = v === "caught no"; }); return "pending"; })()
+async_try_finally_await | (function(){ var log = []; async function f(){ try { await 1; log.push("try"); } finally { log.push("finally"); } return log.join(); } f().then(function(v){ __r = v === "try,finally"; }); return "pending"; })()
+async_catch_after_two_awaits | (function(){ async function f(){ try { await 1; await 2; throw "late"; } catch (e) { await 3; return "got " + e; } } f().then(function(v){ __r = v === "got late"; }); return "pending"; })()
+async_uncaught_after_try | (function(){ async function f(){ try { await 1; } catch (e) {} await Promise.reject("out"); } f().catch(function(e){ __r = e === "out"; }); return "pending"; })()
+async_loop | (function(){ async function f(){ var s = 0; for (var i = 0; i < 5; i++) { s += await i; } return s; } f().then(function(v){ __r = v === 10; }); return "pending"; })()
+async_let_loop | (function(){ async function f(){ var out = []; for (let i = 0; i < 3; i++) { await null; out.push(i); } return out.join(); } f().then(function(v){ __r = v === "0,1,2"; }); return "pending"; })()
+async_arguments_this | (function(){ var o = { k: 4, m: async function(a, b){ await null; return this.k + a + b; } }; o.m(1, 2).then(function(v){ __r = v === 7; }); return "pending"; })()
+async_arrow | (function(){ var o = { k: 5, run: function(){ var f = async (x) => { await null; return this.k * x; }; return f(2); } }; o.run().then(function(v){ __r = v === 10; }); return "pending"; })()
+async_method_class | (function(){ class A { constructor(){ this.v = 3; } async get(){ return await this.v; } static async make(){ return new A(); } } A.make().then(function(a){ return a.get(); }).then(function(v){ __r = v === 3; }); return "pending"; })()
+async_function_expression | (function(){ var f = async function named(){ return typeof named; }; f().then(function(v){ __r = v === "function"; }); return "pending"; })()
+async_nested_calls | (function(){ async function inner(x){ await null; return x * 2; } async function outer(){ var a = await inner(1); var b = await inner(a); return [a, b].join(); } outer().then(function(v){ __r = v === "2,4"; }); return "pending"; })()
+async_concurrent | (function(){ var log = []; async function task(name, n){ for (var i = 0; i < n; i++) { log.push(name + i); await null; } } Promise.all([task("a", 2), task("b", 2)]).then(function(){ __r = log.join() === "a0,b0,a1,b1"; }); return "pending"; })()
+async_closure_shared | (function(){ async function f(){ var x = 1; var get = function(){ return x; }; var set = function(v){ x = v; }; await null; x = 2; var seen = get(); set(3); await null; return seen + "," + x + "," + get(); } f().then(function(v){ __r = v === "2,3,3"; }); return "pending"; })()
+async_closure_set_while_suspended | (function(){ var setter; async function f(){ var x = "before"; setter = function(v){ x = v; }; await null; return x; } f().then(function(v){ __r = v === "during"; }); setter("during"); return "pending"; })()
+async_await_in_expression | (function(){ async function f(){ return 1 + (await 2) * 3 + [await 4, 5].length; } f().then(function(v){ __r = v === 9; }); return "pending"; })()
+async_await_rejected_value_types | (function(){ async function f(){ try { await Promise.reject(undefined); } catch (e) { return e === undefined; } } f().then(function(v){ __r = v; }); return "pending"; })()
+async_promise_all_await | (function(){ async function f(){ var r = await Promise.all([1, Promise.resolve(2)]); return r.join(); } f().then(function(v){ __r = v === "1,2"; }); return "pending"; })()
+async_not_constructor_promise | (function(){ async function f(){} return Object.getPrototypeOf(f()) === Promise.prototype; })()
+
+# ---- Generators keep state across yield (same suspension machinery) ---------
+generator_try_catch_across_yield | (function(){ function* g(){ try { yield 1; yield 2; } catch (e) { yield "caught"; } } var it = g(); it.next(); return it.next().value === 2; })()
+generator_closure_across_yield | (function(){ function* g(){ var x = 1; var get = function(){ return x; }; yield 0; x = 2; yield get(); } var it = g(); it.next(); return it.next().value === 2; })()
