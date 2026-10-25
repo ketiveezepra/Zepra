@@ -15,36 +15,78 @@ This is a real user experience win for constrained hardware and the rural India/
 ## 📊 The Metric That Actually Matters for Beta (NeolyxOS Targets)
 If we hit these numbers, Zepra becomes the most memory-efficient full-featured browser in existence.
 
-| Condition | Target RSS |
-| :--- | :--- |
-| **Idle, 1 tab** | `< 80MB` |
-| **10 tabs, moderate sites** | `< 300MB` |
-| **50 tabs** | `< 800MB` |
-| **After closing all tabs (Z ≈ X)** | `< 100MB` |
-| **24hr runtime, idle** | `< 5% memory growth` |
+| Condition | Target RSS | Measured (Windows, Release, 2026-10-25) |
+| :--- | :--- | :--- |
+| **Idle, 1 tab** | `< 80MB` | 77–79 MB (small local page) ✅ |
+| **10 tabs, moderate sites** | `< 300MB` | not measured yet |
+| **50 tabs** | `< 800MB` | not measured yet |
+| **After closing all tabs (Z ≈ X)** | `< 100MB` | not measured yet |
+| **24hr runtime, idle** | `< 5% memory growth` | not measured yet |
+
+Single-site figures: Wikipedia article 105–107 MB, flat over 45 s; Hacker News 86–88 MB.
+After the 1 GB runaway-script guard fires, the memory stays committed (about 1.1 GB): see Known gaps.
 
 *Note: If memory after closing all tabs is the same as when 50 tabs were open (Z ≈ Y), we have leaks. Our Shenandoah-style GC should handle this well, but we must fix the JIT cache leak which currently acts as a floor.*
 
 ---
 
+## 🗓️ Timeline
+
+Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are merge dates.
+
+| Date | PR | What changed |
+| :--- | :--- | :--- |
+| 2026-10-25 | #17 | **ZepraScript built-ins pass** (open): spec-correct number/string conversion, Number/Boolean/String/Object/Array as real constructors, one set of intrinsic prototypes per VM, Error chain, real Symbol, hashed Map/Set/WeakSet, Array.from, RegExp fixes, pages get the engine's built-ins instead of stubs, conformance suite |
+| 2026-10-25 | #16 | Parser: `super(...)`/`super.x`, class fields and class expressions, getters/setters and keyword keys in literals, object spread, async and destructuring arrows; built-in subclassing |
+| 2026-10-24 | #15 | Runaway scripts stopped (10 s / 1 GB `ScriptRunGuard`); real frame model, calls, closures, scoping and exceptions in the VM |
+| 2026-10-21 | #14 | HTTPS certificates are verified |
+| 2026-10-21 | #13 | Scripts can change the page: timers, `requestAnimationFrame`, re-render after DOM changes |
+| 2026-10-21 | #12 | Render loop no longer spins a CPU core |
+| 2026-10-21 | #11 | Page freezes, `:hover`/`:active`/`:focus`, local files on Windows |
+| 2026-10-21 | #10, #8 | macOS build; NXRender on macOS (Cocoa + NSOpenGL) |
+| 2026-10-21 | #9 | NxPdf test made real; NXRender tests run in CI |
+| 2026-10-21 | #7 | Copy/paste on Linux (X11) |
+| 2026-10-15 | #5, #6 | Linux CI (GLU) and icon-name case fixes |
+| 2026-10-13 | #4 | NXRender browser builds and runs on Windows |
+| 2026-10-09 | `9eda6cc` | Per-tab VM; history, settings and bookmarks saved to disk |
+| 2026-06-14 | `50d4372` | DOM node classes and the JS↔DOM bridge |
+| 2025-12 → 2026-06 | — | Engine, NXRender, layout/CSS, JIT and GC groundwork (pre-PR history) |
+
+### 🔨 Active now / next
+1. **Built-ins pass** (#17) — in review.
+2. **Promise and microtasks** — design first. `Promise.then` callbacks never run today.
+3. **DOM bindings** — `element.style`, `classList`, canvas `getContext`; the manual test pages throw on these.
+4. **Network speed** — `http_client` waits on a 1 s `poll()` and has no keep-alive, so Hacker News takes 8–17 s.
+5. **Memory after the runaway guard** — reclaim what a killed script allocated (needs the GC stage).
+
+### ⚠️ Known gaps (ZepraScript)
+- Regex engine is not conformant: no lookaround, `{n,m}` does nothing, byte-based matching, no named groups or backreferences, slow. RegExp objects have no `source`/`flags`/`global`/`lastIndex` properties.
+- Strings are byte-indexed, not UTF-16.
+- `Promise.then` never runs callbacks; WebAssembly is still a fake namespace; URL/URLSearchParams and the observers in ScriptContext are stubs.
+- Reading an undeclared variable does not throw a ReferenceError; tagged templates (``String.raw`x` ``) are not supported.
+- A UTF-8 byte-order mark at the start of a script is a parse error.
+- `Object.defineProperty` does not reject redefining a non-configurable property.
+- WeakMap/WeakSet hold their keys strongly (no weak-reference hook in the collector yet).
+- `globalThis` in a page is the engine's global object, not `window`.
+
 ## 🛠️ High-Priority Bug Fixes (The "Unfreeze" Sprint)
 
 ### 1. ZepraScript Engine Stabilization
-- [ ] **Parser Fix:** Implement comma operator `(0, _.E)` support in `parseExpression()` to stop the parser from hanging on minified JS.
-- [ ] **JIT Memory Leak (B06):** Fix `CodeCache::compact()` in JIT so it actually decrements `usedSize_` and reclaims executable memory buffer space.
-- [ ] **W^X Vulnerability:** Re-architect the `mprotect` calls in the JIT so compiling a new block doesn't alter permissions of existing active blocks on the same page.
-- [ ] **VM Isolation (B08):** Eliminate global statics (`s_vm`, `s_vmContext`) in `script_context.cpp` to ensure true per-tab VM isolation and fix ObjectSecurity pointer reuse.
+- [x] **Parser Fix:** Comma operator `(0, _.E)` parses and evaluates (conformance case `comma_operator`); the parser no longer loops on an unexpected token (#15).
+- [~] **JIT Memory Leak (B06):** `CodeCache::compact()` now decrements `usedSize_`. Not verified: that the executable memory itself is released.
+- [ ] **W^X Vulnerability:** *(not started)* Re-architect the `mprotect` calls in the JIT so compiling a new block doesn't alter permissions of existing active blocks on the same page.
+- [x] **VM Isolation (B08):** `s_vm`/`s_vmContext` are gone; each tab owns its VM (`9eda6cc`), and built-in prototypes are per VM or per global (#17). Not verified: ObjectSecurity pointer reuse.
 
 ### 2. Rendering & UI Thread Unblocking
-- [ ] **Asynchronous JS Execution:** Move `parseWithWebCore` and `executePageScripts()` off the main UI rendering loop, or implement yielding, so JS execution doesn't freeze the browser.
+- [~] **Asynchronous JS Execution:** Scripts still run on the UI thread. Mitigated: a runaway script is stopped after 10 s or 1 GB of growth and the page keeps working (#15).
 
 ### 3. Network Reliability
-- [ ] **Keep-Alive Delay:** Rewrite the `http_client` 1000ms `poll()` hack to parse HTTP headers (`Content-Length`) and break immediately when the payload finishes.
-- [ ] **TLS Integration:** Implement the `nx_tls_connect` stub with OpenSSL/mbedTLS to enable HTTPS.
-- [ ] **Chunked Decoding:** Fix the empty body and chunked decoding bugs in the new `nxhttp` C engine.
+- [ ] **Keep-Alive Delay:** *(still open: HN takes 8–17 s)* Rewrite the `http_client` 1000ms `poll()` hack to parse HTTP headers (`Content-Length`) and break immediately when the payload finishes.
+- [x] **TLS Integration:** HTTPS works through OpenSSL in NXNet (Wikipedia, Hacker News load) and certificates are verified (#14).
+- [ ] **Chunked Decoding:** *(not checked)* Fix the empty body and chunked decoding bugs in the new `nxhttp` C engine.
 
 ### 4. Storage Persistence (B13-B15)
-- [ ] **Data Saving:** Replace the `TODO` stubs in `history_database.cpp`, `settings_store.cpp`, and `bookmark_manager.cpp` with actual JSON or SQLite writing so the browser saves user data.
+- [x] **Data Saving:** History, settings and bookmarks are written to disk (`9eda6cc`). Not run yet: the crash-recovery test below. `localStorage` is in-memory only.
 
 ---
 
@@ -73,4 +115,4 @@ To ship a Stable Beta, run tests in this exact priority:
 - **Goal:** Verify what state survives. (Currently fails due to stubbed storage).
 
 ---
-> *Generated based on the new Neolyx OS engineering philosophy.*
+> *Generated based on the new Neolyx OS engineering philosophy. Status and timeline last updated 2026-10-25.*
