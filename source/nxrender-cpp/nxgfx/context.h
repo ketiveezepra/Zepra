@@ -128,6 +128,10 @@ public:
     /// RGBA pixels; edges clamp, so a scaled texture doesn't wrap
     void updateTexture(TextureId texture, int width, int height, const uint8_t* pixels);
     void drawTexture(TextureId texture, const Rect& dest);
+    /// A texture whose first row is the bottom one (a GL render target, such as a
+    /// WebGL drawing buffer). `premultiplied` composites with ONE, ONE_MINUS_SRC_ALPHA;
+    /// `opaque` ignores the texture's alpha.
+    void drawRenderTarget(TextureId texture, const Rect& dest, bool premultiplied, bool opaque);
     void drawTexture(TextureId texture, const Rect& src, const Rect& dest);
     void destroyTexture(TextureId texture);
     

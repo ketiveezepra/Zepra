@@ -66,6 +66,7 @@
 #include "scripting/script_context.hpp"
 #include "scripting/canvas_bindings.hpp"
 #include "nxgfx/canvas2d/canvas_context.h"
+#include "nxgfx/webgl/webgl_context.h"
 using namespace Zepra::WebCore;
 
 extern "C" {
@@ -2591,6 +2592,19 @@ static void layout_gfx_canvas(float x, float y, float w, float h, DOMElement* ca
     Zepra::WebCore::CanvasSurface* surface = canvases ? canvases->find(canvas) : nullptr;
     NXRender::GpuContext* gpu = NXRender::gpu();
     if (!surface || !gpu) return;
+    if (surface->webgl) {
+        // WebGL: replay what the page recorded since the last paint into the
+        // drawing buffer (an FBO), then composite that texture
+        NXRender::WebGLRenderingContext& gl = *surface->webgl;
+        gl.flush();
+        if (gl.texture()) {
+            gpu->drawRenderTarget(gl.texture(), NXRender::Rect(x, y, w, h),
+                                  gl.attributes().premultipliedAlpha, !gl.attributes().alpha);
+        }
+        gl.markPresented();
+        return;
+    }
+    if (!surface->context2d) return;
     const NXRender::CanvasRenderingContext2D& bitmap = *surface->context2d;
     if (bitmap.width() == 0 || bitmap.height() == 0) return;
     if (!surface->textureId || surface->textureVersion != bitmap.version()) {

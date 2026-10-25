@@ -451,26 +451,24 @@ void GlobalObject::initializeGlobalFunctions() {
     Builtins::defineHidden(regexpProto, "constructor", Value::object(regexpCtor));
     set("RegExp", Value::object(regexpCtor));
 
-    // ArrayBuffer + TypedArray constructors
+    // ArrayBuffer + TypedArray constructors: one %TypedArray%.prototype per
+    // global, and a prototype per element type inheriting from it
+    Object* arrayBufferProto = Builtins::TypedArrayBuiltin::createArrayBufferPrototype();
+    arrayBufferProto->setPrototype(objectPrototype_);
+    set("ArrayBuffer", Value::object(Builtins::TypedArrayBuiltin::createArrayBufferConstructor(arrayBufferProto)));
+
     Object* typedArrayProto = Builtins::TypedArrayBuiltin::createTypedArrayPrototype();
     typedArrayProto->setPrototype(objectPrototype_);
-
-    set("ArrayBuffer", Value::object(
-        createNativeFunction("ArrayBuffer", Builtins::TypedArrayBuiltin::arrayBufferConstructor, 1)));
-
-    auto registerTypedArray = [&](const char* name, Value(*ctor)(Context*, const std::vector<Value>&)) {
-        Object* ctorObj = createNativeFunction(name, ctor, 1);
-        ctorObj->set("prototype", Value::object(typedArrayProto));
-        set(name, Value::object(ctorObj));
-    };
-
-    registerTypedArray("Int8Array",    Builtins::TypedArrayBuiltin::int8ArrayConstructor);
-    registerTypedArray("Uint8Array",   Builtins::TypedArrayBuiltin::uint8ArrayConstructor);
-    registerTypedArray("Int16Array",   Builtins::TypedArrayBuiltin::int16ArrayConstructor);
-    registerTypedArray("Uint16Array",  Builtins::TypedArrayBuiltin::uint16ArrayConstructor);
-    registerTypedArray("Uint32Array",  Builtins::TypedArrayBuiltin::uint32ArrayConstructor);
-    registerTypedArray("Float32Array", Builtins::TypedArrayBuiltin::float32ArrayConstructor);
-    registerTypedArray("Float64Array", Builtins::TypedArrayBuiltin::float64ArrayConstructor);
+    for (auto type : {Builtins::TypedArrayType::Int8, Builtins::TypedArrayType::Uint8,
+                      Builtins::TypedArrayType::Uint8Clamped, Builtins::TypedArrayType::Int16,
+                      Builtins::TypedArrayType::Uint16, Builtins::TypedArrayType::Int32,
+                      Builtins::TypedArrayType::Uint32, Builtins::TypedArrayType::Float32,
+                      Builtins::TypedArrayType::Float64}) {
+        Object* proto = new Object();
+        proto->setPrototype(typedArrayProto);
+        set(Builtins::typedArrayName(type), Value::object(
+            Builtins::TypedArrayBuiltin::createTypedArrayConstructor(type, proto, arrayBufferProto)));
+    }
 
     // Proxy constructor
     Object* proxyCtor = createNativeFunction("Proxy",
