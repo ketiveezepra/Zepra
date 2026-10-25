@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Images local</title>
+<style>
+body { background: #fff; color: #000; font-family: sans-serif; font-size: 12px; margin: 8px; }
+.row { display: flex; margin-bottom: 8px; }
+.cell { width: 120px; margin-right: 8px; }
+.cell p { margin: 2px 0 0 0; }
+.box { width: 200px; height: 80px; border: 1px solid #888; }
+</style></head><body>
+<div class="row">
+<div class="cell"><img src="img/quad.png"><p>png</p></div>
+<div class="cell"><img src="img/quad.jpg"><p>jpeg</p></div>
+<div class="cell"><img src="img/quad.gif"><p>gif</p></div>
+<div class="cell"><img src="img/quad.webp"><p>webp lossless</p></div>
+<div class="cell"><img src="img/quad_lossy.webp"><p>webp lossy</p></div>
+<div class="cell"><img src="svg/01_fill_stroke.svg" width="96" height="96"><p>svg</p></div>
+</div>
+<div class="row" style="background:#9c9">
+<div class="cell"><img src="img/alpha.png"><p>png alpha</p></div>
+<div class="cell"><img src="img/alpha.webp"><p>webp alpha</p></div>
+<div class="cell"><img src="img/quad.png" width="48" height="32"><p>png 48x32</p></div>
+<div class="cell"><img src="img/quad.png" style="width:120px"><p>png css width</p></div>
+</div>
+<p>In a block:</p>
+<div><img src="img/quad.png"> <img src="img/quad.jpg"></div>
+<p>background-image:</p>
+<div class="row">
+<div class="box" style="background-image:url(img/quad.png); margin-right:8px"></div>
+<div class="box" style="background: #ddd url(svg/06_radial_gradient.svg) no-repeat; margin-right:8px"></div>
+<div class="box" style="background: url('img/quad.png') no-repeat center / contain #fec; margin-right:8px"></div>
+<div class="box" style="background-image:url(img/alpha.png); background-repeat:repeat-x; background-position:0 50%; background-color:#9c9; background-size:32px"></div>
+</div>
+</body></html>

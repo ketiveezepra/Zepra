@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120">
+  <polyline points="10,30 40,10 70,30 100,10" fill="none" stroke="#333" stroke-width="8" stroke-linejoin="round" stroke-linecap="round"/>
+  <polyline points="10,60 40,40 70,60 100,40" fill="none" stroke="#c30" stroke-width="8" stroke-linejoin="miter"/>
+  <line x1="10" y1="80" x2="110" y2="80" stroke="#06c" stroke-width="6" stroke-dasharray="12 6"/>
+  <path d="M10 110 A 40 20 0 0 1 110 110" fill="none" stroke="#909" stroke-width="4"/>
+  <polygon points="85,95 110,95 97,115" fill="#fc0" stroke="#000" stroke-width="2"/>
+</svg>

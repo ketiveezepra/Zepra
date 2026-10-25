@@ -182,6 +182,12 @@ NSVGimage* nsvgParseFromFile(const char* filename, const char* units, float dpi)
 // Important note: changes the string.
 NSVGimage* nsvgParse(char* input, const char* units, float dpi);
 
+// Zepra: as nsvgParse, with the value of currentColor (0xRRGGBB) at the root.
+// Altered from upstream: colours carry alpha (rgba(), hsla(), #rgba, #rrggbbaa,
+// transparent), hsl()/hsla(), the color property and currentColor, and nested
+// opacity multiplies.
+NSVGimage* nsvgParseWithColor(char* input, const char* units, float dpi, unsigned int currentColor);
+
 // Duplicates a path.
 NSVGpath* nsvgDuplicatePath(NSVGpath* p);
 
@@ -197,6 +203,7 @@ void nsvgDelete(NSVGimage* image);
 #ifdef NANOSVG_IMPLEMENTATION
 
 #include <string.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
@@ -443,6 +450,11 @@ typedef struct NSVGattrib
 	unsigned int stopColor;
 	float stopOpacity;
 	float stopOffset;
+	float fillAlpha;		// alpha of the fill/stroke/stop colour itself (0..1)
+	float strokeAlpha;
+	float stopAlpha;
+	unsigned int currentColor;	// the color property, used by currentColor
+	float currentAlpha;
 	char hasFill;
 	char hasStroke;
 	char visible;
@@ -648,6 +660,11 @@ static NSVGparser* nsvg__createParser(void)
 	p->attr[0].fillOpacity = 1;
 	p->attr[0].strokeOpacity = 1;
 	p->attr[0].stopOpacity = 1;
+	p->attr[0].fillAlpha = 1;
+	p->attr[0].strokeAlpha = 1;
+	p->attr[0].stopAlpha = 1;
+	p->attr[0].currentColor = NSVG_RGB(0,0,0);
+	p->attr[0].currentAlpha = 1;
 	p->attr[0].strokeWidth = 1;
 	p->attr[0].strokeLineJoin = NSVG_JOIN_MITER;
 	p->attr[0].strokeLineCap = NSVG_CAP_BUTT;
@@ -869,10 +886,12 @@ static NSVGgradient* nsvg__createGradient(NSVGparser* p, const char* id, const f
 
 	// The shape width and height.
 	if (data->units == NSVG_OBJECT_SPACE) {
-		ox = localBounds[0];
-		oy = localBounds[1];
-		sw = localBounds[2] - localBounds[0];
-		sh = localBounds[3] - localBounds[1];
+		// Zepra: coordinates are fractions of the bounding box (plain numbers too, not
+		// only percentages), and gradientTransform applies before the box mapping
+		ox = 0;
+		oy = 0;
+		sw = 1;
+		sh = 1;
 	} else {
 		ox = nsvg__actualOrigX(p);
 		oy = nsvg__actualOrigY(p);
@@ -904,11 +923,19 @@ static NSVGgradient* nsvg__createGradient(NSVGparser* p, const char* id, const f
 		grad->xform[0] = r; grad->xform[1] = 0;
 		grad->xform[2] = 0; grad->xform[3] = r;
 		grad->xform[4] = cx; grad->xform[5] = cy;
-		grad->fx = fx / r;
-		grad->fy = fy / r;
+		// Focal point relative to the centre, in radii (the rasterizer's gradient space)
+		grad->fx = r > 0 ? (fx - cx) / r : 0;
+		grad->fy = r > 0 ? (fy - cy) / r : 0;
 	}
 
 	nsvg__xformMultiply(grad->xform, data->xform);
+	if (data->units == NSVG_OBJECT_SPACE) {
+		float box[6];
+		box[0] = localBounds[2] - localBounds[0]; box[1] = 0;
+		box[2] = 0; box[3] = localBounds[3] - localBounds[1];
+		box[4] = localBounds[0]; box[5] = localBounds[1];
+		nsvg__xformMultiply(grad->xform, box);
+	}
 	nsvg__xformMultiply(grad->xform, xform);
 
 	grad->spread = data->spread;
@@ -1010,7 +1037,7 @@ static void nsvg__addShape(NSVGparser* p)
 	} else if (attr->hasFill == 1) {
 		shape->fill.type = NSVG_PAINT_COLOR;
 		shape->fill.color = attr->fillColor;
-		shape->fill.color |= (unsigned int)(attr->fillOpacity*255) << 24;
+		shape->fill.color |= (unsigned int)(attr->fillOpacity*attr->fillAlpha*255) << 24;
 	} else if (attr->hasFill == 2) {
 		shape->fill.type = NSVG_PAINT_UNDEF;
 	}
@@ -1021,7 +1048,7 @@ static void nsvg__addShape(NSVGparser* p)
 	} else if (attr->hasStroke == 1) {
 		shape->stroke.type = NSVG_PAINT_COLOR;
 		shape->stroke.color = attr->strokeColor;
-		shape->stroke.color |= (unsigned int)(attr->strokeOpacity*255) << 24;
+		shape->stroke.color |= (unsigned int)(attr->strokeOpacity*attr->strokeAlpha*255) << 24;
 	} else if (attr->hasStroke == 2) {
 		shape->stroke.type = NSVG_PAINT_UNDEF;
 	}
@@ -1236,68 +1263,102 @@ static const char* nsvg__getNextPathItem(const char* s, char* it)
 	return s;
 }
 
-static unsigned int nsvg__parseColorHex(const char* str)
+static int nsvg__hexDigit(char c)
 {
-	unsigned int r=0, g=0, b=0;
-	if (sscanf(str, "#%2x%2x%2x", &r, &g, &b) == 3 )		// 2 digit hex
-		return NSVG_RGB(r, g, b);
-	if (sscanf(str, "#%1x%1x%1x", &r, &g, &b) == 3 )		// 1 digit hex, e.g. #abc -> 0xccbbaa
-		return NSVG_RGB(r*17, g*17, b*17);			// same effect as (r<<4|r), (g<<4|g), ..
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+// #rgb, #rgba, #rrggbb, #rrggbbaa. Returns gray on parse errors (upstream behaviour).
+static unsigned int nsvg__parseColorHex(const char* str, float* alpha)
+{
+	int d[8], n = 0;
+	str++;
+	while (n < 8 && nsvg__hexDigit(str[n]) >= 0) { d[n] = nsvg__hexDigit(str[n]); n++; }
+	if (n == 3 || n == 4) {
+		if (n == 4) *alpha = d[3] * 17 / 255.0f;
+		return NSVG_RGB(d[0]*17, d[1]*17, d[2]*17);
+	}
+	if (n == 6 || n == 8) {
+		if (n == 8) *alpha = (d[6]*16 + d[7]) / 255.0f;
+		return NSVG_RGB(d[0]*16 + d[1], d[2]*16 + d[3], d[4]*16 + d[5]);
+	}
 	return NSVG_RGB(128, 128, 128);
 }
 
-// Parse rgb color. The pointer 'str' must point at "rgb(" (4+ characters).
-// This function returns gray (rgb(128, 128, 128) == '#808080') on parse errors
-// for backwards compatibility. Note: other image viewers return black instead.
-
-static unsigned int nsvg__parseColorRGB(const char* str)
+// Reads the comma, space or slash separated arguments of rgb()/rgba()/hsl()/hsla().
+// 'str' points just after the '('. Returns the number of arguments read (at most 4);
+// pct[i] is 1 when argument i ended in '%'.
+static int nsvg__parseColorArgs(const char* str, float* v, int* pct)
 {
-	int i;
-	unsigned int rgbi[3];
-	float rgbf[3];
-	// try decimal integers first
-	if (sscanf(str, "rgb(%u, %u, %u)", &rgbi[0], &rgbi[1], &rgbi[2]) != 3) {
-		// integers failed, try percent values (float, locale independent)
-		const char delimiter[3] = {',', ',', ')'};
-		str += 4; // skip "rgb("
-		for (i = 0; i < 3; i++) {
-			while (*str && (nsvg__isspace(*str))) str++; 	// skip leading spaces
-			if (*str == '+') str++;				// skip '+' (don't allow '-')
-			if (!*str) break;
-			rgbf[i] = nsvg__atof(str);
-
-			// Note 1: it would be great if nsvg__atof() returned how many
-			// bytes it consumed but it doesn't. We need to skip the number,
-			// the '%' character, spaces, and the delimiter ',' or ')'.
-
-			// Note 2: The following code does not allow values like "33.%",
-			// i.e. a decimal point w/o fractional part, but this is consistent
-			// with other image viewers, e.g. firefox, chrome, eog, gimp.
-
-			while (*str && nsvg__isdigit(*str)) str++;		// skip integer part
-			if (*str == '.') {
-				str++;
-				if (!nsvg__isdigit(*str)) break;		// error: no digit after '.'
-				while (*str && nsvg__isdigit(*str)) str++;	// skip fractional part
-			}
-			if (*str == '%') str++; else break;
-			while (*str && nsvg__isspace(*str)) str++;
-			if (*str == delimiter[i]) str++;
-			else break;
+	int n = 0;
+	while (n < 4) {
+		while (*str && (nsvg__isspace(*str) || *str == ',' || *str == '/')) str++;
+		if (!*str || *str == ')') break;
+		if (!(nsvg__isdigit(*str) || *str == '.' || *str == '-' || *str == '+')) return 0;
+		v[n] = (float)nsvg__atof(str);
+		if (*str == '+' || *str == '-') str++;
+		while (*str && (nsvg__isdigit(*str) || *str == '.')) str++;
+		if (*str == 'e' || *str == 'E') {
+			str++;
+			if (*str == '+' || *str == '-') str++;
+			while (*str && nsvg__isdigit(*str)) str++;
 		}
-		if (i == 3) {
-			rgbi[0] = roundf(rgbf[0] * 2.55f);
-			rgbi[1] = roundf(rgbf[1] * 2.55f);
-			rgbi[2] = roundf(rgbf[2] * 2.55f);
-		} else {
-			rgbi[0] = rgbi[1] = rgbi[2] = 128;
-		}
+		pct[n] = 0;
+		if (*str == '%') { pct[n] = 1; str++; }
+		else while (*str && ((*str >= 'a' && *str <= 'z') || (*str >= 'A' && *str <= 'Z'))) str++; // "deg"
+		n++;
 	}
-	// clip values as the CSS spec requires
+	return n;
+}
+
+static float nsvg__clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+// rgb()/rgba(): integers or percentages, optional alpha (number or %).
+static unsigned int nsvg__parseColorRGB(const char* str, float* alpha)
+{
+	float v[4]; int pct[4] = {0, 0, 0, 0}, i, n;
+	unsigned int c[3];
+	str = strchr(str, '(');
+	n = str ? nsvg__parseColorArgs(str + 1, v, pct) : 0;
+	if (n < 3) return NSVG_RGB(128, 128, 128);
 	for (i = 0; i < 3; i++) {
-		if (rgbi[i] > 255) rgbi[i] = 255;
+		float x = pct[i] ? v[i] * 2.55f : v[i];
+		c[i] = (unsigned int)roundf(x < 0 ? 0 : (x > 255 ? 255 : x));
 	}
-	return NSVG_RGB(rgbi[0], rgbi[1], rgbi[2]);
+	if (n == 4) *alpha = nsvg__clamp01(pct[3] ? v[3] / 100.0f : v[3]);
+	return NSVG_RGB(c[0], c[1], c[2]);
+}
+
+static float nsvg__hue2rgb(float m1, float m2, float h)
+{
+	if (h < 0) h += 1;
+	if (h > 1) h -= 1;
+	if (h < 1.0f/6.0f) return m1 + (m2 - m1) * h * 6.0f;
+	if (h < 0.5f) return m2;
+	if (h < 2.0f/3.0f) return m1 + (m2 - m1) * (2.0f/3.0f - h) * 6.0f;
+	return m1;
+}
+
+// hsl()/hsla() (CSS Color 3 §4.2.4).
+static unsigned int nsvg__parseColorHSL(const char* str, float* alpha)
+{
+	float v[4], h, s, l, m1, m2; int pct[4] = {0, 0, 0, 0}, n;
+	str = strchr(str, '(');
+	n = str ? nsvg__parseColorArgs(str + 1, v, pct) : 0;
+	if (n < 3) return NSVG_RGB(128, 128, 128);
+	h = fmodf(v[0], 360.0f) / 360.0f;
+	if (h < 0) h += 1;
+	s = nsvg__clamp01(v[1] / 100.0f);
+	l = nsvg__clamp01(v[2] / 100.0f);
+	m2 = l <= 0.5f ? l * (s + 1) : l + s - l * s;
+	m1 = l * 2 - m2;
+	if (n == 4) *alpha = nsvg__clamp01(pct[3] ? v[3] / 100.0f : v[3]);
+	return NSVG_RGB((unsigned int)roundf(nsvg__hue2rgb(m1, m2, h + 1.0f/3.0f) * 255),
+					(unsigned int)roundf(nsvg__hue2rgb(m1, m2, h) * 255),
+					(unsigned int)roundf(nsvg__hue2rgb(m1, m2, h - 1.0f/3.0f) * 255));
 }
 
 typedef struct NSVGNamedColor {
@@ -1431,6 +1492,7 @@ NSVGNamedColor nsvg__colors[] = {
 	{ "plum", NSVG_RGB(221, 160, 221) },
 	{ "powderblue", NSVG_RGB(176, 224, 230) },
 	{ "purple", NSVG_RGB(128, 0, 128) },
+	{ "rebeccapurple", NSVG_RGB(102, 51, 153) },
 	{ "rosybrown", NSVG_RGB(188, 143, 143) },
 	{ "royalblue", NSVG_RGB( 65, 105, 225) },
 	{ "saddlebrown", NSVG_RGB(139, 69, 19) },
@@ -1472,16 +1534,38 @@ static unsigned int nsvg__parseColorName(const char* str)
 	return NSVG_RGB(128, 128, 128);
 }
 
-static unsigned int nsvg__parseColor(const char* str)
+// Parses a colour; *alpha is set to the colour's own alpha (1 unless it has one).
+// currentColor resolves to the color property of the current attribute state.
+static unsigned int nsvg__parseColorA(NSVGparser* p, const char* str, float* alpha)
 {
+	char name[32];
 	size_t len = 0;
+	*alpha = 1.0f;
 	while(*str == ' ') ++str;
 	len = strlen(str);
+	while (len > 0 && nsvg__isspace(str[len-1])) len--;
 	if (len >= 1 && *str == '#')
-		return nsvg__parseColorHex(str);
-	else if (len >= 4 && str[0] == 'r' && str[1] == 'g' && str[2] == 'b' && str[3] == '(')
-		return nsvg__parseColorRGB(str);
-	return nsvg__parseColorName(str);
+		return nsvg__parseColorHex(str, alpha);
+	if (len >= 4 && (strncmp(str, "rgb(", 4) == 0 || strncmp(str, "rgba(", 5) == 0))
+		return nsvg__parseColorRGB(str, alpha);
+	if (len >= 4 && (strncmp(str, "hsl(", 4) == 0 || strncmp(str, "hsla(", 5) == 0))
+		return nsvg__parseColorHSL(str, alpha);
+	if (len >= sizeof(name)) len = sizeof(name) - 1;
+	{
+		size_t i;
+		for (i = 0; i < len; i++) name[i] = (char)tolower((unsigned char)str[i]);
+		name[len] = '\0';
+	}
+	if (strcmp(name, "currentcolor") == 0) {
+		NSVGattrib* attr = nsvg__getAttr(p);
+		*alpha = attr->currentAlpha;
+		return attr->currentColor;
+	}
+	if (strcmp(name, "transparent") == 0) {
+		*alpha = 0.0f;
+		return NSVG_RGB(0, 0, 0);
+	}
+	return nsvg__parseColorName(name);
 }
 
 static float nsvg__parseOpacity(const char* str)
@@ -1831,10 +1915,14 @@ static int nsvg__parseAttr(NSVGparser* p, const char* name, const char* value)
 			nsvg__parseUrl(attr->fillGradient, value);
 		} else {
 			attr->hasFill = 1;
-			attr->fillColor = nsvg__parseColor(value);
+			attr->fillColor = nsvg__parseColorA(p, value, &attr->fillAlpha);
 		}
 	} else if (strcmp(name, "opacity") == 0) {
-		attr->opacity = nsvg__parseOpacity(value);
+		// Group opacity multiplies (the attribute state starts as a copy of the parent's)
+		attr->opacity *= nsvg__parseOpacity(value);
+	} else if (strcmp(name, "color") == 0) {
+		if (strcmp(value, "inherit") != 0)
+			attr->currentColor = nsvg__parseColorA(p, value, &attr->currentAlpha);
 	} else if (strcmp(name, "fill-opacity") == 0) {
 		attr->fillOpacity = nsvg__parseOpacity(value);
 	} else if (strcmp(name, "stroke") == 0) {
@@ -1845,7 +1933,7 @@ static int nsvg__parseAttr(NSVGparser* p, const char* name, const char* value)
 			nsvg__parseUrl(attr->strokeGradient, value);
 		} else {
 			attr->hasStroke = 1;
-			attr->strokeColor = nsvg__parseColor(value);
+			attr->strokeColor = nsvg__parseColorA(p, value, &attr->strokeAlpha);
 		}
 	} else if (strcmp(name, "stroke-width") == 0) {
 		attr->strokeWidth = nsvg__parseCoordinate(p, value, 0.0f, nsvg__actualLength(p));
@@ -1869,7 +1957,7 @@ static int nsvg__parseAttr(NSVGparser* p, const char* name, const char* value)
 		nsvg__parseTransform(xform, value);
 		nsvg__xformPremultiply(attr->xform, xform);
 	} else if (strcmp(name, "stop-color") == 0) {
-		attr->stopColor = nsvg__parseColor(value);
+		attr->stopColor = nsvg__parseColorA(p, value, &attr->stopAlpha);
 	} else if (strcmp(name, "stop-opacity") == 0) {
 		attr->stopOpacity = nsvg__parseOpacity(value);
 	} else if (strcmp(name, "offset") == 0) {
@@ -2674,7 +2762,7 @@ static void nsvg__parseSVG(NSVGparser* p, const char** attr)
 
 static void nsvg__parseGradient(NSVGparser* p, const char** attr, signed char type)
 {
-	int i;
+	int i, hasFx = 0, hasFy = 0;
 	NSVGgradientData* grad = (NSVGgradientData*)malloc(sizeof(NSVGgradientData));
 	if (grad == NULL) return;
 	memset(grad, 0, sizeof(NSVGgradientData));
@@ -2713,8 +2801,10 @@ static void nsvg__parseGradient(NSVGparser* p, const char** attr, signed char ty
 				grad->radial.r = nsvg__parseCoordinateRaw(attr[i + 1]);
 			} else if (strcmp(attr[i], "fx") == 0) {
 				grad->radial.fx = nsvg__parseCoordinateRaw(attr[i + 1]);
+				hasFx = 1;
 			} else if (strcmp(attr[i], "fy") == 0) {
 				grad->radial.fy = nsvg__parseCoordinateRaw(attr[i + 1]);
+				hasFy = 1;
 			} else if (strcmp(attr[i], "x1") == 0) {
 				grad->linear.x1 = nsvg__parseCoordinateRaw(attr[i + 1]);
 			} else if (strcmp(attr[i], "y1") == 0) {
@@ -2730,12 +2820,18 @@ static void nsvg__parseGradient(NSVGparser* p, const char** attr, signed char ty
 					grad->spread = NSVG_SPREAD_REFLECT;
 				else if (strcmp(attr[i+1], "repeat") == 0)
 					grad->spread = NSVG_SPREAD_REPEAT;
-			} else if (strcmp(attr[i], "xlink:href") == 0) {
+			} else if (strcmp(attr[i], "xlink:href") == 0 || strcmp(attr[i], "href") == 0) {
 				const char *href = attr[i+1];
 				strncpy(grad->ref, href+1, 62);
 				grad->ref[62] = '\0';
 			}
 		}
+	}
+
+	// The focal point defaults to the centre (linear and radial share a union)
+	if (grad->type == NSVG_PAINT_RADIAL_GRADIENT) {
+		if (!hasFx) grad->radial.fx = grad->radial.cx;
+		if (!hasFy) grad->radial.fy = grad->radial.cy;
 	}
 
 	grad->next = p->gradients;
@@ -2752,6 +2848,7 @@ static void nsvg__parseGradientStop(NSVGparser* p, const char** attr)
 	curAttr->stopOffset = 0;
 	curAttr->stopColor = 0;
 	curAttr->stopOpacity = 1.0f;
+	curAttr->stopAlpha = 1.0f;
 
 	for (i = 0; attr[i]; i += 2) {
 		nsvg__parseAttr(p, attr[i], attr[i + 1]);
@@ -2780,7 +2877,7 @@ static void nsvg__parseGradientStop(NSVGparser* p, const char** attr)
 
 	stop = &grad->stops[idx];
 	stop->color = curAttr->stopColor;
-	stop->color |= (unsigned int)(curAttr->stopOpacity*255) << 24;
+	stop->color |= (unsigned int)(curAttr->stopOpacity*curAttr->stopAlpha*255) << 24;
 	stop->offset = curAttr->stopOffset;
 }
 
@@ -3029,6 +3126,11 @@ static void nsvg__createGradients(NSVGparser* p)
 
 NSVGimage* nsvgParse(char* input, const char* units, float dpi)
 {
+	return nsvgParseWithColor(input, units, dpi, NSVG_RGB(0,0,0));
+}
+
+NSVGimage* nsvgParseWithColor(char* input, const char* units, float dpi, unsigned int currentColor)
+{
 	NSVGparser* p;
 	NSVGimage* ret = 0;
 
@@ -3037,6 +3139,10 @@ NSVGimage* nsvgParse(char* input, const char* units, float dpi)
 		return NULL;
 	}
 	p->dpi = dpi;
+	{
+		unsigned int r = (currentColor >> 16) & 0xff, g = (currentColor >> 8) & 0xff, b = currentColor & 0xff;
+		p->attr[0].currentColor = NSVG_RGB(r, g, b);
+	}
 
 	nsvg__parseXML(input, nsvg__startElement, nsvg__endElement, nsvg__content, p);
 

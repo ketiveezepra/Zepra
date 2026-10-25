@@ -100,27 +100,10 @@ std::string expandCSSVariables(const std::string& css) {
 std::string polyfillCSSShorthands(const std::string& css) {
     std::string result = css;
     
-    // background: value -> background-color: value (ONLY for simple colors)
-    size_t pos = 0;
-    while ((pos = result.find("background:", pos)) != std::string::npos) {
-        char next = (pos + 11 < result.length()) ? result[pos + 11] : 0;
-        if (next != '-') {
-            // Check if it's a gradient or image which shouldn't be mapped to background-color
-            size_t endPos = result.find(';', pos);
-            if (endPos == std::string::npos) endPos = result.length();
-            std::string val = result.substr(pos + 11, endPos - (pos + 11));
-            
-            bool isGradientOrImg = (val.find("gradient") != std::string::npos || 
-                                    val.find("url") != std::string::npos ||
-                                    val.find("image") != std::string::npos);
-            
-            if (!isGradientOrImg) {
-                result.replace(pos, 11, "background-color:");
-            }
-        }
-        pos += 17;
-    }
-    
+    // background is left alone: the style resolver splits the shorthand
+    // into colour, image, repeat, position and size (renaming it to
+    // background-color turned "#fff center / cover" into black)
+
     // padding and margin shorthands are left alone: the style resolver
     // expands them, including the two- to four-value forms
     
