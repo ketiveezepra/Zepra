@@ -121,37 +121,8 @@ std::string polyfillCSSShorthands(const std::string& css) {
         pos += 17;
     }
     
-    // padding: val -> padding-top: val; ...
-    pos = 0;
-    while ((pos = result.find("padding:", pos)) != std::string::npos) {
-        char next = (pos + 8 < result.length()) ? result[pos + 8] : 0;
-        if (next != '-') {
-            size_t semi = result.find(';', pos);
-            if (semi != std::string::npos) {
-                std::string val = result.substr(pos + 8, semi - (pos + 8));
-                std::string expanded = "padding-top:" + val + ";padding-right:" + val + 
-                                     ";padding-bottom:" + val + ";padding-left:" + val;
-                result.replace(pos, semi - pos, expanded);
-            }
-        }
-        pos += 8;
-    }
-    
-    // margin: val -> same logic
-    pos = 0;
-    while ((pos = result.find("margin:", pos)) != std::string::npos) {
-        char next = (pos + 7 < result.length()) ? result[pos + 7] : 0;
-        if (next != '-') {
-            size_t semi = result.find(';', pos);
-            if (semi != std::string::npos) {
-                std::string val = result.substr(pos + 7, semi - (pos + 7));
-                std::string expanded = "margin-top:" + val + ";margin-right:" + val + 
-                                     ";margin-bottom:" + val + ";margin-left:" + val;
-                result.replace(pos, semi - pos, expanded);
-            }
-        }
-        pos += 7;
-    }
+    // padding and margin shorthands are left alone: the style resolver
+    // expands them, including the two- to four-value forms
     
     return result;
 }
@@ -236,23 +207,8 @@ std::string extractBodyInlineStyle(const std::string& html) {
         }
     }
     
-    // Also handle 'bgcolor'
-    size_t bgPos = findCaseInsensitive(tagContent, "bgcolor=");
-    if (bgPos != std::string::npos) {
-        size_t quoteStart = bgPos + 8;
-        while (quoteStart < tagContent.length() && isspace(tagContent[quoteStart])) quoteStart++;
-        if (quoteStart < tagContent.length()) {
-            char quote = tagContent[quoteStart];
-            if (quote == '"' || quote == '\'') {
-                 size_t endQuote = tagContent.find(quote, quoteStart + 1);
-                 if (endQuote != std::string::npos) {
-                     std::string color = tagContent.substr(quoteStart + 1, endQuote - (quoteStart + 1));
-                     return "body { background-color: " + color + "; }";
-                 }
-            }
-        }
-    }
-    
+    // bgcolor and the other legacy attributes are presentational hints
+    // (css/presentational_hints.cpp)
     return "";
 }
 

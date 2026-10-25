@@ -86,6 +86,13 @@ enum class DisplayValue {
     TableCell,
     ListItem,
     Contents,
+    TableRowGroup,
+    TableHeaderGroup,
+    TableFooterGroup,
+    TableColumn,
+    TableColumnGroup,
+    TableCaption,
+    InlineTable,
 };
 // Restore X11 None macro
 #ifdef _CSS_NONE_WAS_DEFINED
@@ -305,11 +312,24 @@ public:
     FontStyle fontStyle = FontStyle::Normal;
     float lineHeight = 1.2f;
     TextAlign textAlign = TextAlign::Start;
+    // HTML "align descendants" (<center>, align attributes, -webkit-center):
+    // block children are aligned too. 0=none, 1=left, 2=center, 3=right
+    int legacyAlign = 0;
     std::string textDecoration;
     std::string textTransform;
     float letterSpacing = 0;
     float wordSpacing = 0;
     std::string whiteSpace = "normal";
+    std::string verticalAlign = "baseline";
+
+    // =========================================================================
+    // Tables
+    // =========================================================================
+
+    float borderSpacingH = 0;   // inherited
+    float borderSpacingV = 0;   // inherited
+    bool borderCollapse = false; // inherited
+    bool tableLayoutFixed = false;
 
     // =========================================================================
     // Background

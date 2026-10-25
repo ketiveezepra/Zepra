@@ -12,6 +12,8 @@ namespace Zepra::WebCore {
  */
 struct ZepraUAStylesheet {
     static const char* getStylesheet();
+    /// Extra user-agent rules for documents in quirks mode
+    static const char* getQuirksStylesheet();
 };
 
 } // namespace Zepra::WebCore

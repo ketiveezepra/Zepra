@@ -186,7 +186,21 @@ void CSSCascade::buildIndex(
             
             size_t ruleIdx = indexedRules_.size();
             indexedRules_.push_back({styleRule, origin, ruleOrder++});
-            indexSelector(styleRule->selectorText(), ruleIdx);
+            // Index every selector of a list ("td, th"), not just the last
+            const std::string& text = styleRule->selectorText();
+            size_t partStart = 0;
+            int depth = 0;
+            for (size_t c = 0; c <= text.size(); c++) {
+                char ch = c < text.size() ? text[c] : ',';
+                if (ch == '(' || ch == '[') depth++;
+                else if ((ch == ')' || ch == ']') && depth > 0) depth--;
+                else if (ch == ',' && depth == 0) {
+                    std::string part = text.substr(partStart, c - partStart);
+                    size_t b = part.find_first_not_of(" \t\n\r");
+                    if (b != std::string::npos) indexSelector(part.substr(b), ruleIdx);
+                    partStart = c + 1;
+                }
+            }
         }
     }
     
@@ -573,8 +587,12 @@ bool CSSCascade::compoundSelectorMatches(DOMElement* element, const std::string&
                 if (i < len) i++; // skip ')'
             }
             
-            // Pseudo-elements (::before, ::after) — skip (not rendered)
-            if (isPseudoElement) continue;
+            // Pseudo-elements (::before, ::after, and the old one-colon forms)
+            // style boxes that aren't generated yet, never the element itself
+            if (isPseudoElement || pseudoName == "before" || pseudoName == "after" ||
+                pseudoName == "first-line" || pseudoName == "first-letter") {
+                return false;
+            }
             
             // UI state pseudo-classes: match the live interaction state and the
             // element's attributes (see InteractionState in css_engine.hpp)
