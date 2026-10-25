@@ -10,6 +10,7 @@
 
 #include "scripting/script_context.hpp"
 #include "scripting/canvas_bindings.hpp"
+#include "scripting/dom_bindings.hpp"
 #include <iostream>
 #include <algorithm>
 #include <chrono>
@@ -167,6 +168,10 @@ void ScriptContext::initialize(DOMDocument* document) {
 }
 
 ScriptResult ScriptContext::evaluate(const std::string& code, const std::string& filename) {
+    return run(code, filename, nullptr);
+}
+
+ScriptResult ScriptContext::run(const std::string& code, const std::string& filename, Zepra::Runtime::Value* value) {
     ScriptResult result;
     
     if (code.empty()) {
@@ -274,6 +279,7 @@ ScriptResult ScriptContext::evaluate(const std::string& code, const std::string&
         if (execResult.status == Zepra::Runtime::ExecutionResult::Status::Success) {
             result.success = true;
             result.value = execResult.value.toString();
+            if (value) *value = execResult.value;
         } else {
             result.success = false;
             result.error = execResult.error;
@@ -375,20 +381,24 @@ void ScriptContext::callStoredCallback(const std::string& key, bool passTimestam
     if (!fn) return;
     std::vector<Value> args;
     if (passTimestamp) args.push_back(Value::number(timestampMs));
-    // The callback is a task of its own: its microtasks run right after it,
-    // under the same limits, even when it threw. A run stopped by the limits
-    // takes its queued microtasks with it.
+    runTask([&] { vm_->call(fn, Value::undefined(), args); }, "callback");
+}
+
+void ScriptContext::runTask(const std::function<void()>& task, const char* what) {
+    // The task's microtasks run right after it, under the same limits, even
+    // when it threw. A run stopped by the limits takes its queued microtasks
+    // with it.
     ScriptRunGuard guard(vm_);
     try {
-        vm_->call(fn, Value::undefined(), args);
+        task();
     } catch (const std::exception& e) {
-        if (consoleHandler_) consoleHandler_("error", std::string("Uncaught exception in callback: ") + e.what());
+        if (consoleHandler_) consoleHandler_("error", std::string("Uncaught exception in ") + what + ": " + e.what());
         if (vm_->isTerminationRequested()) {
             vm_->discardJobs();
             return;
         }
     } catch (...) {
-        if (consoleHandler_) consoleHandler_("error", "Uncaught exception in callback");
+        if (consoleHandler_) consoleHandler_("error", std::string("Uncaught exception in ") + what);
     }
     try {
         vm_->runMicrotasks();
@@ -409,15 +419,35 @@ void ScriptContext::setGlobal(const std::string& name, const std::string& value)
 }
 
 void ScriptContext::fireDOMContentLoaded() {
+    if (vm_ && domBindings_) {
+        domBindings_->setReadyState("interactive");
+        runTask([this] { domBindings_->fireEvent(document_, "DOMContentLoaded", true, false); }, "DOMContentLoaded listener");
+    }
     for (auto& listener : domContentLoadedListeners_) {
         if (listener) listener();
     }
 }
 
 void ScriptContext::fireLoadEvent() {
+    if (vm_ && domBindings_) {
+        domBindings_->setReadyState("complete");
+        runTask([this] { domBindings_->fireEvent(nullptr, "load", false, false); }, "load listener");
+    }
     for (auto& listener : loadListeners_) {
         if (listener) listener();
     }
+}
+
+bool ScriptContext::dispatchMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY) {
+    bool notCanceled = true;
+    if (vm_ && domBindings_ && target) {
+        runTask([&] { notCanceled = domBindings_->fireMouseEvent(target, type, clientX, clientY); }, "event listener");
+    }
+    return notCanceled;
+}
+
+void ScriptContext::releaseDetachedNodes() {
+    if (domBindings_) domBindings_->releaseDetachedNodes();
 }
 
 void ScriptContext::addEventListener(const std::string& eventType, std::function<void()> callback) {
@@ -444,6 +474,13 @@ std::string ScriptContext::prompt(const std::string& message, const std::string&
 }
 
 void ScriptContext::setupGlobals() {
+    if (vm_) {
+        // The window object and the DOM interfaces (EventTarget, Node, Event, ...)
+        domBindings_ = std::make_unique<DOMBindings>(vm_, [this](const std::string& message) {
+            if (consoleHandler_) consoleHandler_("error", message);
+            else std::cerr << "[console.error] " << message << std::endl;
+        });
+    }
     setupWindowGlobals();
     setupDocumentGlobals();
 }
@@ -588,7 +625,8 @@ void ScriptContext::setupWindowGlobals() {
     
     // 'window' — self-referencing global scope alias
     // Most JS starts with window.addEventListener, window.document, etc.
-    auto* windowObj = new Object();
+    // (an EventTarget: addEventListener comes from its prototype)
+    auto* windowObj = domBindings_->window();
     windowObj->set("innerWidth", Value::number(1280));
     windowObj->set("innerHeight", Value::number(720));
     windowObj->set("navigator", Value::object(navObj));
@@ -601,23 +639,6 @@ void ScriptContext::setupWindowGlobals() {
     windowObj->set("setInterval", Value::object(setIntervalFn));
     windowObj->set("clearTimeout", Value::object(clearTimeoutFn));
     windowObj->set("clearInterval", Value::object(clearTimeoutFn));
-    
-    // window.addEventListener — delegates to ScriptContext event system
-    auto* winAddEvent = createNativeFunction("addEventListener",
-        [this](Context*, const std::vector<Value>& args) -> Value {
-            if (args.size() < 2) return Value::undefined();
-            std::string eventType = args[0].toString();
-            addEventListener(eventType, []{});
-            return Value::undefined();
-        }, 2);
-    windowObj->set("addEventListener", Value::object(winAddEvent));
-    
-    // window.removeEventListener (no-op for now)
-    auto* winRemoveEvent = createNativeFunction("removeEventListener",
-        [](Context*, const std::vector<Value>&) -> Value {
-            return Value::undefined();
-        }, 2);
-    windowObj->set("removeEventListener", Value::object(winRemoveEvent));
     
     // window.getComputedStyle (stub — returns empty style object)
     auto* getComputedStyleFn = createNativeFunction("getComputedStyle",
@@ -890,326 +911,19 @@ void ScriptContext::setupWindowGlobals() {
 }
 
 void ScriptContext::setupDocumentGlobals() {
-    if (!vm_ || !document_) return;
-    
-    using namespace Zepra::Runtime;
-    
-    // Helper: wrap a DOMElement* into a JS Object with properties and methods
-    auto wrapElement = [this](DOMElement* elem) -> Value {
-        if (!elem) return Value::null();
-        
-        auto* obj = new Object();
-        
-        // Properties
-        obj->set("tagName", Value::string(new String(elem->tagName())));
-        obj->set("id", Value::string(new String(elem->id())));
-        obj->set("className", Value::string(new String(elem->className())));
-        obj->set("textContent", Value::string(new String(elem->textContent())));
-        obj->set("nodeName", Value::string(new String(elem->nodeName())));
-        
-        // innerHTML (approximation: textContent)
-        obj->set("innerHTML", Value::string(new String(elem->textContent())));
-        
-        // getAttribute(name)
-        auto* getAttrFn = createNativeFunction("getAttribute",
-            [elem](Context*, const std::vector<Value>& args) -> Value {
-                if (args.empty()) return Value::undefined();
-                std::string name = args[0].toString();
-                return Value::string(new String(elem->getAttribute(name)));
-            }, 1);
-        obj->set("getAttribute", Value::object(getAttrFn));
-        
-        // setAttribute(name, value)
-        auto* setAttrFn = createNativeFunction("setAttribute",
-            [this, elem](Context*, const std::vector<Value>& args) -> Value {
-                if (args.size() < 2) return Value::undefined();
-                elem->setAttribute(args[0].toString(), args[1].toString());
-                if (canvasRegistry_) canvasRegistry_->attributeChanged(elem, args[0].toString());
-                return Value::undefined();
-            }, 2);
-        obj->set("setAttribute", Value::object(setAttrFn));
-        
-        // style object (property bag — sets CSS inline styles)
-        auto* styleObj = new Object();
-        obj->set("style", Value::object(styleObj));
-        
-        // addEventListener (stored on the EventTarget)
-        auto* addEventFn = createNativeFunction("addEventListener",
-            [](Context*, const std::vector<Value>&) -> Value {
-                // Event binding requires callback storage — placeholder for now
-                return Value::undefined();
-            }, 2);
-        obj->set("addEventListener", Value::object(addEventFn));
-        
-        // children array
-        auto* childrenArray = new Object(ObjectType::Array);
-        int idx = 0;
-        for (const auto& childNode : elem->childNodes()) {
-            if (auto* childElem = dynamic_cast<DOMElement*>(childNode.get())) {
-                auto* childObj = new Object();
-                childObj->set("tagName", Value::string(new String(childElem->tagName())));
-                childObj->set("id", Value::string(new String(childElem->id())));
-                childObj->set("textContent", Value::string(new String(childElem->textContent())));
-                childrenArray->set(idx++, Value::object(childObj));
-            }
-        }
-        obj->set("children", Value::object(childrenArray));
-        
-        // querySelector on element
-        auto wrapElem = [this](DOMElement* e) -> Value {
-            if (!e) return Value::null();
-            auto* o = new Object();
-            o->set("tagName", Value::string(new String(e->tagName())));
-            o->set("id", Value::string(new String(e->id())));
-            o->set("className", Value::string(new String(e->className())));
-            o->set("textContent", Value::string(new String(e->textContent())));
-            return Value::object(o);
-        };
-        
-        auto* qsFn = createNativeFunction("querySelector",
-            [elem, wrapElem](Context*, const std::vector<Value>& args) -> Value {
-                if (args.empty()) return Value::null();
-                return wrapElem(elem->querySelector(args[0].toString()));
-            }, 1);
-        obj->set("querySelector", Value::object(qsFn));
-        
-        // classList object
-        auto* classListObj = new Object();
-        std::string cls = elem->className();
-        classListObj->set("value", Value::string(new String(cls)));
-        
-        auto* clAddFn = createNativeFunction("add",
-            [elem](Context*, const std::vector<Value>& args) -> Value {
-                if (!args.empty()) {
-                    std::string current = elem->className();
-                    if (!current.empty()) current += " ";
-                    current += args[0].toString();
-                    elem->setAttribute("class", current);
-                }
-                return Value::undefined();
-            }, 1);
-        classListObj->set("add", Value::object(clAddFn));
-        
-        auto* clRemoveFn = createNativeFunction("remove",
-            [](Context*, const std::vector<Value>&) -> Value {
-                return Value::undefined();
-            }, 1);
-        classListObj->set("remove", Value::object(clRemoveFn));
-        
-        auto* clContainsFn = createNativeFunction("contains",
-            [elem](Context*, const std::vector<Value>& args) -> Value {
-                if (args.empty()) return Value::boolean(false);
-                std::string cls = elem->className();
-                return Value::boolean(cls.find(args[0].toString()) != std::string::npos);
-            }, 1);
-        classListObj->set("contains", Value::object(clContainsFn));
-        
-        auto* clToggleFn = createNativeFunction("toggle",
-            [](Context*, const std::vector<Value>&) -> Value {
-                return Value::boolean(false);
-            }, 1);
-        classListObj->set("toggle", Value::object(clToggleFn));
-        obj->set("classList", Value::object(classListObj));
-        
-        // parentNode / parentElement
-        DOMNode* parentNode = elem->parentNode();
-        DOMElement* parent = parentNode ? dynamic_cast<DOMElement*>(parentNode) : nullptr;
-        if (parent) {
-            auto* parentObj = new Object();
-            parentObj->set("tagName", Value::string(new String(parent->tagName())));
-            parentObj->set("id", Value::string(new String(parent->id())));
-            parentObj->set("className", Value::string(new String(parent->className())));
-            obj->set("parentNode", Value::object(parentObj));
-            obj->set("parentElement", Value::object(parentObj));
-        } else {
-            obj->set("parentNode", Value::null());
-            obj->set("parentElement", Value::null());
-        }
-        
-        // appendChild / removeChild (stubs for mutation)
-        auto* appendChildFn = createNativeFunction("appendChild",
-            [](Context*, const std::vector<Value>& args) -> Value {
-                return args.empty() ? Value::undefined() : args[0];
-            }, 1);
-        obj->set("appendChild", Value::object(appendChildFn));
-        
-        auto* removeChildFn = createNativeFunction("removeChild",
-            [](Context*, const std::vector<Value>& args) -> Value {
-                return args.empty() ? Value::undefined() : args[0];
-            }, 1);
-        obj->set("removeChild", Value::object(removeChildFn));
-        
-        // getBoundingClientRect
-        auto* getBCRFn = createNativeFunction("getBoundingClientRect",
-            [](Context*, const std::vector<Value>&) -> Value {
-                auto* rect = new Object();
-                rect->set("x", Value::number(0));
-                rect->set("y", Value::number(0));
-                rect->set("width", Value::number(0));
-                rect->set("height", Value::number(0));
-                rect->set("top", Value::number(0));
-                rect->set("left", Value::number(0));
-                rect->set("right", Value::number(0));
-                rect->set("bottom", Value::number(0));
-                return Value::object(rect);
-            }, 0);
-        obj->set("getBoundingClientRect", Value::object(getBCRFn));
+    if (!vm_ || !domBindings_) return;
 
-        // <canvas>: width, height, getContext()
-        std::string tag = elem->tagName();
-        std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
-        if (tag == "canvas" && canvasRegistry_) canvasRegistry_->decorate(obj, elem);
-        
-        return Value::object(obj);
-    };
-    
-    // Create 'document' object
-    auto* docObj = new Object();
-    DOMDocument* doc = document_;
-    
-    // document.getElementById(id)
-    auto* getById = createNativeFunction("getElementById",
-        [doc, wrapElement](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::null();
-            return wrapElement(doc->getElementById(args[0].toString()));
-        }, 1);
-    docObj->set("getElementById", Value::object(getById));
-    
-    // document.querySelector(selector)
-    auto* querySelector = createNativeFunction("querySelector",
-        [doc, wrapElement](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::null();
-            return wrapElement(doc->querySelector(args[0].toString()));
-        }, 1);
-    docObj->set("querySelector", Value::object(querySelector));
-    
-    // document.querySelectorAll(selector) → returns array
-    auto* querySelectorAll = createNativeFunction("querySelectorAll",
-        [doc, wrapElement](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::object(new Object(ObjectType::Array));
-            auto elems = doc->querySelectorAll(args[0].toString());
-            auto* arr = new Object(ObjectType::Array);
-            for (size_t i = 0; i < elems.size(); i++) {
-                arr->set(i, wrapElement(elems[i]));
-            }
-            return Value::object(arr);
-        }, 1);
-    docObj->set("querySelectorAll", Value::object(querySelectorAll));
-    
-    // document.createElement(tagName)
-    auto* createElement = createNativeFunction("createElement",
-        [doc](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::null();
-            auto elem = doc->createElement(args[0].toString());
-            if (!elem) return Value::null();
-            auto* obj = new Object();
-            obj->set("tagName", Value::string(new String(elem->tagName())));
-            return Value::object(obj);
-        }, 1);
-    docObj->set("createElement", Value::object(createElement));
-    
-    // document.createTextNode(data)
-    auto* createTextNode = createNativeFunction("createTextNode",
-        [doc](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::null();
-            auto* obj = new Object();
-            obj->set("nodeType", Value::number(3));
-            obj->set("textContent", Value::string(new String(args[0].toString())));
-            return Value::object(obj);
-        }, 1);
-    docObj->set("createTextNode", Value::object(createTextNode));
-    
-    // document.body
-    DOMElement* bodyElem = doc->body();
-    docObj->set("body", wrapElement(bodyElem));
-    
-    // document.documentElement
-    DOMElement* htmlElem = doc->documentElement();
-    docObj->set("documentElement", wrapElement(htmlElem));
-    
-    // document.head
-    DOMElement* headElem = doc->head();
-    docObj->set("head", wrapElement(headElem));
-    
-    // document.title
-    docObj->set("title", Value::string(new String(doc->title())));
-    
-    // document.addEventListener
-    auto* docAddEvent = createNativeFunction("addEventListener",
-        [this](Context*, const std::vector<Value>& args) -> Value {
-            if (args.size() < 2) return Value::undefined();
-            std::string eventType = args[0].toString();
-            addEventListener(eventType, []{});
-            return Value::undefined();
-        }, 2);
-    docObj->set("addEventListener", Value::object(docAddEvent));
-    
-    // document.getElementsByTagName
-    auto* getByTag = createNativeFunction("getElementsByTagName",
-        [doc, wrapElement](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::object(new Object(ObjectType::Array));
-            auto elems = doc->querySelectorAll(args[0].toString());
-            auto* arr = new Object(ObjectType::Array);
-            for (size_t i = 0; i < elems.size(); i++) {
-                arr->set(i, wrapElement(elems[i]));
-            }
-            arr->set("length", Value::number((double)elems.size()));
-            return Value::object(arr);
-        }, 1);
-    docObj->set("getElementsByTagName", Value::object(getByTag));
-    
-    // document.getElementsByClassName
-    auto* getByClass = createNativeFunction("getElementsByClassName",
-        [doc, wrapElement](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::object(new Object(ObjectType::Array));
-            std::string selector = "." + args[0].toString();
-            auto elems = doc->querySelectorAll(selector);
-            auto* arr = new Object(ObjectType::Array);
-            for (size_t i = 0; i < elems.size(); i++) {
-                arr->set(i, wrapElement(elems[i]));
-            }
-            arr->set("length", Value::number((double)elems.size()));
-            return Value::object(arr);
-        }, 1);
-    docObj->set("getElementsByClassName", Value::object(getByClass));
-    
-    // document.cookie (empty string)
-    docObj->set("cookie", Value::string(new String("")));
-    
-    // document.readyState
-    docObj->set("readyState", Value::string(new String("complete")));
-    
-    // document.URL / document.location
-    docObj->set("URL", Value::string(new String("")));
-    
-    // document.createDocumentFragment
-    auto* createFragFn = createNativeFunction("createDocumentFragment",
-        [](Context*, const std::vector<Value>&) -> Value {
-            auto* frag = new Object();
-            frag->set("nodeType", Value::number(11));
-            auto* appendChildFn = createNativeFunction("appendChild",
-                [](Context*, const std::vector<Value>& args) -> Value {
-                    return args.empty() ? Value::undefined() : args[0];
-                }, 1);
-            frag->set("appendChild", Value::object(appendChildFn));
-            return Value::object(frag);
-        }, 0);
-    docObj->set("createDocumentFragment", Value::object(createFragFn));
-    
-    // Wire window.document
-    vm_->setGlobal("__document_ref__", Value::object(docObj));
-    
-    // Register document global
-    vm_->setGlobal("document", Value::object(docObj));
-    
-    // Patch window object with document reference
-    // (window was created in setupWindowGlobals, now we add document to it)
-    auto windowVal = vm_->getGlobal("window");
-    if (windowVal.isObject()) {
-        windowVal.asObject()->set("document", Value::object(docObj));
-    }
-    
-    std::cout << "[ScriptContext] DOM API registered (document.getElementById, querySelector, createElement, body, title)" << std::endl;
+    using namespace Zepra::Runtime;
+
+    // document and every node reached from it are live wrappers of the C++
+    // DOM (scripting/dom_bindings.cpp); <canvas> wrappers get getContext()
+    domBindings_->setCanvases(canvasRegistry_.get());
+    // on<event>="..." attributes compile to functions on first dispatch
+    domBindings_->setFunctionCompiler([this](const std::string& source, Value& out) {
+        return run(source, "<event handler>", &out).success;
+    });
+    domBindings_->installDocument(document_);
+    if (document_) vm_->setGlobal("__document_ref__", vm_->getGlobal("document"));
 }
 
 // ============================================================================

@@ -18,6 +18,7 @@ namespace Zepra::Runtime {
     class VM; 
     class Context; // Internal context
     class Object;
+    class Value;
 }
 
 namespace Zepra::WebCore {
@@ -44,6 +45,7 @@ struct TimerCallback {
  * @brief Alert dialog handler callback
  */
 class CanvasRegistry;
+class DOMBindings;
 
 using AlertHandler = std::function<void(const std::string& message)>;
 using ConfirmHandler = std::function<bool(const std::string& message)>;
@@ -102,6 +104,22 @@ public:
      * @brief Add event listener for window/document events
      */
     void addEventListener(const std::string& eventType, std::function<void()> callback);
+
+    /**
+     * @brief Fire a mouse event (click, mousedown, ...) at a page element:
+     * its listeners run, then the microtasks they queued
+     * @return false when a listener canceled it (preventDefault)
+     */
+    bool dispatchMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY);
+
+    /**
+     * @brief Free the DOM nodes scripts removed and can no longer reach.
+     * Call after the layout tree was rebuilt, when nothing points at them.
+     */
+    void releaseDetachedNodes();
+
+    /// The live DOM wrappers of this page
+    DOMBindings* domBindings() { return domBindings_.get(); }
     
     // ====== NEW: Dialog Handlers ======
     
@@ -129,6 +147,11 @@ private:
     void setupGlobals();
     void setupWindowGlobals();
     void setupDocumentGlobals();
+    /// Compiles and runs `code`; `value` (optional) receives its completion value
+    ScriptResult run(const std::string& code, const std::string& filename, Zepra::Runtime::Value* value);
+    /// Runs host-initiated script work (a callback, an event) as a task: under
+    /// the run limits, followed by the microtasks it queued
+    void runTask(const std::function<void()>& task, const char* what);
     
     DOMDocument* document_ = nullptr;
     ConsoleHandler consoleHandler_;
@@ -163,7 +186,8 @@ private:
     ConfirmHandler confirmHandler_;
     PromptHandler promptHandler_;
 
-    // Declared last: goes before the VM whose objects point into it
+    // Go before the VM whose objects point into them
+    std::unique_ptr<DOMBindings> domBindings_;
     std::unique_ptr<CanvasRegistry> canvasRegistry_;
 };
 

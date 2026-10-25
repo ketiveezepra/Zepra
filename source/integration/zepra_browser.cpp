@@ -1068,6 +1068,8 @@ static void relayoutDocument() {
     g_styledLines.clear();
     rebuildLayoutTree();
     g_focusedBox = findBoxForElement(g_layoutRoot.get(), focusedElement);
+    // No box points at the nodes scripts removed any more
+    if (g_scriptContext) g_scriptContext->releaseDetachedNodes();
 }
 
 void parseWithWebCore(const std::string& html) {
@@ -1257,13 +1259,9 @@ void parseWithWebCore(const std::string& html) {
         executePageScripts(g_document->head());
     }
     
-    // Fire DOMContentLoaded
+    // DOMContentLoaded, then load (listeners and on* handlers)
     g_scriptContext->fireDOMContentLoaded();
-    if (g_scriptContext) {
-        g_scriptContext->evaluate("if (typeof document !== 'undefined' && typeof document.onDOMContentLoaded === 'function') { document.onDOMContentLoaded(); }", "zepra://internal/dom_loaded");
-        g_scriptContext->fireLoadEvent();
-        g_scriptContext->evaluate("if (typeof window !== 'undefined' && typeof window.onload === 'function') { window.onload(); }", "zepra://internal/onload");
-    }
+    g_scriptContext->fireLoadEvent();
     std::cout << "[JS] DOMContentLoaded and Window Load fired" << std::endl;
 
     // The box tree was built before scripts ran; show their DOM changes
@@ -4288,6 +4286,8 @@ void onNavigate(const std::string& input) {
 }
 
 // Find LayoutBox at screen coordinates (recursive)
+static DOMElement* findElementAt(LayoutBox* box, float x, float y);
+
 LayoutBox* findBoxAt(LayoutBox* box, float x, float y) {
     if (!box) return nullptr;
     
@@ -4413,6 +4413,15 @@ void handleClick(float mx, float my) {
     g_addressFocused = false;
     g_searchFocused = false;
     g_focusedBox = nullptr;
+
+    // Page scripts see the click first (on press); preventDefault() keeps
+    // links from navigating and inputs from taking focus. Nodes a listener
+    // removes stay alive until the next relayout, so the boxes below are safe.
+    if (my > TOPBAR_HEIGHT && g_layoutRoot && g_scriptContext) {
+        if (DOMElement* target = findElementAt(g_layoutRoot.get(), mx, my)) {
+            if (!g_scriptContext->dispatchMouseEvent(target, "click", mx, my - TOPBAR_HEIGHT)) return;
+        }
+    }
     
     // Check web content layout tree for inputs (HTML-rendered search box)
     if (my > TOPBAR_HEIGHT && g_layoutRoot) {
