@@ -80,6 +80,7 @@ set(ZEPRASCRIPT_INTEGRATION_TEST_SOURCES
     integration/js_execution_test.cpp
     integration/script_context_test.cpp
     integration/canvas_bindings_test.cpp
+    integration/webgl_bindings_test.cpp
     integration/conformance_test.cpp
 )
 

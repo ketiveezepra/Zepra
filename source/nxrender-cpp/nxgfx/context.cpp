@@ -551,6 +551,31 @@ void GpuContext::drawTexture(TextureId texture, const Rect& dest) {
     glDisable(GL_TEXTURE_2D);
 }
 
+void GpuContext::drawRenderTarget(TextureId texture, const Rect& dest, bool premultiplied, bool opaque) {
+    if (!texture) return;
+
+    glPushAttrib(GL_COLOR_BUFFER_BIT | GL_ENABLE_BIT);
+    if (opaque) {
+        glDisable(GL_BLEND);
+    } else {
+        glEnable(GL_BLEND);
+        glBlendFunc(premultiplied ? GL_ONE : GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    }
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glColor4ub(255, 255, 255, 255);
+
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 1); glVertex2f(dest.x, dest.y);
+    glTexCoord2f(1, 1); glVertex2f(dest.x + dest.width, dest.y);
+    glTexCoord2f(1, 0); glVertex2f(dest.x + dest.width, dest.y + dest.height);
+    glTexCoord2f(0, 0); glVertex2f(dest.x, dest.y + dest.height);
+    glEnd();
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glPopAttrib();
+}
+
 void GpuContext::drawTexture(TextureId texture, const Rect& src, const Rect& dest) {
     if (!texture) return;
     
