@@ -136,6 +136,13 @@ public:
      */
     using TextureCreator = std::function<uint32_t(int width, int height, const uint8_t* pixels)>;
     void setTextureCreator(TextureCreator creator) { textureCreator_ = creator; }
+
+    /**
+     * @brief The texture to draw now for an image texture (main thread). For an
+     * animated GIF, textureId is its first frame and the result follows the
+     * frame delays, looping; any other texture comes back unchanged.
+     */
+    uint32_t currentFrame(uint32_t textureId) const;
     
 private:
     void workerThread();
@@ -159,6 +166,7 @@ private:
         int tabId = -1;
         uint64_t tabGeneration = 0;
         std::string url;           // key for textureCache_
+        std::vector<int> delaysMs; // animated GIF: one per frame; pixels holds the frames back to back
         bool background = false;   // see PendingImage::background
         std::string errorText;     // non-empty: show this placeholder instead
         uint32_t errorColor = 0;
@@ -196,6 +204,14 @@ private:
     };
     std::unordered_map<std::string, CachedTexture> textureCache_;
     std::mutex cacheMutex_;
+
+    // Animated GIFs by first-frame texture (main thread only)
+    struct Animation {
+        std::vector<uint32_t> frames;
+        std::vector<int> endsMs;  // frame i shows until endsMs[i] into each loop
+        int64_t startMs = 0;
+    };
+    std::unordered_map<uint32_t, Animation> animations_;
 };
 
 // Global instance
