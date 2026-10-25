@@ -172,7 +172,8 @@ include_directories(${CMAKE_SOURCE_DIR}/source/integration/include)
 add_subdirectory(source/platform)
 include_directories(${CMAKE_SOURCE_DIR}/source/platform/include)
 
-# Build NXAudio (Audio Engine)
+# Build NXAudio (Audio Engine) and its tests (ctest --test-dir build/source/media/nxaudio)
+set(NXAUDIO_BUILD_TESTS ON)
 add_subdirectory(source/media/nxaudio)
 include_directories(${CMAKE_SOURCE_DIR}/source/media/nxaudio/include)
 

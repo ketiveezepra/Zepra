@@ -48,22 +48,31 @@ int wav_parse(const void *data, size_t size, wav_info_t *info) {
     const wav_fmt_chunk_t *fmt = NULL;
     const wav_data_chunk_t *data_chunk = NULL;
     const void *audio_data = NULL;
+    uint32_t data_size = 0;
     
     while (ptr + 8 <= end) {
         const char *chunk_id = (const char*)ptr;
-        uint32_t chunk_size = *(uint32_t*)(ptr + 4);
+        uint32_t chunk_size = (uint32_t)ptr[4] | ((uint32_t)ptr[5] << 8) |
+                              ((uint32_t)ptr[6] << 16) | ((uint32_t)ptr[7] << 24);
+        size_t left = (size_t)(end - ptr) - 8;
         
         if (mem_cmp(chunk_id, "fmt ", 4) == 0) {
+            if (chunk_size < 16 || left < 16) break;
             fmt = (const wav_fmt_chunk_t*)ptr;
         }
         else if (mem_cmp(chunk_id, "data", 4) == 0) {
             data_chunk = (const wav_data_chunk_t*)ptr;
             audio_data = ptr + 8;
+            /* Streamed WAVs may claim 0 or 0xFFFFFFFF; never read past the file */
+            data_size = (chunk_size == 0 || chunk_size > left) ? (uint32_t)left : chunk_size;
+            break;
         }
+        
+        if (chunk_size > left) break;
         
         /* Move to next chunk (8 byte header + chunk data, aligned to 2 bytes) */
         ptr += 8 + chunk_size;
-        if (chunk_size & 1) ptr++;  /* Padding byte */
+        if ((chunk_size & 1) && ptr < end) ptr++;  /* Padding byte */
     }
     
     if (!fmt) {
@@ -81,17 +90,32 @@ int wav_parse(const void *data, size_t size, wav_info_t *info) {
     info->channels = fmt->num_channels;
     info->sample_rate = fmt->sample_rate;
     info->bits_per_sample = fmt->bits_per_sample;
-    info->data_size = data_chunk->chunk_size;
+    info->data_size = data_size;
     info->data = audio_data;
+    
+    /* WAVE_FORMAT_EXTENSIBLE: the sub-format GUID starts with the real format code */
+    if (info->format == WAV_FORMAT_EXTENSIBLE && fmt->chunk_size >= 40) {
+        const uint8_t *sub = (const uint8_t*)fmt + 8 + 24;
+        info->format = (uint16_t)(sub[0] | (sub[1] << 8));
+    }
+    
+    int bits = info->bits_per_sample;
+    int pcm_ok = info->format == WAV_FORMAT_PCM &&
+                 (bits == 8 || bits == 16 || bits == 24 || bits == 32);
+    int float_ok = info->format == WAV_FORMAT_IEEE_FLOAT && bits == 32;
+    if (!pcm_ok && !float_ok) {
+        fprintf(stderr, "[WAV] Unsupported encoding (format 0x%04x, %d bit)\n", info->format, bits);
+        return -6;
+    }
+    if (info->channels == 0 || info->sample_rate == 0) {
+        fprintf(stderr, "[WAV] Bad fmt chunk\n");
+        return -6;
+    }
     
     /* Calculate number of frames */
     size_t bytes_per_sample = info->bits_per_sample / 8;
     size_t bytes_per_frame = bytes_per_sample * info->channels;
     info->num_frames = info->data_size / bytes_per_frame;
-    
-    printf("[WAV] Parsed: %d Hz, %d ch, %d bit, %zu frames (%.2f sec)\n",
-           info->sample_rate, info->channels, info->bits_per_sample,
-           info->num_frames, wav_duration(info));
     
     return 0;
 }
@@ -178,7 +202,8 @@ size_t wav_to_float(const wav_info_t *info, float *out_samples, size_t max_frame
         case 24: {
             /* Signed 24-bit PCM */
             for (size_t i = 0; i < total_samples; i++) {
-                int32_t sample = (src[i*3] << 8) | (src[i*3+1] << 16) | (src[i*3+2] << 24);
+                int32_t sample = (int32_t)(((uint32_t)src[i*3] << 8) | ((uint32_t)src[i*3+1] << 16) |
+                                           ((uint32_t)src[i*3+2] << 24));
                 sample >>= 8;  /* Sign extend */
                 out_samples[i] = (float)sample / 8388608.0f;
             }

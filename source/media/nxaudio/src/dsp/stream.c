@@ -6,6 +6,7 @@
 
 #include "stream.h"
 #include "../codecs/wav.h"
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -17,7 +18,11 @@ static int str_ends_with(const char *str, const char *suffix) {
     size_t str_len = strlen(str);
     size_t suf_len = strlen(suffix);
     if (suf_len > str_len) return 0;
-    return strcasecmp(str + str_len - suf_len, suffix) == 0;
+    const char *tail = str + str_len - suf_len;
+    for (size_t i = 0; i < suf_len; i++) {
+        if (tolower((unsigned char)tail[i]) != tolower((unsigned char)suffix[i])) return 0;
+    }
+    return 1;
 }
 
 static nx_codec_t detect_codec(const char *filepath) {
@@ -30,70 +35,82 @@ static nx_codec_t detect_codec(const char *filepath) {
     return NX_CODEC_UNKNOWN;
 }
 
+static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+static uint32_t rd32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
 /* ============ WAV Streaming Codec ============ */
 
 typedef struct {
-    size_t data_offset;
-    size_t data_size;
-    size_t bytes_per_frame;
+    size_t   data_offset;
+    size_t   data_size;
+    size_t   bytes_per_frame;
+    int      is_float;
 } wav_stream_state_t;
 
 static nx_error_t wav_stream_open(nx_audio_stream_t *stream) {
-    /* Read header */
-    uint8_t header[44];
-    if (fread(header, 1, 44, stream->file) != 44) {
-        return NX_ERR_IO;
-    }
-    
-    /* Verify RIFF/WAVE */
-    if (memcmp(header, "RIFF", 4) != 0 || memcmp(header + 8, "WAVE", 4) != 0) {
+    wav_stream_state_t *state = (wav_stream_state_t*)stream->decoder_state;
+    uint8_t riff[12];
+
+    if (fread(riff, 1, 12, stream->file) != 12) return NX_ERR_IO;
+    if (memcmp(riff, "RIFF", 4) != 0 || memcmp(riff + 8, "WAVE", 4) != 0) {
         return NX_ERR_FORMAT;
     }
-    
-    /* Find fmt chunk */
-    fseek(stream->file, 12, SEEK_SET);
-    
-    while (!feof(stream->file)) {
-        char chunk_id[4];
-        uint32_t chunk_size;
-        
-        if (fread(chunk_id, 1, 4, stream->file) != 4) break;
-        if (fread(&chunk_size, 4, 1, stream->file) != 1) break;
-        
-        if (memcmp(chunk_id, "fmt ", 4) == 0) {
-            uint16_t format, channels, bits;
-            uint32_t sample_rate;
-            
-            fread(&format, 2, 1, stream->file);
-            fread(&channels, 2, 1, stream->file);
-            fread(&sample_rate, 4, 1, stream->file);
-            fseek(stream->file, 6, SEEK_CUR);  /* Skip byte rate and block align */
-            fread(&bits, 2, 1, stream->file);
-            
-            stream->sample_rate = sample_rate;
-            stream->channels = channels;
-            stream->bits_per_sample = bits;
-            
-            fseek(stream->file, -(22), SEEK_CUR);
-            fseek(stream->file, chunk_size, SEEK_CUR);
+
+    int have_fmt = 0;
+    uint16_t format = 0;
+
+    for (;;) {
+        uint8_t hdr[8];
+        if (fread(hdr, 1, 8, stream->file) != 8) break;
+
+        uint32_t chunk_size = rd32(hdr + 4);
+        long body = ftell(stream->file);
+
+        if (memcmp(hdr, "fmt ", 4) == 0) {
+            uint8_t fmt[40] = {0};
+            size_t n = chunk_size < sizeof(fmt) ? chunk_size : sizeof(fmt);
+            if (n < 16 || fread(fmt, 1, n, stream->file) != n) return NX_ERR_FORMAT;
+
+            format = rd16(fmt);
+            stream->channels = rd16(fmt + 2);
+            stream->sample_rate = rd32(fmt + 4);
+            stream->bits_per_sample = rd16(fmt + 14);
+
+            /* WAVE_FORMAT_EXTENSIBLE: the real format is the sub-format GUID's first word */
+            if (format == 0xFFFE && n >= 26) format = rd16(fmt + 24);
+            have_fmt = 1;
         }
-        else if (memcmp(chunk_id, "data", 4) == 0) {
-            wav_stream_state_t *state = (wav_stream_state_t*)stream->decoder_state;
-            state->data_offset = ftell(stream->file);
-            state->data_size = chunk_size;
-            state->bytes_per_frame = stream->channels * (stream->bits_per_sample / 8);
-            
-            stream->total_frames = chunk_size / state->bytes_per_frame;
-            stream->duration = (float)stream->total_frames / stream->sample_rate;
-            
+        else if (memcmp(hdr, "data", 4) == 0) {
+            if (!have_fmt) return NX_ERR_FORMAT;
+
+            state->data_offset = (size_t)body;
+            /* Streamed WAVs may say 0 or 0xFFFFFFFF here; trust the file size */
+            size_t avail = stream->file_size > (size_t)body ? stream->file_size - (size_t)body : 0;
+            state->data_size = (chunk_size == 0 || chunk_size > avail) ? avail : chunk_size;
             break;
         }
-        else {
-            fseek(stream->file, chunk_size, SEEK_CUR);
-            if (chunk_size & 1) fseek(stream->file, 1, SEEK_CUR);
-        }
+
+        if (fseek(stream->file, body + (long)chunk_size + (long)(chunk_size & 1), SEEK_SET) != 0) break;
     }
-    
+
+    if (!have_fmt || state->data_offset == 0) return NX_ERR_FORMAT;
+    if (stream->channels == 0 || stream->sample_rate == 0) return NX_ERR_FORMAT;
+
+    int bits = stream->bits_per_sample;
+    if (format == 3 && bits == 32) {
+        state->is_float = 1;
+    } else if (format != 1 || (bits != 8 && bits != 16 && bits != 24 && bits != 32)) {
+        fprintf(stderr, "[Stream] Unsupported WAV encoding (format %u, %d bit)\n", format, bits);
+        return NX_ERR_FORMAT;
+    }
+
+    state->bytes_per_frame = (size_t)stream->channels * (size_t)(bits / 8);
+    stream->total_frames = state->data_size / state->bytes_per_frame;
+    stream->duration = (float)stream->total_frames / stream->sample_rate;
+
+    fseek(stream->file, (long)state->data_offset, SEEK_SET);
     return NX_OK;
 }
 
@@ -109,51 +126,57 @@ static nx_error_t wav_stream_read(nx_audio_stream_t *stream, float *out, size_t 
         return NX_ERR_EOF;
     }
     
-    size_t bytes_needed = want * state->bytes_per_frame;
-    uint8_t *raw = malloc(bytes_needed);
-    if (!raw) return NX_ERR_MEMORY;
-    
-    size_t read_bytes = fread(raw, 1, bytes_needed, stream->file);
-    size_t read_frames = read_bytes / state->bytes_per_frame;
-    
-    /* Convert to float */
-    size_t samples = read_frames * stream->channels;
-    
-    switch (stream->bits_per_sample) {
-        case 8:
-            for (size_t i = 0; i < samples; i++) {
-                out[i] = ((float)raw[i] - 128.0f) / 128.0f;
-            }
-            break;
-        case 16: {
-            int16_t *src = (int16_t*)raw;
-            for (size_t i = 0; i < samples; i++) {
-                out[i] = (float)src[i] / 32768.0f;
-            }
-            break;
+    size_t done = 0;
+    const size_t chunk_frames = stream->read_buffer_size / state->bytes_per_frame;
+
+    while (done < want) {
+        size_t n = want - done;
+        if (n > chunk_frames) n = chunk_frames;
+
+        size_t got = fread(stream->read_buffer, 1, n * state->bytes_per_frame, stream->file)
+                     / state->bytes_per_frame;
+        if (got == 0) break;
+
+        const uint8_t *raw = stream->read_buffer;
+        float *dst = out + done * stream->channels;
+        size_t samples = got * stream->channels;
+
+        switch (stream->bits_per_sample) {
+            case 8:
+                for (size_t i = 0; i < samples; i++) {
+                    dst[i] = ((float)raw[i] - 128.0f) / 128.0f;
+                }
+                break;
+            case 16:
+                for (size_t i = 0; i < samples; i++) {
+                    dst[i] = (float)(int16_t)rd16(raw + i * 2) / 32768.0f;
+                }
+                break;
+            case 24:
+                for (size_t i = 0; i < samples; i++) {
+                    const uint8_t *p = raw + i * 3;
+                    int32_t val = (int32_t)(((uint32_t)p[0] << 8) | ((uint32_t)p[1] << 16) |
+                                            ((uint32_t)p[2] << 24)) >> 8;
+                    dst[i] = (float)val / 8388608.0f;
+                }
+                break;
+            case 32:
+                if (state->is_float) {
+                    memcpy(dst, raw, samples * sizeof(float));
+                } else {
+                    for (size_t i = 0; i < samples; i++) {
+                        dst[i] = (float)(int32_t)rd32(raw + i * 4) / 2147483648.0f;
+                    }
+                }
+                break;
         }
-        case 24:
-            for (size_t i = 0; i < samples; i++) {
-                int32_t val = (raw[i*3] << 8) | (raw[i*3+1] << 16) | (raw[i*3+2] << 24);
-                val >>= 8;
-                out[i] = (float)val / 8388608.0f;
-            }
-            break;
-        case 32: {
-            int32_t *src = (int32_t*)raw;
-            for (size_t i = 0; i < samples; i++) {
-                out[i] = (float)src[i] / 2147483648.0f;
-            }
-            break;
-        }
+        done += got;
     }
     
-    free(raw);
+    stream->current_frame += done;
+    *frames = done;
     
-    stream->current_frame += read_frames;
-    *frames = read_frames;
-    
-    return NX_OK;
+    return done ? NX_OK : NX_ERR_EOF;
 }
 
 static nx_error_t wav_stream_seek(nx_audio_stream_t *stream, size_t frame) {
@@ -164,7 +187,7 @@ static nx_error_t wav_stream_seek(nx_audio_stream_t *stream, size_t frame) {
     }
     
     size_t byte_offset = state->data_offset + frame * state->bytes_per_frame;
-    fseek(stream->file, byte_offset, SEEK_SET);
+    fseek(stream->file, (long)byte_offset, SEEK_SET);
     stream->current_frame = frame;
     
     return NX_OK;
@@ -180,6 +203,41 @@ static const nx_codec_ops_t wav_codec_ops = {
     .read = wav_stream_read,
     .seek = wav_stream_seek,
     .close = wav_stream_close,
+};
+
+/* ============ In-memory PCM ============ */
+
+/* Already-decoded float samples owned by the caller (e.g. an nxaudio buffer) */
+typedef struct {
+    const float *samples;
+} pcm_stream_state_t;
+
+static nx_error_t pcm_stream_read(nx_audio_stream_t *stream, float *out, size_t *frames) {
+    pcm_stream_state_t *state = (pcm_stream_state_t*)stream->decoder_state;
+
+    size_t want = *frames;
+    size_t avail = stream->total_frames - stream->current_frame;
+    if (want > avail) want = avail;
+
+    *frames = want;
+    if (want == 0) return NX_ERR_EOF;
+
+    memcpy(out, state->samples + stream->current_frame * stream->channels,
+           want * stream->channels * sizeof(float));
+    stream->current_frame += want;
+    return NX_OK;
+}
+
+static nx_error_t pcm_stream_seek(nx_audio_stream_t *stream, size_t frame) {
+    stream->current_frame = frame < stream->total_frames ? frame : stream->total_frames;
+    return NX_OK;
+}
+
+static const nx_codec_ops_t pcm_codec_ops = {
+    .open = NULL,
+    .read = pcm_stream_read,
+    .seek = pcm_stream_seek,
+    .close = NULL,
 };
 
 /* ============ Public API ============ */
@@ -216,10 +274,12 @@ nx_error_t nx_stream_open(nx_audio_stream_t *stream, const char *filepath) {
             stream->codec_ops = &wav_codec_ops;
             break;
         default:
-            /* Other codecs use similar pattern */
-            stream->decoder_state_size = 256;
-            stream->codec_ops = &wav_codec_ops;  /* Fallback */
-            break;
+            /* Only WAV streams from disk so far; other formats go through
+             * the whole-file loader (codecs/loader.c) */
+            fprintf(stderr, "[Stream] No streaming decoder for: %s\n", filepath);
+            fclose(stream->file);
+            stream->file = NULL;
+            return NX_ERR_FORMAT;
     }
     
     stream->decoder_state = calloc(1, stream->decoder_state_size);
@@ -231,6 +291,10 @@ nx_error_t nx_stream_open(nx_audio_stream_t *stream, const char *filepath) {
     /* Allocate read buffer */
     stream->read_buffer = malloc(READ_BUFFER_SIZE);
     stream->read_buffer_size = READ_BUFFER_SIZE;
+    if (!stream->read_buffer) {
+        nx_stream_close(stream);
+        return NX_ERR_MEMORY;
+    }
     
     /* Open codec */
     nx_error_t err = stream->codec_ops->open(stream);
@@ -244,6 +308,31 @@ nx_error_t nx_stream_open(nx_audio_stream_t *stream, const char *filepath) {
     printf("[Stream] Opened: %s (%d Hz, %d ch, %.2f sec)\n",
            filepath, stream->sample_rate, stream->channels, stream->duration);
     
+    return NX_OK;
+}
+
+nx_error_t nx_stream_open_pcm(nx_audio_stream_t *stream,
+                              const float *samples, size_t frames,
+                              uint32_t sample_rate, uint16_t channels) {
+    if (!stream || !samples || sample_rate == 0 || channels == 0) return NX_ERR_INVALID;
+
+    memset(stream, 0, sizeof(*stream));
+
+    pcm_stream_state_t *state = (pcm_stream_state_t*)calloc(1, sizeof(*state));
+    if (!state) return NX_ERR_MEMORY;
+    state->samples = samples;
+
+    stream->codec = NX_CODEC_PCM;
+    stream->codec_ops = &pcm_codec_ops;
+    stream->decoder_state = state;
+    stream->decoder_state_size = sizeof(*state);
+    stream->sample_rate = sample_rate;
+    stream->channels = channels;
+    stream->bits_per_sample = 32;
+    stream->total_frames = frames;
+    stream->duration = (float)frames / (float)sample_rate;
+    stream->state = NX_STREAM_STOPPED;
+
     return NX_OK;
 }
 

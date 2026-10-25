@@ -1,149 +1,73 @@
 /*
- * NXAudio Player - Play WAV/MP3 Files
- * 
- * Usage: nxaudio_player <audio_file>
- * 
+ * NXAudio Player - play an audio file through the default output
+ *
+ * Usage: nxaudio_play <file.wav> [--loop]
+ * Set NXAUDIO_BACKEND=pulse|alsa|wasapi|coreaudio|null to pick the output.
+ *
  * Copyright (c) 2025 KetiveeAI - KETIVEEAI License
  */
 
+#include "nxaudio/nxaudio.h"
+#include "platform/nx_thread.h"
+
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <math.h>
-#include <alsa/asoundlib.h>
 
-/* Include our codecs */
-#include "codecs/wav.h"
-
-#define BUFFER_FRAMES   1024
-
-/* Simple string check for file extension */
-static int ends_with(const char *str, const char *suffix) {
-    size_t str_len = strlen(str);
-    size_t suf_len = strlen(suffix);
-    if (suf_len > str_len) return 0;
-    return strcasecmp(str + str_len - suf_len, suffix) == 0;
-}
-
-/* Play float samples through ALSA */
-static int play_audio(float *samples, size_t num_frames, 
-                       int channels, int sample_rate) {
-    snd_pcm_t *pcm;
-    snd_pcm_hw_params_t *params;
-    int err;
-    
-    /* Open device */
-    err = snd_pcm_open(&pcm, "default", SND_PCM_STREAM_PLAYBACK, 0);
-    if (err < 0) {
-        fprintf(stderr, "Cannot open audio: %s\n", snd_strerror(err));
-        return -1;
-    }
-    
-    /* Configure */
-    snd_pcm_hw_params_alloca(&params);
-    snd_pcm_hw_params_any(pcm, params);
-    snd_pcm_hw_params_set_access(pcm, params, SND_PCM_ACCESS_RW_INTERLEAVED);
-    snd_pcm_hw_params_set_format(pcm, params, SND_PCM_FORMAT_FLOAT_LE);
-    snd_pcm_hw_params_set_channels(pcm, params, channels);
-    
-    unsigned int rate = sample_rate;
-    snd_pcm_hw_params_set_rate_near(pcm, params, &rate, 0);
-    
-    err = snd_pcm_hw_params(pcm, params);
-    if (err < 0) {
-        fprintf(stderr, "Cannot configure: %s\n", snd_strerror(err));
-        snd_pcm_close(pcm);
-        return -1;
-    }
-    
-    printf("Playing: %d Hz, %d channels, %zu frames\n", 
-           sample_rate, channels, num_frames);
-    
-    /* Play in chunks */
-    float *ptr = samples;
-    size_t remaining = num_frames;
-    
-    while (remaining > 0) {
-        size_t chunk = (remaining > BUFFER_FRAMES) ? BUFFER_FRAMES : remaining;
-        
-        snd_pcm_sframes_t written = snd_pcm_writei(pcm, ptr, chunk);
-        if (written < 0) {
-            written = snd_pcm_recover(pcm, written, 0);
-        }
-        if (written < 0) {
-            fprintf(stderr, "Write error: %s\n", snd_strerror(written));
-            break;
-        }
-        
-        ptr += written * channels;
-        remaining -= written;
-        
-        /* Progress indicator */
-        int progress = (int)(100.0 * (num_frames - remaining) / num_frames);
-        printf("\rPlaying: %3d%%", progress);
-        fflush(stdout);
-    }
-    
-    printf("\rPlaying: 100%%\n");
-    
-    snd_pcm_drain(pcm);
-    snd_pcm_close(pcm);
-    
-    return 0;
-}
-
-int main(int argc, char *argv[]) {
-    printf("╔══════════════════════════════════════════════════════╗\n");
-    printf("║          NXAudio Audio Player                        ║\n");
-    printf("║          Copyright (c) 2025 KetiveeAI                ║\n");
-    printf("╚══════════════════════════════════════════════════════╝\n\n");
-    
+int main(int argc, char **argv) {
     if (argc < 2) {
-        printf("Usage: %s <audio_file.wav>\n", argv[0]);
-        printf("\nSupported formats: WAV (PCM 8/16/24/32-bit, float)\n");
+        fprintf(stderr, "Usage: %s <file.wav> [--loop]\n", argv[0]);
         return 1;
     }
-    
-    const char *filepath = argv[1];
-    printf("Loading: %s\n", filepath);
-    
-    if (ends_with(filepath, ".wav")) {
-        /* Load WAV file */
-        wav_info_t wav;
-        void *wav_data;
-        
-        if (wav_load(filepath, &wav, &wav_data) != 0) {
-            fprintf(stderr, "Failed to load WAV file\n");
-            return 1;
-        }
-        
-        printf("Format: WAV %d-bit, %d Hz, %d ch\n",
-               wav.bits_per_sample, wav.sample_rate, wav.channels);
-        printf("Duration: %.2f seconds\n\n", wav_duration(&wav));
-        
-        /* Convert to float */
-        float *samples = malloc(wav.num_frames * wav.channels * sizeof(float));
-        if (!samples) {
-            fprintf(stderr, "Out of memory\n");
-            wav_free(wav_data);
-            return 1;
-        }
-        
-        wav_to_float(&wav, samples, wav.num_frames);
-        
-        /* Play */
-        play_audio(samples, wav.num_frames, wav.channels, wav.sample_rate);
-        
-        /* Cleanup */
-        free(samples);
-        wav_free(wav_data);
-    }
-    else {
-        fprintf(stderr, "Unsupported format. Use .wav files.\n");
+
+    const char *path = argv[1];
+    int loop = argc > 2 && strcmp(argv[2], "--loop") == 0;
+
+    if (nxaudio_init() != NXAUDIO_SUCCESS) {
+        fprintf(stderr, "nxaudio_init failed\n");
         return 1;
     }
-    
-    printf("\n✓ Playback complete!\n");
-    
+
+    nxaudio_context_t ctx = nxaudio_context_create();
+    if (ctx == NXAUDIO_INVALID_HANDLE) {
+        fprintf(stderr, "No audio output\n");
+        nxaudio_shutdown();
+        return 1;
+    }
+
+    nxaudio_buffer_t buf = nxaudio_buffer_create(path);
+    if (buf == NXAUDIO_INVALID_HANDLE) {
+        fprintf(stderr, "Cannot load %s\n", path);
+        nxaudio_shutdown();
+        return 1;
+    }
+
+    nxaudio_object_config_t config = {
+        .gain = 1.0f,
+        .pitch = 1.0f,
+        .looping = (uint8_t)loop,
+    };
+    nxaudio_object_t obj = nxaudio_object_create(ctx, buf, &config);
+    if (obj == NXAUDIO_INVALID_HANDLE) {
+        fprintf(stderr, "Cannot create audio object\n");
+        nxaudio_shutdown();
+        return 1;
+    }
+
+    float duration = nxaudio_buffer_duration(buf);
+    printf("Playing %s (%.2f s) via %s%s\n", path, duration,
+           nxaudio_context_backend(ctx), loop ? ", looping (Ctrl+C to stop)" : "");
+
+    nxaudio_object_play(obj);
+    while (nxaudio_object_is_playing(obj)) {
+        printf("\r  %6.2f / %.2f s", nxaudio_object_get_time(obj), duration);
+        fflush(stdout);
+        nx_sleep_ns(100 * 1000000ull);
+    }
+    printf("\r  %6.2f / %.2f s\n", duration, duration);
+
+    nxaudio_object_destroy(obj);
+    nxaudio_buffer_destroy(buf);
+    nxaudio_context_destroy(ctx);
+    nxaudio_shutdown();
     return 0;
 }
