@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>DevTools manual test</title>
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 24px; background: #fafafa; color: #222; }
+  #card { border: 2px solid #4a7; padding: 12px 16px; margin: 16px 0; border-radius: 6px; background: #fff; width: 420px; }
+  #card.tick-1 { border-color: #c84; }
+  #card.tick-2 { border-color: #48c; }
+  #card.tick-3 { border-color: #c48; background: #fff4fa; }
+</style>
+</head>
+<body>
+  <h1 id="title">DevTools manual test</h1>
+  <p>Open DevTools with <b>F12</b>. In the Inspector the card below gains a <code>data-ticks</code>
+     attribute and a class every 800 ms (expand it to watch); the Console shows one log, one warning
+     and two errors; the Network panel lists this file.</p>
+  <div id="card" class="box demo">
+    <h2>Ticks</h2>
+    <p>The border colour follows the tick class.</p>
+  </div>
+  <script>
+    console.log("page loaded: " + document.title);
+    console.warn("a warning from the page");
+    console.error("an error from the page");
+    var count = 0;
+    var timer = setInterval(function () {
+      count++;
+      var card = document.getElementById("card");
+      card.setAttribute("data-ticks", String(count));
+      card.classList.add("tick-" + count);
+      if (count === 3) {
+        clearInterval(timer);
+        setTimeout(function () { undefinedFunction(); }, 100);  // uncaught: shows as an error
+      }
+    }, 800);
+  </script>
+</body>
+</html>

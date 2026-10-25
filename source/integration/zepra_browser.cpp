@@ -96,6 +96,7 @@ extern "C" {
 #include "browser/lazy_image_loader.h"
 #include "browser/clipboard.h"
 #include "browser/css_utils.h"
+#include "devtools/devtools_panel.hpp"
 
 // Import CSS utilities (avoid Tab namespace collision)
 using ZepraBrowser::cssColorToRGB;
@@ -319,7 +320,6 @@ static std::string g_pageContent = "";           // Loaded page HTML/content
 static std::string g_pageTitle = "New Tab";      // Page title
 static bool g_isLoading = false;                 // Loading indicator
 static std::string g_loadError = "";             // Error message
-static bool g_consoleVisible = false;            // Developer console (F12)
 
 // Alert/Confirm/Prompt modal state
 static bool g_alertVisible = false;
@@ -328,29 +328,8 @@ static bool g_alertIsConfirm = false;
 // static bool g_alertResult = false; // Reserved for confirm dialog
 static bool g_uiHoverHand = false;                // UI element hover (buttons, tabs, links)
 
-// =============================================================================
-// ZepraWebView DevTools State
-// =============================================================================
-// DevTools tab enum (matches DevToolsPanel::DevToolsTab in zepra_webview_panel.h)
-enum class DevToolsTab { 
-    Elements = 0,     // DOM Tree + CSS Inspector
-    Console,          // JavaScript Console
-    Network,          // Network Requests/Responses  
-    Sources,          // JavaScript Source Viewer
-    Performance,      // Performance Profiling
-    Application,      // Storage, Cache, Service Workers
-    Security,         // TLS/SSL Certificates, Permissions
-    Settings,         // DevTools Settings
-    COUNT             // Total tab count (for iteration)
-};
-static DevToolsTab g_devToolsTab = DevToolsTab::Elements;
-static float g_devToolsHeight = 280.0f;          // Panel height
-static std::string g_consoleInput = "";          // Console input field
-static bool g_consoleFocused = false;            // Console input focused
-// static int g_selectedDOMNodeId = -1;          // Reserved: DevTools DOM inspector
-// Console log is now per-tab (see Tab::consoleLog)
-static std::map<int, bool> g_domNodeExpanded;    // Track expanded nodes in tree
-// static int g_domNodeCounter = 0;              // Reserved: DevTools DOM inspector
+// Docked developer tools (F12): source/integration/devtools/
+static ZepraBrowser::DevTools::DevToolsPanel g_devTools;
 
 // Mouse handler instance
 ZepraBrowser::MouseHandler g_mouseHandler;
@@ -2521,6 +2500,44 @@ float textWidth(const std::string& str, float size = 14.0f) {
 }
 
 // ============================================================================
+// DEVTOOLS BRIDGE: the panel draws with the gfx helpers and reads the active page
+// ============================================================================
+
+static ZepraBrowser::DevTools::Painter devToolsPainter() {
+    ZepraBrowser::DevTools::Painter p;
+    p.rect = [](float x, float y, float w, float h, uint32_t c, uint8_t a) { gfx::rect(x, y, w, h, c, a); };
+    p.line = [](float x1, float y1, float x2, float y2, uint32_t c) {
+        g_nxGpu.drawLine(x1, y1, x2, y2, NXRender::Color(c).withAlpha(255), 1.0f);
+    };
+    p.triangle = [](float x1, float y1, float x2, float y2, float x3, float y3, uint32_t c) {
+        g_nxGpu.fillPath({NXRender::Point(x1, y1), NXRender::Point(x2, y2), NXRender::Point(x3, y3)},
+                         NXRender::Color(c).withAlpha(255));
+    };
+    p.text = [](const std::string& s, float x, float y, uint32_t c, float size) { text(s, x, y, c, size); };
+    p.textWidth = [](const std::string& s, float size) { return textWidth(s, size); };
+    p.pushClip = [](float x, float y, float w, float h) { g_nxGpu.pushClip(NXRender::Rect(x, y, w, h)); };
+    p.popClip = []() { g_nxGpu.popClip(); };
+    return p;
+}
+
+static ZepraBrowser::DevTools::Page devToolsPage() {
+    ZepraBrowser::DevTools::Page page;
+    page.document = g_document.get();
+    page.css = g_cssEngine.get();
+    page.layoutRoot = g_layoutRoot.get();
+    page.script = g_scriptContext.get();
+    page.domVersion = Zepra::WebCore::domMutationVersion();
+    for (Tab& t : g_tabs) {
+        if (t.id == g_activeTabId) {
+            page.consoleLog = &t.consoleLog;
+            page.network = &t.getNetworkMonitor();
+            break;
+        }
+    }
+    return page;
+}
+
+// ============================================================================
 // SVG HELPER
 // ============================================================================
 
@@ -2688,6 +2705,11 @@ static bool g_leftSidebarExpanded = false;
 inline float getSidebarOffset() {
     if (!g_leftSidebarVisible) return 0;
     return g_leftSidebarExpanded ? LEFT_SIDEBAR_EXPANDED : LEFT_SIDEBAR_WIDTH;
+}
+
+// Height of the page's content area: below the top bar, above the docked DevTools
+static float pageViewportHeight() {
+    return (float)g_height - TOPBAR_HEIGHT - (g_devTools.visible() ? g_devTools.height() : 0.0f);
 }
 
 // Sidebar panel enum (matches reference image)
@@ -3477,7 +3499,7 @@ void render() {
     float contentX = getSidebarOffset();
     float contentY = TOPBAR_HEIGHT;  // FIXED: Adjusted for unified Safari-style top bar
     float contentW = g_width - contentX;
-    float contentH = g_height - contentY;
+    float contentH = pageViewportHeight();
     
     // Render current page
     bool isStart = g_currentUrl == "zepra://start" || g_currentUrl.empty();
@@ -3602,388 +3624,21 @@ void render() {
         }
     }
     
+    // DevTools element highlight over the page (clipped to the content area)
+    g_devTools.drawPageOverlay(devToolsPainter(), devToolsPage(), contentX, contentY, contentW, contentH);
+
     // UI overlays - Reference design layout
     renderTopBar();          // Top bar with centered search, left/right controls
     renderLeftSidebar();     // Floating sidebar on LEFT with dashboard, bookmarks, history
     
-    // ==========================================================================
-    // ZepraWebView DevTools Panel (F12)
-    // ==========================================================================
-    if (g_consoleVisible) {
-        float panelHeight = g_devToolsHeight;
-        float panelY = g_height - panelHeight;
+    // Docked DevTools panel (F12)
+    if (g_devTools.visible()) {
         float panelX = getSidebarOffset();
-        float panelW = g_width - panelX;
-        
-        // Panel background (dark theme)
-        gfx::rect(panelX, panelY, panelW, panelHeight, 0x1E1E1E);
-        gfx::rect(panelX, panelY, panelW, 1, 0x3C3C3C);  // Top border
-        
-        // Tab bar with all panels
-        float tabX = panelX + 8;
-        const char* tabs[] = {"Elements", "Console", "Network", "Sources", "Performance", "Application", "Security", "Settings"};
-        const int tabCount = static_cast<int>(DevToolsTab::COUNT);
-        
-        for (int i = 0; i < tabCount; i++) {
-            bool active = (static_cast<int>(g_devToolsTab) == i);
-            float tabW = 72;  // Slightly narrower to fit all tabs
-            
-            // Tab background
-            if (active) {
-                gfx::rect(tabX, panelY + 4, tabW, 24, 0x2D2D2D);
-                gfx::rect(tabX, panelY + 27, tabW, 2, 0x58A6FF);  // Active indicator
-            }
-            
-            // Tab click detection
-            if (hit(tabX, panelY + 4, tabW, 24)) {
-                gfx::rect(tabX, panelY + 4, tabW, 24, 0x3D3D3D);  // Hover
-                if (g_mouseDown) {
-                    g_devToolsTab = static_cast<DevToolsTab>(i);
-                }
-            }
-            
-            text(tabs[i], tabX + 6, panelY + 20, active ? 0xFFFFFF : 0x888888, 11.0f);
-            tabX += tabW + 2;
-        }
-        
-        // Close button
-        float closeX = panelX + panelW - 28;
-        if (hit(closeX, panelY + 6, 20, 20)) {
-            gfx::rect(closeX, panelY + 6, 20, 20, 0x3D3D3D);
-            if (g_mouseDown) g_consoleVisible = false;
-        }
-        text("X", closeX + 6, panelY + 20, 0x888888);
-        
-        // Content area
-        float contentY = panelY + 34;
-        float contentH = panelHeight - 34;
-        
-        // Render based on active tab
-        switch (g_devToolsTab) {
-            case DevToolsTab::Elements: {
-                // Elements (DOM Tree) panel
-                text("DOM Tree", panelX + 12, contentY + 16, 0x4FC1FF);
-                contentY += 24;
-                
-#ifdef USE_WEBCORE
-                if (g_document && g_document->body()) {
-                    // Render simplified DOM tree
-                    float treeY = contentY;
-                    std::function<void(DOMNode*, int)> renderNode = [&](DOMNode* node, int depth) {
-                        if (!node || treeY > panelY + panelHeight - 20) return;
-                        
-                        float indent = depth * 16.0f;
-                        DOMElement* el = dynamic_cast<DOMElement*>(node);
-                        
-                        if (el) {
-                            std::string tag = el->tagName();
-                            std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
-                            
-                            // Skip invisible
-                            if (tag == "script" || tag == "style" || tag == "head") return;
-                            
-                            // Node line
-                            bool hasChildren = el->childNodes().size() > 0;
-                            std::string arrow = hasChildren ? "▸" : " ";
-                            std::string display = arrow + " <" + tag;
-                            
-                            // Add class/id if present
-                            std::string cls = el->getAttribute("class");
-                            std::string id = el->getAttribute("id");
-                            if (!id.empty()) display += " id=\"" + id + "\"";
-                            if (!cls.empty() && cls.length() < 30) display += " class=\"" + cls + "\"";
-                            display += ">";
-                            
-                            // Highlight hovered
-                            bool hovered = hit(panelX + 12 + indent, treeY, panelW - 24 - indent, 16);
-                            if (hovered) {
-                                gfx::rect(panelX + 8, treeY - 2, panelW - 16, 18, 0x264F78);
-                            }
-                            
-                            text(display, panelX + 12 + indent, treeY + 12, 0xE8A8F0);
-                            treeY += 18;
-                            
-                            // Render children (first 3 levels only for performance)
-                            if (depth < 3) {
-                                for (size_t i = 0; i < el->childNodes().size() && i < 10; i++) {
-                                    renderNode(el->childNodes()[i].get(), depth + 1);
-                                }
-                            }
-                        }
-                    };
-                    
-                    text("<html>", panelX + 12, treeY + 12, 0x569CD6);
-                    treeY += 18;
-                    renderNode(g_document->body(), 1);
-                } else {
-                    text("No document loaded", panelX + 12, contentY + 16, 0x666666);
-                }
-#else
-                text("WebCore not enabled", panelX + 12, contentY + 16, 0x666666);
-#endif
-                break;
-            }
-            
-            case DevToolsTab::Console: {
-                // Console panel (interactive - per-tab console logs)
-                
-                // Get active tab's console log
-                Tab* activeTab = nullptr;
-                for (auto& t : g_tabs) {
-                    if (t.id == g_activeTabId) { activeTab = &t; break; }
-                }
-                std::vector<std::string>& consoleLog = activeTab ? activeTab->consoleLog : g_tabs[0].consoleLog;
-                
-                // Console log display area (above input)
-                float logAreaHeight = contentH - 30;  // Reserve 30px for input
-                
-                if (consoleLog.empty()) {
-                    text("  Welcome to ZepraBrowser Console", panelX + 12, contentY + 16, 0x888888);
-                    contentY += 20;
-                    text("  Type JavaScript expressions and press Enter to execute", panelX + 12, contentY + 16, 0x666666);
-                    contentY += 18;
-                    text("  [Info] Current URL: " + g_currentUrl, panelX + 12, contentY + 16, 0x4FC1FF);
-                    contentY += 18;
-                    text("  [Info] Layout boxes: " + std::to_string(g_layoutRoot ? g_layoutRoot->children.size() : 0), panelX + 12, contentY + 16, 0x4FC1FF);
-                } else {
-                    float logY = contentY;
-                    // Show last N entries that fit
-                    int maxEntries = static_cast<int>((logAreaHeight - 20) / 16);
-                    size_t startIdx = consoleLog.size() > static_cast<size_t>(maxEntries) ? 
-                                      consoleLog.size() - maxEntries : 0;
-                    
-                    for (size_t i = startIdx; i < consoleLog.size() && logY < panelY + panelHeight - 35; i++) {
-                        const std::string& entry = consoleLog[i];
-                        // Color based on prefix
-                        uint32_t color = 0xCCCCCC;
-                        if (entry.find("> ") == 0) color = 0xFFFFFF;  // User input
-                        else if (entry.find("< ") == 0) color = 0x6A9955;  // Return value
-                        else if (entry.find("[Error]") != std::string::npos) color = 0xF14C4C;
-                        else if (entry.find("[Warning]") != std::string::npos) color = 0xFFAA00;
-                        else if (entry.find("[Info]") != std::string::npos) color = 0x4FC1FF;
-                        
-                        text(entry, panelX + 12, logY + 14, color, 11.0f);
-                        logY += 16;
-                    }
-                }
-                
-                // Console input field at bottom
-                float inputY = panelY + panelHeight - 28;
-                float inputW = panelW - 24;
-                
-                // Input background
-                gfx::rect(panelX + 8, inputY, inputW + 8, 24, 0x2D2D2D);
-                gfx::rect(panelX + 8, inputY, inputW + 8, 1, 0x3C3C3C);  // Top border
-                
-                // Prompt
-                text(">", panelX + 12, inputY + 16, 0x58A6FF);
-                
-                // Input text with cursor
-                std::string displayInput = g_consoleInput;
-                if (g_consoleFocused) {
-                    // Add blinking cursor
-                    static int cursorBlink = 0;
-                    cursorBlink++;
-                    if ((cursorBlink / 30) % 2 == 0) {
-                        displayInput += "|";
-                    }
-                }
-                text(displayInput.empty() && !g_consoleFocused ? "Type JavaScript expression..." : displayInput, 
-                     panelX + 24, inputY + 16, g_consoleFocused ? 0xFFFFFF : 0x666666, 11.0f);
-                
-                // Click to focus
-                if (hit(panelX + 8, inputY, inputW + 8, 24)) {
-                    if (g_mouseDown) {
-                        g_consoleFocused = true;
-                        g_addressFocused = false;
-                        g_searchFocused = false;
-                    }
-                }
-                break;
-            }
-            
-            // NOTE: DevToolsTab::Styles was removed - use Elements panel for CSS inspection
-            
-            case DevToolsTab::Network: {
-                // Network panel — real data from per-tab NetworkMonitor
-                text("Network Requests", panelX + 12, contentY + 16, 0x4FC1FF);
-                contentY += 24;
-                
-                // Header row
-                text("Method   URL                                       Status   Size     Time", 
-                     panelX + 12, contentY + 14, 0x888888, 10.0f);
-                contentY += 20;
-                gfx::rect(panelX, contentY, panelW, 1, 0x3C3C3C);
-                contentY += 4;
-                
-                // Get active tab's network monitor
-                Tab* netTab = nullptr;
-                for (auto& t : g_tabs) {
-                    if (t.id == g_activeTabId) { netTab = &t; break; }
-                }
-                
-                if (netTab) {
-                    auto& monitor = netTab->getNetworkMonitor();
-                    auto entries = monitor.getEntries();
-                    
-                    if (entries.empty()) {
-                        text("No network requests recorded", panelX + 12, contentY + 14, 0x666666);
-                    } else {
-                        // Show most recent entries that fit
-                        int maxRows = static_cast<int>((contentH - 60) / 16);
-                        size_t startIdx = entries.size() > static_cast<size_t>(maxRows) ? 
-                                          entries.size() - maxRows : 0;
-                        
-                        for (size_t i = startIdx; i < entries.size() && contentY < panelY + panelHeight - 20; i++) {
-                            const auto& entry = entries[i];
-                            
-                            // Method
-                            uint32_t methodColor = (entry.request.method == "GET") ? 0x3FB950 : 0x58A6FF;
-                            text(entry.request.method, panelX + 12, contentY + 15, methodColor, 10.0f);
-                            
-                            // URL (truncated)
-                            std::string displayUrl = entry.request.url.length() > 45 ? 
-                                entry.request.url.substr(0, 42) + "..." : entry.request.url;
-                            text(displayUrl, panelX + 70, contentY + 15, 0xCCCCCC, 10.0f);
-                            
-                            // Status
-                            uint32_t statusColor = entry.response.status_code >= 200 && entry.response.status_code < 300 ? 0x3FB950 :
-                                                   entry.response.status_code >= 400 ? 0xF14C4C : 0xFFAA00;
-                            text(entry.response.status_code > 0 ? std::to_string(entry.response.status_code) : "...", 
-                                 panelX + panelW - 180, contentY + 15, statusColor, 10.0f);
-                            
-                            // Size
-                            std::string sizeStr = entry.response.content_length > 0 ? 
-                                (entry.response.content_length > 1024 ? 
-                                    std::to_string(entry.response.content_length / 1024) + " KB" :
-                                    std::to_string(entry.response.content_length) + " B") : "-";
-                            text(sizeStr, panelX + panelW - 120, contentY + 15, 0x888888, 10.0f);
-                            
-                            // Time
-                            std::string timeStr = entry.response.duration_ms > 0 ? 
-                                std::to_string(static_cast<int>(entry.response.duration_ms)) + " ms" : "pending";
-                            text(timeStr, panelX + panelW - 60, contentY + 15, 0x888888, 10.0f);
-                            
-                            contentY += 16;
-                        }
-                    }
-                }
-                break;
-            }
-            
-            case DevToolsTab::Sources: {
-                // Sources panel - JavaScript debugger
-                text("Sources", panelX + 12, contentY + 16, 0x4FC1FF);
-                contentY += 24;
-                
-                // File tree
-                text("  Page Sources:", panelX + 12, contentY + 14, 0x888888);
-                contentY += 20;
-                text("   > " + (g_currentUrl.length() > 30 ? g_currentUrl.substr(0, 30) + "..." : g_currentUrl), 
-                     panelX + 12, contentY + 14, 0x4FC1FF);
-                contentY += 18;
-                text("       index.html", panelX + 12, contentY + 14, 0xE8A8F0);
-                contentY += 16;
-                text("       styles.css", panelX + 12, contentY + 14, 0x4EC9B0);
-                contentY += 16;
-                text("       app.js", panelX + 12, contentY + 14, 0xDCDC9D);
-                break;
-            }
-            
-            case DevToolsTab::Performance: {
-                // Performance panel
-                text("Performance", panelX + 12, contentY + 16, 0x4FC1FF);
-                contentY += 24;
-                
-                // Record button
-                gfx::rect(panelX + 12, contentY + 2, 70, 22, 0x3FB950);
-                text("Record", panelX + 22, contentY + 16, 0xFFFFFF);
-                contentY += 30;
-                
-                // Metrics
-                text("Page Load Metrics:", panelX + 12, contentY + 14, 0xCCCCCC);
-                contentY += 20;
-                text("  DOM Content Loaded: 245ms", panelX + 12, contentY + 14, 0x3FB950);
-                contentY += 16;
-                text("  First Contentful Paint: 312ms", panelX + 12, contentY + 14, 0x3FB950);
-                contentY += 16;
-                text("  Document Complete: " + std::string(g_isLoading ? "loading..." : "890ms"), 
-                     panelX + 12, contentY + 14, g_isLoading ? 0xFFAA00 : 0xCCCCCC);
-                break;
-            }
-            
-            case DevToolsTab::Application: {
-                // Application panel - Storage
-                text("Application", panelX + 12, contentY + 16, 0x4FC1FF);
-                contentY += 24;
-                
-                text("Storage:", panelX + 12, contentY + 14, 0x888888);
-                contentY += 20;
-                text("  > Local Storage", panelX + 12, contentY + 14, 0xCCCCCC);
-                contentY += 16;
-                text("  > Session Storage", panelX + 12, contentY + 14, 0xCCCCCC);
-                contentY += 16;
-                text("  > Cookies", panelX + 12, contentY + 14, 0xCCCCCC);
-                contentY += 16;
-                text("  > IndexedDB", panelX + 12, contentY + 14, 0xCCCCCC);
-                contentY += 22;
-                text("Cache:", panelX + 12, contentY + 14, 0x888888);
-                contentY += 20;
-                text("  > Cache Storage", panelX + 12, contentY + 14, 0xCCCCCC);
-                break;
-            }
-            
-            case DevToolsTab::Security: {
-                // Security panel - TLS/SSL Info
-                text("Security Overview", panelX + 12, contentY + 16, 0x4FC1FF);
-                contentY += 24;
-                
-                bool isSecure = g_currentUrl.find("https://") == 0;
-                text(isSecure ? "* Connection: Secure (TLS 1.3)" : "! Connection: Not Secure", 
-                     panelX + 12, contentY + 14, isSecure ? 0x3FB950 : 0xFFAA00);
-                contentY += 18;
-                text(isSecure ? "  Certificate: Valid" : "  No TLS Certificate", 
-                     panelX + 12, contentY + 14, 0x888888);
-                contentY += 26;
-                
-                text("Cross-Origin Policy:", panelX + 12, contentY + 14, 0x888888);
-                contentY += 18;
-                text("  Same-origin requests allowed", panelX + 12, contentY + 14, 0xCCCCCC);
-                contentY += 16;
-                text("  Cross-origin requires CORS headers", panelX + 12, contentY + 14, 0xCCCCCC);
-                break;
-            }
-            
-            case DevToolsTab::Settings: {
-                // Settings panel
-                text("DevTools Settings", panelX + 12, contentY + 16, 0x4FC1FF);
-                contentY += 24;
-                
-                text("Appearance:", panelX + 12, contentY + 14, 0x888888);
-                contentY += 20;
-                text("  Theme: Dark", panelX + 12, contentY + 14, 0xCCCCCC);
-                contentY += 16;
-                text("  Panel layout: Bottom", panelX + 12, contentY + 14, 0xCCCCCC);
-                contentY += 22;
-                
-                text("Console:", panelX + 12, contentY + 14, 0x888888);
-                contentY += 20;
-                text("  [x] Show timestamps", panelX + 12, contentY + 14, 0xCCCCCC);
-                contentY += 16;
-                text("  [x] Preserve log", panelX + 12, contentY + 14, 0xCCCCCC);
-                contentY += 22;
-                
-                text("Network:", panelX + 12, contentY + 14, 0x888888);
-                contentY += 20;
-                text("  [x] Disable cache (while DevTools open)", panelX + 12, contentY + 14, 0xCCCCCC);
-                break;
-            }
-            
-            default:
-                break;
-        }
+        float panelY = g_height - g_devTools.height();
+        g_devTools.draw(devToolsPainter(), devToolsPage(), panelX, panelY, g_width - panelX, g_devTools.height(),
+                        g_mouseX, g_mouseY, g_mouseDown);
     }
-    
+
     // Render context menu (if visible)
     auto& ctxMenu = g_mouseHandler.getContextMenu();
     if (ctxMenu.visible) {
@@ -4114,7 +3769,7 @@ void render() {
         }
     }
     // Cursor switching based on UI state
-    if (g_addressFocused || g_searchFocused || g_consoleFocused) {
+    if (g_addressFocused || g_searchFocused || g_devTools.consoleFocused()) {
         NXRender::setCursor(NXRender::CursorType::Text);
     } else if (g_currentCursorIsHand || isOverLink || g_cursorIsPointer || g_uiHoverHand) {
         NXRender::setCursor(NXRender::CursorType::Hand);
@@ -4478,6 +4133,9 @@ void onNavigate(const std::string& input) {
         g_isLoading = true;
         g_loadError = "";
         g_asyncLoadPending = true;
+        for (Tab& tab : g_tabs) {
+            if (tab.id == g_activeTabId) tab.clearNetworkLog();   // the Network panel shows one page
+        }
         
         std::cout << "[Browser] Loading (async): " << url << std::endl;
         
@@ -4733,6 +4391,9 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
         return;
     }
     
+    // DevTools console input takes the keys while it has focus
+    if (g_devTools.onKey(key, text, ctrl, shift, devToolsPage())) return;
+
     // Keyboard shortcuts (Ctrl+...)
     if (ctrl) {
         if (key == NXRender::KeyCode::C) {
@@ -4760,8 +4421,8 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
                     g_addressInput += clipboardText;
                 } else if (g_searchFocused) {
                     (g_focusedBox ? g_focusedBox->text : g_searchQuery) += clipboardText;
-                } else if (g_consoleFocused) {
-                    g_consoleInput += clipboardText;
+                } else if (g_devTools.consoleFocused()) {
+                    g_devTools.insertConsoleText(clipboardText);
                 } else if (g_focusedBox) {
                     g_focusedBox->text += clipboardText;
                 }
@@ -4786,9 +4447,7 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
     
     // Determine active input buffer
     std::string* activeInput = nullptr;
-    if (g_consoleFocused) {
-        activeInput = &g_consoleInput;
-    } else if (g_addressFocused) {
+    if (g_addressFocused) {
         activeInput = &g_addressInput;
     } else if (g_searchFocused) {
         // The start page's <input> shows its box's text, so type into that
@@ -4799,55 +4458,7 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
     
     if (activeInput) {
         if (key == NXRender::KeyCode::Enter) {
-            if (g_consoleFocused && !g_consoleInput.empty()) {
-                // Console input: execute JavaScript expression
-                std::string expr = g_consoleInput;
-                std::cout << "[Console] Executing: " << expr << std::endl;
-                
-                // Log input to console
-                Tab* activeTab = nullptr;
-                for (auto& t : g_tabs) {
-                    if (t.id == g_activeTabId) { activeTab = &t; break; }
-                }
-                if (activeTab) {
-                    activeTab->logConsole("> " + expr);
-                    
-                    // Execute with ZepraScript VM
-                    std::string result;
-                    
-                    // Special cases handled before VM
-                    if (expr == "clear()" || expr == "console.clear()") {
-                        activeTab->consoleLog.clear();
-                        result = "";
-                    }
-#ifdef USE_WEBCORE
-                    else if (g_scriptContext) {
-                        // Wire console handler to this tab
-                        g_scriptContext->setConsoleHandler(
-                            [activeTab](const std::string& level, const std::string& msg) {
-                                if (activeTab) activeTab->logConsole("[" + level + "] " + msg);
-                            });
-                        
-                        auto evalResult = g_scriptContext->evaluate(expr, "<devtools>");
-                        if (evalResult.success) {
-                            result = evalResult.value;
-                        } else {
-                            result = evalResult.error;
-                        }
-                    }
-#endif
-                    else {
-                        result = "[ScriptContext not available]";
-                    }
-                    
-                    if (!result.empty()) {
-                        activeTab->logConsole("< " + result);
-                    }
-                }
-                
-                g_consoleInput.clear();
-                return;
-            } else {
+            {
                 // Handle Enter key for specific inputs
                 if (g_addressFocused || g_searchFocused) {
                     std::cout << "[KEY] Enter pressed - navigating to: " << *activeInput << std::endl;
@@ -4876,7 +4487,6 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
             // Cancel editing
             g_addressFocused = false;
             g_searchFocused = false;
-            g_consoleFocused = false;
             *activeInput = ""; // Clear the input buffer
         } else if (!text.empty()) {
             // Regular character input (includes space if text is " ")
@@ -4927,15 +4537,9 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
             std::cout << "[Browser] Hard Refresh: " << g_currentUrl << std::endl;
             onNavigate(g_currentUrl);
         }
-    } else if (key == KeyCode::F12) {
-        // Toggle DevTools
-        g_consoleVisible = !g_consoleVisible;
-    } else if (ctrl && shift && key == KeyCode::I) {
-        // Ctrl+Shift+I - Toggle DevTools
-        g_consoleVisible = !g_consoleVisible;
-    } else if (ctrl && key == KeyCode::I) {
-        // Ctrl+I - Toggle DevTools (legacy)
-        g_consoleVisible = !g_consoleVisible;
+    } else if (key == KeyCode::F12 || (ctrl && shift && key == KeyCode::I) || (ctrl && key == KeyCode::I)) {
+        // F12 / Ctrl+Shift+I (Ctrl+I: legacy) - Toggle DevTools
+        g_devTools.toggle();
     } else if (ctrl && key == KeyCode::F) {
         // Ctrl+F - Find on page (TODO: implement find bar)
         std::cout << "[Browser] Ctrl+F: Find on page (TODO)" << std::endl;
@@ -4999,7 +4603,7 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
                 tab.scrollY += shift ? -100 : 100;
                 if (tab.scrollY < 0) tab.scrollY = 0;
                 if (g_layoutRoot) {
-                    float maxS = std::max(0.0f, g_layoutRoot->height - ((float)g_height - TAB_HEIGHT - NAV_HEIGHT));
+                    float maxS = std::max(0.0f, g_layoutRoot->height - (pageViewportHeight()));
                     if (tab.scrollY > maxS) tab.scrollY = maxS;
                 }
                 break;
@@ -5011,7 +4615,7 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
             if (tab.id == g_activeTabId) {
                 tab.scrollY += g_height - 100;
                 if (g_layoutRoot) {
-                    float maxS = std::max(0.0f, g_layoutRoot->height - ((float)g_height - TAB_HEIGHT - NAV_HEIGHT));
+                    float maxS = std::max(0.0f, g_layoutRoot->height - (pageViewportHeight()));
                     if (tab.scrollY > maxS) tab.scrollY = maxS;
                 }
                 break;
@@ -5031,7 +4635,7 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
         // Ctrl+End - Scroll to bottom
         for (Tab& tab : g_tabs) {
             if (tab.id == g_activeTabId) {
-                if (g_layoutRoot) tab.scrollY = std::max(0.0f, g_layoutRoot->height - ((float)g_height - TAB_HEIGHT - NAV_HEIGHT));
+                if (g_layoutRoot) tab.scrollY = std::max(0.0f, g_layoutRoot->height - (pageViewportHeight()));
                 break;
             }
         }
@@ -5039,8 +4643,10 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
         // Close context menu first, then console
         if (g_mouseHandler.getContextMenu().visible) {
             g_mouseHandler.getContextMenu().hide();
-        } else if (g_consoleVisible) {
-            g_consoleVisible = false;
+        } else if (g_devTools.pickerActive()) {
+            g_devTools.setPickerActive(false);
+        } else if (g_devTools.visible()) {
+            g_devTools.hide();
         } else {
             // Don't exit on Escape - just cancel any operation
             g_addressFocused = false;
@@ -5149,6 +4755,9 @@ void handleNXEvent(const NXRender::Event& event) {
             std::string text = event.textInput;
             handleKeyPress((NXRender::KeyCode)event.key.key, text, 
                           event.key.modifiers.ctrl, event.key.modifiers.shift);
+        } else if (event.type == NXRender::EventType::TextInput && !event.textInput.empty()) {
+            // Text that came without a key (IME commits, characters outside ASCII)
+            handleKeyPress(NXRender::KeyCode::Unknown, event.textInput, false, false);
         }
     } else if (event.type == NXRender::EventType::FileDrop) {
         // File dropped on browser - navigate to first file
@@ -5170,12 +4779,14 @@ void handleNXEvent(const NXRender::Event& event) {
              // :hover state (content area only)
              if (g_layoutRoot && g_layoutPainted) {
                  const auto& state = Zepra::WebCore::interactionState();
-                 DOMElement* hovered = (y > TOPBAR_HEIGHT) ? findElementAt(g_layoutRoot.get(), x, y) : nullptr;
+                 bool overPage = y > TOPBAR_HEIGHT && !g_devTools.contains(x, y);
+                 DOMElement* hovered = overPage ? findElementAt(g_layoutRoot.get(), x, y) : nullptr;
                  setInteractionState(hovered, state.active, state.focused);
+                 if (g_devTools.pickerActive()) g_devTools.pickerHover(hovered);
              }
 
              // Link hover detection - show URL in status bar
-             if (g_layoutRoot) {
+             if (g_layoutRoot && !g_devTools.contains(x, y)) {
                  LayoutBox* hoverBox = findBoxAt(g_layoutRoot.get(), x, y);
                  if (hoverBox && hoverBox->isLink && !hoverBox->href.empty()) {
                      g_hoverUrl = hoverBox->href;
@@ -5192,6 +4803,15 @@ void handleNXEvent(const NXRender::Event& event) {
              g_mouseY = y;
              
              if (event.mouse.button == NXRender::MouseButton::Left) {
+                 if (g_devTools.onMouseDown(x, y, devToolsPage())) {
+                     // Click inside the DevTools panel
+                     g_mouseDown = true;
+                 } else if (g_devTools.pickerActive() && y > TOPBAR_HEIGHT) {
+                     // Inspect-element picker: the click chooses the element
+                     g_devTools.pickerSelect(g_layoutRoot ? findElementAt(g_layoutRoot.get(), x, y) : nullptr);
+                     g_mouseDown = true;
+                 } else {
+                 g_devTools.blurConsole();
                  // Call main click handler (handles address bar, search, tabs, etc.)
                  extern void handleClick(float, float);
                  handleClick(x, y);
@@ -5206,6 +4826,7 @@ void handleNXEvent(const NXRender::Event& event) {
                      DOMElement* focused = g_focusedBox ? g_focusedBox->domElement : nullptr;
                      setInteractionState(state.hovered, pressed, focused);
                  }
+                 }
              } else if (event.mouse.button == NXRender::MouseButton::Right) {
                  auto& ctxMenu = g_mouseHandler.getContextMenu();
                  if (ctxMenu.visible) {
@@ -5216,6 +4837,7 @@ void handleNXEvent(const NXRender::Event& event) {
              }
         } else if (event.type == NXRender::EventType::MouseUp) {
              if (event.mouse.button == NXRender::MouseButton::Left) {
+                 g_devTools.onMouseUp(x, y);
                  ::g_mouseHandler.handleLeftRelease(x, y); 
                  g_mouseDown = false;
                  if (g_layoutRoot) {
@@ -5224,13 +4846,14 @@ void handleNXEvent(const NXRender::Event& event) {
                  }
              }
         } else if (event.type == NXRender::EventType::MouseWheel) {
+             if (g_devTools.onMouseWheel(x, y, event.mouse.wheelDelta)) return;
              for (auto& tab : g_tabs) {
                  if (tab.id == g_activeTabId) {
                      tab.scrollY -= event.mouse.wheelDelta * 40.0f;
                      if (tab.scrollY < 0) tab.scrollY = 0;
                      // Clamp to max scroll (page height - viewport height)
                      if (g_layoutRoot) {
-                         float viewH = (float)g_height - TAB_HEIGHT - NAV_HEIGHT;
+                         float viewH = pageViewportHeight();
                          float maxScroll = std::max(0.0f, g_layoutRoot->height - viewH);
                          if (tab.scrollY > maxScroll) tab.scrollY = maxScroll;
                      }
@@ -5381,7 +5004,11 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
         if (direction == 0) { onNavigate(g_currentUrl); }
     });
     ::g_mouseHandler.onReload([]() { onNavigate(g_currentUrl); });
-    ::g_mouseHandler.onInspect([](float, float) { g_consoleVisible = !g_consoleVisible; });
+    ::g_mouseHandler.onInspect([](float x, float y) {
+        g_devTools.show();
+        g_devTools.setActiveTab(ZepraBrowser::DevTools::PanelTab::Inspector);
+        if (g_layoutRoot) g_devTools.pickerSelect(findElementAt(g_layoutRoot.get(), x, y));
+    });
     ::g_mouseHandler.onGetText([](float x, float y, float w, float h) -> std::string {
         if (g_layoutRoot) return ZepraBrowser::getTextInRect(*g_layoutRoot, x, y, w, h);
         return "";
