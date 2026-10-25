@@ -17,7 +17,6 @@ If we hit these numbers, Zepra becomes the most memory-efficient full-featured b
 
 | Condition | Target RSS | Measured (Windows, Release, 2026-10-25) |
 | :--- | :--- | :--- |
-| 2026-10-25 | #20 | **Promises and microtasks** (open): per-VM microtask queue drained after scripts, timers and rAF callbacks; spec Promise (thenables, then/catch/finally, all/allSettled/race/any/withResolvers/try, subclassing); async/await; try/catch and closures across await/yield |
 | **Idle, 1 tab** | `< 80MB` | 77–79 MB (small local page) ✅ |
 | **10 tabs, moderate sites** | `< 300MB` | not measured yet |
 | **50 tabs** | `< 800MB` | not measured yet |
