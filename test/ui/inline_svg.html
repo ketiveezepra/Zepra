@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>inline svg</title>
+<style>
+body { background: #FFFFFF; font-family: sans-serif; padding: 20px; }
+.row { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+.sized { width: 96px; height: 96px; }
+</style>
+</head>
+<body>
+<!-- Each drawing is a blue square with a green centre; its size is in the label -->
+<div class="row">
+  <svg width="48" height="48" viewBox="0 0 24 24"><rect width="24" height="24" fill="#2962FF"/><rect x="6" y="6" width="12" height="12" fill="#00C853"/></svg>
+  <span>48x48 (attributes) in a flex row</span>
+</div>
+<div class="row">
+  <svg class="sized" viewBox="0 0 24 24"><rect width="24" height="24" fill="#2962FF"/><rect x="6" y="6" width="12" height="12" fill="#00C853"/></svg>
+  <span>96x96 (css)</span>
+</div>
+<p>In a paragraph: <svg width="24" height="24" viewBox="0 0 24 24"><circle cx="12" cy="12" r="12" fill="#2962FF"/></svg> a 24px circle.</p>
+</body>
+</html>

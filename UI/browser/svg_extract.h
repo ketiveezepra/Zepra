@@ -6,6 +6,7 @@
 #pragma once
 
 #include <string>
+#include <cctype>
 #include <cstdio>
 #include "browser/dom.hpp"
 
@@ -25,7 +26,9 @@ inline SvgDimensions getSvgDimensions(const DOMElement* svgElement) {
     
     std::string w = svgElement->getAttribute("width");
     std::string h = svgElement->getAttribute("height");
-    std::string vb = svgElement->getAttribute("viewBox");
+    // The HTML tokenizer lowercases attribute names
+    std::string vb = svgElement->getAttribute("viewbox");
+    if (vb.empty()) vb = svgElement->getAttribute("viewBox");
     
     if (!w.empty()) { try { dim.width = std::stof(w); } catch (...) {} }
     if (!h.empty()) { try { dim.height = std::stof(h); } catch (...) {} }
@@ -43,10 +46,24 @@ inline SvgDimensions getSvgDimensions(const DOMElement* svgElement) {
 }
 
 // Serialize an <svg> element subtree to an XML string for nxsvg.
-// Uses DOMElement::outerHTML() which is already implemented in the DOM.
+// The HTML tokenizer lowercased the attribute names; SVG's mixed-case ones
+// get their case back (HTML "adjust SVG attributes", §13.2.6.3)
 inline std::string extractSvgString(const DOMElement* svgElement) {
     if (!svgElement) return "";
-    return svgElement->outerHTML();
+    std::string svg = svgElement->outerHTML();
+    static const char* const kMixedCase[] = {
+        "viewBox", "preserveAspectRatio", "gradientUnits", "gradientTransform", "patternUnits",
+        "patternContentUnits", "patternTransform", "clipPathUnits", "maskUnits", "maskContentUnits",
+        "markerWidth", "markerHeight", "markerUnits", "refX", "refY", "stdDeviation", "textLength",
+        "lengthAdjust", "startOffset", "spreadMethod", "pathLength", "baseFrequency", "numOctaves"};
+    for (const char* name : kMixedCase) {
+        std::string lower(name);
+        for (char& c : lower) c = (char)std::tolower((unsigned char)c);
+        std::string from = " " + lower + "=\"", to = std::string(" ") + name + "=\"";
+        for (size_t pos = svg.find(from); pos != std::string::npos; pos = svg.find(from, pos + to.size()))
+            svg.replace(pos, from.size(), to);
+    }
+    return svg;
 }
 
 } // namespace ZepraBrowser::UI

@@ -22,9 +22,6 @@
 #include <cmath>
 #include <vector>
 
-extern int g_width;
-extern int g_height;
-
 namespace ZepraBrowser {
 
 namespace {
@@ -49,14 +46,14 @@ bool hasLength(const LayoutLength& len) {
 // Border-box width from a non-percentage CSS width, or -1
 float fixedBorderBoxWidth(const LayoutBox& b, const LayoutLength& len) {
     if (!hasLength(len) || len.isPercent()) return -1;
-    float w = len.resolve(0, b.fontSize, (float)g_width, (float)g_height);
+    float w = len.resolve(0, b.fontSize, layoutViewportWidth(), layoutViewportHeight());
     if (b.boxSizing == 0) w += horizontalEdges(b);
     return std::max(0.0f, w);
 }
 
 float fixedBorderBoxHeight(const LayoutBox& b, const LayoutLength& len) {
     if (!hasLength(len) || len.isPercent()) return -1;
-    float h = len.resolve(0, b.fontSize, (float)g_width, (float)g_height);
+    float h = len.resolve(0, b.fontSize, layoutViewportWidth(), layoutViewportHeight());
     if (b.boxSizing == 0) h += verticalEdges(b);
     return std::max(0.0f, h);
 }
@@ -346,7 +343,7 @@ void invalidateIntrinsicWidths() {
 }
 
 void intrinsicWidths(const LayoutBox& box, float& minW, float& maxW) {
-    int key = g_width + s_intrinsicEpoch * 65536;
+    int key = (int)layoutViewportWidth() + s_intrinsicEpoch * 65536;
     if (box.intrinsicKey == key) {
         minW = box.intrinsicMin;
         maxW = box.intrinsicMax;
@@ -361,11 +358,13 @@ void intrinsicWidths(const LayoutBox& box, float& minW, float& maxW) {
         tableIntrinsicWidths(box, minW, maxW);
         float spec = fixedBorderBoxWidth(box, box.cssWidth);
         if (spec >= 0) minW = maxW = std::max(spec, minW);
-    } else if (box.isImage || box.isInput) {
+    } else if (box.isImage) {
+        float h;
+        imageSize(box, 0, minW, h);
+        maxW = minW;
+    } else if (box.isInput) {
         float w = fixedBorderBoxWidth(box, box.cssWidth);
-        bool placeholder = box.isImage && box.textureId == 0 && box.svgData.empty() && !box.text.empty();
-        if (w < 0) w = placeholder ? measureTextWidth(box.text, box.fontSize) : box.width;
-        minW = maxW = w;
+        minW = maxW = w < 0 ? box.width : w;
     } else if (box.children.empty()) {
         float textW = box.text.empty() ? 0 : measureTextWidth(box.text, box.fontSize);
         // Inline-level leaves are exactly as wide as their text in layoutBlock
@@ -428,7 +427,7 @@ void intrinsicWidths(const LayoutBox& box, float& minW, float& maxW) {
 }
 
 void layoutTable(LayoutBox& table, float containingWidth, float startY) {
-    float vpW = (float)g_width, vpH = (float)g_height;
+    float vpW = layoutViewportWidth(), vpH = layoutViewportHeight();
     float spacingH = table.borderSpacingH, spacingV = table.borderSpacingV;
     float edges = horizontalEdges(table);
 

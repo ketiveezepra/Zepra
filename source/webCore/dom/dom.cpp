@@ -177,9 +177,77 @@ std::vector<std::string> DOMElement::classList() const {
     return classes;
 }
 
+namespace {
+
+// HTML fragment serialization (HTML Living Standard §13.3)
+std::string escapeHtml(const std::string& text, bool attribute) {
+    std::string out;
+    out.reserve(text.size());
+    for (char c : text) {
+        switch (c) {
+            case '&': out += "&amp;"; break;
+            case '"': out += attribute ? "&quot;" : "\""; break;
+            case '<': out += attribute ? "<" : "&lt;"; break;
+            case '>': out += attribute ? ">" : "&gt;"; break;
+            default: out += c;
+        }
+    }
+    return out;
+}
+
+bool isVoidElement(const std::string& tag) {
+    static const char* const kVoid[] = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+                                         "link", "meta", "source", "track", "wbr"};
+    for (const char* v : kVoid) if (tag == v) return true;
+    return false;
+}
+
+void serializeChildren(const DOMElement& element, std::string& out);
+
+void serializeElement(const DOMElement& element, std::string& out) {
+    out += '<';
+    out += element.tagName();
+    for (const auto& attr : element.attributes()) {
+        out += ' ';
+        out += attr.first;
+        out += "=\"";
+        out += escapeHtml(attr.second, true);
+        out += '"';
+    }
+    out += '>';
+    if (isVoidElement(element.tagName())) return;
+    serializeChildren(element, out);
+    out += "</";
+    out += element.tagName();
+    out += '>';
+}
+
+void serializeChildren(const DOMElement& element, std::string& out) {
+    // Script and style text is raw text: written as it is
+    bool raw = element.tagName() == "script" || element.tagName() == "style";
+    for (const auto& child : element.childNodes()) {
+        switch (child->nodeType()) {
+            case NodeType::Element:
+                serializeElement(static_cast<const DOMElement&>(*child), out);
+                break;
+            case NodeType::Text:
+                out += raw ? child->nodeValue() : escapeHtml(child->nodeValue(), false);
+                break;
+            case NodeType::Comment:
+                out += "<!--" + child->nodeValue() + "-->";
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+}  // namespace
+
 std::string DOMElement::innerHTML() const {
-    // Stub
-    return "";
+    std::string out;
+    serializeChildren(*this, out);
+    return out;
 }
 
 void DOMElement::setInnerHTML(const std::string& html) {
@@ -210,8 +278,9 @@ void DOMElement::setTextContent(const std::string& text) {
 }
 
 std::string DOMElement::outerHTML() const {
-    // Stub
-    return "";
+    std::string out;
+    serializeElement(*this, out);
+    return out;
 }
 
 DOMElement* DOMElement::getElementById(const std::string& id) {

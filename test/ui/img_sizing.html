@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>img sizing</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #FFFFFF; font-family: sans-serif; padding: 20px; }
+.row { display: flex; align-items: flex-start; gap: 20px; margin-bottom: 20px; }
+.block { background: #E8F0FF; margin-bottom: 20px; }
+.w48 { width: 48px; height: 48px; }
+.w96 { width: 96px; }
+.h40 { height: 40px; }
+.m { margin: 16px 24px; }
+.cap { max-width: 64px; }
+</style>
+</head>
+<body>
+<!-- Each image is img/square.svg (24x24); the size it should be drawn at is in its label -->
+<div class="row">
+  <img class="w48" src="img/square.svg"><span>48x48 (css width+height)</span>
+  <img class="w96" src="img/square.svg"><span>96x96 (css width, ratio)</span>
+  <img class="h40" src="img/square.svg"><span>40x40 (css height, ratio)</span>
+  <img src="img/square.svg"><span>24x24 (natural)</span>
+</div>
+<div class="row">
+  <img width="32" height="32" src="img/square.svg"><span>32x32 (attributes)</span>
+  <img class="w48 m" src="img/square.svg"><span>48x48, margin 16/24</span>
+  <img class="w96 cap" src="img/square.svg"><span>64x64 (max-width)</span>
+</div>
+<div class="block">
+  <img class="w48" src="img/square.svg"> 48x48 in a block parent
+</div>
+<div class="block"><img class="w96" src="img/square.svg"></div>
+</body>
+</html>

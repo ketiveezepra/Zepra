@@ -19,6 +19,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 // Viewport size the layout engine reads (zepra_browser.cpp defines these)
 int g_width = 1280;
@@ -296,4 +297,262 @@ TEST(TableLayout, EmptyRowKeepsItsHeight) {
     addCell(row, "x");
     ZepraBrowser::layoutBlock(table, 1000, 0);
     EXPECT_FLOAT_EQ(row.y, 10);
+}
+
+// ---------------------------------------------------------------------------
+// Flex alignment, image sizing and repeatable layout
+// ---------------------------------------------------------------------------
+
+using ZepraBrowser::LayoutLength;
+
+LayoutBox makeFlex(int direction, int alignItems) {
+    LayoutBox flex;
+    flex.type = LayoutType::Flex;
+    flex.flexDirection = direction;
+    flex.alignItems = alignItems;
+    flex.boxSizing = 1;
+    return flex;
+}
+
+LayoutBox& addImage(LayoutBox& parent, float naturalW, float naturalH) {
+    LayoutBox& img = addBox(parent, LayoutType::InlineBlock);
+    img.isImage = true;
+    img.naturalWidth = naturalW;
+    img.naturalHeight = naturalH;
+    return img;
+}
+
+TEST(FlexLayout, ColumnAlignCenterCentresHorizontally) {
+    LayoutBox flex = makeFlex(1, 3);
+    LayoutBox& item = addBox(flex, LayoutType::Block);
+    addBox(item, LayoutType::Inline).text = "abcdefghij";  // 80px
+    ZepraBrowser::layoutBlock(flex, 1000, 0);
+    EXPECT_FLOAT_EQ(item.width, 80);
+    EXPECT_FLOAT_EQ(item.x, (1000 - 80) / 2.0f);
+}
+
+TEST(FlexLayout, ColumnStretchFillsTheWidth) {
+    LayoutBox flex = makeFlex(1, 0);
+    LayoutBox& item = addBox(flex, LayoutType::Block);
+    addBox(item, LayoutType::Inline).text = "abcdefghij";
+    ZepraBrowser::layoutBlock(flex, 1000, 0);
+    EXPECT_FLOAT_EQ(item.width, 1000);
+    EXPECT_FLOAT_EQ(item.x, 0);
+}
+
+TEST(FlexLayout, RowAlignCenterUsesTheMinHeight) {
+    LayoutBox flex = makeFlex(0, 3);
+    flex.cssMinHeight = LayoutLength::px(48);
+    flex.paddingTop = flex.paddingBottom = 8;
+    LayoutBox& item = addBox(flex, LayoutType::Block);
+    item.cssWidth = item.cssHeight = LayoutLength::px(24);
+    ZepraBrowser::layoutBlock(flex, 600, 0);
+    EXPECT_FLOAT_EQ(flex.height, 48);
+    EXPECT_FLOAT_EQ(item.y, 8 + (32 - 24) / 2.0f);
+}
+
+TEST(FlexLayout, GrownItemLaysOutItsContentAtItsWidth) {
+    LayoutBox flex = makeFlex(0, 3);
+    LayoutBox& grow = addBox(flex, LayoutType::Block);
+    grow.flexGrow = 1;
+    grow.textAlign = 1;
+    LayoutBox& run = addBox(grow, LayoutType::Inline);
+    run.text = "centre";  // 48px
+    addImage(flex, 24, 24);
+    ZepraBrowser::layoutBlock(flex, 400, 0);
+    EXPECT_FLOAT_EQ(grow.width, 376);
+    EXPECT_FLOAT_EQ(run.x, (376 - 48) / 2.0f);
+}
+
+TEST(ImageLayout, CssWidthKeepsTheAspectRatio) {
+    LayoutBox block;
+    LayoutBox& img = addImage(block, 24, 12);
+    img.cssWidth = LayoutLength::px(96);
+    ZepraBrowser::layoutBlock(block, 500, 0);
+    EXPECT_FLOAT_EQ(img.width, 96);
+    EXPECT_FLOAT_EQ(img.height, 48);
+}
+
+TEST(ImageLayout, MaxWidthScalesDown) {
+    LayoutBox block;
+    LayoutBox& img = addImage(block, 400, 200);
+    img.cssMaxWidth = LayoutLength::pct(50);
+    ZepraBrowser::layoutBlock(block, 300, 0);
+    EXPECT_FLOAT_EQ(img.width, 150);
+    EXPECT_FLOAT_EQ(img.height, 75);
+}
+
+TEST(ImageLayout, CssSizeAndMarginsInAFlexRow) {
+    LayoutBox flex = makeFlex(0, 1);
+    flex.gap = 10;
+    LayoutBox& img = addImage(flex, 24, 24);
+    img.cssWidth = img.cssHeight = LayoutLength::px(48);
+    img.marginLeft = 4;
+    img.marginTop = 6;
+    LayoutBox& next = addImage(flex, 24, 24);
+    ZepraBrowser::layoutBlock(flex, 600, 0);
+    EXPECT_FLOAT_EQ(img.width, 48);
+    EXPECT_FLOAT_EQ(img.height, 48);
+    EXPECT_FLOAT_EQ(img.x, 4);
+    EXPECT_FLOAT_EQ(img.y, 6);
+    EXPECT_FLOAT_EQ(next.x, 4 + 48 + 10);
+    EXPECT_FLOAT_EQ(next.width, 24);
+}
+
+TEST(ImageLayout, PlaceholderUntilLoaded) {
+    LayoutBox block;
+    LayoutBox& img = addImage(block, 0, 0);
+    img.text = "[IMG]";  // 40px
+    ZepraBrowser::layoutBlock(block, 500, 0);
+    EXPECT_FLOAT_EQ(img.width, 40);
+    img.cssWidth = img.cssHeight = LayoutLength::px(30);
+    ZepraBrowser::layoutBlock(block, 500, 0);
+    EXPECT_FLOAT_EQ(img.width, 30);
+    EXPECT_FLOAT_EQ(img.height, 30);
+}
+
+void collectGeometry(const LayoutBox& box, std::vector<float>& out) {
+    out.insert(out.end(), {box.x, box.y, box.width, box.height, box.marginLeft, box.marginTop});
+    for (const auto& c : box.children) collectGeometry(c, out);
+}
+
+TEST(RepeatableLayout, SecondPassMatchesTheFirst) {
+    ZepraBrowser::setLayoutViewport(1000, 600);
+    LayoutBox root = makeFlex(1, 3);
+    root.justifyContent = 2;
+    root.cssMinHeight = {100, LayoutLength::Unit::Vh};
+    LayoutBox& logo = addBox(root, LayoutType::Flex);
+    logo.justifyContent = 2;
+    logo.marginBottom = 40;
+    addImage(logo, 104, 113);
+    LayoutBox& pill = addBox(root, LayoutType::Flex);
+    pill.alignItems = 3;
+    pill.boxSizing = 1;
+    pill.cssWidth = LayoutLength::px(400);
+    pill.cssMinHeight = LayoutLength::px(48);
+    pill.marginLeftAuto = pill.marginRightAuto = true;
+    LayoutBox& grow = addBox(pill, LayoutType::Block);
+    grow.flexGrow = 1;
+    addBox(grow, LayoutType::Inline).text = "search";
+    addImage(pill, 24, 24);
+
+    ZepraBrowser::layoutBlock(root, 1000, 0);
+    std::vector<float> first, second;
+    collectGeometry(root, first);
+    ZepraBrowser::layoutBlock(root, 1000, 0);
+    collectGeometry(root, second);
+    EXPECT_EQ(first, second);
+    EXPECT_FLOAT_EQ(root.height, 600);
+    EXPECT_FLOAT_EQ(pill.x, 300);
+    // Column content (113 + 40 + 48) centred in the 600px viewport
+    EXPECT_FLOAT_EQ(logo.y, (600 - (113 + 40 + 48)) / 2.0f);
+    ZepraBrowser::setLayoutViewport(0, 0);
+}
+
+TEST(Cascade, AlignSelfDefaultsToAuto) {
+    StyledDoc d("<!doctype html><div id=a></div><div id=b></div>", "#b { align-self: auto; }");
+    EXPECT_EQ(d.style("a")->alignSelf, JustifyAlign::Auto);
+    EXPECT_EQ(d.style("b")->alignSelf, JustifyAlign::Auto);
+}
+
+// ---------------------------------------------------------------------------
+// Gradient backgrounds (painted through recording callbacks)
+// ---------------------------------------------------------------------------
+
+struct GradientPiece {
+    float x, y, w, h;
+    uint32_t c1, c2;
+    bool horizontal;
+};
+std::vector<GradientPiece> g_pieces;
+
+std::vector<GradientPiece> paintGradientBox(const std::string& css, float w, float h) {
+    g_pieces.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t) {}, [](float, float, float, float, uint32_t, float) {},
+        nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(
+        nullptr,
+        [](float x, float y, float w, float h, uint32_t a, uint32_t b) { g_pieces.push_back({x, y, w, h, a, b, false}); },
+        nullptr,
+        [](float x, float y, float w, float h, uint32_t a, uint32_t b) { g_pieces.push_back({x, y, w, h, a, b, true}); });
+    LayoutBox box;
+    box.width = w;
+    box.height = h;
+    box.hasBgColor = true;
+    box.backgroundImage = css;
+    ZepraBrowser::paintBox(box, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(nullptr, nullptr, nullptr, nullptr);
+    return g_pieces;
+}
+
+TEST(Gradients, ThreeStopsStackTopToBottom) {
+    auto pieces = paintGradientBox("linear-gradient(#ff0000, #00ff00, #0000ff)", 100, 200);
+    ASSERT_EQ(pieces.size(), 2u);
+    EXPECT_FALSE(pieces[0].horizontal);
+    EXPECT_FLOAT_EQ(pieces[0].y, 0);
+    EXPECT_FLOAT_EQ(pieces[1].y, 100);
+    EXPECT_EQ(pieces[0].c1, 0xFF0000u);
+    EXPECT_EQ(pieces[0].c2, 0x00FF00u);
+    EXPECT_EQ(pieces[1].c2, 0x0000FFu);
+}
+
+TEST(Gradients, ToRightWithAPosition) {
+    auto pieces = paintGradientBox("linear-gradient(to right, #ff0000, #00ff00 25%, #0000ff)", 200, 50);
+    ASSERT_EQ(pieces.size(), 2u);
+    EXPECT_TRUE(pieces[0].horizontal);
+    EXPECT_FLOAT_EQ(pieces[1].x, 50);
+    EXPECT_EQ(pieces[1].c1, 0x00FF00u);
+}
+
+TEST(Gradients, ToTopRunsBottomToTop) {
+    auto pieces = paintGradientBox("linear-gradient(0deg, #000000, #ffffff)", 100, 100);
+    ASSERT_EQ(pieces.size(), 1u);
+    // Drawn top to bottom, so the top edge has the end colour
+    EXPECT_EQ(pieces[0].c1, 0xFFFFFFu);
+    EXPECT_EQ(pieces[0].c2, 0x000000u);
+}
+
+TEST(Gradients, DiagonalIsDrawnInRows) {
+    auto pieces = paintGradientBox("linear-gradient(135deg, #000000, #ffffff)", 100, 100);
+    ASSERT_GT(pieces.size(), 10u);
+    // The top-left corner starts black, the bottom-right ends white
+    EXPECT_EQ(pieces.front().c1 & 0xFF, pieces.front().c1 >> 16);
+    EXPECT_LT(pieces.front().c1 & 0xFF, 0x10u);
+    EXPECT_GT(pieces.back().c2 & 0xFF, 0xF0u);
+}
+
+TEST(Gradients, OnlyTheTopLayerAndRadialShapes) {
+    auto layered = paintGradientBox("linear-gradient(#ff0000, #00ff00), linear-gradient(#0000ff, #ffffff)", 100, 100);
+    ASSERT_EQ(layered.size(), 1u);
+    EXPECT_EQ(layered[0].c2, 0x00FF00u);
+    // Radial gradients are drawn as their first colour, not the shape keyword
+    g_pieces.clear();
+    uint32_t solid = 0;
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t c) { g_pieces.push_back({0, 0, 0, 0, c, c, false}); },
+        [](float, float, float, float, uint32_t, float) {}, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(nullptr, [](float, float, float, float, uint32_t, uint32_t) {});
+    LayoutBox box;
+    box.width = box.height = 10;
+    box.hasBgColor = true;
+    box.backgroundImage = "radial-gradient(circle, #ff6b6b, #4ecdc4)";
+    ZepraBrowser::paintBox(box, 0, 0, 10000, 0);
+    if (!g_pieces.empty()) solid = g_pieces[0].c1;
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(nullptr, nullptr);
+    EXPECT_EQ(solid, 0xFF6B6Bu);
+}
+
+// ---------------------------------------------------------------------------
+// Serialization (inline <svg> is drawn from its outerHTML)
+// ---------------------------------------------------------------------------
+
+TEST(Serialization, OuterAndInnerHTML) {
+    StyledDoc d("<!doctype html><div id=a>x &amp; y<br><span title='say \"hi\"'>z</span></div>");
+    DOMElement* div = d.doc->getElementById("a");
+    ASSERT_NE(div, nullptr);
+    EXPECT_EQ(div->innerHTML(), "x &amp; y<br><span title=\"say &quot;hi&quot;\">z</span>");
+    EXPECT_EQ(div->outerHTML(), "<div id=\"a\">" + div->innerHTML() + "</div>");
 }
