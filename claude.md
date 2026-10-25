@@ -36,6 +36,7 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 
 | Date | PR | What changed |
 | :--- | :--- | :--- |
+| 2026-10-26 | `feat/live-dom-wrappers` | **Live DOM for scripts** (open): one JS object per node whose properties change the C++ DOM (appendChild, innerHTML, textContent, classList, style, dataset, cloneNode, fragments); DOM events with capture/bubble, `addEventListener`, on* handlers, DOMContentLoaded/load, page clicks (a canceled click does not navigate); `querySelector` matches through the cascade; the Inspector follows script-built content |
 | 2026-10-25 | #26 | **DevTools** (open): docked Inspector (live DOM tree, page highlight, box model, computed styles, picker), Console (levels, eval in the page), Network panel; F12 keeps the page usable |
 | 2026-10-25 | #20 | **Promises and microtasks** (open): per-VM microtask queue drained after scripts, timers and rAF callbacks; spec Promise (thenables, then/catch/finally, all/allSettled/race/any/withResolvers/try, subclassing); async/await; try/catch and closures across await/yield |
 | 2026-10-25 | #17 | **ZepraScript built-ins pass** (open): spec-correct number/string conversion, Number/Boolean/String/Object/Array as real constructors, one set of intrinsic prototypes per VM, Error chain, real Symbol, hashed Map/Set/WeakSet, Array.from, RegExp fixes, pages get the engine's built-ins instead of stubs, conformance suite |
@@ -57,7 +58,7 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 ### 🔨 Active now / next
 1. **Built-ins pass** (#17) — in review.
 2. **Promises and microtasks** (#20) — in review. Next for async: async generators, `for await`, top-level await.
-3. **DOM bindings** — `element.style`, `classList`, canvas `getContext`; the manual test pages throw on these. `appendChild` / `textContent =` / `innerHTML =` are snapshot stubs, so the DevTools tree (#26) cannot show them.
+3. **DOM bindings** — the tree, attributes, classes, inline style and click events are live (`feat/live-dom-wrappers`). Still missing: layout geometry for scripts (`getBoundingClientRect`, `offsetWidth`, `scrollTop` read 0), mouse-move/keyboard/input/submit events, form control values beyond the attribute, `MutationObserver`/`IntersectionObserver`/`ResizeObserver` (stubs), `fetch`/XHR (stub), `document.write`, `window.getComputedStyle`.
 4. **Network speed** — `http_client` waits on a 1 s `poll()` and has no keep-alive, so Hacker News takes 8–17 s.
 5. **Memory after the runaway guard** — reclaim what a killed script allocated (needs the GC stage).
 
@@ -69,7 +70,8 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 - A UTF-8 byte-order mark at the start of a script is a parse error.
 - `Object.defineProperty` does not reject redefining a non-configurable property.
 - WeakMap/WeakSet hold their keys strongly (no weak-reference hook in the collector yet).
-- `globalThis` in a page is the engine's global object, not `window`.
+- `globalThis` in a page is the engine's global object, not `window`; `var x` at the top level is not a `window` property.
+- NodeList/HTMLCollection are plain arrays (with `item()`), not live collections. `innerText` is `textContent` (no layout-aware line breaks).
 
 ## 🛠️ High-Priority Bug Fixes (The "Unfreeze" Sprint)
 
