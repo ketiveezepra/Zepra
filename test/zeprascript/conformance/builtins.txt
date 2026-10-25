@@ -106,6 +106,25 @@ weak_collections | (function(){ var o = {}, ws = new WeakSet([o]), wm = new Weak
 collection_iterators | (function(){ var it = new Map([[1, 2]]).entries(); var a = it.next(); var b = it.next(); return a.value.join() === "1,2" && a.done === false && b.done === true && it[Symbol.iterator]() === it; })()
 collection_spread | (function(){ var m = new Map([[1, 2]]); var s = new Set([5, 6]); return [...m].join("|") === "1,2" && [...s].join() === "5,6" && [...m.keys()].join() === "1"; })()
 
+# ---- ArrayBuffer and typed arrays ----------------------------------------------
+ta_from_array | (function(){ var f = new Float32Array([1, 2.5, 3]); return f.length === 3 && f[0] === 1 && f[1] === 2.5 && f[2] === 3 && f[3] === undefined; })()
+ta_from_length | (function(){ var a = new Int16Array(4); return a.length === 4 && a[3] === 0 && a.byteLength === 8 && a.byteOffset === 0; })()
+ta_index_write | (function(){ var a = new Uint8Array(2); a[0] = 300; a[1] = -1; a[5] = 9; return a[0] === 44 && a[1] === 255 && a[5] === undefined && a.length === 2; })()
+ta_int_wrap | (function(){ var a = new Int8Array([127, 128, -129]); var b = new Int32Array([2147483648, 1.9, -1.9]); var u = new Uint32Array([-1]); return a.join() === "127,-128,127" && b.join() === "-2147483648,1,-1" && u[0] === 4294967295; })()
+ta_clamped | (function(){ var c = new Uint8ClampedArray([300, -5, 1.5, 2.5, 0.5, NaN]); return c.join() === "255,0,2,2,0,0" && Uint8ClampedArray.BYTES_PER_ELEMENT === 1; })()
+ta_float32_rounding | new Float32Array([0.1])[0] === Math.fround(0.1) && new Float64Array([0.1])[0] === 0.1
+ta_shared_buffer | (function(){ var buf = new ArrayBuffer(8); var f = new Float32Array(buf); var b = new Uint8Array(buf, 6, 2); f[1] = 1; return buf.byteLength === 8 && f.length === 2 && b.length === 2 && b.byteOffset === 6 && b[0] === 128 && b[1] === 63 && f.buffer === buf; })()
+ta_buffer_errors | (function(){ var r = 0; try { new Float32Array(new ArrayBuffer(6)); } catch (e) { if (e instanceof RangeError) r++; } try { new Int32Array(new ArrayBuffer(8), 2); } catch (e) { if (e instanceof RangeError) r++; } try { new Uint8Array(-1); } catch (e) { if (e instanceof RangeError) r++; } try { Uint8Array(2); } catch (e) { if (e instanceof TypeError) r++; } return r === 4; })()
+ta_from_typed | (function(){ var a = new Uint8Array(new Float64Array([1.7, 256, -1])); return a instanceof Uint8Array && a.join() === "1,0,255"; })()
+ta_from_iterable | (function(){ var s = new Set([3, 4]); var a = new Float64Array(s); var b = new Int8Array({ length: 2, 0: 7, 1: "8" }); return a.join() === "3,4" && b.join() === "7,8"; })()
+ta_static_from_of | Float32Array.from([1, 2], function(x){ return x * 2; }).join() === "2,4" && Int16Array.of(1, 2, 3).length === 3 && Uint8Array.from("12").join() === "1,2"
+ta_iteration | (function(){ var r = []; for (var v of new Uint16Array([5, 6])) r.push(v); return r.join() === "5,6" && [].concat(Array.from(new Int8Array([1, 2]))).length === 2 && [...new Uint8Array([9, 8])].join() === "9,8"; })()
+ta_set_subarray | (function(){ var a = new Float32Array(5); a.set([1, 2], 1); a.set(new Int8Array([7]), 4); var s = a.subarray(1, -1); s[0] = 9; return a.join() === "0,9,2,0,7" && s.length === 3 && s instanceof Float32Array && s.buffer === a.buffer; })()
+ta_slice_fill | (function(){ var a = new Int32Array([1, 2, 3, 4]); var s = a.slice(1, 3); s[0] = 0; a.fill(5, -1); return s.join() === "0,3" && a.join() === "1,2,3,5" && s.buffer !== a.buffer; })()
+ta_methods | (function(){ var a = new Float64Array([3, 1, NaN, 2]); return a.indexOf(1) === 1 && a.includes(NaN) && a.indexOf(NaN) === -1 && a.map(function(x){ return x * 2; }) instanceof Float64Array && a.filter(function(x){ return x > 1; }).join() === "3,2" && a.reduce(function(s, x){ return x === x ? s + x : s; }, 0) === 6 && a.sort().join() === "1,2,3,NaN" && a.at(-1) !== a.at(-1) && a.reverse()[1] === 3; })()
+ta_prototype_chain | (function(){ var a = new Uint8Array(1); var TA = Object.getPrototypeOf(Uint8Array.prototype); return Object.getPrototypeOf(Float32Array.prototype) === TA && a.constructor === Uint8Array && Object.prototype.toString.call(a) === "[object Uint8Array]" && ArrayBuffer.isView(a) && !ArrayBuffer.isView([]) && Float32Array.BYTES_PER_ELEMENT === 4; })()
+ta_buffer_slice | (function(){ var a = new Uint8Array([1, 2, 3, 4]); var b = new Uint8Array(a.buffer.slice(1, 3)); return b.join() === "2,3" && b.buffer instanceof ArrayBuffer; })()
+
 # ---- Global functions ----------------------------------------------------------
 uri_component | encodeURIComponent("a b&c=d/é") === "a%20b%26c%3Dd%2F%C3%A9" && decodeURIComponent("a%20b%26%C3%A9") === "a b&é" && encodeURIComponent("!*'()-_.~") === "!*'()-_.~"
 uri_full | encodeURI("http://x.com/a b?q=é#h") === "http://x.com/a%20b?q=%C3%A9#h" && decodeURI("%41%2F%20") === "A%2F "

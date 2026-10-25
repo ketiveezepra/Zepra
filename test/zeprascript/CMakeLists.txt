@@ -28,6 +28,7 @@ set(ZEPRASCRIPT_UNIT_TEST_SOURCES
     unit/vm_tests.cpp
     unit/gc_tests.cpp
     unit/builtin_tests.cpp
+    unit/typed_array_tests.cpp
     unit/url_tests.cpp
     unit/wasm_tests.cpp
     unit/zeprascript_comprehensive_tests.cpp
