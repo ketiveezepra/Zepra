@@ -78,6 +78,7 @@ set(ZEPRASCRIPT_INTEGRATION_TEST_SOURCES
     integration/browser_vm_integration_test.cpp
     integration/js_execution_test.cpp
     integration/script_context_test.cpp
+    integration/canvas_bindings_test.cpp
     integration/conformance_test.cpp
 )
 
@@ -109,6 +110,7 @@ target_include_directories(zeprascript-integration-tests
         ${PROJECT_SOURCE_DIR}/include
         ${PROJECT_SOURCE_DIR}/source/zepraScript
         ${PROJECT_SOURCE_DIR}/source/webCore
+        ${PROJECT_SOURCE_DIR}/source/nxrender-cpp
 )
 
 target_compile_definitions(zeprascript-integration-tests
