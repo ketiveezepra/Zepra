@@ -612,7 +612,8 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         else if (value == "space-around") style.alignContent = JustifyAlign::SpaceAround;
     }
     else if (property == "align-self") {
-        if (value == "auto" || value == "flex-start" || value == "start") style.alignSelf = JustifyAlign::Start;
+        if (value == "auto") style.alignSelf = JustifyAlign::Auto;
+        else if (value == "flex-start" || value == "start") style.alignSelf = JustifyAlign::Start;
         else if (value == "flex-end" || value == "end") style.alignSelf = JustifyAlign::End;
         else if (value == "center") style.alignSelf = JustifyAlign::Center;
         else if (value == "stretch") style.alignSelf = JustifyAlign::Stretch;

@@ -83,8 +83,8 @@ void LazyImageLoader::queueImage(LayoutBox* box, const std::string& url,
         if (it != textureCache_.end()) {
             // Already loaded - update box directly
             box->textureId = it->second.textureId;
-            box->width = (float)it->second.width;
-            box->height = (float)it->second.height;
+            box->naturalWidth = (float)it->second.width;
+            box->naturalHeight = (float)it->second.height;
             box->text = ""; // Clear placeholder
             box->hasBgColor = false;
             invalidateIntrinsicWidths();
@@ -177,11 +177,11 @@ void LazyImageLoader::pollCompleted(std::vector<ImageResult>& results, int maxRe
                 raw.box->svgData = std::string(raw.pixels.begin(), raw.pixels.end());
                 raw.box->text = "";
                 raw.box->hasBgColor = false;  // drop the loading placeholder's grey box
-                raw.box->width = (float)(-raw.width);
-                raw.box->height = (float)raw.height;
+                raw.box->naturalWidth = (float)(-raw.width);
+                raw.box->naturalHeight = (float)raw.height;
                 raw.box->isImage = true;
                 // std::cout << "[LazyImageLoader] SVG applied to box: " 
-                //           << raw.box->width << "x" << raw.box->height << std::endl;
+                //           << raw.box->naturalWidth << "x" << raw.box->naturalHeight << std::endl;
                 continue;
             }
             
@@ -191,8 +191,8 @@ void LazyImageLoader::pollCompleted(std::vector<ImageResult>& results, int maxRe
                 
                 if (texId > 0 && raw.box) {
                     raw.box->textureId = texId;
-                    raw.box->width = (float)raw.width;
-                    raw.box->height = (float)raw.height;
+                    raw.box->naturalWidth = (float)raw.width;
+                    raw.box->naturalHeight = (float)raw.height;
                     raw.box->text = "";
                     raw.box->hasBgColor = false;
                     if (!raw.url.empty()) {

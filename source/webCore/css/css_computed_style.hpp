@@ -135,6 +135,7 @@ enum class JustifyAlign {
     FlexStart,
     FlexEnd,
     Baseline,
+    Auto,       // align-self: auto (the container's align-items)
 };
 
 /**
@@ -285,7 +286,7 @@ public:
     JustifyAlign justifyContent = JustifyAlign::FlexStart;
     JustifyAlign alignItems = JustifyAlign::Stretch;
     JustifyAlign alignContent = JustifyAlign::Stretch;
-    JustifyAlign alignSelf = JustifyAlign::Start;
+    JustifyAlign alignSelf = JustifyAlign::Auto;
     float flexGrow = 0;
     float flexShrink = 1;
     CSSLength flexBasis = CSSLength::auto_();

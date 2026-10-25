@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <iostream>
 #include <cfloat>
+#include <cmath>
 
 #include "../css/css_computed_style.hpp"
 
@@ -34,6 +35,7 @@ static void (*s_gfx_line)(float, float, float, float, uint32_t, float) = nullptr
 static void (*s_gfx_rrect)(float, float, float, float, float, uint32_t, uint8_t) = nullptr;
 static void (*s_gfx_gradient)(float, float, float, float, uint32_t, uint32_t) = nullptr;
 static void (*s_gfx_svg)(float, float, float, float, const std::string&, const std::string&) = nullptr;
+static void (*s_gfx_hgradient)(float, float, float, float, uint32_t, uint32_t) = nullptr;
 
 // Set rendering callbacks
 void setLayoutCallbacks(
@@ -57,16 +59,132 @@ void setLayoutCallbacks(
 void setLayoutCallbacks2(
     void (*gfx_rrect)(float, float, float, float, float, uint32_t, uint8_t),
     void (*gfx_gradient)(float, float, float, float, uint32_t, uint32_t),
-    void (*gfx_svg)(float, float, float, float, const std::string&, const std::string&)
+    void (*gfx_svg)(float, float, float, float, const std::string&, const std::string&),
+    void (*gfx_hgradient)(float, float, float, float, uint32_t, uint32_t)
 ) {
     s_gfx_rrect = gfx_rrect;
     s_gfx_gradient = gfx_gradient;
     s_gfx_svg = gfx_svg;
+    s_gfx_hgradient = gfx_hgradient;
 }
+
+// =============================================================================
+// VIEWPORT
+// =============================================================================
+
+static float s_viewportW = 0;
+static float s_viewportH = 0;
+
+void setLayoutViewport(float width, float height) {
+    s_viewportW = width;
+    s_viewportH = height;
+}
+
+float layoutViewportWidth() { return s_viewportW > 0 ? s_viewportW : (float)g_width; }
+float layoutViewportHeight() { return s_viewportH > 0 ? s_viewportH : (float)g_height; }
 
 // =============================================================================
 // LAYOUT ALGORITHM
 // =============================================================================
+
+// Restores what a layout pass overwrites to the values the box was built
+// with (recording them on the first pass)
+static void resetLayoutState(LayoutBox& box) {
+    if (!box.specSaved) {
+        box.specSaved = true;
+        box.specType = box.type;
+        box.specWidth = box.width;
+        box.specHeight = box.height;
+        box.specMarginTop = box.marginTop;
+        box.specMarginRight = box.marginRight;
+        box.specMarginBottom = box.marginBottom;
+        box.specMarginLeft = box.marginLeft;
+    } else {
+        box.type = box.specType;
+        box.width = box.specWidth;
+        box.height = box.specHeight;
+        box.marginTop = box.specMarginTop;
+        box.marginRight = box.specMarginRight;
+        box.marginBottom = box.specMarginBottom;
+        box.marginLeft = box.specMarginLeft;
+    }
+    for (auto& child : box.children) resetLayoutState(child);
+}
+
+// Lays a flex item out again at a given border-box width (its fit-content
+// or flexed width), as a block filling exactly that width
+static void layoutAtWidth(LayoutBox& item, float width) {
+    resetLayoutState(item);
+    LayoutType type = item.type;
+    LayoutLength cssWidth = item.cssWidth, cssMinWidth = item.cssMinWidth, cssMaxWidth = item.cssMaxWidth;
+    bool mla = item.marginLeftAuto, mra = item.marginRightAuto;
+
+    if (!isBlockLevel(type)) item.type = LayoutType::Block;
+    item.cssWidth = item.cssMinWidth = item.cssMaxWidth = LayoutLength::none();
+    item.marginLeftAuto = item.marginRightAuto = false;
+    layoutBlock(item, width + item.marginLeft + item.marginRight, 0);
+
+    item.type = type;
+    item.cssWidth = cssWidth; item.cssMinWidth = cssMinWidth; item.cssMaxWidth = cssMaxWidth;
+    item.marginLeftAuto = mla; item.marginRightAuto = mra;
+    item.width = width;
+}
+
+void imageSize(const LayoutBox& img, float containingWidth, float& width, float& height) {
+    float vpW = layoutViewportWidth(), vpH = layoutViewportHeight();
+    float edgesW = img.paddingLeft + img.paddingRight + img.borderLeft + img.borderRight;
+    float edgesH = img.paddingTop + img.paddingBottom + img.borderTop + img.borderBottom;
+    // Content-box length, or false when it is auto (a percentage height has
+    // no definite container height to resolve against)
+    auto resolve = [&](const LayoutLength& len, bool horizontal, float& out) {
+        if (!len.isSet() || len.isAuto()) return false;
+        if (len.isPercent() && (!horizontal || containingWidth <= 0)) return false;
+        out = len.resolve(containingWidth, img.fontSize, vpW, vpH);
+        if (img.boxSizing == 1) out -= horizontal ? edgesW : edgesH;
+        out = std::max(0.0f, out);
+        return true;
+    };
+
+    float w = 0, h = 0;
+    bool hasW = resolve(img.cssWidth, true, w);
+    bool hasH = resolve(img.cssHeight, false, h);
+    float ratio = (img.naturalWidth > 0 && img.naturalHeight > 0) ? img.naturalWidth / img.naturalHeight : 0;
+    if (!hasW && !hasH) {
+        if (ratio > 0) {
+            w = img.naturalWidth;
+            h = img.naturalHeight;
+        } else if (!img.text.empty()) {
+            // Not loaded (or failed): as big as its placeholder text
+            w = measureTextWidth(img.text, img.fontSize);
+            h = img.fontSize + 4;
+        }
+    } else if (!hasW) {
+        w = ratio > 0 ? h * ratio : h;
+    } else if (!hasH) {
+        h = ratio > 0 ? w / ratio : w;
+    }
+
+    // min/max constraints keep the aspect ratio of a dimension that was not given
+    float limit;
+    if (resolve(img.cssMaxWidth, true, limit) && w > limit) {
+        if (!hasH && ratio > 0) h = limit / ratio;
+        w = limit;
+    }
+    if (resolve(img.cssMinWidth, true, limit) && w < limit) {
+        if (!hasH && ratio > 0) h = limit / ratio;
+        w = limit;
+    }
+    if (resolve(img.cssMaxHeight, false, limit) && h > limit) {
+        if (!hasW && ratio > 0) w = limit * ratio;
+        h = limit;
+    }
+    if (resolve(img.cssMinHeight, false, limit) && h < limit) {
+        if (!hasW && ratio > 0) w = limit * ratio;
+        h = limit;
+    }
+    width = w + edgesW;
+    height = h + edgesH;
+}
 
 bool isBlockLevel(LayoutType type) {
     switch (type) {
@@ -89,13 +207,23 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     if (++s_depth > 64) { --s_depth; return; }
     struct DepthGuard { ~DepthGuard() { --s_depth; } } guard;
 
+    // A pass over the whole tree starts from the boxes as built
+    if (s_depth == 1) resetLayoutState(box);
+
     if (box.type == LayoutType::Table) {
         layoutTable(box, containingWidth, startY);
         return;
     }
-    
-    float vpW = (float)g_width;
-    float vpH = (float)g_height;
+
+    if (box.isImage) {
+        imageSize(box, containingWidth, box.width, box.height);
+        box.x = box.marginLeft;
+        box.y = startY + box.marginTop;
+        return;
+    }
+
+    float vpW = layoutViewportWidth();
+    float vpH = layoutViewportHeight();
     
     // Resolve deferred CSS width
     if (box.cssWidth.isSet() && !box.cssWidth.isAuto()) {
@@ -217,14 +345,22 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
             if (child.type == LayoutType::None) continue;
             
             float childAvailableWidth = contentWidth > 0 ? contentWidth : 200;
-            
-            LayoutType oldType = child.type;
-            if (!isColumn && (child.type == LayoutType::Block || child.type == LayoutType::Flex) && (!child.cssWidth.isSet() || child.cssWidth.isAuto())) {
-                 child.type = LayoutType::InlineBlock;
+
+            // Items whose width isn't the container's (every row item, and
+            // column items that aren't stretched) are as wide as their
+            // content, within the space available: fit-content
+            // (CSS Flexbox §9.2 step 3, §9.4 step 11)
+            int align = child.alignSelf >= 0 ? child.alignSelf : box.alignItems;
+            bool autoWidth = !child.cssWidth.isSet() || child.cssWidth.isAuto();
+            if (autoWidth && !child.isImage && (!isColumn || align != 0) &&
+                (isBlockLevel(child.type) || !child.children.empty())) {
+                float minW, maxW;
+                intrinsicWidths(child, minW, maxW);
+                float available = childAvailableWidth - child.marginLeft - child.marginRight;
+                layoutAtWidth(child, std::min(maxW, std::max(minW, available)));
+            } else {
+                layoutBlock(child, childAvailableWidth, 0);
             }
-            
-            layoutBlock(child, childAvailableWidth, 0);
-            child.type = oldType;
             
             // Shrink-to-fit: compute width from children if no explicit width was set
             if (child.width == 0 || (!child.cssWidth.isSet() || child.cssWidth.isAuto())) {
@@ -309,6 +445,13 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         // Wrap-reverse: reverse line stacking order
         if (box.wrapReverse && lines.size() > 1) {
             std::reverse(lines.begin(), lines.end());
+        }
+
+        // The line of a single-line container is as big as the container's
+        // definite cross size, min-height included (§9.4 step 15), so
+        // align-items: center centres in the whole row
+        if (lines.size() == 1 && !box.flexWrap && containerCrossSize > lines[0].crossSize) {
+            lines[0].crossSize = containerCrossSize;
         }
         
         // Align-content: distribute cross-axis free space across lines
@@ -414,7 +557,20 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
             }
             line.freeSpace = containerMainSize - line.mainSize;
             if (line.freeSpace < 0) line.freeSpace = 0;
-            
+
+            // Row items that grew or shrank are laid out again at their new
+            // width, so their contents wrap and align to it
+            if (!isColumn) {
+                for (auto& fc : line.items) {
+                    LayoutBox& child = *fc.ptr;
+                    float w = std::max(0.0f, fc.mainSize - child.marginLeft - child.marginRight);
+                    if (child.children.empty() || child.isImage || std::fabs(w - child.width) < 0.5f) continue;
+                    layoutAtWidth(child, w);
+                    fc.crossSize = child.height + child.marginTop + child.marginBottom;
+                    line.crossSize = std::max(line.crossSize, fc.crossSize);
+                }
+            }
+
             // Margin auto: absorb remaining free space before alignment
             // Per CSS Flexbox spec §9.5, auto margins consume free space first
             if (line.freeSpace > 0) {
@@ -623,18 +779,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 if (child.width == 0) child.width = 200;
                 if (child.height == 0) child.height = std::max(24.0f, child.fontSize + 8);
             } else if (child.isImage) {
-                // CSS width/height (or the width/height attributes) win over
-                // the natural size the image loader stored; until it loads,
-                // an image without a size is as big as its placeholder text
-                bool loaded = child.textureId > 0 || !child.svgData.empty();
-                if (!loaded && !child.text.empty()) {
-                    child.width = measureTextWidth(child.text, child.fontSize);
-                    child.height = child.fontSize + 4;
-                }
-                if (child.cssWidth.isSet() && !child.cssWidth.isAuto())
-                    child.width = child.cssWidth.resolve(contentWidth, child.fontSize, vpW, vpH);
-                if (child.cssHeight.isSet() && !child.cssHeight.isAuto())
-                    child.height = child.cssHeight.resolve(0, child.fontSize, vpW, vpH);
+                imageSize(child, contentWidth, child.width, child.height);
             } else if (!child.children.empty()) {
                 // Inline element with children — recursive layout
                 float availWidth = contentWidth > 0 ? contentWidth : containingWidth;
@@ -752,15 +897,13 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     }
     
     // Apply min/max height constraints (accounting for box-sizing)
-    float vpW2 = (float)g_width;
-    float vpH2 = (float)g_height;
     if (box.cssMinHeight.isSet() && !box.cssMinHeight.isAuto()) {
-        float minH = box.cssMinHeight.resolve(0, box.fontSize, vpW2, vpH2);
+        float minH = box.cssMinHeight.resolve(0, box.fontSize, vpW, vpH);
         if (box.boxSizing == 0) minH += box.paddingTop + box.paddingBottom + box.borderTop + box.borderBottom;
         if (box.height < minH) box.height = minH;
     }
     if (box.cssMaxHeight.isSet() && !box.cssMaxHeight.isAuto()) {
-        float maxH = box.cssMaxHeight.resolve(0, box.fontSize, vpW2, vpH2);
+        float maxH = box.cssMaxHeight.resolve(0, box.fontSize, vpW, vpH);
         if (box.boxSizing == 0) maxH += box.paddingTop + box.paddingBottom + box.borderTop + box.borderBottom;
         if (box.height > maxH) box.height = maxH;
     }
@@ -811,6 +954,185 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
 // =============================================================================
 // PAINTING
 // =============================================================================
+
+namespace {
+
+struct GradientStop {
+    uint32_t color;
+    float pos;  // 0..1 along the gradient line, or -1 when not given
+};
+
+uint32_t lerpColor(uint32_t a, uint32_t b, float t) {
+    auto channel = [&](int shift) {
+        float va = (float)((a >> shift) & 0xFF), vb = (float)((b >> shift) & 0xFF);
+        return (uint32_t)std::lround(va + (vb - va) * t) << shift;
+    };
+    return channel(16) | channel(8) | channel(0);
+}
+
+uint32_t colorAt(const std::vector<GradientStop>& stops, float t) {
+    if (t <= stops.front().pos) return stops.front().color;
+    for (size_t i = 1; i < stops.size(); i++) {
+        if (t <= stops[i].pos) {
+            float span = stops[i].pos - stops[i - 1].pos;
+            return span > 0 ? lerpColor(stops[i - 1].color, stops[i].color, (t - stops[i - 1].pos) / span)
+                            : stops[i].color;
+        }
+    }
+    return stops.back().color;
+}
+
+// CSS angle of a linear-gradient direction (0deg = to top, clockwise), or
+// false when the token isn't one
+bool parseGradientAngle(const std::string& token, float w, float h, float& deg) {
+    if (token.compare(0, 3, "to ") == 0) {
+        bool top = token.find("top") != std::string::npos, bottom = token.find("bottom") != std::string::npos;
+        bool left = token.find("left") != std::string::npos, right = token.find("right") != std::string::npos;
+        float dx = right ? 1.0f : left ? -1.0f : 0.0f;
+        float dy = bottom ? 1.0f : top ? -1.0f : 0.0f;
+        // A corner direction is perpendicular to the diagonal between the
+        // other two corners (CSS Images 3 §3.1.1)
+        if (dx != 0 && dy != 0) { dx *= h; dy *= w; }
+        deg = std::atan2(dx, -dy) * 180.0f / 3.14159265f;
+        return true;
+    }
+    char* end = nullptr;
+    float v = std::strtof(token.c_str(), &end);
+    if (end == token.c_str()) return false;
+    std::string unit(end);
+    if (unit == "deg") deg = v;
+    else if (unit == "turn") deg = v * 360.0f;
+    else if (unit == "rad") deg = v * 180.0f / 3.14159265f;
+    else if (unit == "grad") deg = v * 0.9f;
+    else return false;
+    return true;
+}
+
+}  // namespace
+
+// Paints the top gradient layer of a background: linear-gradient() at any
+// angle with any number of stops; other gradient kinds get their first colour
+static void paintGradient(const std::string& css, float x, float y, float w, float h, uint32_t fallback) {
+    size_t kind = css.find("gradient(");
+    bool isLinear = kind != std::string::npos && kind >= 7 && css.compare(kind - 7, 7, "linear-") == 0;
+    // The gradient's own parentheses (a url() layer may come first, more
+    // gradient layers may follow)
+    size_t open = css.find('(', kind);
+    size_t close = std::string::npos;
+    for (size_t i = open, depth = 0; i < css.size(); i++) {
+        if (css[i] == '(') depth++;
+        else if (css[i] == ')' && --depth == 0) { close = i; break; }
+    }
+    float deg = 180.0f;
+    std::vector<GradientStop> stops;
+    if (open != std::string::npos && close != std::string::npos && close > open) {
+        std::string inner = css.substr(open + 1, close - open - 1);
+        // Split at top-level commas (not the ones inside rgb() or hsl())
+        std::vector<std::string> tokens;
+        int depth = 0;
+        size_t from = 0;
+        for (size_t i = 0; i <= inner.size(); i++) {
+            if (i < inner.size() && inner[i] == '(') depth++;
+            else if (i < inner.size() && inner[i] == ')') depth--;
+            else if (i == inner.size() || (inner[i] == ',' && depth == 0)) {
+                std::string t = inner.substr(from, i - from);
+                size_t a = t.find_first_not_of(" \t\n"), b = t.find_last_not_of(" \t\n");
+                tokens.push_back(a == std::string::npos ? "" : t.substr(a, b - a + 1));
+                from = i + 1;
+            }
+        }
+        for (size_t i = 0; i < tokens.size(); i++) {
+            const std::string& token = tokens[i];
+            if (token.empty()) continue;
+            if (i == 0 && parseGradientAngle(token, w, h, deg)) continue;
+            // Radial/conic shape, size and position ("circle at center", "from 90deg")
+            if (i == 0 && !isLinear && token[0] != '#' && token.find('(') == std::string::npos &&
+                (token.find("circle") != std::string::npos || token.find("ellipse") != std::string::npos ||
+                 token.find("closest") != std::string::npos || token.find("farthest") != std::string::npos ||
+                 token.compare(0, 3, "at ") == 0 || token.compare(0, 5, "from ") == 0)) continue;
+            // "<color> [<position>]": the position follows the colour's ')' or first space
+            size_t split = token.rfind(')');
+            split = token.find(' ', split == std::string::npos ? 0 : split);
+            std::string colorText = split == std::string::npos ? token : token.substr(0, split);
+            float pos = -1;
+            if (split != std::string::npos) {
+                std::string p = token.substr(split + 1);
+                char* end = nullptr;
+                float v = std::strtof(p.c_str(), &end);
+                if (end != p.c_str() && *end == '%') pos = v / 100.0f;
+            }
+            Zepra::WebCore::CSSColor col = Zepra::WebCore::CSSColor::parse(colorText);
+            // Transparent stops have no RGB to draw
+            if (col.a > 0) stops.push_back({(uint32_t)((col.r << 16) | (col.g << 8) | col.b), pos});
+        }
+    }
+    if (stops.empty()) {
+        if (css.find("transparent") == std::string::npos) s_gfx_rect(x, y, w, h, fallback);
+        return;
+    }
+    if (stops.size() == 1 || !isLinear) {
+        s_gfx_rect(x, y, w, h, stops[0].color);
+        return;
+    }
+
+    // Unpositioned stops: the first at 0, the last at 1, the others spread
+    // evenly between their positioned neighbours; positions never go back
+    if (stops.front().pos < 0) stops.front().pos = 0;
+    if (stops.back().pos < 0) stops.back().pos = 1;
+    for (size_t i = 1; i < stops.size(); i++) {
+        if (stops[i].pos >= 0) continue;
+        size_t j = i;
+        while (stops[j].pos < 0) j++;
+        for (size_t k = i; k < j; k++)
+            stops[k].pos = stops[i - 1].pos + (stops[j].pos - stops[i - 1].pos) * (float)(k - i + 1) / (float)(j - i + 1);
+    }
+    for (size_t i = 1; i < stops.size(); i++) stops[i].pos = std::max(stops[i].pos, stops[i - 1].pos);
+
+    deg = std::fmod(std::fmod(deg, 360.0f) + 360.0f, 360.0f);
+    float rad = deg * 3.14159265f / 180.0f;
+    float dx = std::sin(rad), dy = -std::cos(rad);  // gradient direction, y down
+    if (std::fabs(dx) < 1e-4f) dx = 0;
+    if (std::fabs(dy) < 1e-4f) dy = 0;
+
+    // Fills a band whose gradient position runs from t0 at 'start' to t1 at
+    // 'start + length' along x (horizontal) or y, one 2-colour piece per stop
+    auto drawBand = [&](float t0, float t1, float start, float length, bool horizontal,
+                        float bx, float by, float bw, float bh) {
+        std::vector<float> cuts{t0};
+        for (const auto& st : stops) if (st.pos > t0 && st.pos < t1) cuts.push_back(st.pos);
+        cuts.push_back(t1);
+        for (size_t i = 0; i + 1 < cuts.size(); i++) {
+            float a = start + (cuts[i] - t0) / (t1 - t0) * length;
+            float b = start + (cuts[i + 1] - t0) / (t1 - t0) * length;
+            uint32_t ca = colorAt(stops, cuts[i]), cb = colorAt(stops, cuts[i + 1]);
+            if (b < a) { std::swap(a, b); std::swap(ca, cb); }
+            if (horizontal) s_gfx_hgradient(a, by, b - a + 0.5f, bh, ca, cb);
+            else s_gfx_gradient(bx, a, bw, b - a + 0.5f, ca, cb);
+        }
+    };
+
+    if (dx == 0 || !s_gfx_hgradient) {
+        // Vertical (without a horizontal primitive the angle is dropped)
+        bool down = dy >= 0;
+        drawBand(0, 1, down ? y : y + h, down ? h : -h, false, x, y, w, h);
+    } else if (dy == 0) {
+        bool right = dx > 0;
+        drawBand(0, 1, right ? x : x + w, right ? w : -w, true, x, y, w, h);
+    } else {
+        // Any other angle: thin rows, each a horizontal gradient between
+        // the positions its two ends reach (CSS Images 3 §3.1.1)
+        float len = std::fabs(w * dx) + std::fabs(h * dy);
+        float rowH = std::max(4.0f, h / 64.0f);
+        for (float ry = 0; ry < h; ry += rowH) {
+            float rh = std::min(rowH, h - ry);
+            float cy = ry + rh / 2 - h / 2;
+            float tl = 0.5f + (-w / 2 * dx + cy * dy) / len;
+            float tr = 0.5f + (w / 2 * dx + cy * dy) / len;
+            if (tl < tr) drawBand(tl, tr, x, w, true, x, y + ry, w, rh);
+            else drawBand(tr, tl, x + w, -w, true, x, y + ry, w, rh);
+        }
+    }
+}
 
 static void dumpLayoutTree(const LayoutBox& box, int depth = 0) {
     static FILE* fp = nullptr;
@@ -881,69 +1203,9 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
                 paintCells(row, screenX + row.x, screenY + row.y);
         }
     } else if (box.hasBgColor) {
-        if (!box.backgroundImage.empty() && box.backgroundImage.find("gradient") != std::string::npos && s_gfx_gradient) {
-            std::string grad = box.backgroundImage;
-            bool isConic = grad.find("conic-gradient") != std::string::npos;
-            
-            std::vector<uint32_t> colors;
-            
-            // Simple robust linear parser allowing any CSS color
-            // The gradient's own parentheses (a url() layer may come first)
-            size_t startPos = grad.find('(', grad.find("gradient("));
-            size_t endPos = grad.rfind(')');
-            if (startPos != std::string::npos && endPos != std::string::npos && endPos > startPos) {
-                std::string inner = grad.substr(startPos + 1, endPos - startPos - 1);
-                
-                size_t p = 0;
-                while (p < inner.length()) {
-                    while (p < inner.length() && std::isspace(inner[p])) p++;
-                    size_t nextComma = inner.find(',', p);
-                    
-                    // Skip commas inside rgb() or hsl()
-                    size_t scope = 0;
-                    for (size_t i = p; i < inner.length(); i++) {
-                        if (inner[i] == '(') scope++;
-                        else if (inner[i] == ')') scope--;
-                        else if (inner[i] == ',' && scope == 0) {
-                            nextComma = i;
-                            break;
-                        }
-                    }
-                    if (scope != 0 || nextComma == std::string::npos) nextComma = inner.length();
-                    
-                    std::string token = inner.substr(p, nextComma - p);
-                    
-                    // Trim token
-                    while (!token.empty() && std::isspace(token.back())) token.pop_back();
-                    while (!token.empty() && std::isspace(token.front())) token.erase(token.begin());
-                    
-                    if (!token.empty() && token.find("to ") == std::string::npos && token.find("deg") == std::string::npos) {
-                        Zepra::WebCore::CSSColor col = Zepra::WebCore::CSSColor::parse(token);
-                        // Actually Zepra colors are RGB in UI but s_gfx uses 0xRRGGBB
-                        // (transparent stops have no RGB to draw)
-                        if (col.a > 0) colors.push_back((col.r << 16) | (col.g << 8) | col.b);
-                    }
-                    p = nextComma + 1;
-                }
-            }
-            
-            if (isConic) {
-                // Fallback for conic gradients (not natively supported by s_gfx)
-                s_gfx_rect(screenX, screenY, box.width, box.height, colors.empty() ? box.bgColor : colors[0]);
-            } else {
-                if (colors.size() >= 2) {
-                    float chunkW = box.width / (colors.size() - 1);
-                    float curX = screenX;
-                    for (size_t i = 0; i < colors.size() - 1; i++) {
-                         s_gfx_gradient(curX, screenY, chunkW + 1, box.height, colors[i], colors[i+1]);
-                         curX += chunkW;
-                    }
-                } else if (colors.size() == 1) {
-                    s_gfx_rect(screenX, screenY, box.width, box.height, colors[0]);
-                } else if (!box.backgroundImage.empty() && box.backgroundImage.find("transparent") == std::string::npos) {
-                    s_gfx_rect(screenX, screenY, box.width, box.height, box.bgColor);
-                }
-            }
+        if (!box.backgroundImage.empty() && box.backgroundImage.find("gradient") != std::string::npos &&
+            s_gfx_gradient && s_gfx_rect) {
+            paintGradient(box.backgroundImage, screenX, screenY, box.width, box.height, box.bgColor);
         } else if (box.borderRadius > 0 && s_gfx_rrect) {
             s_gfx_rrect(screenX, screenY, box.width, box.height, box.borderRadius, box.bgColor, alpha);
         } else if (s_gfx_rect) {

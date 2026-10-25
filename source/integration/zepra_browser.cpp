@@ -2023,12 +2023,16 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     imgBox->color = 0xAAAAAA;
                     imgBox->bgColor = 0xEEEEEE;
                     imgBox->hasBgColor = true;
-                    imgBox->width = 100;
-                    imgBox->height = 100;
                     if (const CSSComputedStyle* imgStyle = g_cssEngine ? g_cssEngine->getComputedStyle(childElement) : nullptr) {
-                        // width/height from CSS or the width/height attributes
+                        // width/height from CSS or the width/height attributes;
+                        // layout sizes the box from these and the natural size
                         imgBox->cssWidth = cssToLayout(imgStyle->width);
                         imgBox->cssHeight = cssToLayout(imgStyle->height);
+                        imgBox->cssMinWidth = cssToLayout(imgStyle->minWidth);
+                        imgBox->cssMaxWidth = cssToLayout(imgStyle->maxWidth);
+                        imgBox->cssMinHeight = cssToLayout(imgStyle->minHeight);
+                        imgBox->cssMaxHeight = cssToLayout(imgStyle->maxHeight);
+                        imgBox->fontSize = imgStyle->fontSize;
                         imgBox->marginTop = imgStyle->marginTop.isAuto() ? 0 : imgStyle->marginTop.value;
                         imgBox->marginBottom = imgStyle->marginBottom.isAuto() ? 0 : imgStyle->marginBottom.value;
                         imgBox->marginLeft = imgStyle->marginLeft.isAuto() ? 0 : imgStyle->marginLeft.value;
@@ -2050,8 +2054,12 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     svgBox->type = LayoutType::InlineBlock;
                     svgBox->isImage = true;
                     svgBox->svgData = svgStr;
-                    svgBox->width = dim.width;
-                    svgBox->height = dim.height;
+                    svgBox->naturalWidth = dim.width;
+                    svgBox->naturalHeight = dim.height;
+                    if (const CSSComputedStyle* svgStyle = g_cssEngine ? g_cssEngine->getComputedStyle(childElement) : nullptr) {
+                        svgBox->cssWidth = cssToLayout(svgStyle->width);
+                        svgBox->cssHeight = cssToLayout(svgStyle->height);
+                    }
                     svgBox->marginTop = 2;
                     svgBox->marginBottom = 2;
                 }
@@ -2531,6 +2539,12 @@ static void layout_gfx_gradient(float x, float y, float w, float h, uint32_t c1,
     gfx::gradient(x, y, w, h, c1, c2);
 }
 
+static void layout_gfx_hgradient(float x, float y, float w, float h, uint32_t c1, uint32_t c2) {
+    g_nxGpu.fillRectGradient(NXRender::Rect(x, y, w, h),
+                             NXRender::Color(c1).withAlpha(255), NXRender::Color(c2).withAlpha(255),
+                             true);
+}
+
 // Initialize layout engine callbacks
 static void initLayoutEngine() {
     ZepraBrowser::setLayoutCallbacks(
@@ -2558,7 +2572,8 @@ static void initLayoutEngine() {
             // Render at position with size
             float renderSize = std::min(w, h);
             g_svg.draw(key, x, y, renderSize);
-        }
+        },
+        layout_gfx_hgradient
     );
     
     std::cout << "[Layout] Layout engine initialized (rounded rect + gradient support)" << std::endl;
@@ -3408,12 +3423,10 @@ void render() {
         // Start page rendered through layout engine (DOM-based)
         g_linkHitBoxes.clear();
         g_cursorIsPointer = false;
-        // Ensure root covers at least the visible content area BEFORE layout
-        // so flex justify-content: center has main axis space to distribute
-        if (g_layoutRoot->height < contentH)
-            g_layoutRoot->height = contentH;
+        // vh is the content area (body's min-height: 100vh fills it)
+        ZepraBrowser::setLayoutViewport(contentW, contentH);
         ZepraBrowser::layoutBlock(*g_layoutRoot, contentW, 0);
-        // Re-check after layout in case content grew beyond viewport
+        // The background covers the whole content area
         if (g_layoutRoot->height < contentH)
             g_layoutRoot->height = contentH;
         float scrollY = 0;
@@ -3453,6 +3466,7 @@ void render() {
             if (g_layoutRoot) {
                 // Run layout algorithm
                 float layoutWidth = contentW - 40;  // Margins
+                ZepraBrowser::setLayoutViewport(contentW, contentH);
                 ZepraBrowser::layoutBlock(*g_layoutRoot, layoutWidth, 0);
                 
                 // Paint the layout tree
@@ -5244,6 +5258,12 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
         return 1;
     }
     std::cout << " OK" << std::endl;
+    // The window may have been made smaller than asked (to fit the screen);
+    // its resize event came before our handler was registered
+    if (NXRender::viewportWidth() > 0 && NXRender::viewportHeight() > 0) {
+        g_width = NXRender::viewportWidth();
+        g_height = NXRender::viewportHeight();
+    }
 
 #ifdef __linux__
     // X11 clipboard: copy() needs our display/window to take selection

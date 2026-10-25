@@ -225,8 +225,20 @@ struct LayoutBox {
     uint32_t textureId = 0; // 0 = no texture
     std::string svgData;    // Raw SVG string for NxSVG rendering on main thread
     mutable std::string svgKey; // Cached hash key for NxSVG
-    
-    
+    // Natural size once the image has loaded (0 until then); layout sizes the
+    // box from CSS width/height and this (CSS 2.1 §10.3.2, §10.6.2)
+    float naturalWidth = 0;
+    float naturalHeight = 0;
+
+    // Type, size and margins as built. Layout overwrites them (flex items
+    // become FlexItem, auto margins and stretched sizes are written back), so
+    // each top-level layoutBlock call restores these first: laying out the
+    // same tree twice gives the same boxes.
+    bool specSaved = false;
+    LayoutType specType = LayoutType::Block;
+    float specWidth = 0, specHeight = 0;
+    float specMarginTop = 0, specMarginRight = 0, specMarginBottom = 0, specMarginLeft = 0;
+
     // Children (using list for stable pointers - vector invalidates on realloc)
     std::list<LayoutBox> children;
     
@@ -260,12 +272,32 @@ void setLayoutCallbacks(
     void (*gfx_line)(float x1, float y1, float x2, float y2, uint32_t color, float thickness) = nullptr
 );
 
-/// Set extended rendering callbacks (rounded rect, gradient)
+/// Set extended rendering callbacks (rounded rect, gradients: gfx_gradient
+/// runs top to bottom, gfx_hgradient left to right)
 void setLayoutCallbacks2(
     void (*gfx_rrect)(float x, float y, float w, float h, float radius, uint32_t color, uint8_t alpha),
     void (*gfx_gradient)(float x, float y, float w, float h, uint32_t c1, uint32_t c2),
-    void (*gfx_svg)(float x, float y, float w, float h, const std::string& svgData, const std::string& svgKey) = nullptr
+    void (*gfx_svg)(float x, float y, float w, float h, const std::string& svgData, const std::string& svgKey) = nullptr,
+    void (*gfx_hgradient)(float x, float y, float w, float h, uint32_t c1, uint32_t c2) = nullptr
 );
+
+/**
+ * @brief Set the viewport that vw/vh units and percentages of it resolve
+ * against: the page's content area, not the whole window. Until it is set,
+ * the window size (g_width x g_height) is used.
+ */
+void setLayoutViewport(float width, float height);
+float layoutViewportWidth();
+float layoutViewportHeight();
+
+/**
+ * @brief Border-box size of an image box: CSS width/height (or the width and
+ * height attributes), the other dimension from the natural aspect ratio,
+ * else the natural size; min/max-width and -height scale it. Before the
+ * image loads, a missing dimension comes from its placeholder text.
+ * Percentages resolve against containingWidth (ignored when it is 0).
+ */
+void imageSize(const LayoutBox& img, float containingWidth, float& width, float& height);
 
 /**
  * @brief Layout a block formatting context
