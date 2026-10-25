@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Runaway microtasks</title>
+<style>
+  body { font-family: sans-serif; margin: 24px; }
+  #box { width: 300px; height: 120px; background: #2962FF; }
+</style>
+</head>
+<body>
+<h1>Runaway microtasks</h1>
+<p>An endless promise chain and an endless queueMicrotask loop. Each one must be
+stopped by the script limits (10 s or 1 GB), the page must keep rendering,
+and the loops must not resume with the next timer.</p>
+<div id="box"></div>
+<script>
+var spins = 0;
+function spin() { spins++; queueMicrotask(spin); }
+spin();
+</script>
+<script>
+var chain = 0;
+function step() { chain++; return Promise.resolve().then(step); }
+setTimeout(step, 0);
+setTimeout(function () { console.log('after runaways: spins=' + spins + ' chain=' + chain); }, 100);
+</script>
+</body>
+</html>

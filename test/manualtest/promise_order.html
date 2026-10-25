@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Promise ordering</title>
+<style>
+  body { font-family: sans-serif; margin: 24px; }
+  pre { font-size: 14px; line-height: 1.4; }
+  #verdict { font-weight: bold; padding: 8px 12px; color: #fff; background: #888; display: inline-block; }
+</style>
+</head>
+<body>
+<h1>Promise ordering</h1>
+<p>Logs the order of sync code, promise reactions, queueMicrotask, async/await and timers.
+The expected order is what Chrome prints for the same page.</p>
+<div id="verdict">running</div>
+<pre id="out"></pre>
+<script>
+var log = [];
+function out(s) { log.push(s); console.log(s); }
+
+out('script start');
+setTimeout(function () {
+  out('timeout 1');
+  Promise.resolve().then(function () { out('timeout 1 microtask'); });
+}, 0);
+setTimeout(function () { out('timeout 2'); }, 0);
+
+Promise.resolve().then(function () { out('promise 1'); }).then(function () { out('promise 2'); });
+queueMicrotask(function () { out('queueMicrotask'); });
+
+async function a1() { out('a1 start'); await a2(); out('a1 end'); }
+async function a2() { out('a2'); }
+a1();
+
+new Promise(function (resolve) { out('executor'); resolve(); }).then(function () { out('executor then'); });
+
+var p = Promise.resolve();
+new Promise(function (r) { r(p); }).then(function () { out('adopted'); });
+p.then(function () { out('t1'); }).then(function () { out('t2'); }).then(function () { out('t3'); });
+
+Promise.all([1, Promise.resolve(2)]).then(function (v) { out('all ' + v.join()); });
+Promise.reject(new Error('x')).catch(function (e) { out('caught ' + e.message); })
+  .finally(function () { out('finally'); });
+(async function () {
+  try { await Promise.reject('r'); } catch (e) { out('async caught ' + e); }
+})();
+out('script end');
+
+var expected = [
+  'script start', 'a1 start', 'a2', 'executor', 'script end',
+  'promise 1', 'queueMicrotask', 'a1 end', 'executor then', 't1', 'caught x',
+  'async caught r', 'promise 2', 't2', 'all 1,2', 'finally', 'adopted', 't3',
+  'timeout 1', 'timeout 1 microtask', 'timeout 2'
+];
+
+setTimeout(function () {
+  var got = log.join('\n');
+  var ok = got === expected.join('\n');
+  console.log('ORDER: ' + log.join(' | '));
+  console.log('PROMISE ORDER ' + (ok ? 'MATCHES' : 'DIFFERS FROM') + ' CHROME');
+  var verdict = document.getElementById('verdict');
+  verdict.textContent = ok ? 'matches Chrome' : 'differs from Chrome';
+  verdict.style.background = ok ? '#00C853' : '#D50000';
+  document.getElementById('out').textContent = got;
+}, 50);
+</script>
+</body>
+</html>

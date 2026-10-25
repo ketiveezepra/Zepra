@@ -217,3 +217,92 @@ TEST_F(ScriptContextTest, ErrorRoutedToConsole) {
     }
     EXPECT_TRUE(foundError);
 }
+
+// =============================================================================
+// Promises and microtasks
+// =============================================================================
+
+namespace {
+std::vector<std::string> messages(const std::vector<std::pair<std::string, std::string>>& logs,
+                                  const std::string& level) {
+    std::vector<std::string> out;
+    for (const auto& [l, msg] : logs) {
+        if (l == level) out.push_back(msg);
+    }
+    return out;
+}
+} // namespace
+
+TEST_F(ScriptContextTest, PromiseReactionsRunAfterScript) {
+    auto result = ctx_->evaluate(
+        "Promise.resolve().then(function(){ console.log('then'); });"
+        "queueMicrotask(function(){ console.log('micro'); });"
+        "console.log('sync');", "<test>");
+    EXPECT_TRUE(result.success) << result.error;
+    EXPECT_EQ(messages(consoleLogs_, "log"), (std::vector<std::string>{"sync", "then", "micro"}));
+}
+
+TEST_F(ScriptContextTest, MicrotasksRunAfterEachTimer) {
+    // Each timer callback is a task: its microtasks run before the next timer
+    ctx_->evaluate(
+        "setTimeout(function(){ console.log('t1'); Promise.resolve().then(function(){ console.log('m1'); }); }, 0);"
+        "setTimeout(function(){ console.log('t2'); queueMicrotask(function(){ console.log('m2'); }); }, 0);",
+        "<test>");
+    ctx_->processTimers();
+    EXPECT_EQ(messages(consoleLogs_, "log"), (std::vector<std::string>{"t1", "m1", "t2", "m2"}));
+}
+
+TEST_F(ScriptContextTest, MicrotasksRunAfterAnimationFrame) {
+    ctx_->evaluate(
+        "requestAnimationFrame(function(){ console.log('raf'); Promise.resolve().then(function(){ console.log('m'); }); });",
+        "<test>");
+    ctx_->runAnimationFrames();
+    EXPECT_EQ(messages(consoleLogs_, "log"), (std::vector<std::string>{"raf", "m"}));
+}
+
+TEST_F(ScriptContextTest, MicrotasksRunAfterThrowingScript) {
+    auto result = ctx_->evaluate(
+        "Promise.resolve().then(function(){ console.log('still runs'); }); throw new Error('x');", "<test>");
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(messages(consoleLogs_, "log"), (std::vector<std::string>{"still runs"}));
+}
+
+TEST_F(ScriptContextTest, AsyncAwaitAcrossTimer) {
+    ctx_->evaluate(
+        "function sleep(){ return new Promise(function(r){ setTimeout(r, 0); }); }"
+        "async function run(){ console.log('start'); await sleep(); console.log('woke'); }"
+        "run().then(function(){ console.log('done'); });", "<test>");
+    EXPECT_EQ(messages(consoleLogs_, "log"), (std::vector<std::string>{"start"}));
+    ctx_->processTimers();
+    EXPECT_EQ(messages(consoleLogs_, "log"), (std::vector<std::string>{"start", "woke", "done"}));
+}
+
+TEST_F(ScriptContextTest, UnhandledRejectionReported) {
+    ctx_->evaluate("Promise.reject(new TypeError('boom')); Promise.reject(1).catch(function(){});", "<test>");
+    EXPECT_EQ(messages(consoleLogs_, "error"), (std::vector<std::string>{"Uncaught (in promise) TypeError: boom"}));
+}
+
+TEST_F(ScriptContextTest, MicrotaskErrorReportedAndDrainContinues) {
+    ctx_->evaluate(
+        "queueMicrotask(function(){ throw new Error('first'); });"
+        "queueMicrotask(function(){ console.log('second'); });", "<test>");
+    EXPECT_EQ(messages(consoleLogs_, "log"), (std::vector<std::string>{"second"}));
+    auto errors = messages(consoleLogs_, "error");
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors[0].find("first"), std::string::npos);
+}
+
+TEST_F(ScriptContextTest, RunawayMicrotaskLoopStopped) {
+    // An endless chain of short microtasks (each far below the run loop's
+    // own check interval) is stopped by the 10 s limit, and its queued work
+    // does not come back with the next task
+    auto result = ctx_->evaluate(
+        "var n = 0; function spin(){ n++; queueMicrotask(spin); } spin();", "<test>");
+    EXPECT_FALSE(result.success);
+    auto after = ctx_->evaluate("var before = n; setTimeout(function(){}, 0); before > 1000", "<test>");
+    EXPECT_TRUE(after.success) << after.error;
+    EXPECT_EQ(after.value, "true");
+    ctx_->processTimers();
+    auto still = ctx_->evaluate("n === before", "<test>");
+    EXPECT_EQ(still.value, "true");
+}
