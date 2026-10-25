@@ -196,6 +196,7 @@ if(USE_NXRENDER)
     set(SOURCES
         source/main.cpp
         source/integration/zepra_browser.cpp
+        source/integration/devtools/devtools_panel.cpp
         source/zepraEngine/engine/dev_tools.cpp
         source/zepraEngine/engine/html_parser_stub.cpp
         source/zepraEngine/media/audio_equalizer.cpp
@@ -270,6 +271,7 @@ else()
     set(SOURCES
         source/main.cpp
         source/integration/zepra_browser.cpp
+        source/integration/devtools/devtools_panel.cpp
         source/zepraEngine/engine/dev_tools.cpp
         source/zepraEngine/media/audio_equalizer.cpp
         source/zepraEngine/media/browser_audio.cpp

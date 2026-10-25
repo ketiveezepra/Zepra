@@ -36,6 +36,7 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 
 | Date | PR | What changed |
 | :--- | :--- | :--- |
+| 2026-10-25 | #26 | **DevTools** (open): docked Inspector (live DOM tree, page highlight, box model, computed styles, picker), Console (levels, eval in the page), Network panel; F12 keeps the page usable |
 | 2026-10-25 | #20 | **Promises and microtasks** (open): per-VM microtask queue drained after scripts, timers and rAF callbacks; spec Promise (thenables, then/catch/finally, all/allSettled/race/any/withResolvers/try, subclassing); async/await; try/catch and closures across await/yield |
 | 2026-10-25 | #17 | **ZepraScript built-ins pass** (open): spec-correct number/string conversion, Number/Boolean/String/Object/Array as real constructors, one set of intrinsic prototypes per VM, Error chain, real Symbol, hashed Map/Set/WeakSet, Array.from, RegExp fixes, pages get the engine's built-ins instead of stubs, conformance suite |
 | 2026-10-25 | #16 | Parser: `super(...)`/`super.x`, class fields and class expressions, getters/setters and keyword keys in literals, object spread, async and destructuring arrows; built-in subclassing |
@@ -56,7 +57,7 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 ### 🔨 Active now / next
 1. **Built-ins pass** (#17) — in review.
 2. **Promises and microtasks** (#20) — in review. Next for async: async generators, `for await`, top-level await.
-3. **DOM bindings** — `element.style`, `classList`, canvas `getContext`; the manual test pages throw on these.
+3. **DOM bindings** — `element.style`, `classList`, canvas `getContext`; the manual test pages throw on these. `appendChild` / `textContent =` / `innerHTML =` are snapshot stubs, so the DevTools tree (#26) cannot show them.
 4. **Network speed** — `http_client` waits on a 1 s `poll()` and has no keep-alive, so Hacker News takes 8–17 s.
 5. **Memory after the runaway guard** — reclaim what a killed script allocated (needs the GC stage).
 
