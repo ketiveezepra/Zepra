@@ -181,7 +181,7 @@
 <h3 id="active">Active now / next</h3>
 <ol>
 <li><strong>Built-ins pass</strong> (#17) &mdash; in review.</li>
-<li><strong>Promise and microtasks</strong> &mdash; design first. <code>Promise.then</code> callbacks never run today.</li>
+<li><strong>Promises and microtasks</strong> (#20) &mdash; in review. Next for async: async generators, <code>for await</code>, top-level await.</li>
 <li><strong>DOM bindings</strong> &mdash; <code>element.style</code>, <code>classList</code>, canvas <code>getContext</code>; the manual test pages throw on these.</li>
 <li><strong>Network speed</strong> &mdash; the HTTP client waits on a 1 s poll and has no keep-alive, so Hacker News takes 8&ndash;17 s.</li>
 <li><strong>Memory after the runaway guard</strong> &mdash; memory a stopped script allocated stays committed (about 1.1 GB after the allocation-bomb page).</li>
@@ -270,7 +270,7 @@ See the new detailed reports:
 <li>[ ] ES2024 compliance</li>
 <li>[ ] JIT compilation tiers</li>
 <li>[ ] Garbage collection</li>
-<li>[ ] async/await, Promises</li>
+<li>[x] async/await, Promises (#20; async generators, <code>for await</code> and top-level await not yet)</li>
 <li>[ ] Modules (import/export)</li>
 <li>[ ] Classes and inheritance</li>
 <li>[ ] Proxies and Reflect</li>

@@ -17,6 +17,7 @@ If we hit these numbers, Zepra becomes the most memory-efficient full-featured b
 
 | Condition | Target RSS | Measured (Windows, Release, 2026-10-25) |
 | :--- | :--- | :--- |
+| 2026-10-25 | #20 | **Promises and microtasks** (open): per-VM microtask queue drained after scripts, timers and rAF callbacks; spec Promise (thenables, then/catch/finally, all/allSettled/race/any/withResolvers/try, subclassing); async/await; try/catch and closures across await/yield |
 | **Idle, 1 tab** | `< 80MB` | 77–79 MB (small local page) ✅ |
 | **10 tabs, moderate sites** | `< 300MB` | not measured yet |
 | **50 tabs** | `< 800MB` | not measured yet |
@@ -36,6 +37,7 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 
 | Date | PR | What changed |
 | :--- | :--- | :--- |
+| 2026-10-25 | #20 | **Promises and microtasks** (open): per-VM microtask queue drained after scripts, timers and rAF callbacks; spec Promise (thenables, then/catch/finally, all/allSettled/race/any/withResolvers/try, subclassing); async/await; try/catch and closures across await/yield |
 | 2026-10-25 | #17 | **ZepraScript built-ins pass** (open): spec-correct number/string conversion, Number/Boolean/String/Object/Array as real constructors, one set of intrinsic prototypes per VM, Error chain, real Symbol, hashed Map/Set/WeakSet, Array.from, RegExp fixes, pages get the engine's built-ins instead of stubs, conformance suite |
 | 2026-10-25 | #16 | Parser: `super(...)`/`super.x`, class fields and class expressions, getters/setters and keyword keys in literals, object spread, async and destructuring arrows; built-in subclassing |
 | 2026-10-24 | #15 | Runaway scripts stopped (10 s / 1 GB `ScriptRunGuard`); real frame model, calls, closures, scoping and exceptions in the VM |
@@ -54,7 +56,7 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 
 ### 🔨 Active now / next
 1. **Built-ins pass** (#17) — in review.
-2. **Promise and microtasks** — design first. `Promise.then` callbacks never run today.
+2. **Promises and microtasks** (#20) — in review. Next for async: async generators, `for await`, top-level await.
 3. **DOM bindings** — `element.style`, `classList`, canvas `getContext`; the manual test pages throw on these.
 4. **Network speed** — `http_client` waits on a 1 s `poll()` and has no keep-alive, so Hacker News takes 8–17 s.
 5. **Memory after the runaway guard** — reclaim what a killed script allocated (needs the GC stage).
@@ -62,7 +64,7 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 ### ⚠️ Known gaps (ZepraScript)
 - Regex engine is not conformant: no lookaround, `{n,m}` does nothing, byte-based matching, no named groups or backreferences, slow. RegExp objects have no `source`/`flags`/`global`/`lastIndex` properties.
 - Strings are byte-indexed, not UTF-16.
-- `Promise.then` never runs callbacks; WebAssembly is still a fake namespace; URL/URLSearchParams and the observers in ScriptContext are stubs.
+- Async generators, `for await` and top-level await are not supported. WebAssembly is still a fake namespace; URL/URLSearchParams and the observers in ScriptContext are stubs.
 - Reading an undeclared variable does not throw a ReferenceError; tagged templates (``String.raw`x` ``) are not supported.
 - A UTF-8 byte-order mark at the start of a script is a parse error.
 - `Object.defineProperty` does not reject redefining a non-configurable property.
