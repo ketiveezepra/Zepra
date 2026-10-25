@@ -2368,8 +2368,53 @@ void clear(uint32_t c) {
     g_nxGpu.clear(NXRender::Color(c));
 }
 
+// Test hook: with ZEPRA_CAPTURE=<file.bmp> set, the first frame drawn after
+// ZEPRA_CAPTURE_MS milliseconds (default 8000, counted from process start) is
+// written to that file. It reads the GL frame itself, so it works when the
+// screen is off or covered.
+static const auto g_captureClockStart = std::chrono::steady_clock::now();
+static void captureFrameIfRequested() {
+    static const char* path = std::getenv("ZEPRA_CAPTURE");
+    static bool done = false;
+    if (!path || !*path || done) return;
+    const char* delayEnv = std::getenv("ZEPRA_CAPTURE_MS");
+    long delayMs = delayEnv ? std::atol(delayEnv) : 8000;
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - g_captureClockStart).count();
+    if (elapsed < delayMs) return;
+    done = true;
+
+    int w = g_nxGpu.width(), h = g_nxGpu.height();
+    std::vector<uint8_t> rgb;
+    if (!g_nxGpu.readPixels(0, 0, w, h, rgb)) {
+        std::cerr << "[Capture] glReadPixels failed" << std::endl;
+        return;
+    }
+    // 24-bit BMP: rows bottom-up (as GL returns them), BGR, padded to 4 bytes
+    int rowBytes = (w * 3 + 3) & ~3;
+    uint32_t dataSize = (uint32_t)rowBytes * h, fileSize = 54 + dataSize;
+    uint8_t header[54] = {'B', 'M'};
+    auto put32 = [&](int at, uint32_t v) { for (int i = 0; i < 4; i++) header[at + i] = (v >> (8 * i)) & 0xFF; };
+    put32(2, fileSize); put32(10, 54); put32(14, 40); put32(18, (uint32_t)w); put32(22, (uint32_t)h);
+    header[26] = 1; header[28] = 24; put32(34, dataSize);
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(header), sizeof(header));
+    std::vector<uint8_t> row(rowBytes, 0);
+    for (int y = 0; y < h; y++) {
+        const uint8_t* src = rgb.data() + (size_t)y * w * 3;
+        for (int x = 0; x < w; x++) {
+            row[x * 3] = src[x * 3 + 2];
+            row[x * 3 + 1] = src[x * 3 + 1];
+            row[x * 3 + 2] = src[x * 3];
+        }
+        out.write(reinterpret_cast<const char*>(row.data()), rowBytes);
+    }
+    std::cout << "[Capture] wrote " << path << " (" << w << "x" << h << ")" << std::endl;
+}
+
 void present() { 
     g_nxGpu.endFrame();
+    captureFrameIfRequested();
     // glXSwapBuffers(g_display, g_window); // Handled by NXRender Platform
 }
 
