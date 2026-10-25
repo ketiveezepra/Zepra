@@ -144,6 +144,8 @@ set(NXRENDER_SOURCES
 
     # canvas 2D & WebGL
     nxgfx/canvas2d/canvas_context.cpp
+    nxgfx/canvas2d/canvas_raster.cpp
+    nxgfx/canvas2d/canvas_text.cpp
     nxgfx/webgl/webgl_context.cpp
 
     # form control widgets

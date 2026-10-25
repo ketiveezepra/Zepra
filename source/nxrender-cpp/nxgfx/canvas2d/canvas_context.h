@@ -9,13 +9,16 @@
 #include <string>
 #include <cstdint>
 #include <memory>
-#include <stack>
 
 namespace NXRender {
 
 // ==================================================================
 // Canvas 2D Rendering Context
 // HTML Canvas 2D Context specification
+//
+// The bitmap lives in memory (premultiplied RGBA, width * height * 4
+// bytes) and is drawn by a scanline rasterizer, so drawing never needs a
+// GL context. The embedder uploads it to a texture when version() changes.
 // ==================================================================
 
 enum class LineCap : uint8_t { Butt, Round, Square };
@@ -34,8 +37,30 @@ enum class CompositeOp : uint8_t {
 
 enum class RepeatMode : uint8_t { Repeat, RepeatX, RepeatY, NoRepeat };
 
+/// Affine transform in canvas order: x' = a*x + c*y + e, y' = b*x + d*y + f
+struct CanvasMatrix {
+    float a = 1, b = 0, c = 0, d = 1, e = 0, f = 0;
+
+    void map(float x, float y, float& ox, float& oy) const {
+        ox = a * x + c * y + e;
+        oy = b * x + d * y + f;
+    }
+    /// this * other: other is applied first
+    CanvasMatrix operator*(const CanvasMatrix& o) const {
+        return {a * o.a + c * o.b, b * o.a + d * o.b,
+                a * o.c + c * o.d, b * o.c + d * o.d,
+                a * o.e + c * o.f + e, b * o.e + d * o.f + f};
+    }
+    float determinant() const { return a * d - b * c; }
+    bool invertible() const;
+    CanvasMatrix inverse() const;
+    bool isFinite() const;
+    /// Average scale factor, for choosing curve flattening detail
+    float scaleFactor() const;
+};
+
 struct CanvasGradient {
-    enum class Type { Linear, Radial, Conic } type;
+    enum class Type { Linear, Radial, Conic } type = Type::Linear;
     float x0 = 0, y0 = 0, r0 = 0;
     float x1 = 0, y1 = 0, r1 = 0;
     float angle = 0; // Conic
@@ -49,11 +74,16 @@ struct CanvasGradient {
     void addColorStop(float offset, const Color& color);
 };
 
-struct CanvasPattern {
-    uint32_t textureId = 0;
+/// Pixels a pattern or drawImage reads (premultiplied RGBA, row-major)
+struct CanvasImage {
     int width = 0, height = 0;
+    std::vector<uint8_t> pixels;
+};
+
+struct CanvasPattern {
+    std::shared_ptr<const CanvasImage> image;
     RepeatMode repeat = RepeatMode::Repeat;
-    Math::Transform2D transform;
+    CanvasMatrix transform;
 };
 
 struct CanvasFillStyle {
@@ -63,9 +93,10 @@ struct CanvasFillStyle {
     CanvasPattern pattern;
 };
 
+/// Unpremultiplied RGBA, row-major (the layout of ImageData.data)
 struct ImageData {
     int width = 0, height = 0;
-    std::vector<uint8_t> data; // RGBA, row-major
+    std::vector<uint8_t> data;
 
     ImageData() = default;
     ImageData(int w, int h);
@@ -78,7 +109,7 @@ struct ImageData {
     void setPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 };
 
-struct TextMetrics {
+struct CanvasTextMetrics {
     float width = 0;
     float actualBoundingBoxLeft = 0;
     float actualBoundingBoxRight = 0;
@@ -94,7 +125,7 @@ struct TextMetrics {
 };
 
 // ==================================================================
-// Path2D — reusable subpaths
+// Path2D — reusable subpaths (user-space commands)
 // ==================================================================
 
 class Path2D {
@@ -133,6 +164,8 @@ private:
     void parseSVGPathData(const std::string& d);
 };
 
+namespace Canvas2D { struct FlatPath; struct ClipMask; }
+
 // ==================================================================
 // CanvasRenderingContext2D
 // ==================================================================
@@ -144,7 +177,16 @@ public:
 
     int width() const { return width_; }
     int height() const { return height_; }
+    /// New bitmap size: clears the bitmap and resets all state (as setting
+    /// canvas.width or canvas.height does)
     void resize(int w, int h);
+
+    /// Premultiplied RGBA, width() * height() * 4 bytes, top row first
+    const uint8_t* pixels() const { return pixels_.data(); }
+    /// Writes the bitmap unpremultiplied (for a GL_RGBA texture) to out
+    void copyUnpremultiplied(uint8_t* out) const;
+    /// Increases whenever the bitmap changes
+    uint64_t version() const { return version_; }
 
     // State
     void save();
@@ -159,6 +201,7 @@ public:
     void setTransform(float a, float b, float c, float d, float e, float f);
     void resetTransform();
     Math::Transform2D getTransform() const;
+    const CanvasMatrix& currentTransform() const { return state_.transform; }
 
     // Compositing
     void setGlobalAlpha(float alpha);
@@ -172,27 +215,38 @@ public:
     void setFillStyle(const CanvasPattern& pattern);
     void setStrokeStyle(const Color& color);
     void setStrokeStyle(const CanvasGradient& gradient);
+    void setStrokeStyle(const CanvasPattern& pattern);
+    const CanvasFillStyle& fillStyle() const { return state_.fillStyle; }
+    const CanvasFillStyle& strokeStyle() const { return state_.strokeStyle; }
 
     // Line style
     void setLineWidth(float width);
     float lineWidth() const;
     void setLineCap(LineCap cap);
+    LineCap lineCap() const { return state_.lineCap; }
     void setLineJoin(LineJoin join);
+    LineJoin lineJoin() const { return state_.lineJoin; }
     void setMiterLimit(float limit);
+    float miterLimit() const { return state_.miterLimit; }
     void setLineDash(const std::vector<float>& segments);
     std::vector<float> getLineDash() const;
     void setLineDashOffset(float offset);
+    float lineDashOffset() const { return state_.lineDashOffset; }
 
-    // Shadow
+    // Shadow (stored; shadows are not drawn yet)
     void setShadowColor(const Color& color);
     void setShadowBlur(float blur);
     void setShadowOffsetX(float x);
     void setShadowOffsetY(float y);
 
     // Text
-    void setFont(const std::string& font);
+    /// Returns false (and keeps the old font) when the value can't be parsed
+    bool setFont(const std::string& font);
+    const std::string& font() const { return state_.font; }
     void setTextAlign(TextAlign2D align);
+    TextAlign2D textAlign() const { return state_.textAlign; }
     void setTextBaseline(TextBaseline baseline);
+    TextBaseline textBaseline() const { return state_.textBaseline; }
     void setDirection(const std::string& dir);
 
     // Path operations
@@ -217,6 +271,7 @@ public:
     void stroke(const Path2D& path);
     void clip(FillRule rule = FillRule::NonZero);
     void clip(const Path2D& path, FillRule rule = FillRule::NonZero);
+    /// x, y in canvas pixels (not transformed), as the spec says
     bool isPointInPath(float x, float y, FillRule rule = FillRule::NonZero);
     bool isPointInStroke(float x, float y);
 
@@ -228,13 +283,15 @@ public:
     // Text
     void fillText(const std::string& text, float x, float y, float maxWidth = -1);
     void strokeText(const std::string& text, float x, float y, float maxWidth = -1);
-    TextMetrics measureText(const std::string& text);
+    CanvasTextMetrics measureText(const std::string& text);
 
-    // Image drawing
-    void drawImage(uint32_t textureId, float dx, float dy);
-    void drawImage(uint32_t textureId, float dx, float dy, float dw, float dh);
-    void drawImage(uint32_t textureId, float sx, float sy, float sw, float sh,
+    // Image drawing (source in its own pixels; destination in user space)
+    void drawImage(const CanvasImage& image, float dx, float dy);
+    void drawImage(const CanvasImage& image, float dx, float dy, float dw, float dh);
+    void drawImage(const CanvasImage& image, float sx, float sy, float sw, float sh,
                    float dx, float dy, float dw, float dh);
+    /// The current bitmap as a drawImage/pattern source
+    std::shared_ptr<CanvasImage> snapshot() const;
 
     // Pixel manipulation
     ImageData createImageData(int width, int height);
@@ -248,23 +305,19 @@ public:
     CanvasGradient createRadialGradient(float x0, float y0, float r0,
                                          float x1, float y1, float r1);
     CanvasGradient createConicGradient(float startAngle, float x, float y);
-    CanvasPattern createPattern(uint32_t textureId, int w, int h, RepeatMode repeat);
+    CanvasPattern createPattern(std::shared_ptr<const CanvasImage> image, RepeatMode repeat);
 
-    // Filter
+    // Filter (stored; filters are not applied yet)
     void setFilter(const std::string& filter);
-
-    // Framebuffer access
-    uint32_t framebufferId() const { return fbo_; }
-    uint32_t textureId() const { return texture_; }
 
 private:
     int width_, height_;
-    uint32_t fbo_ = 0;
-    uint32_t texture_ = 0;
+    std::vector<uint8_t> pixels_;
+    uint64_t version_ = 1;
 
     // State stack
     struct State {
-        Math::Transform2D transform;
+        CanvasMatrix transform;
         CanvasFillStyle fillStyle;
         CanvasFillStyle strokeStyle;
         float lineWidth = 1.0f;
@@ -275,25 +328,32 @@ private:
         float lineDashOffset = 0;
         float globalAlpha = 1.0f;
         CompositeOp compositeOp = CompositeOp::SourceOver;
-        Color shadowColor;
+        Color shadowColor = Color(0, 0, 0, 0);
         float shadowBlur = 0;
         float shadowOffsetX = 0, shadowOffsetY = 0;
         std::string font = "10px sans-serif";
         TextAlign2D textAlign = TextAlign2D::Start;
         TextBaseline textBaseline = TextBaseline::Alphabetic;
         std::string direction = "ltr";
-        std::string filter;
+        std::string filter = "none";
+        std::shared_ptr<const Canvas2D::ClipMask> clip;  // null = no clip
     };
 
     State state_;
-    std::stack<State> stateStack_;
-    Path2D currentPath_;
+    std::vector<State> stateStack_;
+    std::unique_ptr<Canvas2D::FlatPath> currentPath_;
 
-    void setupFBO();
-    void teardownFBO();
-    void applyCompositing();
-    void drawPathFill(const Path2D& path, FillRule rule);
-    void drawPathStroke(const Path2D& path);
+    void paintPath(const Canvas2D::FlatPath& path, FillRule rule, const CanvasFillStyle& style);
+    /// Composites `style` through coverage spans: spans(fn) calls
+    /// fn(y, x0, x1, coverage) for each covered run of pixels
+    template <typename Spans>
+    void paintCoverage(Spans&& spans, const CanvasFillStyle& style);
+    /// The device rectangle of a user-space one, when the transform keeps it
+    /// axis-aligned
+    bool deviceRect(float x, float y, float w, float h, float out[4]) const;
+    void strokePath(const Canvas2D::FlatPath& path);
+    void drawText(const std::string& text, float x, float y, float maxWidth, bool stroke);
+    void changed() { ++version_; }
 };
 
 } // namespace NXRender
