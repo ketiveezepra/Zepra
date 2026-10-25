@@ -2621,7 +2621,8 @@ static void layout_gfx_border(float x, float y, float w, float h, uint32_t color
 }
 
 static void layout_gfx_texture(float x, float y, float w, float h, uint32_t textureId) {
-    gfx::texture(x, y, w, h, textureId);
+    // An animated GIF's box holds its first frame; draw the frame due now
+    gfx::texture(x, y, w, h, ZepraBrowser::g_lazyImageLoader.currentFrame(textureId));
 }
 
 static void layout_text_render(const std::string& str, float x, float y, uint32_t c, float fontSize) {

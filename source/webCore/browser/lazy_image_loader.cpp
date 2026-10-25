@@ -26,6 +26,8 @@ extern "C" {
     unsigned char* stbi_load_from_memory(const unsigned char* buffer, int len, 
                                           int* x, int* y, int* channels_in_file, 
                                           int desired_channels);
+    unsigned char* stbi_load_gif_from_memory(const unsigned char* buffer, int len, int** delays,
+                                             int* x, int* y, int* z, int* comp, int req_comp);
     void stbi_image_free(void* retval_from_stbi_load);
     const char* stbi_failure_reason(void);
 }
@@ -226,10 +228,26 @@ void LazyImageLoader::pollCompleted(std::vector<ImageResult>& results, int maxRe
                 entry.width = -raw.width;
                 entry.height = raw.height;
             } else if (textureCreator_ && !raw.pixels.empty()) {
-                // Raster image — create GPU texture
+                // Raster image — create GPU texture (one per frame for an animated GIF)
                 entry.textureId = textureCreator_(raw.width, raw.height, raw.pixels.data());
                 entry.width = raw.width;
                 entry.height = raw.height;
+                if (entry.textureId && raw.delaysMs.size() > 1) {
+                    Animation anim;
+                    size_t frameBytes = (size_t)raw.width * raw.height * 4;
+                    int end = 0;
+                    for (size_t f = 0; f < raw.delaysMs.size(); f++) {
+                        uint32_t tex = f == 0 ? entry.textureId
+                                              : textureCreator_(raw.width, raw.height, raw.pixels.data() + f * frameBytes);
+                        if (!tex) break;
+                        anim.frames.push_back(tex);
+                        end += raw.delaysMs[f];
+                        anim.endsMs.push_back(end);
+                    }
+                    anim.startMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                    if (anim.frames.size() > 1) animations_[entry.textureId] = std::move(anim);
+                }
                 if (!entry.textureId) {
                     if (boxAlive && !raw.background) {
                         raw.box->text = "[IMG: GPU Error]";
@@ -261,6 +279,17 @@ void LazyImageLoader::pollCompleted(std::vector<ImageResult>& results, int maxRe
         results.push_back(completedQueue_.back());
         completedQueue_.pop_back();
     }
+}
+
+uint32_t LazyImageLoader::currentFrame(uint32_t textureId) const {
+    auto it = animations_.find(textureId);
+    if (it == animations_.end()) return textureId;
+    const Animation& anim = it->second;
+    int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    int64_t t = (now - anim.startMs) % anim.endsMs.back();
+    size_t f = std::upper_bound(anim.endsMs.begin(), anim.endsMs.end(), (int)t) - anim.endsMs.begin();
+    return anim.frames[std::min(f, anim.frames.size() - 1)];
 }
 
 void LazyImageLoader::workerThread() {
@@ -545,15 +574,36 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
         }
 
         // Decode raster image: WebP through libwebp (NXRender's WebPDecoder),
-        // PNG, JPEG, GIF (first frame) and BMP through stb_image
+        // PNG, JPEG, GIF (all frames) and BMP through stb_image
         int w = 0, h = 0;
         std::vector<uint8_t> rgba;
+        std::vector<int> delaysMs;  // animated GIF frames
         if (format == "webp") {
             NXRender::DecodedImage image = NXRender::WebPDecoder().decode(data.data(), data.size());
             if (!image.valid()) return fail("WebP decode failed", "[IMG: Decode Failed]", 0xFF0000);
             w = image.width;
             h = image.height;
             rgba = std::move(image.pixels);
+        } else if (format == "gif") {
+            // Every frame, composited by stb (disposal and transparency applied)
+            int frames = 0, channels;
+            int* delays = nullptr;
+            unsigned char* pixels = stbi_load_gif_from_memory(data.data(), (int)data.size(), &delays,
+                                                              &w, &h, &frames, &channels, 4);
+            if (!pixels) return fail(stbi_failure_reason(), "[IMG: Decode Failed]", 0xFF0000);
+            // Keep at most 64 MB of frames; a longer animation stops early
+            size_t frameBytes = (size_t)w * h * 4;
+            int kept = std::max(1, std::min(frames, (int)((64u << 20) / std::max<size_t>(frameBytes, 1))));
+            rgba.assign(pixels, pixels + frameBytes * kept);
+            if (kept > 1) {
+                for (int f = 0; f < kept; f++) {
+                    // As in other browsers, delays of 10 ms or less play at 100 ms
+                    int d = delays ? delays[f] : 100;
+                    delaysMs.push_back(d <= 10 ? 100 : d);
+                }
+            }
+            stbi_image_free(pixels);
+            if (delays) stbi_image_free(delays);
         } else {
             int channels;
             unsigned char* pixels = stbi_load_from_memory(data.data(), (int)data.size(),
@@ -580,6 +630,7 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
             raw.width = w;
             raw.height = h;
             raw.pixels = std::move(rgba);
+            raw.delaysMs = std::move(delaysMs);
             rawImages_.push_back(std::move(raw));
         }
 
