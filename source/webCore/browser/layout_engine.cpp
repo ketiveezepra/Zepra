@@ -35,6 +35,7 @@ static void (*s_gfx_line)(float, float, float, float, uint32_t, float) = nullptr
 static void (*s_gfx_rrect)(float, float, float, float, float, uint32_t, uint8_t) = nullptr;
 static void (*s_gfx_gradient)(float, float, float, float, uint32_t, uint32_t) = nullptr;
 static void (*s_gfx_svg)(float, float, float, float, const std::string&, const std::string&) = nullptr;
+static void (*s_gfx_canvas)(float, float, float, float, Zepra::WebCore::DOMElement*) = nullptr;
 static void (*s_gfx_hgradient)(float, float, float, float, uint32_t, uint32_t) = nullptr;
 
 // Set rendering callbacks
@@ -66,6 +67,10 @@ void setLayoutCallbacks2(
     s_gfx_gradient = gfx_gradient;
     s_gfx_svg = gfx_svg;
     s_gfx_hgradient = gfx_hgradient;
+}
+
+void setCanvasPaintCallback(void (*gfx_canvas)(float, float, float, float, Zepra::WebCore::DOMElement*)) {
+    s_gfx_canvas = gfx_canvas;
 }
 
 // =============================================================================
@@ -1232,8 +1237,13 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
         }
     }
     
-    // Draw image
-    if (box.isImage) {
+    // Draw a canvas bitmap (stretched to the content box, as CSS sizes it)
+    if (box.isCanvas) {
+        if (s_gfx_canvas && box.domElement) {
+            s_gfx_canvas(screenX + box.borderLeft + box.paddingLeft, screenY + box.borderTop + box.paddingTop,
+                         box.contentWidth(), box.contentHeight(), box.domElement);
+        }
+    } else if (box.isImage) {
         if (!box.svgData.empty() && s_gfx_svg) {
             // SVG: render via NxSVG on main thread
             if (box.svgKey.empty()) {
