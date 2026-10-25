@@ -68,11 +68,31 @@ void setLayoutCallbacks2(
 // LAYOUT ALGORITHM
 // =============================================================================
 
+bool isBlockLevel(LayoutType type) {
+    switch (type) {
+        case LayoutType::Block:
+        case LayoutType::Flex:
+        case LayoutType::Table:
+        case LayoutType::TableRowGroup:
+        case LayoutType::TableRow:
+        case LayoutType::TableCell:
+        case LayoutType::TableCaption:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     // Guard against deep recursion (complex pages like github.com with 1800+ boxes)
     static thread_local int s_depth = 0;
     if (++s_depth > 64) { --s_depth; return; }
     struct DepthGuard { ~DepthGuard() { --s_depth; } } guard;
+
+    if (box.type == LayoutType::Table) {
+        layoutTable(box, containingWidth, startY);
+        return;
+    }
     
     float vpW = (float)g_width;
     float vpH = (float)g_height;
@@ -83,7 +103,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         if (box.boxSizing == 0) {
             box.width += box.paddingLeft + box.paddingRight + box.borderLeft + box.borderRight;
         }
-    } else if (box.type == LayoutType::Block || box.type == LayoutType::Flex) {
+    } else if (isBlockLevel(box.type)) {
         // Block and Flex containers fill their containing block width (CSS2 §10.3.3)
         float w = containingWidth - box.marginLeft - box.marginRight;
         box.width = w > 0 ? w : containingWidth;
@@ -544,7 +564,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
             continue;
         }
         
-        if (child.type == LayoutType::Block || child.type == LayoutType::Flex) {
+        if (isBlockLevel(child.type)) {
             // Flush any inline content first
             if (lineHeight > 0) {
                 childY += lineHeight;
@@ -579,6 +599,13 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
             
             layoutBlock(child, blockAvailWidth, childY);
             child.x += box.paddingLeft + box.borderLeft + blockOffsetX;
+
+            // <center> and align attributes also align narrower block
+            // children whose own margins don't position them
+            if (box.alignChildren >= 2 && !child.marginLeftAuto && !child.marginRightAuto) {
+                float freeSpace = blockAvailWidth - child.totalWidth();
+                if (freeSpace > 0) child.x += box.alignChildren == 2 ? freeSpace / 2.0f : freeSpace;
+            }
             
             childY = child.y + child.height + child.marginBottom;
             prevBlockMarginBottom = child.marginBottom;
@@ -595,6 +622,19 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 // Input defaults
                 if (child.width == 0) child.width = 200;
                 if (child.height == 0) child.height = std::max(24.0f, child.fontSize + 8);
+            } else if (child.isImage) {
+                // CSS width/height (or the width/height attributes) win over
+                // the natural size the image loader stored; until it loads,
+                // an image without a size is as big as its placeholder text
+                bool loaded = child.textureId > 0 || !child.svgData.empty();
+                if (!loaded && !child.text.empty()) {
+                    child.width = measureTextWidth(child.text, child.fontSize);
+                    child.height = child.fontSize + 4;
+                }
+                if (child.cssWidth.isSet() && !child.cssWidth.isAuto())
+                    child.width = child.cssWidth.resolve(contentWidth, child.fontSize, vpW, vpH);
+                if (child.cssHeight.isSet() && !child.cssHeight.isAuto())
+                    child.height = child.cssHeight.resolve(0, child.fontSize, vpW, vpH);
             } else if (!child.children.empty()) {
                 // Inline element with children — recursive layout
                 float availWidth = contentWidth > 0 ? contentWidth : containingWidth;
@@ -669,7 +709,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 shift = contentWidth - lineContentWidth;
             if (shift > 0) {
                 for (auto* lc : lineChildren) {
-                    if (lc->type != LayoutType::Block && lc->type != LayoutType::Flex)
+                    if (!isBlockLevel(lc->type))
                         lc->x += shift;
                 }
             }
@@ -678,7 +718,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         
         for (auto& child : box.children) {
             if (child.type == LayoutType::None) continue;
-            if (child.type == LayoutType::Block || child.type == LayoutType::Flex) {
+            if (isBlockLevel(child.type)) {
                 flushLine();
                 currentLineY = -1;
                 continue;
@@ -825,8 +865,22 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
     
     uint8_t alpha = (uint8_t)(box.opacity * 255.0f);
     
-    // Draw background (gradient or solid)
-    if (box.hasBgColor) {
+    // Row and row-group backgrounds show through their cells only, not the
+    // border-spacing between them (CSS 2.1 §17.5.1)
+    if (box.hasBgColor && (box.type == LayoutType::TableRow || box.type == LayoutType::TableRowGroup)) {
+        auto paintCells = [&](const LayoutBox& row, float rowX, float rowY) {
+            for (const auto& cell : row.children) {
+                if (cell.type == LayoutType::TableCell && s_gfx_rect)
+                    s_gfx_rect(rowX + cell.x, rowY + cell.y, cell.width, cell.height, box.bgColor);
+            }
+        };
+        if (box.type == LayoutType::TableRow) {
+            paintCells(box, screenX, screenY);
+        } else {
+            for (const auto& row : box.children)
+                paintCells(row, screenX + row.x, screenY + row.y);
+        }
+    } else if (box.hasBgColor) {
         if (!box.backgroundImage.empty() && box.backgroundImage.find("gradient") != std::string::npos && s_gfx_gradient) {
             std::string grad = box.backgroundImage;
             bool isConic = grad.find("conic-gradient") != std::string::npos;
@@ -834,7 +888,8 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
             std::vector<uint32_t> colors;
             
             // Simple robust linear parser allowing any CSS color
-            size_t startPos = grad.find('(');
+            // The gradient's own parentheses (a url() layer may come first)
+            size_t startPos = grad.find('(', grad.find("gradient("));
             size_t endPos = grad.rfind(')');
             if (startPos != std::string::npos && endPos != std::string::npos && endPos > startPos) {
                 std::string inner = grad.substr(startPos + 1, endPos - startPos - 1);
@@ -865,7 +920,8 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
                     if (!token.empty() && token.find("to ") == std::string::npos && token.find("deg") == std::string::npos) {
                         Zepra::WebCore::CSSColor col = Zepra::WebCore::CSSColor::parse(token);
                         // Actually Zepra colors are RGB in UI but s_gfx uses 0xRRGGBB
-                        colors.push_back((col.r << 16) | (col.g << 8) | col.b);
+                        // (transparent stops have no RGB to draw)
+                        if (col.a > 0) colors.push_back((col.r << 16) | (col.g << 8) | col.b);
                     }
                     p = nextComma + 1;
                 }
@@ -884,7 +940,7 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
                     }
                 } else if (colors.size() == 1) {
                     s_gfx_rect(screenX, screenY, box.width, box.height, colors[0]);
-                } else {
+                } else if (!box.backgroundImage.empty() && box.backgroundImage.find("transparent") == std::string::npos) {
                     s_gfx_rect(screenX, screenY, box.width, box.height, box.bgColor);
                 }
             }
@@ -896,9 +952,22 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
     }
     
     // Draw border
-    if ((box.borderTop > 0 || box.borderRight > 0 || box.borderBottom > 0 || box.borderLeft > 0) && s_gfx_border) {
-        float thickness = std::max({box.borderTop, box.borderRight, box.borderBottom, box.borderLeft});
-        s_gfx_border(screenX, screenY, box.width, box.height, box.borderColor, thickness);
+    if ((box.borderTop > 0 || box.borderRight > 0 || box.borderBottom > 0 || box.borderLeft > 0) &&
+        box.borderVisible && s_gfx_border) {
+        bool uniform = box.borderTop == box.borderRight && box.borderTop == box.borderBottom &&
+                       box.borderTop == box.borderLeft;
+        if (uniform || box.borderRadius > 0 || !s_gfx_rect) {
+            float thickness = std::max({box.borderTop, box.borderRight, box.borderBottom, box.borderLeft});
+            s_gfx_border(screenX, screenY, box.width, box.height, box.borderColor, thickness);
+        } else {
+            // Only the sides that have a width (border-bottom alone is a rule, not a frame)
+            if (box.borderTop > 0) s_gfx_rect(screenX, screenY, box.width, box.borderTop, box.borderColor);
+            if (box.borderBottom > 0)
+                s_gfx_rect(screenX, screenY + box.height - box.borderBottom, box.width, box.borderBottom, box.borderColor);
+            if (box.borderLeft > 0) s_gfx_rect(screenX, screenY, box.borderLeft, box.height, box.borderColor);
+            if (box.borderRight > 0)
+                s_gfx_rect(screenX + box.width - box.borderRight, screenY, box.borderRight, box.height, box.borderColor);
+        }
     }
     
     // Draw image
@@ -947,7 +1016,9 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
         if (!drawText.empty()) {
             float textW = s_text_width ? s_text_width(drawText, box.fontSize) : (drawText.length() * box.fontSize * 0.5f);
             
-            bool underline = box.isLink || (box.textDecoration.find("underline") != std::string::npos);
+            // Links underline unless their text-decoration says otherwise
+            bool underline = box.textDecoration.find("underline") != std::string::npos ||
+                             (box.isLink && box.textDecoration.empty());
             bool lineThrough = (box.textDecoration.find("line-through") != std::string::npos);
             
             if (underline) {
@@ -999,7 +1070,9 @@ std::string getAllText(const LayoutBox& root) {
         s += getAllText(child);
     }
     
-    if (root.type == LayoutType::Block) s += "\n";
+    if (root.type == LayoutType::Block || root.type == LayoutType::TableRow ||
+        root.type == LayoutType::TableCaption) s += "\n";
+    else if (root.type == LayoutType::TableCell) s += "\t";
     return s;
 }
 

@@ -222,6 +222,7 @@ if(USE_NXRENDER)
         source/sandbox/src/security/security_checker.cpp
         source/webCore/browser/mouse_handler.cpp
         source/webCore/browser/layout_engine.cpp
+        source/webCore/browser/layout_table.cpp
         source/webCore/browser/css_utils.cpp
         # New modular architecture
         source/storage/src/bookmark_manager.cpp
