@@ -92,4 +92,21 @@ void SymbolRegistry::buildReverseLookup() {
     }
 }
 
+std::optional<std::string> symbolDescription(uint32_t id) {
+    // The well-known symbols the engine uses carry fixed ids (see well_known_symbols.hpp)
+    static const char* wellKnown[] = {
+        "Symbol.iterator", "Symbol.toPrimitive", "Symbol.hasInstance", "Symbol.toStringTag",
+        "Symbol.species", "Symbol.isConcatSpreadable", "Symbol.unscopables", "Symbol.asyncIterator",
+        "Symbol.match", "Symbol.replace", "Symbol.search", "Symbol.split"};
+    if (id >= 0xFFFF0001 && id <= 0xFFFF000C) return std::string(wellKnown[id - 0xFFFF0001]);
+
+    std::string description = SymbolRegistry::instance().getDescription(id);
+    if (description.empty()) return std::nullopt;
+    return description;
+}
+
+std::string symbolDescriptiveString(uint32_t id) {
+    return "Symbol(" + symbolDescription(id).value_or("") + ")";
+}
+
 } // namespace Zepra::Runtime

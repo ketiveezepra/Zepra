@@ -105,6 +105,21 @@ bool Object::has(uint32_t index) const {
     return has(std::to_string(index));
 }
 
+bool Object::hasOwnProperty(const std::string& key) const {
+    if (properties_.find(key) != properties_.end()) return true;
+
+    // A canonical array index ("0", "17"; not "01") names an element
+    if (!key.empty() && key.size() <= 10 && (key.size() == 1 || key[0] != '0')) {
+        uint64_t index = 0;
+        for (char c : key) {
+            if (c < '0' || c > '9') return false;
+            index = index * 10 + static_cast<uint64_t>(c - '0');
+        }
+        return index < elements_.size() && !elements_[static_cast<size_t>(index)].isUndefined();
+    }
+    return false;
+}
+
 bool Object::deleteProperty(const std::string& key) {
     auto descIt = descriptors_.find(key);
     if (descIt != descriptors_.end()) {
@@ -218,11 +233,12 @@ std::vector<std::string> Object::getOwnPropertyNames() const {
         }
     }
     
-    // Add named properties, in insertion order
+    // Add named properties, in insertion order (symbol-keyed ones are not names)
     for (auto& key : orderedNamedKeys()) {
+        if (key.compare(0, 9, "@@symbol:") == 0) continue;
         names.push_back(std::move(key));
     }
-    
+
     return names;
 }
 
@@ -238,6 +254,7 @@ std::vector<std::string> Object::keys() const {
     
     // Add enumerable named properties, in insertion order
     for (auto& key : orderedNamedKeys()) {
+        if (key.compare(0, 9, "@@symbol:") == 0) continue;  // symbol keys are not string keys
         auto descIt = descriptors_.find(key);
         if (descIt == descriptors_.end() || descIt->second.isEnumerable()) {
             result.push_back(std::move(key));
@@ -536,30 +553,19 @@ bool String::endsWith(const std::string& suffix) const {
 // Array
 // =============================================================================
 
-// Shared Array prototype - forward declare
-namespace Zepra::Builtins { class ArrayBuiltin; }
-
-// Shared Array prototype that gets attached to all Array instances
-static Object* getArrayPrototype() {
-    static Object* arrayProto = nullptr;
-    if (!arrayProto) {
-        // Use the full ArrayBuiltin prototype
-        arrayProto = Builtins::ArrayBuiltin::createArrayPrototype(nullptr);
-    }
-    return arrayProto;
-}
+// An array stores no prototype link: the VM resolves it to the running VM's
+// Array.prototype (VM::prototypeOf), so each VM has its own and
+// Array.prototype.x = ... reaches every array of that VM.
 
 Array::Array()
     : Object(ObjectType::Array)
 {
-    setPrototype(getArrayPrototype());
 }
 
 Array::Array(size_t length)
     : Object(ObjectType::Array)
 {
     elements_.resize(length, Value::undefined());
-    setPrototype(getArrayPrototype());
 }
 
 Array::Array(std::vector<Value> elements)
@@ -567,7 +573,6 @@ Array::Array(std::vector<Value> elements)
 {
     // Assign to the base class elements_
     Object::elements_ = std::move(elements);
-    setPrototype(getArrayPrototype());
 }
 
 void Array::push(Value value) {
@@ -680,9 +685,7 @@ Error::Error(const std::string& message, const std::string& name)
     , name_(name)
     , cause_(Value::undefined())
 {
-    // Set standard error properties
-    set("message", Value::string(new String(message)));
-    set("name", Value::string(new String(name)));
+    defineStandardProperties();
 }
 
 Error::Error(const std::string& message, const std::string& name, Value cause)
@@ -691,13 +694,24 @@ Error::Error(const std::string& message, const std::string& name, Value cause)
     , name_(name)
     , cause_(cause)
 {
-    set("message", Value::string(new String(message)));
-    set("name", Value::string(new String(name)));
-    
+    defineStandardProperties();
+
     // ES2022: Set cause property if provided
-    if (!cause.isUndefined()) {
-        set("cause", cause);
-    }
+    if (!cause.isUndefined()) defineHidden("cause", cause);
+}
+
+// Error properties are writable and configurable but not enumerable, so they
+// do not show up in for-in, Object.keys or JSON.stringify
+void Error::defineHidden(const std::string& key, Value value) {
+    PropertyDescriptor desc;
+    desc.value = value;
+    desc.attributes = PropertyAttribute::Writable | PropertyAttribute::Configurable;
+    defineProperty(key, desc);
+}
+
+void Error::defineStandardProperties() {
+    defineHidden("message", Value::string(new String(message_)));
+    defineHidden("name", Value::string(new String(name_)));
 }
 
 Error* Error::typeError(const std::string& message) {

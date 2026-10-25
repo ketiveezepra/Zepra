@@ -26,8 +26,15 @@ RegexEngine::RegexEngine(const RegexProgram& program, const RegexFlags& flags)
 // Public API
 // =============================================================================
 
+namespace {
+// A pattern like (a*)*b on a long run of 'a' backtracks without end. Stopping
+// after this many instructions in one exec() turns a frozen page into an error.
+constexpr uint64_t kStepBudget = 50'000'000;
+}
+
 MatchResult RegexEngine::exec(const std::string& input, int32_t startPos) {
     result_ = MatchResult{};
+    steps_ = 0;
 
     int32_t len = static_cast<int32_t>(input.size());
     int32_t start = (startPos >= 0) ? startPos : 0;
@@ -230,6 +237,7 @@ bool RegexEngine::execute(const std::string& input, int32_t startPos) {
         bool dead = false;
 
         while (!dead && t.pc < program_.size()) {
+            if (++steps_ > kStepBudget) throw RegexBudgetExceeded();
             const RegexInstr& instr = program_.at(t.pc);
 
             switch (instr.op) {

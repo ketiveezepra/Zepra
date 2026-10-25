@@ -45,6 +45,10 @@ inline PropertyAttribute operator&(PropertyAttribute a, PropertyAttribute b) {
     return static_cast<PropertyAttribute>(static_cast<int>(a) & static_cast<int>(b));
 }
 
+inline PropertyAttribute operator~(PropertyAttribute a) {
+    return static_cast<PropertyAttribute>(~static_cast<int>(a) & static_cast<int>(PropertyAttribute::Default));
+}
+
 inline bool hasAttribute(PropertyAttribute attrs, PropertyAttribute flag) {
     return (static_cast<int>(attrs) & static_cast<int>(flag)) != 0;
 }
@@ -146,6 +150,10 @@ public:
     virtual bool set(uint32_t index, Value value);
     virtual bool has(const std::string& key) const;
     virtual bool has(uint32_t index) const;
+
+    /** True when the property is stored on this object itself, not inherited (hasOwnProperty). */
+    bool hasOwnProperty(const std::string& key) const;
+
     virtual bool deleteProperty(const std::string& key);
     virtual bool deleteProperty(uint32_t index);
     
@@ -371,6 +379,9 @@ public:
     static Error* withCause(const std::string& name, const std::string& message, Value cause);
     
 private:
+    void defineHidden(const std::string& key, Value value);
+    void defineStandardProperties();
+
     std::string message_;
     std::string name_;
     Value cause_;

@@ -2,219 +2,280 @@
 // Licensed under KPL-2.0. See LICENSE file for details.
 /**
  * @file map.cpp
- * @brief JavaScript Map builtin implementation
+ * @brief JavaScript Map
  */
 
 #include "builtins/map.hpp"
-#include "runtime/objects/function.hpp"
-#include <cmath>
+#include "builtins/builtin_helpers.hpp"
+#include "builtins/list_iterator.hpp"
+#include "runtime/execution/vm.hpp"
+#include "runtime/objects/well_known_symbols.hpp"
 
 namespace Zepra::Builtins {
 
-// =============================================================================
-// MapObject Implementation
-// =============================================================================
+using Runtime::Array;
+using Runtime::FunctionCallInfo;
+using Runtime::JSError;
+using Runtime::VM;
 
-int MapObject::findKey(const Value& key) const {
-    for (size_t i = 0; i < entries_.size(); ++i) {
-        const Value& k = entries_[i].first;
-        // SameValueZero: NaN === NaN, +0 === -0, else strict equal
-        if (key.isNumber() && k.isNumber()) {
-            double a = key.asNumber();
-            double b = k.asNumber();
-            if (std::isnan(a) && std::isnan(b)) {
-                return static_cast<int>(i);
-            }
-            if (a == b) {
-                return static_cast<int>(i);
-            }
-        } else if (k.equals(key)) {
-            return static_cast<int>(i);
-        }
-    }
-    return -1;
-}
+// =============================================================================
+// MapObject
+// =============================================================================
 
 void MapObject::set(const Value& key, const Value& value) {
-    int idx = findKey(key);
-    if (idx >= 0) {
-        entries_[idx].second = value;
-    } else {
-        entries_.push_back({key, value});
+    const CollectionKey id = CollectionKey::of(key);
+    auto found = index_.find(id);
+    if (found != index_.end()) {
+        entries_[found->second].value = value;
+        return;
     }
+    // A -0 key is stored as +0
+    Value stored = key;
+    if (key.isNumber() && key.asNumber() == 0) stored = Value::number(0);
+    index_.emplace(id, entries_.size());
+    entries_.push_back({stored, value, true});
+    ++live_;
 }
 
 Value MapObject::get(const Value& key) const {
-    int idx = findKey(key);
-    if (idx >= 0) {
-        return entries_[idx].second;
-    }
-    return Value::undefined();
+    auto found = index_.find(CollectionKey::of(key));
+    return found == index_.end() ? Value::undefined() : entries_[found->second].value;
 }
 
 bool MapObject::has(const Value& key) const {
-    return findKey(key) >= 0;
+    return index_.find(CollectionKey::of(key)) != index_.end();
 }
 
 bool MapObject::deleteKey(const Value& key) {
-    int idx = findKey(key);
-    if (idx >= 0) {
-        entries_.erase(entries_.begin() + idx);
-        return true;
-    }
-    return false;
+    auto found = index_.find(CollectionKey::of(key));
+    if (found == index_.end()) return false;
+    Entry& entry = entries_[found->second];
+    entry.live = false;
+    entry.key = Value::undefined();
+    entry.value = Value::undefined();
+    index_.erase(found);
+    --live_;
+    compact();
+    return true;
 }
 
 void MapObject::clear() {
-    entries_.clear();
+    if (walking_ > 0) {
+        for (Entry& entry : entries_) {
+            entry.live = false;
+            entry.key = Value::undefined();
+            entry.value = Value::undefined();
+        }
+    } else {
+        entries_.clear();
+    }
+    index_.clear();
+    live_ = 0;
+}
+
+// Drops the dead entries once they outnumber the live ones, unless a
+// forEach is holding positions in entries_
+void MapObject::compact() {
+    if (walking_ > 0 || entries_.size() < 32 || live_ * 2 >= entries_.size()) return;
+    std::vector<Entry> kept;
+    kept.reserve(live_);
+    index_.clear();
+    for (Entry& entry : entries_) {
+        if (!entry.live) continue;
+        index_.emplace(CollectionKey::of(entry.key), kept.size());
+        kept.push_back(std::move(entry));
+    }
+    entries_ = std::move(kept);
 }
 
 std::vector<std::pair<Value, Value>> MapObject::entries() const {
-    return entries_;
+    std::vector<std::pair<Value, Value>> result;
+    result.reserve(live_);
+    for (const Entry& entry : entries_) {
+        if (entry.live) result.emplace_back(entry.key, entry.value);
+    }
+    return result;
 }
 
 std::vector<Value> MapObject::keys() const {
     std::vector<Value> result;
-    result.reserve(entries_.size());
-    for (const auto& entry : entries_) {
-        result.push_back(entry.first);
+    result.reserve(live_);
+    for (const Entry& entry : entries_) {
+        if (entry.live) result.push_back(entry.key);
     }
     return result;
 }
 
 std::vector<Value> MapObject::values() const {
     std::vector<Value> result;
-    result.reserve(entries_.size());
-    for (const auto& entry : entries_) {
-        result.push_back(entry.second);
+    result.reserve(live_);
+    for (const Entry& entry : entries_) {
+        if (entry.live) result.push_back(entry.value);
     }
     return result;
 }
 
+void MapObject::forEach(const std::function<void(const Value&, const Value&)>& fn) {
+    struct Walk {
+        int& depth;
+        explicit Walk(int& d) : depth(d) { ++depth; }
+        ~Walk() { --depth; }
+    } walk(walking_);
+    for (size_t i = 0; i < entries_.size(); ++i) {
+        if (!entries_[i].live) continue;
+        const Value key = entries_[i].key;
+        const Value value = entries_[i].value;
+        fn(key, value);
+    }
+}
+
 // =============================================================================
-// MapBuiltin Implementation
+// Map built-ins
 // =============================================================================
 
-Value MapBuiltin::constructor(Runtime::Context*, const std::vector<Value>&) {
-    return Value::object(new MapObject());
+namespace {
+
+MapObject* thisMap(const FunctionCallInfo& info, const char* method) {
+    const Value self = info.thisValue();
+    auto* map = self.isObject() ? dynamic_cast<MapObject*>(self.asObject()) : nullptr;
+    if (!map) {
+        throw JSError("TypeError", std::string("Method Map.prototype.") + method +
+                                   " called on incompatible receiver " + self.toString());
+    }
+    return map;
 }
 
-Value MapBuiltin::get(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.size() < 2 || !args[0].isObject()) return Value::undefined();
-    
-    MapObject* map = dynamic_cast<MapObject*>(args[0].asObject());
-    if (!map) return Value::undefined();
-    
-    return map->get(args[1]);
+VM& runningVM() {
+    VM* vm = VM::current();
+    if (!vm) throw JSError("TypeError", "Map operation outside a running script");
+    return *vm;
 }
 
-Value MapBuiltin::set(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.size() < 3 || !args[0].isObject()) return Value::undefined();
-    
-    MapObject* map = dynamic_cast<MapObject*>(args[0].asObject());
-    if (!map) return Value::undefined();
-    
-    map->set(args[1], args[2]);
-    return args[0]; // Return map for chaining
+Runtime::Function* callbackArgument(const Value& value, const char* method) {
+    if (!value.isObject() || !value.asObject()->isFunction()) {
+        throw JSError("TypeError", std::string(value.toString()) + " is not a function (Map." + method + ")");
+    }
+    return static_cast<Runtime::Function*>(value.asObject());
 }
 
-Value MapBuiltin::has(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.size() < 2 || !args[0].isObject()) return Value::boolean(false);
-    
-    MapObject* map = dynamic_cast<MapObject*>(args[0].asObject());
-    if (!map) return Value::boolean(false);
-    
-    return Value::boolean(map->has(args[1]));
+std::vector<Value> pair(const Value& key, const Value& value) {
+    return {key, value};
 }
 
-Value MapBuiltin::deleteMethod(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.size() < 2 || !args[0].isObject()) return Value::boolean(false);
-    
-    MapObject* map = dynamic_cast<MapObject*>(args[0].asObject());
-    if (!map) return Value::boolean(false);
-    
-    return Value::boolean(map->deleteKey(args[1]));
-}
-
-Value MapBuiltin::clear(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isObject()) return Value::undefined();
-    
-    MapObject* map = dynamic_cast<MapObject*>(args[0].asObject());
-    if (map) map->clear();
-    
-    return Value::undefined();
-}
-
-Value MapBuiltin::size(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isObject()) return Value::number(0);
-    
-    MapObject* map = dynamic_cast<MapObject*>(args[0].asObject());
-    if (!map) return Value::number(0);
-    
-    return Value::number(static_cast<double>(map->size()));
-}
+} // namespace
 
 Object* MapBuiltin::createMapPrototype() {
-    Object* proto = new Object();
+    auto* prototype = new Object();
 
-    proto->set("get", Value::object(
-        new Runtime::Function("get", [](const Runtime::FunctionCallInfo& info) -> Value {
-            if (!info.thisValue().isObject()) return Value::undefined();
-            MapObject* map = dynamic_cast<MapObject*>(info.thisValue().asObject());
-            if (!map || info.argumentCount() < 1) return Value::undefined();
-            return map->get(info.argument(0));
-        }, 1)));
+    defineMethod(prototype, "get", [](const FunctionCallInfo& info) -> Value {
+        return thisMap(info, "get")->get(info.argument(0));
+    }, 1);
 
-    proto->set("set", Value::object(
-        new Runtime::Function("set", [](const Runtime::FunctionCallInfo& info) -> Value {
-            if (!info.thisValue().isObject()) return Value::undefined();
-            MapObject* map = dynamic_cast<MapObject*>(info.thisValue().asObject());
-            if (!map || info.argumentCount() < 2) return info.thisValue();
-            map->set(info.argument(0), info.argument(1));
-            return info.thisValue();
-        }, 2)));
+    defineMethod(prototype, "set", [](const FunctionCallInfo& info) -> Value {
+        thisMap(info, "set")->set(info.argument(0), info.argument(1));
+        return info.thisValue();
+    }, 2);
 
-    proto->set("has", Value::object(
-        new Runtime::Function("has", [](const Runtime::FunctionCallInfo& info) -> Value {
-            if (!info.thisValue().isObject()) return Value::boolean(false);
-            MapObject* map = dynamic_cast<MapObject*>(info.thisValue().asObject());
-            if (!map || info.argumentCount() < 1) return Value::boolean(false);
-            return Value::boolean(map->has(info.argument(0)));
-        }, 1)));
+    defineMethod(prototype, "has", [](const FunctionCallInfo& info) -> Value {
+        return Value::boolean(thisMap(info, "has")->has(info.argument(0)));
+    }, 1);
 
-    proto->set("delete", Value::object(
-        new Runtime::Function("delete", [](const Runtime::FunctionCallInfo& info) -> Value {
-            if (!info.thisValue().isObject()) return Value::boolean(false);
-            MapObject* map = dynamic_cast<MapObject*>(info.thisValue().asObject());
-            if (!map || info.argumentCount() < 1) return Value::boolean(false);
-            return Value::boolean(map->deleteKey(info.argument(0)));
-        }, 1)));
+    defineMethod(prototype, "delete", [](const FunctionCallInfo& info) -> Value {
+        return Value::boolean(thisMap(info, "delete")->deleteKey(info.argument(0)));
+    }, 1);
 
-    proto->set("clear", Value::object(
-        new Runtime::Function("clear", [](const Runtime::FunctionCallInfo& info) -> Value {
-            if (!info.thisValue().isObject()) return Value::undefined();
-            MapObject* map = dynamic_cast<MapObject*>(info.thisValue().asObject());
-            if (map) map->clear();
-            return Value::undefined();
-        }, 0)));
+    defineMethod(prototype, "clear", [](const FunctionCallInfo& info) -> Value {
+        thisMap(info, "clear")->clear();
+        return Value::undefined();
+    }, 0);
 
-    proto->set("forEach", Value::object(
-        new Runtime::Function("forEach", [](const Runtime::FunctionCallInfo& info) -> Value {
-            if (!info.thisValue().isObject() || info.argumentCount() < 1) return Value::undefined();
-            MapObject* map = dynamic_cast<MapObject*>(info.thisValue().asObject());
-            if (!map || !info.argument(0).isObject()) return Value::undefined();
-            Runtime::Function* callback = dynamic_cast<Runtime::Function*>(info.argument(0).asObject());
-            if (!callback) return Value::undefined();
+    defineMethod(prototype, "forEach", [](const FunctionCallInfo& info) -> Value {
+        MapObject* map = thisMap(info, "forEach");
+        Runtime::Function* callback = callbackArgument(info.argument(0), "forEach");
+        const Value thisArg = info.argument(1);
+        const Value self = info.thisValue();
+        VM& vm = runningVM();
+        map->forEach([&](const Value& key, const Value& value) {
+            vm.executeCallback(callback, thisArg, {value, key, self});
+        });
+        return Value::undefined();
+    }, 1);
 
-            Value thisArg = info.argumentCount() > 1 ? info.argument(1) : Value::undefined();
-            for (const auto& entry : map->entries()) {
-                std::vector<Value> args = {entry.second, entry.first, info.thisValue()};
-                callback->call(nullptr, thisArg, args);
+    defineMethod(prototype, "keys", [](const FunctionCallInfo& info) -> Value {
+        return IteratorBuiltin::makeListIterator(thisMap(info, "keys")->keys());
+    }, 0);
+
+    defineMethod(prototype, "values", [](const FunctionCallInfo& info) -> Value {
+        return IteratorBuiltin::makeListIterator(thisMap(info, "values")->values());
+    }, 0);
+
+    Function* entries = defineMethod(prototype, "entries", [](const FunctionCallInfo& info) -> Value {
+        std::vector<Value> items;
+        for (const auto& entry : thisMap(info, "entries")->entries()) {
+            items.push_back(Value::object(new Array(pair(entry.first, entry.second))));
+        }
+        return IteratorBuiltin::makeListIterator(std::move(items));
+    }, 0);
+    defineHidden(prototype, Runtime::symbolPropertyKey(Runtime::WellKnownSymbols::Iterator), Value::object(entries));
+
+    // size is an accessor on the prototype, not an own data property
+    Runtime::PropertyDescriptor size;
+    size.getter = Value::object(new Function("get size", [](const FunctionCallInfo& info) -> Value {
+        return Value::number(static_cast<double>(thisMap(info, "size")->size()));
+    }, 0));
+    size.attributes = Runtime::PropertyAttribute::Configurable;
+    prototype->defineProperty("size", size);
+
+    defineConstant(prototype, Runtime::symbolPropertyKey(Runtime::WellKnownSymbols::ToStringTag), makeString("Map"));
+    return prototype;
+}
+
+Function* MapBuiltin::createMapConstructor(Object* prototype) {
+    auto* constructor = new Function("Map", [prototype](const FunctionCallInfo& info) -> Value {
+        // `new Map()` arrives with a fresh object inheriting from Map.prototype; a plain call does not
+        const Value self = info.thisValue();
+        if (!self.isObject() || !inheritsFrom(self.asObject(), prototype)) {
+            throw JSError("TypeError", "Constructor Map requires 'new'");
+        }
+        auto* map = new MapObject();
+        map->setPrototype(self.asObject()->prototype());
+
+        const Value iterable = info.argument(0);
+        if (!iterable.isUndefined() && !iterable.isNull()) {
+            runningVM().forOf(iterable, [&](const Value& entry) {
+                if (!entry.isObject()) {
+                    throw JSError("TypeError", "Iterator value " + entry.toString() + " is not an entry object");
+                }
+                map->set(entry.asObject()->get(static_cast<uint32_t>(0)), entry.asObject()->get(static_cast<uint32_t>(1)));
+                return true;
+            });
+        }
+        return Value::object(map);
+    }, 0);
+
+    defineHidden(constructor, "prototype", Value::object(prototype));
+    defineHidden(prototype, "constructor", Value::object(constructor));
+
+    // Map.groupBy(items, callback): key -> array of the items that produced it
+    defineMethod(constructor, "groupBy", [prototype](const FunctionCallInfo& info) -> Value {
+        Runtime::Function* callback = callbackArgument(info.argument(1), "groupBy");
+        VM& vm = runningVM();
+        auto* groups = new MapObject();
+        groups->setPrototype(prototype);
+        double index = 0;
+        vm.forOf(info.argument(0), [&](const Value& item) {
+            const Value key = vm.executeCallback(callback, Value::undefined(), {item, Value::number(index++)});
+            Value group = groups->get(key);
+            if (!group.isObject()) {
+                group = Value::object(new Array());
+                groups->set(key, group);
             }
-            return Value::undefined();
-        }, 1)));
-
-    return proto;
+            static_cast<Array*>(group.asObject())->push(item);
+            return true;
+        });
+        return Value::object(groups);
+    }, 2);
+    return constructor;
 }
 
 } // namespace Zepra::Builtins

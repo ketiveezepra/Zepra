@@ -6,6 +6,7 @@
  */
 
 #include "builtins/regexp.hpp"
+#include "runtime/execution/js_error.hpp"
 #include "runtime/objects/function.hpp"
 
 namespace Zepra::Builtins {
@@ -90,6 +91,7 @@ Value RegExpObject::exec(const std::string& str) {
     // Set index and input properties
     static_cast<Runtime::Object*>(arr)->set("index", Value::number(static_cast<double>(result.matchStart)));
     static_cast<Runtime::Object*>(arr)->set("input", Value::string(new Runtime::String(str)));
+    static_cast<Runtime::Object*>(arr)->set("groups", Value::undefined());
 
     return Value::object(arr);
 }
@@ -151,18 +153,34 @@ Value RegExpBuiltin::constructor(Runtime::Context*, const std::vector<Value>& ar
     std::string pattern;
     std::string flags;
 
-    if (!args.empty() && args[0].isString()) {
-        pattern = static_cast<Runtime::String*>(args[0].asObject())->value();
+    if (!args.empty()) {
+        // new RegExp(existingRegExp) copies its source and flags
+        if (args[0].isObject()) {
+            if (auto* existing = dynamic_cast<RegExpObject*>(args[0].asObject())) {
+                pattern = existing->pattern();
+                flags = existing->flags();
+            } else {
+                pattern = args[0].toString();
+            }
+        } else if (!args[0].isUndefined()) {
+            pattern = args[0].toString();
+        }
     }
-    if (args.size() > 1 && args[1].isString()) {
-        flags = static_cast<Runtime::String*>(args[1].asObject())->value();
+    if (args.size() > 1 && !args[1].isUndefined()) {
+        flags = args[1].toString();
+    }
+    if (pattern.empty()) pattern = "(?:)";
+
+    for (size_t i = 0; i < flags.size(); ++i) {
+        if (std::string("dgimsuvy").find(flags[i]) == std::string::npos || flags.find(flags[i]) != i) {  // unknown or repeated
+            throw Runtime::JSError("SyntaxError", "Invalid flags supplied to RegExp constructor '" + flags + "'");
+        }
     }
 
-    auto* re = new RegExpObject(pattern, flags);
-    if (!re->isValid()) {
-        // Pattern compile failed — still return object (matches browser behavior)
-    }
-    return Value::object(re);
+    // Regex literals evaluate to `new RegExp(...)`. A pattern this engine cannot
+    // compile (lookbehind, named groups, ...) yields a RegExp that never
+    // matches, rather than throwing and aborting the page's whole script.
+    return Value::object(new RegExpObject(pattern, flags));
 }
 
 Value RegExpBuiltin::test(Runtime::Context*, const std::vector<Value>& args) {

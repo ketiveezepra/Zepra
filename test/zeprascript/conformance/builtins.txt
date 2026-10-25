@@ -1,0 +1,129 @@
+# name | expression that must evaluate to true. A leading '!' marks a known gap.
+
+# ---- Numbers -----------------------------------------------------------------
+num_tostring_large | String(123456789) === "123456789" && String(1e21) === "1e+21" && String(0.1 + 0.2) === "0.30000000000000004"
+num_tostring_small | String(1e-7) === "1e-7" && String(0.000001) === "0.000001" && String(-5.5e-10) === "-5.5e-10"
+num_concat | "id" + 1700000000000 === "id1700000000000"
+num_radix | (255).toString(16) === "ff" && (255).toString(2) === "11111111" && (0.5).toString(2) === "0.1" && (-255).toString(36) === "-73"
+num_tofixed | (1.005).toFixed(2) === "1.00" && (2.5).toFixed(0) === "3" && (0).toFixed(2) === "0.00" && (1234.5678).toFixed(1) === "1234.6"
+num_tofixed_range | (function(){ try { (1).toFixed(101); return false; } catch (e) { return e instanceof RangeError; } })()
+num_toprecision | (123.456).toPrecision(4) === "123.5" && (0.000123).toPrecision(2) === "0.00012" && (123456).toPrecision(2) === "1.2e+5"
+num_toexponential | (123456).toExponential(2) === "1.23e+5" && (0).toExponential() === "0e+0"
+num_tolocalestring | (1234567.891).toLocaleString() === "1,234,567.891" && (1234.5).toLocaleString(undefined, { minimumFractionDigits: 2 }) === "1,234.50" && (0.5).toLocaleString() === "0.5"
+num_parse | parseInt("42px") === 42 && parseInt("0x1F") === 31 && parseInt("101", 2) === 5 && isNaN(parseInt("abc")) && parseFloat("3.14abc") === 3.14 && parseFloat(".5") === 0.5
+num_ctor | Number("12") === 12 && Number("") === 0 && isNaN(Number("12px")) && Number("0x10") === 16 && Number(" 7 ") === 7 && Number(true) === 1 && Number(null) === 0 && isNaN(Number(undefined))
+num_statics | Number.isInteger(5) && !Number.isInteger(5.5) && Number.isSafeInteger(Math.pow(2, 53) - 1) && !Number.isSafeInteger(Math.pow(2, 53)) && Number.isNaN(NaN) && !Number.isNaN("x") && Number.parseFloat === parseFloat && Number.MAX_SAFE_INTEGER === 9007199254740991 && Number.EPSILON > 0 && Number.MIN_VALUE === 5e-324
+num_wrapper | (function(){ var n = new Number(5); return typeof n === "object" && n + 1 === 6 && n.toFixed(1) === "5.0"; })()
+bool_ctor | Boolean(0) === false && Boolean("a") === true && typeof new Boolean(false) === "object" && true.toString() === "true" && (false).valueOf() === false
+conversion_ops | 1 + "2" === "12" && "3" * "4" === 12 && [1, 2] + "" === "1,2" && +"  12 " === 12 && isNaN(+"12px") && -"5" === -5 && "10" / 4 === 2.5
+number_property_keys | (function(){ var o = {}; o[1.5] = "a"; o[1e21] = "b"; return o["1.5"] === "a" && o["1e+21"] === "b"; })()
+date_now_string | String(Date.now()).length >= 13 && typeof Date.now() === "number" && !/e/.test(String(Date.now()))
+
+# ---- Strings -----------------------------------------------------------------
+str_ctor | typeof String(12) === "string" && String(null) === "null" && String(undefined) === "undefined" && String({ toString: function(){ return "x"; } }) === "x" && String([1, 2]) === "1,2"
+str_replace_string | "a-b-c".replace("-", "+") === "a+b-c" && "a-b-c".replaceAll("-", "+") === "a+b+c"
+str_replace_regex | "a1b22".replace(/\d+/g, "#") === "a#b#" && "a1b22".replace(/\d+/, "#") === "a#b22"
+str_replace_patterns | "John Smith".replace(/(\w+)\s(\w+)/, "$2, $1") === "Smith, John" && "abc".replace(/b/, "[$&]") === "a[b]c" && "abc".replace(/b/, "$`|$'") === "aa|cc" && "x".replace(/x/, "$$") === "$"
+str_replace_function | "a1b2".replace(/\d/g, function(m){ return "<" + m * 2 + ">"; }) === "a<2>b<4>" && "ab".replace(/(a)(b)/, function(m, p1, p2, offset, whole){ return p2 + p1 + offset + whole; }) === "ba0ab"
+str_replaceall_regex | (function(){ try { "a".replaceAll(/a/, "b"); return false; } catch (e) { return e instanceof TypeError; } })() && "aaa".replaceAll(/a/g, "b") === "bbb"
+str_replaceall_empty | "abc".replaceAll("", "-") === "-a-b-c-"
+str_split_string | "a,b,,c".split(",").length === 4 && "abc".split("").join("|") === "a|b|c" && "a,b,c".split(",", 2).join("|") === "a|b" && "abc".split().length === 1 && "".split(",").length === 1 && "".split("").length === 0
+str_split_regex | "a1b2c".split(/\d/).join("|") === "a|b|c" && "a, b ,c".split(/\s*,\s*/).join("|") === "a|b|c" && "ab".split(/(?:)/).join("|") === "a|b" && "a1b".split(/(\d)/).join("|") === "a|1|b"
+str_match | "a1b22".match(/\d+/g).join(",") === "1,22" && "abc".match(/x/) === null && "ab12".match(/(\d)(\d)/)[2] === "2" && "ab12".match(/\d/).index === 2
+str_matchall | (function(){ var r = []; for (var m of "a1b2".matchAll(/[a-z](\d)/g)) r.push(m[1] + "@" + m.index); return r.join() === "1@0,2@2"; })()
+str_search | "abcd".search(/c/) === 2 && "abcd".search(/x/) === -1
+str_positions | "abc".startsWith("c", 5) === false && "abc".startsWith("") && "abc".endsWith("bc") && "abc".endsWith("ab", 2) && "abc".includes("bc", 1) && !"abc".includes("ab", 1)
+str_index | "abcabc".indexOf("c") === 2 && "abcabc".indexOf("c", 3) === 5 && "abcabc".lastIndexOf("c") === 5 && "abcabc".lastIndexOf("c", 4) === 2 && "abc".indexOf("") === 0 && "abc".indexOf("x") === -1
+str_slice | "abcdef".slice(1, 3) === "bc" && "abcdef".slice(-2) === "ef" && "abcdef".slice(2, -1) === "cde" && "abcdef".substring(4, 1) === "bcd" && "abcdef".substr(-3, 2) === "de" && "abc".slice(5) === ""
+str_char | "abc".charAt(1) === "b" && "abc".charAt(9) === "" && "abc".charCodeAt(0) === 97 && isNaN("abc".charCodeAt(9)) && "abc".at(-1) === "c" && "abc".codePointAt(1) === 98 && "abc"[1] === "b"
+str_pad_repeat | "5".padStart(3, "0") === "005" && "5".padEnd(3, "ab") === "5ab" && "ab".repeat(3) === "ababab" && "x".padStart(5, "") === "x" && "abc".padStart(2) === "abc"
+str_repeat_range | (function(){ try { "a".repeat(-1); return false; } catch (e) { return e instanceof RangeError; } })()
+str_trim | "  a b  ".trim() === "a b" && "  a".trimStart() === "a" && "a  ".trimEnd() === "a" && " x ".trim() === "x" && "\n\tx\r".trim() === "x"
+str_case | "Hello".toUpperCase() === "HELLO" && "HELLO".toLowerCase() === "hello" && "é".toUpperCase() === "É" && "Ж".toLowerCase() === "ж" && "straße".toUpperCase() === "STRASSE"
+str_compare | "a".localeCompare("b") < 0 && "b".localeCompare("a") > 0 && "a".localeCompare("a") === 0 && "a".localeCompare("B") < 0 && ["b", "A", "a"].sort(function(x, y){ return x.localeCompare(y); }).join() === "a,A,b"
+str_statics | String.fromCharCode(72, 105) === "Hi" && String.fromCharCode(0xD83D, 0xDE00) === String.fromCodePoint(0x1F600) && String.raw({ raw: ["a", "b"] }, 1) === "a1b"
+str_tostring | "abc".toString() === "abc" && "abc".valueOf() === "abc" && "a".concat("b", 1, null) === "ab1null"
+str_iterator | (function(){ var it = "ab"[Symbol.iterator](); var a = it.next(), b = it.next(), c = it.next(); return a.value === "a" && b.value === "b" && c.done === true; })()
+
+# ---- Errors ------------------------------------------------------------------
+err_chain | (function(){ var e = new TypeError("t"); return e instanceof TypeError && e instanceof Error && !(e instanceof RangeError) && Object.getPrototypeOf(TypeError.prototype) === Error.prototype; })()
+err_props | (function(){ var e = new RangeError("r"); return e.name === "RangeError" && e.message === "r" && String(e) === "RangeError: r" && e.toString() === "RangeError: r" && typeof e.stack === "string" && e.stack.indexOf("RangeError: r") === 0; })()
+err_hidden | (function(){ var e = new Error("m", { cause: "c" }); return Object.keys(e).length === 0 && e.cause === "c" && JSON.stringify(e) === "{}"; })()
+err_call_without_new | (function(){ var e = Error("x"); return e instanceof Error && e.message === "x"; })()
+err_defaults | (function(){ var e = new Error(); return e.message === "" && e.name === "Error" && String(e) === "Error" && !e.hasOwnProperty("message"); })()
+err_from_engine | (function(){ try { null.x; } catch (e) { return e instanceof TypeError && e.name === "TypeError" && /null/.test(e.message); } })()
+err_constructors | Error.prototype.name === "Error" && TypeError.prototype.name === "TypeError" && TypeError.prototype.constructor === TypeError && Object.getPrototypeOf(TypeError) === Error
+err_aggregate | (function(){ var e = new AggregateError([1, 2], "m"); return e instanceof Error && e.errors.length === 2 && e.message === "m" && e.name === "AggregateError"; })()
+err_capture_stack | (function(){ var o = {}; Error.captureStackTrace(o); return typeof o.stack === "string"; })()
+err_range_from_builtin | (function(){ try { new Array(-1); } catch (e) { return e instanceof RangeError; } })()
+err_thrown_object | (function(){ try { throw { code: 7 }; } catch (e) { return e.code === 7 && !("stack" in e); } })()
+err_in_concat | "" + new Error("x") === "Error: x"
+err_manual_subclass | (function(){ function MyErr(m){ var e = new Error(m); Object.setPrototypeOf(e, MyErr.prototype); return e; } MyErr.prototype = Object.create(Error.prototype); MyErr.prototype.name = "MyErr"; var e = new MyErr("q"); return e instanceof MyErr && e instanceof Error && String(e) === "MyErr: q"; })()
+
+# ---- Object, Function, Array constructors and prototypes ----------------------
+typeof_globals | typeof Object === "function" && typeof Array === "function" && typeof Error === "function" && typeof Number === "function" && typeof String === "function" && typeof Boolean === "function" && typeof Map === "function" && typeof structuredClone === "function"
+obj_ctor | typeof Object === "function" && Object() instanceof Object && Object(null) !== null && Object.keys(Object({ a: 1 })).join() === "a" && typeof Object(1) === "object" && Object.prototype.constructor === Object && ({}).constructor === Object
+obj_statics | Object.keys({ a: 1, b: 2 }).join() === "a,b" && Object.values({ a: 1, b: 2 }).join() === "1,2" && Object.entries({ a: 1 })[0].join() === "a,1" && Object.assign({}, { a: 1 }, { b: 2 }).b === 2 && Object.fromEntries([["a", 1]]).a === 1
+obj_prototype_methods | ({ a: 1 }).hasOwnProperty("a") && !({}).hasOwnProperty("toString") && Object.prototype.isPrototypeOf({}) && ({}).toString() === "[object Object]" && ({ x: 1 }).propertyIsEnumerable("x")
+obj_prototype_extension | (function(){ Object.prototype.__zz = 1; var v = ({}).__zz; delete Object.prototype.__zz; return v === 1; })()
+arr_prototype_extension | (function(){ Array.prototype.__yy = function(){ return this.length; }; var v = [1, 2].__yy(); delete Array.prototype.__yy; return v === 2; })()
+define_property_accessor | (function(){ var seen = 0; var o = {}; Object.defineProperty(o, "x", { get: function(){ return this.k * 2; }, set: function(v){ seen = v; }, configurable: true }); o.k = 4; o.x = 9; var d = Object.getOwnPropertyDescriptor(o, "x"); return o.x === 8 && seen === 9 && typeof d.get === "function" && !("value" in d) && d.configurable === true && d.enumerable === false; })()
+define_property_defaults | (function(){ var o = {}; Object.defineProperty(o, "v", { value: 1 }); o.v = 2; var d = Object.getOwnPropertyDescriptor(o, "v"); return o.v === 1 && Object.keys(o).length === 0 && d.writable === false && d.enumerable === false && d.configurable === false; })()
+define_property_keeps_fields | (function(){ var o = { a: 1 }; Object.defineProperty(o, "a", { value: 2 }); var d = Object.getOwnPropertyDescriptor(o, "a"); return o.a === 2 && d.writable && d.enumerable && d.configurable; })()
+define_property_inherited_getter | (function(){ var p = {}; Object.defineProperty(p, "z", { get: function(){ return this.k; } }); var o = Object.create(p); o.k = 5; return o.z === 5; })()
+define_property_errors | (function(){ var a = false, b = false, c = false; try { Object.defineProperty({}, "x", { get: 1 }); } catch (e) { a = e instanceof TypeError; } try { Object.defineProperty({}, "x", { get: function(){}, value: 1 }); } catch (e) { b = e instanceof TypeError; } try { Object.defineProperty({}, "x", 5); } catch (e) { c = e instanceof TypeError; } return a && b && c; })()
+define_properties | (function(){ var o = Object.defineProperties({}, { a: { value: 1, enumerable: true }, b: { get: function(){ return 2; } } }); return o.a === 1 && o.b === 2 && Object.keys(o).join() === "a"; })()
+array_instanceof | [] instanceof Array && [] instanceof Object && (function(){}) instanceof Function && (function(){}) instanceof Object && Array.prototype.constructor === Array && [].constructor === Array && Object.getPrototypeOf([]) === Array.prototype && Object.getPrototypeOf(Array.prototype) === Object.prototype
+func_ctor | typeof Function === "function" && (function(){}).constructor === Function && Function.prototype.call === (function(){}).call
+func_props | (function(a, b){}).length === 2 && (function foo(){}).name === "foo" && (function(){}).toString().indexOf("function") === 0
+func_call_native | Math.max.call(null, 1, 3) === 3 && Array.prototype.slice.call([1, 2, 3], 1).join() === "2,3"
+array_ctor | new Array(3).length === 3 && new Array(1, 2).join() === "1,2" && Array(2).length === 2 && new Array("a").length === 1
+array_of | Array.of(7).length === 1 && Array.of(1, 2, 3).join() === "1,2,3"
+array_from_string | Array.from("abc").join() === "a,b,c" && Array.from("").length === 0
+array_from_iterables | Array.from(new Set([1, 1, 2])).join() === "1,2" && Array.from(new Map([[1, 2]])).join("|") === "1,2"
+array_from_array_like | Array.from({ length: 3 }).length === 3 && Array.from({ length: 2, 0: "x", 1: "y" }).join() === "x,y" && Array.from({}).length === 0 && Array.from(5).length === 0
+array_from_map_function | Array.from([1, 2, 3], function(x, i){ return x * i; }).join() === "0,2,6" && Array.from({ length: 3 }, function(_, i){ return i; }).join() === "0,1,2"
+array_from_generator | (function(){ function* g(){ yield 1; yield 2; } return Array.from(g()).join() === "1,2"; })()
+array_from_null | (function(){ try { Array.from(null); return false; } catch (e) { return e instanceof TypeError; } })()
+
+# ---- Map, Set, WeakSet, WeakMap ------------------------------------------------
+map_basic | (function(){ var m = new Map([["a", 1], ["b", 2]]); return m.size === 2 && m.get("a") === 1 && m.has("b") && !m.has("c") && m.set("c", 3) === m && m.size === 3 && m.delete("a") && !m.delete("a") && m.size === 2; })()
+map_key_equality | (function(){ var m = new Map(); m.set(NaN, 1); m.set(0, 2); var o = {}; m.set(o, 3); return m.get(NaN) === 1 && m.get(-0) === 2 && m.get(o) === 3 && m.get({}) === undefined && m.get("0") === undefined; })()
+map_order | (function(){ var m = new Map(); m.set("z", 1); m.set("y", 2); m.set("z", 3); return Array.from(m.keys()).join() === "z,y" && Array.from(m.values()).join() === "3,2" && Array.from(m.entries()).join("|") === "z,3|y,2"; })()
+map_iteration | (function(){ var m = new Map([[1, "a"], [2, "b"]]); var r = []; for (var e of m) r.push(e[0] + e[1]); m.forEach(function(v, k, mm){ r.push(v + k + (mm === m)); }); return r.join() === "1a,2b,a1true,b2true"; })()
+map_mutation_during_foreach | (function(){ var m = new Map([[1, 1], [2, 2], [3, 3]]); var seen = []; m.forEach(function(v, k){ seen.push(k); if (k === 1) { m.delete(2); m.set(4, 4); } }); return seen.join() === "1,3,4"; })()
+map_constructor_errors | (function(){ var a = false, b = false; try { Map(); } catch (e) { a = e instanceof TypeError; } try { new Map([1]); } catch (e) { b = e instanceof TypeError; } return a && b; })()
+map_from_map | (function(){ var a = new Map([[1, 2]]); var b = new Map(a); return b.get(1) === 2 && b !== a; })()
+map_group_by | (function(){ var g = Map.groupBy([1, 2, 3, 4], function(x){ return x % 2 ? "odd" : "even"; }); return g.get("odd").join() === "1,3" && g.get("even").join() === "2,4"; })()
+map_size | typeof new Map().size === "number" && new Map([[1, 1]]).size === 1 && !new Map().hasOwnProperty("size")
+map_large | (function(){ var m = new Map(); for (var i = 0; i < 20000; i++) m.set(i, i); var s = 0; for (var j = 0; j < 20000; j++) s += m.get(j); return s === 199990000 && m.size === 20000; })()
+set_basic | (function(){ var s = new Set([1, 2, 2, 3]); return s.size === 3 && s.has(2) && s.add(4) === s && s.delete(1) && s.size === 3 && Array.from(s).join() === "2,3,4"; })()
+set_from_string | new Set("hello").size === 4 && Array.from(new Set("hello")).join("") === "helo"
+set_iteration | (function(){ var r = []; new Set([1, 2]).forEach(function(v, k, s){ r.push(v === k); }); for (var x of new Set([3, 4])) r.push(x); return r.join() === "true,true,3,4"; })()
+set_entries | Array.from(new Set([1]).entries()).join() === "1,1" && new Set([1]).keys().next().value === 1
+set_algebra | (function(){ var a = new Set([1, 2, 3]), b = new Set([2, 3, 4]); return Array.from(a.union(b)).join() === "1,2,3,4" && Array.from(a.intersection(b)).join() === "2,3" && Array.from(a.difference(b)).join() === "1" && Array.from(a.symmetricDifference(b)).join() === "1,4" && new Set([2]).isSubsetOf(a) && a.isSupersetOf(new Set([1, 2])) && a.isDisjointFrom(new Set([9])); })()
+weak_collections | (function(){ var o = {}, ws = new WeakSet([o]), wm = new WeakMap([[o, 1]]); var t = false; try { ws.add(1); } catch (e) { t = e instanceof TypeError; } return ws.has(o) && !ws.has({}) && wm.get(o) === 1 && t; })()
+collection_iterators | (function(){ var it = new Map([[1, 2]]).entries(); var a = it.next(); var b = it.next(); return a.value.join() === "1,2" && a.done === false && b.done === true && it[Symbol.iterator]() === it; })()
+collection_spread | (function(){ var m = new Map([[1, 2]]); var s = new Set([5, 6]); return [...m].join("|") === "1,2" && [...s].join() === "5,6" && [...m.keys()].join() === "1"; })()
+
+# ---- Global functions ----------------------------------------------------------
+uri_component | encodeURIComponent("a b&c=d/é") === "a%20b%26c%3Dd%2F%C3%A9" && decodeURIComponent("a%20b%26%C3%A9") === "a b&é" && encodeURIComponent("!*'()-_.~") === "!*'()-_.~"
+uri_full | encodeURI("http://x.com/a b?q=é#h") === "http://x.com/a%20b?q=%C3%A9#h" && decodeURI("%41%2F%20") === "A%2F "
+uri_errors | (function(){ try { decodeURIComponent("%E0%A4%A"); return false; } catch (e) { return e instanceof URIError && e.name === "URIError"; } })() && (function(){ try { decodeURIComponent("%"); return false; } catch (e) { return e instanceof URIError; } })()
+base64 | btoa("hello") === "aGVsbG8=" && atob("aGVsbG8=") === "hello" && btoa("") === "" && btoa("é") === "6Q==" && atob("6Q==") === "é" && atob("aGVsbG8") === "hello" && atob(" aGVs bG8= ") === "hello"
+base64_errors | (function(){ var a = false, b = false; try { atob("a"); } catch (e) { a = e.name === "InvalidCharacterError"; } try { btoa("Ā"); } catch (e) { b = e.name === "InvalidCharacterError"; } return a && b; })()
+structured_clone | (function(){ var o = { a: 1, b: [1, { c: 2 }], d: new Date(5), e: new Map([[1, { z: 1 }]]), f: new Set([1]), h: "s", i: null, j: undefined }; var c = structuredClone(o); return c !== o && c.b !== o.b && c.b[1].c === 2 && c.b[1] !== o.b[1] && c.d.getTime() === 5 && c.d !== o.d && c.e.get(1).z === 1 && c.e.get(1) !== o.e.get(1) && c.f.has(1) && c.h === "s" && c.i === null && "j" in c; })()
+structured_clone_cycles | (function(){ var o = { n: 1 }; o.self = o; var c = structuredClone(o); return c.self === c && c !== o; })()
+structured_clone_shared | (function(){ var s = { v: 1 }; var c = structuredClone({ a: s, b: s }); return c.a === c.b && c.a !== s; })()
+structured_clone_errors | (function(){ var f = false, s = false; try { structuredClone(function(){}); } catch (e) { f = e.name === "DataCloneError"; } try { structuredClone({ x: Symbol("q") }); } catch (e) { s = e.name === "DataCloneError"; } return f && s; })()
+structured_clone_error_object | (function(){ var c = structuredClone(new RangeError("r")); return c instanceof RangeError && c.message === "r"; })()
+queue_microtask_validates | (function(){ try { queueMicrotask(1); return false; } catch (e) { return e instanceof TypeError; } })()
+
+# ---- RegExp --------------------------------------------------------------------
+regex_star | /x*/.exec("ab").index === 0 && /a*b/.exec("caab")[0] === "aab" && /\s*,\s*/.exec("a , b")[0] === " , " && "aaa".replace(/a*/, "X") === "X" && /^\w*$/.test("abc_1")
+regex_catastrophic_backtracking | (function(){ try { /(a*)*b/.test("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); return true; } catch (e) { return /too complex/.test(e.message); } })()
+
+# ---- Symbol --------------------------------------------------------------------
+symbol_basics | (function(){ var s = Symbol("d"); return typeof s === "symbol" && s.toString() === "Symbol(d)" && s.description === "d" && String(s) === "Symbol(d)" && Symbol().description === undefined && Symbol("a") !== Symbol("a") && Symbol.for("k") === Symbol.for("k") && Symbol.keyFor(Symbol.for("k")) === "k" && Symbol.keyFor(s) === undefined && Symbol.iterator.toString() === "Symbol(Symbol.iterator)"; })()
+symbol_new_throws | (function(){ try { new Symbol(); return false; } catch (e) { return e instanceof TypeError; } })()
+symbol_as_key | (function(){ var k = Symbol("k"); var o = {}; o[k] = 1; return o[k] === 1 && Object.keys(o).length === 0 && JSON.stringify(o) === "{}"; })()

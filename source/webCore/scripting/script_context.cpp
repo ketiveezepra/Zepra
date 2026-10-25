@@ -12,6 +12,8 @@
 #include <iostream>
 #include <algorithm>
 #include <chrono>
+#include <memory>
+#include <unordered_map>
 
 // ZepraScript internal headers
 #include "runtime/execution/vm.hpp"
@@ -60,6 +62,64 @@ private:
     Zepra::Runtime::ResourceMonitor monitor_;
     Zepra::Runtime::ResourceMonitor* previous_ = nullptr;
 };
+
+// An in-memory Web Storage: string keys and values in insertion order with
+// getItem, setItem, removeItem, clear, key(n) and a length property.
+Zepra::Runtime::Object* makeWebStorage() {
+    using namespace Zepra::Runtime;
+    struct Data {
+        std::vector<std::string> order;
+        std::unordered_map<std::string, std::string> values;
+    };
+    auto data = std::make_shared<Data>();
+    auto* storage = new Object();
+
+    auto method = [storage](const char* name, size_t arity, NativeFn fn) {
+        PropertyDescriptor desc;
+        desc.value = Value::object(createNativeFunction(name, std::move(fn), arity));
+        desc.attributes = PropertyAttribute::Writable | PropertyAttribute::Configurable;
+        storage->defineProperty(name, desc);
+    };
+    auto text = [](const std::vector<Value>& args, size_t index) {
+        return index < args.size() ? args[index].toString() : std::string("undefined");
+    };
+
+    method("getItem", 1, [data, text](Context*, const std::vector<Value>& args) -> Value {
+        auto found = data->values.find(text(args, 0));
+        return found == data->values.end() ? Value::null() : Value::string(new String(found->second));
+    });
+    method("setItem", 2, [data, text](Context*, const std::vector<Value>& args) -> Value {
+        const std::string key = text(args, 0);
+        if (data->values.find(key) == data->values.end()) data->order.push_back(key);
+        data->values[key] = text(args, 1);
+        return Value::undefined();
+    });
+    method("removeItem", 1, [data, text](Context*, const std::vector<Value>& args) -> Value {
+        const std::string key = text(args, 0);
+        if (data->values.erase(key) > 0) {
+            data->order.erase(std::remove(data->order.begin(), data->order.end(), key), data->order.end());
+        }
+        return Value::undefined();
+    });
+    method("clear", 0, [data](Context*, const std::vector<Value>&) -> Value {
+        data->order.clear();
+        data->values.clear();
+        return Value::undefined();
+    });
+    method("key", 1, [data](Context*, const std::vector<Value>& args) -> Value {
+        const double index = args.empty() ? 0 : args[0].toNumber();
+        if (!(index >= 0) || index >= static_cast<double>(data->order.size())) return Value::null();
+        return Value::string(new String(data->order[static_cast<size_t>(index)]));
+    });
+
+    PropertyDescriptor length;
+    length.getter = Value::object(createNativeFunction("length", [data](Context*, const std::vector<Value>&) -> Value {
+        return Value::number(static_cast<double>(data->order.size()));
+    }, 0));
+    length.attributes = PropertyAttribute::Configurable;
+    storage->defineProperty("length", length);
+    return storage;
+}
 } // namespace
 
 ScriptContext::ScriptContext() : vm_(nullptr), vmReady_(false) {
@@ -69,9 +129,16 @@ ScriptContext::ScriptContext() : vm_(nullptr), vmReady_(false) {
         ownedVm_ = std::make_unique<Zepra::Runtime::VM>(nullptr);
         ownedContext_ = std::make_unique<Zepra::Runtime::Context>(ownedVm_.get());
         
+        // The engine's own built-ins (Object, Array, Map, JSON, Error, ...).
+        // The embedder supplies the rest of the page environment itself: the
+        // console and timers route into the browser, and Promise, WebAssembly
+        // and the web APIs are defined in setupWindowGlobals().
         auto* globalObj = new Zepra::Runtime::GlobalObject(ownedContext_.get());
-        ownedVm_->setGlobal("globalThis", Zepra::Runtime::Value::object(globalObj));
-        
+        globalObj->initialize();
+        globalObj->installInto(*ownedVm_, {"console", "setTimeout", "setInterval", "clearTimeout",
+                                           "clearInterval", "Promise", "WebAssembly"});
+        globalObject_ = globalObj;
+
         vm_ = ownedVm_.get();
         vmReady_ = true;
         std::cout << "[ScriptContext] Per-tab VM initialized" << std::endl;
@@ -610,63 +677,13 @@ void ScriptContext::setupWindowGlobals() {
     vm_->setGlobal("window", Value::object(windowObj));
     vm_->setGlobal("self", Value::object(windowObj));
     
-    // JSON.parse / JSON.stringify
-    auto* jsonObj = new Object();
-    auto* jsonParseFn = createNativeFunction("parse",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::null();
-            // Minimal: return the string as-is for now
-            // Full JSON parsing requires recursive descent
-            return args[0];
-        }, 1);
-    jsonObj->set("parse", Value::object(jsonParseFn));
-    
-    auto* jsonStringifyFn = createNativeFunction("stringify",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::string(new String("undefined"));
-            return Value::string(new String(args[0].toString()));
-        }, 1);
-    jsonObj->set("stringify", Value::object(jsonStringifyFn));
-    vm_->setGlobal("JSON", Value::object(jsonObj));
-    windowObj->set("JSON", Value::object(jsonObj));
-    
-    // localStorage (in-memory, non-persistent)
-    auto* storageObj = new Object();
-    auto* storageData = new Object();  // backing store
-    
-    auto* getItemFn = createNativeFunction("getItem",
-        [storageData](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::null();
-            auto val = storageData->get(args[0].toString());
-            return val.isUndefined() ? Value::null() : val;
-        }, 1);
-    storageObj->set("getItem", Value::object(getItemFn));
-    
-    auto* setItemFn = createNativeFunction("setItem",
-        [storageData](Context*, const std::vector<Value>& args) -> Value {
-            if (args.size() >= 2) {
-                storageData->set(args[0].toString(), args[1]);
-            }
-            return Value::undefined();
-        }, 2);
-    storageObj->set("setItem", Value::object(setItemFn));
-    
-    auto* removeItemFn = createNativeFunction("removeItem",
-        [](Context*, const std::vector<Value>&) -> Value {
-            return Value::undefined();
-        }, 1);
-    storageObj->set("removeItem", Value::object(removeItemFn));
-    
-    auto* clearFn = createNativeFunction("clear",
-        [](Context*, const std::vector<Value>&) -> Value {
-            return Value::undefined();
-        }, 0);
-    storageObj->set("clear", Value::object(clearFn));
-    
-    vm_->setGlobal("localStorage", Value::object(storageObj));
-    vm_->setGlobal("sessionStorage", Value::object(storageObj));
-    windowObj->set("localStorage", Value::object(storageObj));
-    windowObj->set("sessionStorage", Value::object(storageObj));
+    // localStorage and sessionStorage: separate in-memory stores (not persisted yet)
+    auto* localStorageObj = makeWebStorage();
+    auto* sessionStorageObj = makeWebStorage();
+    vm_->setGlobal("localStorage", Value::object(localStorageObj));
+    vm_->setGlobal("sessionStorage", Value::object(sessionStorageObj));
+    windowObj->set("localStorage", Value::object(localStorageObj));
+    windowObj->set("sessionStorage", Value::object(sessionStorageObj));
     
     // history object
     auto* historyObj = new Object();
@@ -690,187 +707,6 @@ void ScriptContext::setupWindowGlobals() {
     
     vm_->setGlobal("history", Value::object(historyObj));
     windowObj->set("history", Value::object(historyObj));
-    
-    // atob / btoa (base64 stubs)
-    auto* atobFn = createNativeFunction("atob",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::string(new String(""));
-            return Value::string(new String(args[0].toString()));
-        }, 1);
-    vm_->setGlobal("atob", Value::object(atobFn));
-    vm_->setGlobal("btoa", Value::object(atobFn));
-    windowObj->set("atob", Value::object(atobFn));
-    windowObj->set("btoa", Value::object(atobFn));
-    
-    // Boolean / Number / String constructors (commonly checked)
-    vm_->setGlobal("Boolean", Value::object(createNativeFunction("Boolean",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::boolean(false);
-            return Value::boolean(args[0].toBoolean());
-        }, 1)));
-    vm_->setGlobal("Number", Value::object(createNativeFunction("Number",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::number(0);
-            return Value::number(args[0].toNumber());
-        }, 1)));
-    vm_->setGlobal("isNaN", Value::object(createNativeFunction("isNaN",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::boolean(true);
-            double n = args[0].toNumber();
-            return Value::boolean(n != n);
-        }, 1)));
-    vm_->setGlobal("isFinite", Value::object(createNativeFunction("isFinite",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::boolean(false);
-            double n = args[0].toNumber();
-            return Value::boolean(n == n && n != INFINITY && n != -INFINITY);
-        }, 1)));
-    vm_->setGlobal("parseInt", Value::object(createNativeFunction("parseInt",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::number(0);
-            try { return Value::number(std::stoi(args[0].toString())); }
-            catch (...) { return Value::number(0); }
-        }, 1)));
-    vm_->setGlobal("parseFloat", Value::object(createNativeFunction("parseFloat",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::number(0);
-            try { return Value::number(std::stod(args[0].toString())); }
-            catch (...) { return Value::number(0); }
-        }, 1)));
-    
-    // Array constructor + static methods
-    auto* arrayCtorFn = createNativeFunction("Array",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* arr = new Object(ObjectType::Array);
-            for (size_t i = 0; i < args.size(); i++) {
-                arr->set(i, args[i]);
-            }
-            arr->set("length", Value::number(static_cast<double>(args.size())));
-            return Value::object(arr);
-        }, 0);
-    auto* arrayObj = new Object();
-    arrayObj->set("isArray", Value::object(createNativeFunction("isArray",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::boolean(false);
-            return Value::boolean(args[0].isObject() && 
-                args[0].asObject()->isArray());
-        }, 1)));
-    arrayObj->set("from", Value::object(createNativeFunction("from",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* arr = new Object(ObjectType::Array);
-            arr->set("length", Value::number(0));
-            return Value::object(arr);
-        }, 1)));
-    vm_->setGlobal("Array", Value::object(arrayObj));
-    
-    // Object constructor + static methods
-    auto* objectCtor = new Object();
-    objectCtor->set("keys", Value::object(createNativeFunction("keys",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* result = new Object(ObjectType::Array);
-            if (!args.empty() && args[0].isObject()) {
-                auto keys = args[0].asObject()->keys();
-                for (size_t i = 0; i < keys.size(); i++) {
-                    result->set(i, Value::string(new String(keys[i])));
-                }
-                result->set("length", Value::number(static_cast<double>(keys.size())));
-            } else {
-                result->set("length", Value::number(0));
-            }
-            return Value::object(result);
-        }, 1)));
-    objectCtor->set("values", Value::object(createNativeFunction("values",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* result = new Object(ObjectType::Array);
-            if (!args.empty() && args[0].isObject()) {
-                auto keys = args[0].asObject()->keys();
-                for (size_t i = 0; i < keys.size(); i++) {
-                    result->set(i, args[0].asObject()->get(keys[i]));
-                }
-                result->set("length", Value::number(static_cast<double>(keys.size())));
-            } else {
-                result->set("length", Value::number(0));
-            }
-            return Value::object(result);
-        }, 1)));
-    objectCtor->set("entries", Value::object(createNativeFunction("entries",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* result = new Object(ObjectType::Array);
-            if (!args.empty() && args[0].isObject()) {
-                auto keys = args[0].asObject()->keys();
-                for (size_t i = 0; i < keys.size(); i++) {
-                    auto* pair = new Object(ObjectType::Array);
-                    pair->set(static_cast<size_t>(0), Value::string(new String(keys[i])));
-                    pair->set(static_cast<size_t>(1), args[0].asObject()->get(keys[i]));
-                    pair->set("length", Value::number(2));
-                    result->set(i, Value::object(pair));
-                }
-                result->set("length", Value::number(static_cast<double>(keys.size())));
-            } else {
-                result->set("length", Value::number(0));
-            }
-            return Value::object(result);
-        }, 1)));
-    objectCtor->set("assign", Value::object(createNativeFunction("assign",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            if (args.empty()) return Value::object(new Object());
-            Value target = args[0];
-            if (target.isObject()) {
-                for (size_t i = 1; i < args.size(); i++) {
-                    if (args[i].isObject()) {
-                        auto keys = args[i].asObject()->keys();
-                        for (auto& k : keys) {
-                            target.asObject()->set(k, args[i].asObject()->get(k));
-                        }
-                    }
-                }
-            }
-            return target;
-        }, 2)));
-    objectCtor->set("freeze", Value::object(createNativeFunction("freeze",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            return args.empty() ? Value::undefined() : args[0];
-        }, 1)));
-    objectCtor->set("defineProperty", Value::object(createNativeFunction("defineProperty",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            // Minimal: set the value if descriptor has 'value'
-            if (args.size() >= 3 && args[0].isObject() && args[2].isObject()) {
-                std::string key = args[1].toString();
-                Value val = args[2].asObject()->get("value");
-                if (!val.isUndefined()) {
-                    args[0].asObject()->set(key, val);
-                }
-            }
-            return args.empty() ? Value::undefined() : args[0];
-        }, 3)));
-    objectCtor->set("create", Value::object(createNativeFunction("create",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            return Value::object(new Object());
-        }, 1)));
-    objectCtor->set("getPrototypeOf", Value::object(createNativeFunction("getPrototypeOf",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            return Value::null();
-        }, 1)));
-    vm_->setGlobal("Object", Value::object(objectCtor));
-    
-    // Error constructor
-    vm_->setGlobal("Error", Value::object(createNativeFunction("Error",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* err = new Object();
-            err->set("message", args.empty() ? Value::string(new String("")) : 
-                Value::string(new String(args[0].toString())));
-            err->set("name", Value::string(new String("Error")));
-            err->set("stack", Value::string(new String("")));
-            return Value::object(err);
-        }, 1)));
-    vm_->setGlobal("TypeError", Value::object(createNativeFunction("TypeError",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* err = new Object();
-            err->set("message", args.empty() ? Value::string(new String("")) : 
-                Value::string(new String(args[0].toString())));
-            err->set("name", Value::string(new String("TypeError")));
-            return Value::object(err);
-        }, 1)));
     
     // Promise (minimal stub for Next.js)
     auto* promiseCtor = createNativeFunction("Promise",
@@ -933,50 +769,6 @@ void ScriptContext::setupWindowGlobals() {
         }, 1)));
 
     vm_->setGlobal("Promise", Value::object(promiseCtor));
-    
-    // Symbol
-    vm_->setGlobal("Symbol", Value::object(createNativeFunction("Symbol",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* sym = new Object();
-            sym->set("description", args.empty() ? Value::undefined() : args[0]);
-            return Value::object(sym);
-        }, 0)));
-
-    // Map
-    vm_->setGlobal("Map", Value::object(createNativeFunction("Map",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* m = new Object();
-            m->set("set", Value::object(createNativeFunction("set",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 2)));
-            m->set("get", Value::object(createNativeFunction("get",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            m->set("has", Value::object(createNativeFunction("has",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::boolean(false); }, 1)));
-            return Value::object(m);
-        }, 0)));
-
-    // Set
-    vm_->setGlobal("Set", Value::object(createNativeFunction("Set",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* s = new Object();
-            s->set("add", Value::object(createNativeFunction("add",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            s->set("has", Value::object(createNativeFunction("has",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::boolean(false); }, 1)));
-            return Value::object(s);
-        }, 0)));
-    
-    // queueMicrotask (no-op stub)
-    vm_->setGlobal("queueMicrotask", Value::object(createNativeFunction("queueMicrotask",
-        [](Context*, const std::vector<Value>&) -> Value {
-            return Value::undefined();
-        }, 1)));
-    
-    // structuredClone (returns input for now)
-    vm_->setGlobal("structuredClone", Value::object(createNativeFunction("structuredClone",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            return args.empty() ? Value::undefined() : args[0];
-        }, 1)));
     
     // MutationObserver — React uses this to track DOM mutations
     auto* mutObsCtor = createNativeFunction("MutationObserver",
@@ -1121,40 +913,17 @@ void ScriptContext::setupWindowGlobals() {
     vm_->setGlobal("URLSearchParams", Value::object(uspCtor));
     windowObj->set("URLSearchParams", Value::object(uspCtor));
     
-    // WeakMap / WeakSet / WeakRef — React internals use these heavily
-    vm_->setGlobal("WeakMap", Value::object(createNativeFunction("WeakMap",
-        [](Context*, const std::vector<Value>&) -> Value {
-            auto* wm = new Object();
-            wm->set("set", Value::object(createNativeFunction("set",
-                [wm](Context*, const std::vector<Value>&) -> Value { return Value::object(wm); }, 2)));
-            wm->set("get", Value::object(createNativeFunction("get",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            wm->set("has", Value::object(createNativeFunction("has",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::boolean(false); }, 1)));
-            wm->set("delete", Value::object(createNativeFunction("delete",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::boolean(false); }, 1)));
-            return Value::object(wm);
-        }, 0)));
-    
-    vm_->setGlobal("WeakSet", Value::object(createNativeFunction("WeakSet",
-        [](Context*, const std::vector<Value>&) -> Value {
-            auto* ws = new Object();
-            ws->set("add", Value::object(createNativeFunction("add",
-                [ws](Context*, const std::vector<Value>&) -> Value { return Value::object(ws); }, 1)));
-            ws->set("has", Value::object(createNativeFunction("has",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::boolean(false); }, 1)));
-            return Value::object(ws);
-        }, 0)));
-    
-    vm_->setGlobal("WeakRef", Value::object(createNativeFunction("WeakRef",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* wr = new Object();
-            Value target = args.empty() ? Value::undefined() : args[0];
-            wr->set("deref", Value::object(createNativeFunction("deref",
-                [target](Context*, const std::vector<Value>&) -> Value { return target; }, 0)));
-            return Value::object(wr);
-        }, 1)));
-    
+    // window carries the engine's built-ins too (window.Array, window.JSON, ...)
+    if (globalObject_) {
+        for (const std::string& name : globalObject_->getOwnPropertyNames()) {
+            if (name == "globalThis" || windowObj->hasOwnProperty(name)) continue;
+            PropertyDescriptor desc;
+            desc.value = globalObject_->get(name);
+            desc.attributes = PropertyAttribute::Writable | PropertyAttribute::Configurable;
+            windowObj->defineProperty(name, desc);
+        }
+    }
+
     std::cout << "[ScriptContext] Window globals registered (alert, console, setTimeout, navigator, location, JSON, localStorage, history)" << std::endl;
 }
 

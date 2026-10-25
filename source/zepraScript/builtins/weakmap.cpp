@@ -6,6 +6,8 @@
  */
 
 #include "builtins/weakmap.hpp"
+#include "builtins/builtin_helpers.hpp"
+#include "runtime/execution/vm.hpp"
 #include "runtime/objects/function.hpp"
 
 namespace Zepra::Builtins {
@@ -104,7 +106,10 @@ Object* WeakMapBuiltin::createWeakMapPrototype() {
         new Runtime::Function("set", [](const Runtime::FunctionCallInfo& info) -> Value {
             if (!info.thisValue().isObject()) return Value::undefined();
             WeakMapObject* wm = dynamic_cast<WeakMapObject*>(info.thisValue().asObject());
-            if (!wm || info.argumentCount() < 2 || !info.argument(0).isObject()) return info.thisValue();
+            if (!wm) return info.thisValue();
+            if (!info.argument(0).isObject()) {
+                throw Runtime::JSError("TypeError", "Invalid value used as weak map key");
+            }
             wm->set(info.argument(0).asObject(), info.argument(1));
             return info.thisValue();
         }, 2)));
@@ -126,6 +131,36 @@ Object* WeakMapBuiltin::createWeakMapPrototype() {
         }, 1)));
 
     return proto;
+}
+
+Runtime::Function* WeakMapBuiltin::createWeakMapConstructor(Object* prototype) {
+    auto* constructor = new Runtime::Function("WeakMap", [prototype](const Runtime::FunctionCallInfo& info) -> Value {
+        const Value self = info.thisValue();
+        if (!self.isObject() || !inheritsFrom(self.asObject(), prototype)) {
+            throw Runtime::JSError("TypeError", "Constructor WeakMap requires 'new'");
+        }
+        auto* map = new WeakMapObject();
+        map->setPrototype(self.asObject()->prototype());
+
+        const Value iterable = info.argument(0);
+        if (!iterable.isUndefined() && !iterable.isNull()) {
+            Runtime::VM* vm = Runtime::VM::current();
+            if (!vm) throw Runtime::JSError("TypeError", "WeakMap constructed outside a running script");
+            vm->forOf(iterable, [&](const Value& entry) {
+                if (!entry.isObject()) {
+                    throw Runtime::JSError("TypeError", "Iterator value " + entry.toString() + " is not an entry object");
+                }
+                const Value key = entry.asObject()->get(static_cast<uint32_t>(0));
+                if (!key.isObject()) throw Runtime::JSError("TypeError", "Invalid value used as weak map key");
+                map->set(key.asObject(), entry.asObject()->get(static_cast<uint32_t>(1)));
+                return true;
+            });
+        }
+        return Value::object(map);
+    }, 0);
+    defineHidden(constructor, "prototype", Value::object(prototype));
+    defineHidden(prototype, "constructor", Value::object(constructor));
+    return constructor;
 }
 
 } // namespace Zepra::Builtins

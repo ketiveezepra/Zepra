@@ -6,6 +6,7 @@
  */
 
 #include "runtime/execution/vm.hpp"
+#include "runtime/execution/js_error.hpp"
 #include <fstream>
 #include "runtime/objects/object.hpp"
 #include "runtime/objects/function.hpp"
@@ -23,6 +24,11 @@
 #include "runtime/execution/Sandbox.h"
 #include "heap/gc_heap.hpp"
 #include "builtins/string.hpp"
+#include "builtins/number.hpp"
+#include "builtins/boolean.hpp"
+#include "builtins/error.hpp"
+#include "builtins/list_iterator.hpp"
+#include "builtins/symbol.hpp"
 #include "builtins/array.hpp"
 #include "runtime/async/promise.hpp"
 #include "runtime/objects/well_known_symbols.hpp"
@@ -117,12 +123,6 @@ size_t utf8SequenceLength(unsigned char lead) {
     return 1;  // Stray continuation byte: step over it
 }
 
-// The one Object.prototype used for objects the VM creates itself
-Object* defaultObjectPrototype() {
-    static Object* proto = Builtins::ObjectBuiltin::createObjectPrototype(nullptr);
-    return proto;
-}
-
 VM& runningVM() {
     VM* vm = VM::current();
     if (!vm) throw std::runtime_error("No script is running");
@@ -152,35 +152,35 @@ std::vector<Value> argumentList(const Value& list) {
     return args;
 }
 
-// Function.prototype: what every function inherits when it does not define
-// the property itself
-Object* functionPrototype() {
-    static Object* proto = [] {
-        auto* p = new Object();
-        p->setPrototype(defaultObjectPrototype());
-        p->set("call", Value::object(new Function("call", [](const FunctionCallInfo& info) -> Value {
-            Function* fn = thisFunction(info, "call");
-            const auto& all = info.arguments();
-            std::vector<Value> args(all.size() > 1 ? all.begin() + 1 : all.end(), all.end());
-            return runningVM().executeCallback(fn, info.argument(0), args);
-        }, 1)));
-        p->set("apply", Value::object(new Function("apply", [](const FunctionCallInfo& info) -> Value {
-            Function* fn = thisFunction(info, "apply");
-            return runningVM().executeCallback(fn, info.argument(0), argumentList(info.argument(1)));
-        }, 2)));
-        p->set("bind", Value::object(new Function("bind", [](const FunctionCallInfo& info) -> Value {
-            Function* fn = thisFunction(info, "bind");
-            const auto& all = info.arguments();
-            std::vector<Value> bound(all.size() > 1 ? all.begin() + 1 : all.end(), all.end());
-            return Value::object(fn->bind(info.argument(0), bound));
-        }, 1)));
-        p->set("toString", Value::object(new Function("toString", [](const FunctionCallInfo& info) -> Value {
-            Function* fn = thisFunction(info, "toString");
-            return Value::string(new String("function " + fn->name() + "() { [native code] }"));
-        }, 0)));
-        return p;
-    }();
-    return proto;
+// Adds call, apply, bind and toString to a Function.prototype, which every
+// function inherits when it does not define the property itself
+void populateFunctionPrototype(Object* p) {
+    auto method = [p](const char* name, size_t arity, BuiltinFn fn) {
+        PropertyDescriptor desc;
+        desc.value = Value::object(new Function(name, std::move(fn), arity));
+        desc.attributes = PropertyAttribute::Writable | PropertyAttribute::Configurable;
+        p->defineProperty(name, desc);
+    };
+    method("call", 1, [](const FunctionCallInfo& info) -> Value {
+        Function* fn = thisFunction(info, "call");
+        const auto& all = info.arguments();
+        std::vector<Value> args(all.size() > 1 ? all.begin() + 1 : all.end(), all.end());
+        return runningVM().executeCallback(fn, info.argument(0), args);
+    });
+    method("apply", 2, [](const FunctionCallInfo& info) -> Value {
+        Function* fn = thisFunction(info, "apply");
+        return runningVM().executeCallback(fn, info.argument(0), argumentList(info.argument(1)));
+    });
+    method("bind", 1, [](const FunctionCallInfo& info) -> Value {
+        Function* fn = thisFunction(info, "bind");
+        const auto& all = info.arguments();
+        std::vector<Value> bound(all.size() > 1 ? all.begin() + 1 : all.end(), all.end());
+        return Value::object(fn->bind(info.argument(0), bound));
+    });
+    method("toString", 0, [](const FunctionCallInfo& info) -> Value {
+        Function* fn = thisFunction(info, "toString");
+        return Value::string(new String("function " + fn->name() + "() { [native code] }"));
+    });
 }
 
 // State of a for-of loop, spread or array destructuring. Arrays and other
@@ -337,6 +337,8 @@ void VM::run() {
             throw;  // Execution limits end the script; page code cannot catch them
         } catch (const ThrownException& e) {
             throwValue(e.value());  // From a builtin or callback: catchable here
+        } catch (const JSError& e) {
+            throwValue(makeError(e.type(), e.what()));
         } catch (const std::runtime_error& e) {
             // Errors the engine detects become catchable JavaScript errors
             const std::string message = e.what();
@@ -396,7 +398,11 @@ Value VM::toPrimitive(const Value& value, bool preferString) {
         }
         return Value::string(new String(joined));
     }
-    return Value::string(new String(value.toString()));
+    // A String wrapper without its prototype is its text; the rest use the
+    // default form (Value::toString would call back into this function)
+    Object* object = value.asObject();
+    if (auto* text = dynamic_cast<String*>(object)) return Value::string(new String(text->value()));
+    return Value::string(new String(object->isFunction() ? "[object Function]" : "[object Object]"));
 }
 
 void VM::toPrimitiveOperands(Value& a, Value& b) {
@@ -406,11 +412,28 @@ void VM::toPrimitiveOperands(Value& a, Value& b) {
 
 Value VM::makeError(const std::string& type, const std::string& message) {
     auto* error = new Error(message, type);
+    Object* prototype = nullptr;
     Value ctor = getGlobal(type);
     if (ctor.isObject()) {
         Value proto = ctor.asObject()->get("prototype");
-        if (proto.isObject()) error->setPrototype(proto.asObject());
+        if (proto.isObject()) prototype = proto.asObject();
     }
+    if (!prototype) {
+        // No global constructor of that type (a bare VM): the base Error
+        // prototype, with the type named on the object itself
+        prototype = intrinsic(Intrinsic::Error);
+        PropertyDescriptor name;
+        name.value = Value::string(new String(type));
+        name.attributes = PropertyAttribute::Writable | PropertyAttribute::Configurable;
+        error->defineProperty("name", name);
+    }
+    error->setPrototype(prototype);
+
+    PropertyDescriptor stack;
+    stack.value = Value::string(new String(type + (message.empty() ? "" : ": " + message) + "\n" +
+                                           captureStackTrace()));
+    stack.attributes = PropertyAttribute::Writable | PropertyAttribute::Configurable;
+    error->defineProperty("stack", stack);
     return Value::object(error);
 }
 
@@ -919,7 +942,7 @@ void VM::dispatch(Opcode op) {
 
         case Opcode::OP_CREATE_OBJECT: {
             Object* obj = new Object();
-            obj->setPrototype(defaultObjectPrototype());
+            obj->setPrototype(intrinsic(Intrinsic::Object));
             push(Value::object(obj));
             break;
         }
@@ -987,6 +1010,8 @@ void VM::dispatch(Opcode op) {
             else if (a.isBoolean()) type = "boolean";
             else if (a.isNumber()) type = "number";
             else if (a.isString()) type = "string";
+            else if (a.isSymbol()) type = "symbol";
+            else if (a.isBigInt()) type = "bigint";
             else if (a.isObject() && dynamic_cast<Function*>(a.asObject())) type = "function";
             else type = "object";
             push(Value::string(new String(type)));
@@ -1011,7 +1036,7 @@ void VM::dispatch(Opcode op) {
             }
             bool found = false;
             if (instance.isObject()) {
-                for (Object* obj = instance.asObject()->prototype(); obj; obj = obj->prototype()) {
+                for (Object* obj = prototypeOf(instance.asObject()); obj; obj = prototypeOf(obj)) {
                     if (obj == prototype) {
                         found = true;
                         break;
@@ -1028,39 +1053,22 @@ void VM::dispatch(Opcode op) {
             exceptionValue_ = pop();
             hasException_ = true;
             
-            // Capture stack trace on the error object if it's an Object
-            if (exceptionValue_.isObject()) {
+            // Error objects record their stack when they are created; one
+            // that was built without it gets the stack of the throw
+            if (exceptionValue_.isObject() && exceptionValue_.asObject()->objectType() == ObjectType::Error) {
                 Object* errObj = exceptionValue_.asObject();
-                std::string stackStr;
-                
-                // Get error name and message for first line
-                Value nameVal = errObj->get("name");
-                Value msgVal = errObj->get("message");
-                if (nameVal.isString()) {
-                    stackStr += static_cast<String*>(nameVal.asObject())->value();
-                } else {
-                    stackStr += "Error";
+                if (!errObj->getOwnPropertyDescriptor("stack")) {
+                    Value nameVal = errObj->get("name");
+                    Value msgVal = errObj->get("message");
+                    std::string header = nameVal.isString() ? nameVal.toString() : "Error";
+                    if (msgVal.isString() && !msgVal.toString().empty()) header += ": " + msgVal.toString();
+                    PropertyDescriptor stack;
+                    stack.value = Value::string(new String(header + "\n" + captureStackTrace()));
+                    stack.attributes = PropertyAttribute::Writable | PropertyAttribute::Configurable;
+                    errObj->defineProperty("stack", stack);
                 }
-                if (msgVal.isString()) {
-                    stackStr += ": " + static_cast<String*>(msgVal.asObject())->value();
-                }
-                stackStr += "\n";
-                
-                // Walk call stack frames
-                for (int i = static_cast<int>(heapStack_.size()) - 1; i >= 0; --i) {
-                    const auto& frame = heapStack_[i];
-                    stackStr += "    at ";
-                    if (frame.function) {
-                        stackStr += frame.function->name().empty() ? "<anonymous>" : frame.function->name();
-                    } else {
-                        stackStr += "<global>";
-                    }
-                    stackStr += " (bytecode:" + std::to_string(frame.returnAddress) + ")\n";
-                }
-                
-                errObj->set("stack", Value::string(new String(stackStr)));
             }
-            
+
             throwValue(exceptionValue_);
             break;
         }
@@ -1323,7 +1331,7 @@ void VM::dispatch(Opcode op) {
                 throw std::runtime_error("Cannot destructure " + describeForError(source));
             }
             Object* rest = new Object();
-            rest->setPrototype(defaultObjectPrototype());
+            rest->setPrototype(intrinsic(Intrinsic::Object));
             if (source.isObject()) {
                 std::unordered_set<std::string> excluded;
                 for (const auto& key : keys) excluded.insert(propertyKeyName(key));
@@ -1822,7 +1830,7 @@ Value VM::construct(Function* constructor, const std::vector<Value>& args) {
 
     Object* instance = new Object();
     Object* proto = ensurePrototypeObject(constructor);
-    instance->setPrototype(proto ? proto : defaultObjectPrototype());
+    instance->setPrototype(proto ? proto : intrinsic(Intrinsic::Object));
 
     Value result = executeCallback(constructor, Value::object(instance), callArgs);
     return result.isObject() ? result : Value::object(instance);
@@ -1877,7 +1885,7 @@ void VM::constructValue(const Value& callee, std::vector<Value> args) {
 
     Object* instance = new Object();
     Object* proto = ensurePrototypeObject(ctor);
-    instance->setPrototype(proto ? proto : defaultObjectPrototype());
+    instance->setPrototype(proto ? proto : intrinsic(Intrinsic::Object));
 
     if (ctor->isBuiltin()) {
         FunctionCallInfo info(context_, Value::object(instance), args);
@@ -2036,17 +2044,83 @@ const std::string& VM::constantString(size_t index) const {
 }
 
 Object* VM::primitivePrototype(const Value& value) {
-    const char* ctorName = value.isString() ? "String"
-                         : value.isNumber() ? "Number"
-                         : value.isBoolean() ? "Boolean"
-                         : value.isSymbol() ? "Symbol" : nullptr;
-    if (!ctorName) return nullptr;
-    Value ctor = getGlobal(ctorName);
-    if (ctor.isObject()) {
-        Value proto = ctor.asObject()->get("prototype");
-        if (proto.isObject()) return proto.asObject();
-    }
+    if (value.isString()) return intrinsic(Intrinsic::String);
+    if (value.isNumber()) return intrinsic(Intrinsic::Number);
+    if (value.isBoolean()) return intrinsic(Intrinsic::Boolean);
+    if (value.isSymbol()) return intrinsic(Intrinsic::Symbol);
     return nullptr;
+}
+
+Object* VM::intrinsic(Intrinsic kind) {
+    Object*& slot = intrinsics_[static_cast<size_t>(kind)];
+    if (slot) return slot;
+
+    switch (kind) {
+        case Intrinsic::Object:
+            slot = Builtins::ObjectBuiltin::createObjectPrototype(nullptr);
+            return slot;
+        case Intrinsic::Function:
+            slot = createFunctionPrototype();
+            return slot;
+        case Intrinsic::Array:
+            slot = Builtins::ArrayBuiltin::createArrayPrototype(nullptr);
+            break;
+        case Intrinsic::String:
+            slot = Builtins::StringBuiltin::createStringPrototype(nullptr);
+            break;
+        case Intrinsic::Number:
+            slot = Builtins::NumberBuiltin::createNumberPrototype();
+            break;
+        case Intrinsic::Boolean:
+            slot = Builtins::BooleanBuiltin::createBooleanPrototype();
+            break;
+        case Intrinsic::Symbol:
+            slot = Builtins::SymbolBuiltin::createSymbolPrototype();
+            break;
+        case Intrinsic::Error:
+            slot = Builtins::ErrorBuiltin::createErrorPrototype();
+            break;
+        case Intrinsic::Iterator:
+            slot = Builtins::IteratorBuiltin::createIteratorPrototype();
+            break;
+        case Intrinsic::Count:
+            return nullptr;
+    }
+    // Everything but Object.prototype itself inherits from it
+    slot->setPrototype(intrinsic(Intrinsic::Object));
+    return slot;
+}
+
+Object* VM::prototypeOf(Object* object) {
+    if (!object) return nullptr;
+    if (object->prototype()) return object->prototype();
+    // Arrays and functions inherit from their built-in prototype without storing a link
+    if (object->isArray()) return intrinsic(Intrinsic::Array);
+    if (object->isFunction()) return intrinsic(Intrinsic::Function);
+    return nullptr;
+}
+
+Object* VM::createFunctionPrototype() {
+    auto* proto = new Object();
+    proto->setPrototype(intrinsic(Intrinsic::Object));
+    populateFunctionPrototype(proto);
+    return proto;
+}
+
+std::string VM::captureStackTrace() const {
+    std::string trace;
+    auto appendFrame = [&trace](const VMCallFrame& frame) {
+        trace += "    at ";
+        if (frame.function) {
+            trace += frame.function->name().empty() ? "<anonymous>" : frame.function->name();
+        } else {
+            trace += "<global>";
+        }
+        trace += " (bytecode:" + std::to_string(frame.returnAddress) + ")\n";
+    };
+    for (size_t i = heapDepth_; i-- > 0;) appendFrame(heapStack_[i]);
+    for (size_t i = nativeDepth_; i-- > 0;) appendFrame(nativeStack_[i]);
+    return trace;
 }
 
 // A function's `prototype` object, created on first use: most functions are
@@ -2063,7 +2137,7 @@ Object* VM::ensurePrototypeObject(Function* fn) {
     }
     if (!fn->isCompiled() || !fn->isConstructor()) return nullptr;
     Object* proto = new Object();
-    proto->setPrototype(defaultObjectPrototype());
+    proto->setPrototype(intrinsic(Intrinsic::Object));
     proto->set("constructor", Value::object(fn));
     fn->set("prototype", Value::object(proto));
     return proto;
@@ -2085,21 +2159,12 @@ Value VM::getProperty(const Value& target, const std::string& name, const Value&
             return Value::number(static_cast<double>(obj->length()));
         }
 
+        // Own properties and the object's prototype chain
         Value value;
-        const PropertyDescriptor* accessor = nullptr;
-        if (obj->lookupProperty(name, value, accessor)) {
-            if (!accessor) return value;
-            if (accessor->getter.isObject() && accessor->getter.asObject()->isFunction()) {
-                return executeCallback(static_cast<Function*>(accessor->getter.asObject()), receiver, {});
-            }
-            return Value::undefined();
-        }
+        if (readProperty(obj, receiver, name, value)) return value;
 
-        // Not stored: the built-in parts of arrays and functions
-        if (obj->isArray()) {
-            static Object* arrayProto = Builtins::ArrayBuiltin::createArrayPrototype(nullptr);
-            return arrayProto->get(name);
-        }
+        // Not stored: the built-in parts of arrays and functions, then the
+        // prototype every object ends up with
         if (obj->isFunction()) {
             auto* fn = static_cast<Function*>(obj);
             if (name == "prototype") {
@@ -2108,8 +2173,10 @@ Value VM::getProperty(const Value& target, const std::string& name, const Value&
             }
             if (name == "length") return Value::number(static_cast<double>(fn->arity()));
             if (name == "name") return Value::string(new String(fn->name()));
-            return functionPrototype()->get(name);
         }
+        Object* builtin = obj->isArray() ? intrinsic(Intrinsic::Array)
+                        : obj->isFunction() ? intrinsic(Intrinsic::Function) : nullptr;
+        if (builtin && readProperty(builtin, receiver, name, value)) return value;
         return Value::undefined();
     }
 
@@ -2122,13 +2189,6 @@ Value VM::getProperty(const Value& target, const std::string& name, const Value&
         if (toArrayIndex(Value::string(new String(name)), index)) {
             return index < str->length() ? str->charAt(index) : Value::undefined();
         }
-        Object* proto = primitivePrototype(target);
-        Value method = proto ? proto->get(name) : Value::undefined();
-        if (method.isUndefined()) {
-            static Object* stringProto = Builtins::StringBuiltin::createStringPrototype(nullptr);
-            method = stringProto->get(name);
-        }
-        return method;
     }
 
     if (target.isNull() || target.isUndefined()) {
@@ -2136,7 +2196,20 @@ Value VM::getProperty(const Value& target, const std::string& name, const Value&
                                  " (reading '" + name + "')");
     }
     Object* proto = primitivePrototype(target);
-    return proto ? proto->get(name) : Value::undefined();
+    Value value;
+    return proto && readProperty(proto, target, name, value) ? value : Value::undefined();
+}
+
+// Reads `name` from `holder` and its prototype chain as `receiver`: a getter
+// runs with the receiver as `this`. False when nothing on the chain has it.
+bool VM::readProperty(Object* holder, const Value& receiver, const std::string& name, Value& out) {
+    const PropertyDescriptor* accessor = nullptr;
+    if (!holder->lookupProperty(name, out, accessor)) return false;
+    if (!accessor) return true;
+    out = accessor->getter.isObject() && accessor->getter.asObject()->isFunction()
+        ? executeCallback(static_cast<Function*>(accessor->getter.asObject()), receiver, {})
+        : Value::undefined();
+    return true;
 }
 
 // obj[key]: array indices read the element storage, other keys are names.
@@ -2266,6 +2339,14 @@ Value VM::makeIterator(const Value& iterable) {
         return Value::object(new IteratorState(Kind::Indexed, iterable));
     }
     throw std::runtime_error(describeForError(iterable) + " is not iterable");
+}
+
+void VM::forOf(const Value& iterable, const std::function<bool(const Value&)>& each) {
+    const Value iterator = makeIterator(iterable);
+    Value value;
+    while (iteratorStep(iterator, value)) {
+        if (!each(value)) break;
+    }
 }
 
 bool VM::iteratorStep(const Value& iterator, Value& value) {

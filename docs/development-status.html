@@ -139,6 +139,15 @@
 
 
 <h1>Zepra Browser Development Status</h1>
+
+<div style="background:#064e3b;border-left:6px solid #34d399;padding:1.25rem;margin:1.5rem 0;border-radius:8px;">
+<strong style="color:#6ee7b7;">Current status — 2026-10-25</strong><br>
+The browser builds and runs on Windows, Linux and macOS (NXRender). On Windows it loads Wikipedia (105&ndash;107 MB) and Hacker News (86&ndash;88 MB) over verified HTTPS, runs page scripts with timers and requestAnimationFrame, stops runaway scripts, and uses the ZepraScript engine's real built-ins. Active work: Promise/microtasks, then DOM bindings (<code>element.style</code>, <code>classList</code>).
+<br><br>
+The dated timeline of every merged change, what is fixed and what is still open: <a href="todo.html#status" style="color:#34d399;">todo.html &rarr; Status and timeline</a>. Engine detail: <a href="zeprascript/todo.html#timeline" style="color:#34d399;">ZepraScript timeline</a>.
+<br><br>
+<em>The sections below are the original status write-up and have not been re-audited.</em>
+</div>
 <h2>🎯 Project Overview</h2>
 <p>Zepra Browser is a cross-platform lightweight web browser built with C++ and SDL2, featuring an integrated KetiveeSearch engine. The project aims to provide a fast, privacy-focused browsing experience.</p>
 <h2>✅ Completed Components</h2>

@@ -2,70 +2,77 @@
 
 /**
  * @file number.hpp
- * @brief JavaScript Number object
+ * @brief JavaScript Number: constructor, prototype methods and global helpers
  */
 
 #include "../config.hpp"
+#include "runtime/objects/function.hpp"
 #include "runtime/objects/object.hpp"
 #include "runtime/objects/value.hpp"
 #include <cmath>
 #include <limits>
-
-namespace Zepra::Runtime { class Context; }
+#include <string>
 
 namespace Zepra::Builtins {
 
-using Runtime::Value;
+using Runtime::Function;
 using Runtime::Object;
+using Runtime::Value;
 
 /**
- * @brief JavaScript Number object wrapper
+ * @brief A Number wrapper object (`new Number(5)`)
  */
 class NumberObject : public Object {
 public:
     explicit NumberObject(double value);
-    
+
     double valueOf() const { return value_; }
     std::string toString(int radix = 10) const;
     std::string toFixed(int digits) const;
     std::string toExponential(int digits) const;
     std::string toPrecision(int precision) const;
-    
-    // Static constants
+
     static constexpr double MAX_VALUE = std::numeric_limits<double>::max();
-    static constexpr double MIN_VALUE = std::numeric_limits<double>::min();
+    static constexpr double MIN_VALUE = std::numeric_limits<double>::denorm_min();
     static constexpr double MAX_SAFE_INTEGER = 9007199254740991.0;
     static constexpr double MIN_SAFE_INTEGER = -9007199254740991.0;
     static constexpr double POSITIVE_INFINITY = std::numeric_limits<double>::infinity();
     static constexpr double NEGATIVE_INFINITY = -std::numeric_limits<double>::infinity();
     static constexpr double NaN = std::numeric_limits<double>::quiet_NaN();
     static constexpr double EPSILON = std::numeric_limits<double>::epsilon();
-    
+
 private:
     double value_;
 };
 
 /**
- * @brief Number builtin methods
+ * @brief Number built-ins
  */
 class NumberBuiltin {
 public:
-    static Value constructor(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value valueOf(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value toString(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value toFixed(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value toExponential(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value toPrecision(Runtime::Context* ctx, const std::vector<Value>& args);
-    
-    // Static methods
-    static Value isNaN(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value isFinite(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value isInteger(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value isSafeInteger(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value parseFloat(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value parseInt(Runtime::Context* ctx, const std::vector<Value>& args);
-    
+    /** Number.prototype: toString, toFixed, toExponential, toPrecision, valueOf, toLocaleString. */
     static Object* createNumberPrototype();
+
+    /**
+     * The Number function: Number(x) converts, `new Number(x)` makes a wrapper.
+     * Carries the constants and the static helpers (isInteger, parseFloat, ...).
+     * `parseFloat` and `parseInt` are the global functions themselves, as the
+     * specification requires.
+     */
+    static Function* createNumberConstructor(Object* prototype, Function* parseFloat, Function* parseInt);
+
+    /** The global functions. */
+    static Function* createParseInt();
+    static Function* createParseFloat();
+    static Function* createIsNaN();
+    static Function* createIsFinite();
+
+    /**
+     * en-US Number.prototype.toLocaleString: digits grouped by commas, at
+     * most three fraction digits by default. Honours the minimumFractionDigits
+     * and maximumFractionDigits options; other options are ignored.
+     */
+    static std::string toLocaleString(double value, const Value& options);
 };
 
 } // namespace Zepra::Builtins

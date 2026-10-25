@@ -8,6 +8,9 @@
 #include "runtime/objects/value.hpp"
 #include "runtime/objects/object.hpp"
 #include "runtime/objects/function.hpp"
+#include "runtime/objects/number_conversion.hpp"
+#include "runtime/objects/symbol.hpp"
+#include "runtime/execution/vm.hpp"
 #include "runtime/builtins_api/bigint_object.hpp"
 #include <sstream>
 #include <cmath>
@@ -21,6 +24,7 @@ ValueType Value::type() const {
     if (isBoolean()) return ValueType::Boolean;
     if (isNumber()) return ValueType::Number;
     if (isString()) return ValueType::String;
+    if (isSymbol()) return ValueType::Symbol;
     if (isBigInt()) return ValueType::BigInt;
     if (isObject()) return ValueType::Object;
     return ValueType::Undefined;
@@ -80,20 +84,20 @@ double Value::toNumber() const {
             return asBoolean() ? 1.0 : 0.0;
         case ValueType::Number:
             return asNumber();
-        case ValueType::String: {
-            const std::string& str = asString()->value();
-            if (str.empty()) return 0.0;
-            try {
-                return std::stod(str);
-            } catch (...) {
-                return std::nan("");
-            }
-        }
+        case ValueType::String:
+            return NumberConversion::stringToNumber(asString()->value());
         case ValueType::BigInt:
             throw std::runtime_error("TypeError: Cannot convert a BigInt value to a number");
         case ValueType::Object: {
             // ToPrimitive → valueOf → toString coercion chain
             Object* obj = asObject();
+            if (obj && obj->objectType() != ObjectType::Proxy) {
+                // ToPrimitive with the number hint, then convert that
+                if (VM* vm = VM::current()) {
+                    const Value primitive = vm->toPrimitiveValue(*this, false);
+                    return primitive.isObject() ? std::nan("") : primitive.toNumber();
+                }
+            }
             if (obj) {
                 Value valueOf = obj->get("valueOf");
                 if (valueOf.isObject() && valueOf.asObject()->isFunction()) {
@@ -101,10 +105,7 @@ double Value::toNumber() const {
                     Function* fn = static_cast<Function*>(valueOf.asObject());
                     Value result = fn->call(nullptr, Value::object(obj), {});
                     if (result.isNumber()) return result.asNumber();
-                    if (result.isString()) {
-                        try { return std::stod(result.toString()); }
-                        catch (...) { return std::nan(""); }
-                    }
+                    if (result.isString()) return NumberConversion::stringToNumber(result.toString());
                 }
             }
             return std::nan("");
@@ -115,6 +116,7 @@ double Value::toNumber() const {
 }
 
 std::string Value::toString() const {
+    if (isSymbol()) return symbolDescriptiveString(asSymbol());
     switch (type()) {
         case ValueType::Undefined:
             return "undefined";
@@ -122,29 +124,22 @@ std::string Value::toString() const {
             return "null";
         case ValueType::Boolean:
             return asBoolean() ? "true" : "false";
-        case ValueType::Number: {
-            double n = asNumber();
-            if (std::isnan(n)) return "NaN";
-            if (std::isinf(n)) return n > 0 ? "Infinity" : "-Infinity";
-            if (n == 0.0) return "0";
-            
-            // Format number
-            std::ostringstream oss;
-            oss << n;
-            return oss.str();
-        }
+        case ValueType::Number:
+            return NumberConversion::toString(asNumber());
         case ValueType::String:
             return asString()->value();
         case ValueType::Object: {
+            // ToString of an object runs its toString()/valueOf(): "1,2" for
+            // [1, 2], "Error: x" for an error
             Object* obj = asObject();
-            if (obj) {
-                // Check object type for appropriate string representation
-                if (obj->isArray()) {
-                    return "[object Array]";
-                } else if (obj->isFunction()) {
-                    return "[object Function]";
+            if (obj && obj->objectType() != ObjectType::Proxy) {
+                if (VM* vm = VM::current()) {
+                    const Value primitive = vm->toPrimitiveValue(*this, true);
+                    if (!primitive.isObject()) return primitive.toString();
                 }
             }
+            if (obj && obj->isArray()) return "[object Array]";
+            if (obj && obj->isFunction()) return "[object Function]";
             return "[object Object]";
         }
         default:
@@ -232,6 +227,10 @@ bool Value::strictEquals(const Value& other) const {
             return asString()->value() == other.asString()->value();
         case ValueType::Object:
             return asObject() == other.asObject();
+        case ValueType::Symbol:
+            return asSymbol() == other.asSymbol();
+        case ValueType::BigInt:
+            return asBigInt()->value() == other.asBigInt()->value();
         default:
             return false;
     }

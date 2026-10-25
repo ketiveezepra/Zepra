@@ -90,6 +90,9 @@
                         <i data-lucide="bar-chart-2" class="w-4 h-4 opacity-70"></i> Progress Bars</a>
                     <a href="#milestones" class="nav-link flex items-center gap-3 px-3 py-2 text-sm text-gray-400 hover:text-white hover:text-emerald-400 rounded-lg hover:bg-white/5 transition-all border-l-2 border-transparent pl-4">
                         <i data-lucide="flag" class="w-4 h-4 opacity-70"></i> Key Milestones</a>
+                    <a href="#timeline" class="nav-link flex items-center gap-3 px-3 py-2 text-sm text-gray-400 hover:text-white hover:text-amber-400 rounded-lg hover:bg-white/5 transition-all border-l-2 border-transparent pl-4">
+                        <i data-lucide="calendar" class="w-4 h-4"></i> Timeline
+                    </a>
                     <a href="#architecture" class="nav-link flex items-center gap-3 px-3 py-2 text-sm text-gray-400 hover:text-white hover:text-pink-400 rounded-lg hover:bg-white/5 transition-all border-l-2 border-transparent pl-4">
                         <i data-lucide="database" class="w-4 h-4 opacity-70"></i> Footprint Table</a>
                 </div>
@@ -176,7 +179,7 @@
                         <h3 class="mt-8 text-xl font-bold text-white flex items-center gap-2 z-10">
                             Test Suite Pass
                         </h3>
-                        <p class="text-sm text-center text-gray-400 mt-2 z-10 leading-relaxed font-medium">470/470 Specs<br>(401 Unit / 69 Integ)</p>
+                        <p class="text-sm text-center text-gray-400 mt-2 z-10 leading-relaxed font-medium">781/781 tests, 2026-10-25<br>(460 unit / 288 integration / 33 engine)</p>
                     </div>
 
                     <!-- Donut 3 -->
@@ -405,6 +408,52 @@
                         100% { transform: translateX(100%); }
                     }
                 </style>
+            </section>
+
+            <!-- Verified timeline -->
+            <section id="timeline" class="mb-24 animate-section scroll-mt-24">
+                <div class="flex items-center gap-4 mb-10">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-br from-amber-500/20 to-orange-500/20 border border-amber-500/30 flex items-center justify-center">
+                        <i data-lucide="calendar" class="w-6 h-6 text-amber-400"></i>
+                    </div>
+                    <div>
+                        <h2 class="text-3xl font-bold tracking-tight">Verified Timeline</h2>
+                        <p class="text-sm text-gray-400 mt-1">Merged engine work, newest first. Measured on Windows (MSYS2 UCRT64, Release); Linux and macOS through CI builds only. The percentages above are older estimates; the test counts are measured.</p>
+                    </div>
+                </div>
+                <div class="glass rounded-2xl p-6 overflow-x-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead><tr class="text-xs uppercase tracking-wider text-gray-500"><th class="pb-3 pr-4">Date</th><th class="pb-3 pr-4">PR</th><th class="pb-3">What changed</th></tr></thead>
+                        <tbody>
+                            <tr class="border-t border-white/5"><td class="py-3 pr-4 font-mono text-xs text-gray-400 whitespace-nowrap">2026-10-25</td><td class="py-3 pr-4 font-mono text-xs text-accent-light whitespace-nowrap">#17 (open)</td><td class="py-3 text-sm text-gray-300">Built-ins pass: shortest round-trip number formatting and exact toFixed/toPrecision; Number, Boolean, String, Object and Array as real constructors; one set of intrinsic prototypes per VM (no process-wide static prototypes for arrays); Error/TypeError/... chain, captureStackTrace, AggregateError; Symbol primitives with registry; Map/Set/WeakSet with hashed SameValueZero keys and iterators; Array.from over iterables; Object.defineProperty accessors; RegExp constructor, <code>*</code> quantifier fix and a backtracking budget; the browser's pages use these built-ins instead of stubs; conformance suite.</td></tr>
+                            <tr class="border-t border-white/5"><td class="py-3 pr-4 font-mono text-xs text-gray-400 whitespace-nowrap">2026-10-25</td><td class="py-3 pr-4 font-mono text-xs text-accent-light whitespace-nowrap">#16</td><td class="py-3 text-sm text-gray-300">Parser: <code>super(...)</code>/<code>super.x</code>, class fields and class expressions, getters/setters and keyword keys in object literals, object spread, async and destructuring arrows; built-in subclassing.</td></tr>
+                            <tr class="border-t border-white/5"><td class="py-3 pr-4 font-mono text-xs text-gray-400 whitespace-nowrap">2026-10-24</td><td class="py-3 pr-4 font-mono text-xs text-accent-light whitespace-nowrap">#15</td><td class="py-3 text-sm text-gray-300">Runaway-script guard (10 s / 1 GB); real frame model, calls, closures, hoisting, destructuring, spread, labels and cross-frame exceptions; parser no longer loops on bad tokens.</td></tr>
+                            <tr class="border-t border-white/5"><td class="py-3 pr-4 font-mono text-xs text-gray-400 whitespace-nowrap">2026-10-21</td><td class="py-3 pr-4 font-mono text-xs text-accent-light whitespace-nowrap">#13</td><td class="py-3 text-sm text-gray-300">Timers, requestAnimationFrame and DOM changes from scripts; JS call fixes.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-8">
+                    <div class="glass rounded-2xl p-6">
+                        <h3 class="font-bold text-white text-lg mb-3">Active now / next</h3>
+                        <ol class="list-decimal list-inside space-y-2 text-sm text-gray-300">
+                            <li>Built-ins pass (#17) &mdash; in review.</li>
+                            <li>Promise and microtasks &mdash; design first; <code>Promise.then</code> callbacks never run today.</li>
+                            <li>DOM bindings: <code>element.style</code>, <code>classList</code>, canvas <code>getContext</code>.</li>
+                            <li>Reclaim memory after the runaway guard stops a script.</li>
+                        </ol>
+                    </div>
+                    <div class="glass rounded-2xl p-6">
+                        <h3 class="font-bold text-white text-lg mb-3">Known gaps</h3>
+                        <ul class="list-disc list-inside space-y-2 text-sm text-gray-300">
+                            <li>Regex: no lookaround, <code>{n,m}</code> ignored, byte-based, no named groups or backreferences, slow; no <code>source</code>/<code>flags</code>/<code>lastIndex</code> on RegExp objects.</li>
+                            <li>Strings are byte-indexed, not UTF-16.</li>
+                            <li>WebAssembly namespace is fake; URL/URLSearchParams and observers are stubs.</li>
+                            <li>Undeclared-variable reads do not throw; tagged templates unsupported.</li>
+                            <li>A UTF-8 byte-order mark at the start of a script is a parse error.</li>
+                            <li>WeakMap/WeakSet hold keys strongly; non-configurable properties can be redefined.</li>
+                        </ul>
+                    </div>
+                </div>
             </section>
 
             <!-- Architecture Size Table -->

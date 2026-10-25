@@ -6,10 +6,14 @@
  */
 
 #include "builtins/array.hpp"
+#include "builtins/builtin_helpers.hpp"
+#include "builtins/list_iterator.hpp"
 #include "runtime/objects/object.hpp"
 #include "runtime/objects/function.hpp"
 #include "runtime/objects/value.hpp"
 #include "runtime/execution/vm.hpp"
+#include "runtime/execution/js_error.hpp"
+#include "runtime/objects/well_known_symbols.hpp"
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -79,24 +83,43 @@ Runtime::Value ArrayBuiltin::isArray(const Runtime::FunctionCallInfo& info) {
 
 // Array.from(arrayLike, mapFn?, thisArg?)
 Runtime::Value ArrayBuiltin::from(const Runtime::FunctionCallInfo& info) {
-    std::vector<Runtime::Value> elements;
-    
-    if (info.argumentCount() < 1) {
-        return Runtime::Value::object(new Runtime::Array(std::move(elements)));
+    const Runtime::Value source = info.argument(0);
+    if (source.isNull() || source.isUndefined()) {
+        throw Runtime::JSError("TypeError", source.toString() + " is not iterable");
     }
-    
-    Runtime::Value source = info.argument(0);
-    
-    if (source.isObject()) {
-        Runtime::Object* obj = source.asObject();
-        if (auto* arr = dynamic_cast<Runtime::Array*>(obj)) {
-            // Copy from existing array
-            for (size_t i = 0; i < arr->length(); i++) {
-                elements.push_back(arr->at(i));
-            }
+
+    Runtime::Function* mapFn = nullptr;
+    if (!info.argument(1).isUndefined()) {
+        if (!info.argument(1).isObject() || !info.argument(1).asObject()->isFunction()) {
+            throw Runtime::JSError("TypeError", info.argument(1).toString() + " is not a function");
         }
+        mapFn = static_cast<Runtime::Function*>(info.argument(1).asObject());
     }
-    
+    const Runtime::Value thisArg = info.argument(2);
+
+    Runtime::VM* vm = Runtime::VM::current();
+    if (!vm) throw Runtime::JSError("TypeError", "Array.from called outside a running script");
+
+    // Strings, arrays, Map/Set and anything with [Symbol.iterator] iterate;
+    // other objects with a numeric length are read by index; the rest are empty
+    bool readable = source.isString();
+    if (source.isObject()) {
+        readable = source.asObject()->isArray() ||
+                   vm->getMember(source, Runtime::symbolPropertyKey(Runtime::WellKnownSymbols::Iterator)).isObject() ||
+                   vm->getMember(source, "length").isNumber() ||
+                   source.asObject()->objectType() == Runtime::ObjectType::Map ||
+                   source.asObject()->objectType() == Runtime::ObjectType::Set;
+    }
+
+    std::vector<Runtime::Value> elements;
+    if (readable) {
+        double index = 0;
+        vm->forOf(source, [&](const Runtime::Value& value) {
+            elements.push_back(mapFn ? vm->executeCallback(mapFn, thisArg, {value, Runtime::Value::number(index)}) : value);
+            index++;
+            return true;
+        });
+    }
     return Runtime::Value::object(new Runtime::Array(std::move(elements)));
 }
 
@@ -296,10 +319,16 @@ Runtime::Value ArrayBuiltin::join(const Runtime::FunctionCallInfo& info) {
     }
     
     std::string separator = ",";
-    if (info.argumentCount() > 0 && info.argument(0).isString()) {
-        separator = static_cast<Runtime::String*>(info.argument(0).asObject())->value();
+    if (!info.argument(0).isUndefined()) separator = info.argument(0).toString();
+
+    // An array that contains itself joins as "" at the inner occurrence
+    static thread_local std::vector<const Runtime::Array*> joining;
+    if (std::find(joining.begin(), joining.end(), arr) != joining.end()) {
+        return Runtime::Value::string(new Runtime::String(""));
     }
-    
+    joining.push_back(arr);
+    struct Pop { ~Pop() { joining.pop_back(); } } pop;
+
     std::ostringstream ss;
     for (size_t i = 0; i < arr->length(); i++) {
         if (i > 0) ss << separator;
@@ -308,7 +337,7 @@ Runtime::Value ArrayBuiltin::join(const Runtime::FunctionCallInfo& info) {
             ss << elem.toString();
         }
     }
-    
+
     return Runtime::Value::string(new Runtime::String(ss.str()));
 }
 
@@ -1152,7 +1181,49 @@ Runtime::Object* ArrayBuiltin::createArrayPrototype(Runtime::Context*) {
     prototype->set("toReversed", Runtime::Value::object(new Runtime::Function("toReversed", toReversed, 0)));
     prototype->set("toSpliced", Runtime::Value::object(new Runtime::Function("toSpliced", toSpliced, 2)));
     prototype->set("with", Runtime::Value::object(new Runtime::Function("with", with, 2)));
-    
+
+    // Conversion and iteration. toString joins with commas, so String([1, 2])
+    // and [1, 2] + "" give "1,2".
+    defineMethod(prototype, "toString", [](const Runtime::FunctionCallInfo& info) -> Runtime::Value {
+        const Runtime::Value self = info.thisValue();
+        if (self.isObject() && dynamic_cast<Runtime::Array*>(self.asObject())) {
+            const std::vector<Runtime::Value> none;
+            return join(Runtime::FunctionCallInfo(info.context(), self, none));
+        }
+        return Runtime::Value::string(new Runtime::String("[object Object]"));
+    }, 0);
+
+    auto elementsOf = [](const Runtime::FunctionCallInfo& info, const char* method) -> const std::vector<Runtime::Value>& {
+        const Runtime::Value self = info.thisValue();
+        auto* array = self.isObject() ? dynamic_cast<Runtime::Array*>(self.asObject()) : nullptr;
+        if (!array) {
+            throw Runtime::JSError("TypeError", std::string("Array.prototype.") + method + " called on a non-array");
+        }
+        return array->elements();
+    };
+
+    defineMethod(prototype, "keys", [elementsOf](const Runtime::FunctionCallInfo& info) -> Runtime::Value {
+        const auto& elements = elementsOf(info, "keys");
+        std::vector<Runtime::Value> keys;
+        for (size_t i = 0; i < elements.size(); i++) keys.push_back(Runtime::Value::number(static_cast<double>(i)));
+        return IteratorBuiltin::makeListIterator(std::move(keys));
+    }, 0);
+
+    Runtime::Function* values = defineMethod(prototype, "values", [elementsOf](const Runtime::FunctionCallInfo& info) -> Runtime::Value {
+        return IteratorBuiltin::makeListIterator(elementsOf(info, "values"));
+    }, 0);
+    defineHidden(prototype, Runtime::symbolPropertyKey(Runtime::WellKnownSymbols::Iterator), Runtime::Value::object(values));
+
+    defineMethod(prototype, "entries", [elementsOf](const Runtime::FunctionCallInfo& info) -> Runtime::Value {
+        const auto& elements = elementsOf(info, "entries");
+        std::vector<Runtime::Value> pairs;
+        for (size_t i = 0; i < elements.size(); i++) {
+            pairs.push_back(Runtime::Value::object(new Runtime::Array(
+                std::vector<Runtime::Value>{Runtime::Value::number(static_cast<double>(i)), elements[i]})));
+        }
+        return IteratorBuiltin::makeListIterator(std::move(pairs));
+    }, 0);
+
     return prototype;
 }
 

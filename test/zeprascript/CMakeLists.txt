@@ -22,6 +22,7 @@ endif()
 # =============================================================================
 set(ZEPRASCRIPT_UNIT_TEST_SOURCES
     unit/value_tests.cpp
+    unit/number_conversion_tests.cpp
     unit/lexer_tests.cpp
     unit/parser_tests.cpp
     unit/vm_tests.cpp
@@ -77,6 +78,7 @@ set(ZEPRASCRIPT_INTEGRATION_TEST_SOURCES
     integration/browser_vm_integration_test.cpp
     integration/js_execution_test.cpp
     integration/script_context_test.cpp
+    integration/conformance_test.cpp
 )
 
 add_executable(zeprascript-integration-tests ${ZEPRASCRIPT_INTEGRATION_TEST_SOURCES})

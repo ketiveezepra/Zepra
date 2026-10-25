@@ -216,21 +216,21 @@ bool RegexCompiler::parseQuantifier(size_t atomStart) {
         // body: <atom>
         // jump back to split
 
-        size_t splitAddr = atomStart;
-        // Insert split before atom
+        // Layout, relative to the split at s: s split, s+1.. atom, then Progress,
+        // then Jump back to s; the loop exits to s + atomLen + 3, past the jump
         RegexInstr splitInstr(RegexOp::Split);
         if (greedy) {
-            splitInstr.split = {1, static_cast<int32_t>(atomLen + 2)};
+            splitInstr.split = {1, static_cast<int32_t>(atomLen + 3)};
         } else {
-            splitInstr.split = {static_cast<int32_t>(atomLen + 2), 1};
+            splitInstr.split = {static_cast<int32_t>(atomLen + 3), 1};
         }
         program_.code.insert(program_.code.begin() + atomStart, splitInstr);
 
         // Add progress guard (prevent infinite empty loops)
         emit(RegexInstr(RegexOp::Progress));
 
-        // Jump back to split
-        emitJump(-static_cast<int32_t>(atomLen + 3));
+        // Jump back to the split (the jump sits atomLen + 2 after it)
+        emitJump(-static_cast<int32_t>(atomLen + 2));
 
     } else if (min == 1 && max == 0xFFFF) {
         // + (or +?)

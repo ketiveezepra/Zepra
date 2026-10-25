@@ -140,8 +140,71 @@
 
 <h1>ZepraBrowser Development TODO</h1>
 
+<h2 id="status">Status and timeline — updated 2026-10-25</h2>
+<p>Measured on Windows (MSYS2 UCRT64, Release). Linux and macOS are covered by CI builds only. The full tracker lives in <code>TODO.md</code> at the repository root.</p>
+
+<h3 id="timeline">Timeline</h3>
+<table>
+<thead><tr><th>Date</th><th>PR</th><th>What changed</th></tr></thead>
+<tbody>
+<tr><td>2026-10-25</td><td>#17 (open)</td><td>ZepraScript built-ins pass: spec-correct number and string conversion, real Number/Boolean/String/Object/Array constructors, one set of intrinsic prototypes per VM, Error chain, real Symbol, hashed Map/Set/WeakSet, Array.from, Object.defineProperty accessors, RegExp fixes. Pages get the engine's built-ins instead of ScriptContext stubs. Conformance suite.</td></tr>
+<tr><td>2026-10-25</td><td>#16</td><td>Parser: <code>super(...)</code>/<code>super.x</code>, class fields and class expressions, getters/setters and keyword keys in literals, object spread, async and destructuring arrows; built-in subclassing.</td></tr>
+<tr><td>2026-10-24</td><td>#15</td><td>Runaway scripts stopped (10 s / 1 GB guard); real frame model, calls, closures, scoping and exceptions in the VM.</td></tr>
+<tr><td>2026-10-21</td><td>#14</td><td>HTTPS certificates are verified.</td></tr>
+<tr><td>2026-10-21</td><td>#13</td><td>Scripts can change the page: timers, requestAnimationFrame, re-render after DOM changes.</td></tr>
+<tr><td>2026-10-21</td><td>#12</td><td>Render loop no longer spins a CPU core.</td></tr>
+<tr><td>2026-10-21</td><td>#11</td><td>Page freezes, <code>:hover</code>/<code>:active</code>/<code>:focus</code>, local files on Windows.</td></tr>
+<tr><td>2026-10-21</td><td>#8, #10</td><td>NXRender on macOS (Cocoa + NSOpenGL) and the macOS build.</td></tr>
+<tr><td>2026-10-21</td><td>#9</td><td>NxPdf test made real; NXRender tests run in CI.</td></tr>
+<tr><td>2026-10-21</td><td>#7</td><td>Copy/paste on Linux (X11).</td></tr>
+<tr><td>2026-10-15</td><td>#5, #6</td><td>Linux CI (GLU) and icon-name case fixes.</td></tr>
+<tr><td>2026-10-13</td><td>#4</td><td>NXRender browser builds and runs on Windows.</td></tr>
+<tr><td>2026-10-09</td><td><code>9eda6cc</code></td><td>Per-tab VM; history, settings and bookmarks saved to disk.</td></tr>
+<tr><td>2026-06-14</td><td><code>50d4372</code></td><td>DOM node classes and the JS&harr;DOM bridge.</td></tr>
+<tr><td>2025-12 &rarr; 2026-06</td><td>&mdash;</td><td>Engine, NXRender, layout/CSS, JIT and GC groundwork (history before pull requests).</td></tr>
+</tbody>
+</table>
+
+<h3 id="fixed">Fixed and verified</h3>
+<ul>
+<li>[x] Idle tab with a small page: 77&ndash;79 MB RSS (target &lt; 80 MB).</li>
+<li>[x] Wikipedia article 105&ndash;107 MB, flat over 45 s; Hacker News 86&ndash;88 MB.</li>
+<li>[x] Runaway scripts (<code>while(true)</code> in a script or a timer, an allocation bomb) are stopped and the page keeps running its next script.</li>
+<li>[x] Timers, requestAnimationFrame, string timers and DOM changes re-render the page (9 script test pages).</li>
+<li>[x] <code>:hover</code> styles apply and clear.</li>
+<li>[x] HTTPS with certificate verification.</li>
+<li>[x] Per-tab VM; no global <code>s_vm</code>/<code>s_vmContext</code>.</li>
+<li>[x] History, settings and bookmarks are written to disk (crash-recovery test not run yet).</li>
+<li>[x] ZepraScript tests: 460 unit, 288 integration (including the language and built-in conformance cases), 33 engine, all passing.</li>
+</ul>
+
+<h3 id="active">Active now / next</h3>
+<ol>
+<li><strong>Built-ins pass</strong> (#17) &mdash; in review.</li>
+<li><strong>Promise and microtasks</strong> &mdash; design first. <code>Promise.then</code> callbacks never run today.</li>
+<li><strong>DOM bindings</strong> &mdash; <code>element.style</code>, <code>classList</code>, canvas <code>getContext</code>; the manual test pages throw on these.</li>
+<li><strong>Network speed</strong> &mdash; the HTTP client waits on a 1 s poll and has no keep-alive, so Hacker News takes 8&ndash;17 s.</li>
+<li><strong>Memory after the runaway guard</strong> &mdash; memory a stopped script allocated stays committed (about 1.1 GB after the allocation-bomb page).</li>
+</ol>
+
+<h3 id="gaps">Known gaps</h3>
+<ul>
+<li>Regex engine: no lookaround, <code>{n,m}</code> does nothing, byte-based matching, no named groups or backreferences, slow. RegExp objects have no <code>source</code>/<code>flags</code>/<code>global</code>/<code>lastIndex</code>.</li>
+<li>Strings are byte-indexed, not UTF-16.</li>
+<li>WebAssembly is a fake namespace; URL/URLSearchParams and the observers are stubs.</li>
+<li>Reading an undeclared variable does not throw a ReferenceError; tagged templates are not supported.</li>
+<li>A UTF-8 byte-order mark at the start of a script is a parse error.</li>
+<li>WeakMap/WeakSet hold their keys strongly.</li>
+<li>Not measured yet: 10 tabs, 50 tabs, memory after closing all tabs, 24-hour idle growth.</li>
+</ul>
+
+<hr />
+<h2>Original roadmap</h2>
+<p>The checklist below predates the status above and has not been re-audited item by item.</p>
+
 <div style="background:#7f1d1d;border-left:6px solid #ef4444;padding:1.25rem;margin:1.5rem 0;border-radius:8px;">
 <strong style="color:#f87171;">⚠ BETA v0.1.0 BLOCKER — Updated 2026-06-12</strong><br>
+<em>Partly superseded: DOM node classes and the bridge landed in <code>50d4372</code> (2026-06-14). See <a href="#status" style="color:#34d399;">Status and timeline</a> for what still blocks script-heavy pages.</em><br><br>
 The single largest gap preventing modern site compatibility is the <strong>header-only JSDOMBridge</strong> (<code>source/webCore/scripting/js_dom_bridge.hpp</code>).
 There is no <code>.cpp</code> implementation and no concrete DOM classes (<code>DOMElement</code>, <code>DOMDocument</code>, etc.).
 <br><br>

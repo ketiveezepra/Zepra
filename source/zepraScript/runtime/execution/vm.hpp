@@ -200,7 +200,52 @@ public:
      * @brief Get current executing VM (for callbacks from builtins)
      */
     static VM* current() { return currentVM_; }
-    
+
+    /**
+     * @brief The prototypes the interpreter itself relies on
+     *
+     * One set per VM, created on first use. The global object's constructors
+     * (Object, Array, Number, ...) take these same objects as their
+     * `prototype`, so `Array.prototype.x = ...` is seen by every array, and
+     * methods on primitives resolve here without a global lookup.
+     */
+    enum class Intrinsic { Object, Function, Array, String, Number, Boolean, Symbol, Error, Iterator, Count };
+    Object* intrinsic(Intrinsic kind);
+
+    /**
+     * @brief The [[Prototype]] of `object` as scripts see it: arrays and
+     * functions answer with their built-in prototype even though they store no
+     * link. Null at the end of a chain.
+     */
+    Object* prototypeOf(Object* object);
+
+    /**
+     * @brief obj.name as script code reads it: accessors run with `target` as
+     * their receiver, primitives read through their prototype, and reading
+     * from null or undefined is a TypeError. Built-ins use this to honour
+     * user-defined properties (an Error subclass's `name`, a custom `length`).
+     */
+    Value getMember(const Value& target, const std::string& name) { return getProperty(target, name); }
+
+    /** ToPrimitive: objects run valueOf()/toString() (toString first when `preferString`). */
+    Value toPrimitiveValue(const Value& value, bool preferString) { return toPrimitive(value, preferString); }
+
+    /**
+     * @brief Calls `each` with every value `iterable` yields (arrays, strings,
+     * Map and Set, or any object with [Symbol.iterator]); `each` returns false
+     * to stop early. Throws a TypeError when the value is not iterable.
+     */
+    void forOf(const Value& iterable, const std::function<bool(const Value&)>& each);
+
+    /** A new error object of the given type ("TypeError", ...) with its prototype and stack. */
+    Value newError(const std::string& type, const std::string& message) { return makeError(type, message); }
+
+    /**
+     * @brief The current call stack as "    at function (bytecode:offset)" lines,
+     * innermost first. Error objects store it as `stack`.
+     */
+    std::string captureStackTrace() const;
+
     /**
      * @brief Execute a callback function (for array methods like map/filter/reduce)
      */
@@ -276,6 +321,11 @@ public:
 private:
     // Thread-local current VM for callback execution
     static thread_local VM* currentVM_;
+
+    // Intrinsic prototypes, created by intrinsic() on first use
+    Object* intrinsics_[static_cast<size_t>(Intrinsic::Count)] = {};
+    Object* createFunctionPrototype();
+
     // Bytecode execution
     void run();
     void dispatch(Zepra::Bytecode::Opcode op);
@@ -314,6 +364,7 @@ private:
     void setElement(const Value& target, const Value& key, const Value& value);
     bool deleteProperty(const Value& target, const Value& key);
     Object* primitivePrototype(const Value& value);
+    bool readProperty(Object* holder, const Value& receiver, const std::string& name, Value& out);
     Object* ensurePrototypeObject(Function* fn);
 
     // Iteration (for-of, spread, array destructuring)
