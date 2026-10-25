@@ -56,7 +56,7 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 1. **Built-ins pass** (#17) — in review.
 2. **Promise and microtasks** — design first. `Promise.then` callbacks never run today.
 3. **DOM bindings** — `element.style`, `classList`, canvas `getContext`; the manual test pages throw on these.
-4. **Network speed** — `http_client` waits on a 1 s `poll()` and has no keep-alive, so Hacker News takes 8–17 s.
+4. **Network speed** — keep-alive and header-driven reads are in review (HN 4.8–5.1 s → 2.0–2.5 s). Next: fetch CSS/JS in parallel instead of one after another.
 5. **Memory after the runaway guard** — reclaim what a killed script allocated (needs the GC stage).
 
 ### ⚠️ Known gaps (ZepraScript)
@@ -81,9 +81,9 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 - [~] **Asynchronous JS Execution:** Scripts still run on the UI thread. Mitigated: a runaway script is stopped after 10 s or 1 GB of growth and the page keeps working (#15).
 
 ### 3. Network Reliability
-- [ ] **Keep-Alive Delay:** *(still open: HN takes 8–17 s)* Rewrite the `http_client` 1000ms `poll()` hack to parse HTTP headers (`Content-Length`) and break immediately when the payload finishes.
+- [x] **Keep-Alive Delay:** `http_client` reads exactly the length the headers give (Content-Length, chunked, or close), reuses connections per host and resumes TLS sessions. HN 4.8–5.1 s → 2.0–2.5 s on a 300 ms RTT link; responses are no longer cut short when OpenSSL had data buffered.
 - [x] **TLS Integration:** HTTPS works through OpenSSL in NXNet (Wikipedia, Hacker News load) and certificates are verified (#14).
-- [ ] **Chunked Decoding:** *(not checked)* Fix the empty body and chunked decoding bugs in the new `nxhttp` C engine.
+- [x] **Chunked Decoding:** `nxhttp` uses the same response reader: chunked bodies are decoded and bodies without a length are read to the end (`http_transport_tests`).
 
 ### 4. Storage Persistence (B13-B15)
 - [x] **Data Saving:** History, settings and bookmarks are written to disk (`9eda6cc`). Not run yet: the crash-recovery test below. `localStorage` is in-memory only.

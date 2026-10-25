@@ -109,6 +109,20 @@ if(NOT WIN32)
 endif()
 add_test(NAME NxHttpTests COMMAND nxhttp_tests)
 
+# Test 7b: HTTP response framing and keep-alive (loopback server, no internet)
+add_executable(http_transport_tests http_transport_tests.cpp)
+target_include_directories(http_transport_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/source/NXNet/nxhttp
+    ${PROJECT_SOURCE_DIR}/source/NXNet/networking
+)
+target_link_libraries(http_transport_tests nxhttp networking GTest::gtest GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(http_transport_tests ws2_32)
+else()
+    target_link_libraries(http_transport_tests pthread)
+endif()
+add_test(NAME HttpTransportTests COMMAND http_transport_tests)
+
 # Test 8: nxcrypto Tests
 add_executable(nxcrypto_tests nxcrypto_tests.cpp)
 target_include_directories(nxcrypto_tests PRIVATE
