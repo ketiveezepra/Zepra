@@ -24,7 +24,12 @@ CSSComputedStyle CSSComputedStyle::inherit(const CSSComputedStyle& parent) {
     style.fontStyle = parent.fontStyle;
     style.lineHeight = parent.lineHeight;
     style.textAlign = parent.textAlign;
+    style.legacyAlign = parent.legacyAlign;
+    style.whiteSpace = parent.whiteSpace;
     style.visibility = parent.visibility;
+    style.borderSpacingH = parent.borderSpacingH;
+    style.borderSpacingV = parent.borderSpacingV;
+    style.borderCollapse = parent.borderCollapse;
     return style;
 }
 

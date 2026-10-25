@@ -215,6 +215,10 @@ public:
     DOMElement* head() const;
     std::string title() const;
     void setTitle(const std::string& title);
+
+    /// Quirks mode, chosen by the parser from the doctype (no doctype = quirks)
+    bool quirksMode() const { return quirksMode_; }
+    void setQuirksMode(bool quirks) { quirksMode_ = quirks; }
     
     // Element creation
     std::unique_ptr<DOMElement> createElement(const std::string& tagName);
@@ -233,6 +237,7 @@ public:
     
 private:
     DOMElement* documentElement_ = nullptr;
+    bool quirksMode_ = false;
 };
 
 

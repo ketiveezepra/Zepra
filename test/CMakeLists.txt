@@ -184,6 +184,18 @@ endif()
 add_test(NAME ZepraEngineTests COMMAND zepra_engine_tests)
 
 # =============================================================================
+# WebCore layout tests (default styles, presentational hints, tables)
+# =============================================================================
+if(TARGET webcore)
+    add_executable(webcore_layout_tests webcore_layout_tests.cpp)
+    target_link_libraries(webcore_layout_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(webcore_layout_tests pthread)
+    endif()
+    add_test(NAME WebCoreLayoutTests COMMAND webcore_layout_tests)
+endif()
+
+# =============================================================================
 # ZepraScript Tests
 # =============================================================================
 add_subdirectory(zeprascript)

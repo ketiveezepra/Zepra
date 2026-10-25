@@ -86,6 +86,7 @@ void LazyImageLoader::queueImage(LayoutBox* box, const std::string& url,
             box->width = (float)it->second.width;
             box->height = (float)it->second.height;
             box->text = ""; // Clear placeholder
+            invalidateIntrinsicWidths();
             // std::cout << "[LazyImageLoader] Cache hit: " << url.substr(url.rfind('/') + 1) << std::endl;
             return;
         }
@@ -145,6 +146,8 @@ void LazyImageLoader::pollCompleted(std::vector<ImageResult>& results, int maxRe
         const uint64_t currentGeneration = generation_.load();
         for (auto& raw : rawImages_) {
             if (!raw.box || raw.generation != currentGeneration) continue;
+            // Sizes change below; table columns measured the placeholder
+            invalidateIntrinsicWidths();
 
             if (!raw.errorText.empty()) {
                 raw.box->text = raw.errorText;

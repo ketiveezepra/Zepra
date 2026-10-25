@@ -144,8 +144,6 @@ public:
     /// Add stylesheet
     void addStyleSheet(std::shared_ptr<CSSStyleSheet> sheet, StyleOrigin origin = StyleOrigin::Author);
 
-    /// Add user agent stylesheet
-    void addUserAgentStyleSheet();
 
     /// Compute style for element
     CSSComputedStyle computeStyle(DOMElement* element, const CSSComputedStyle* parentStyle = nullptr);

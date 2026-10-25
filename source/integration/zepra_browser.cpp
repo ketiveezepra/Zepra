@@ -822,6 +822,7 @@ static ZepraBrowser::LayoutLength cssToLayout(const Zepra::WebCore::CSSLength& c
         case CU::Rem:     return {css.value, LL::Unit::Rem};
         case CU::Vw:      return {css.value, LL::Unit::Vw};
         case CU::Vh:      return {css.value, LL::Unit::Vh};
+        case CU::Pt:      return LL::px(css.value * 96.0f / 72.0f);
         default:          return LL::px(css.value);
     }
 }
@@ -1075,6 +1076,10 @@ void parseWithWebCore(const std::string& html) {
         Zepra::WebCore::ZepraUAStylesheet::getStylesheet(),
         StyleOrigin::UserAgent
     );
+    if (g_document->quirksMode()) {
+        g_cssEngine->addStyleSheet(Zepra::WebCore::ZepraUAStylesheet::getQuirksStylesheet(),
+                                   StyleOrigin::UserAgent);
+    }
     
     // Extract <style> elements and load <link rel="stylesheet"> external CSS
     auto* headEl = g_document->head();
@@ -1299,6 +1304,129 @@ static bool looksLikeHTMLAttributes(const std::string& text) {
 
 
 
+// Boxes paint one border colour: the colour of the first side that has a width
+static Zepra::WebCore::CSSColor usedBorderColor(const CSSComputedStyle& style) {
+    if (style.borderTopWidth > 0) return style.borderTopColor;
+    if (style.borderRightWidth > 0) return style.borderRightColor;
+    if (style.borderBottomWidth > 0) return style.borderBottomColor;
+    return style.borderLeftColor;
+}
+
+// Table display values → table box types (CSS 2.1 §17.2)
+static void applyTableDisplay(LayoutBox* box, DOMElement* element, const std::string& tag,
+                              const CSSComputedStyle* style) {
+    switch (style->display) {
+        case DisplayValue::Table:
+        case DisplayValue::InlineTable:
+            box->type = LayoutType::Table;
+            // border-collapse is drawn as separated borders without spacing
+            box->borderSpacingH = style->borderCollapse ? 0 : style->borderSpacingH;
+            box->borderSpacingV = style->borderCollapse ? 0 : style->borderSpacingV;
+            box->tableLayoutFixed = style->tableLayoutFixed;
+            break;
+        case DisplayValue::TableRowGroup:
+        case DisplayValue::TableHeaderGroup:
+        case DisplayValue::TableFooterGroup:
+            box->type = LayoutType::TableRowGroup;
+            box->rowGroupKind = style->display == DisplayValue::TableHeaderGroup ? 1
+                              : style->display == DisplayValue::TableFooterGroup ? 2 : 0;
+            break;
+        case DisplayValue::TableRow:
+            box->type = LayoutType::TableRow;
+            break;
+        case DisplayValue::TableCell: {
+            box->type = LayoutType::TableCell;
+            if (tag == "td" || tag == "th") {
+                auto spanAttr = [&](const char* name, int fallback) {
+                    std::string v = element->getAttribute(name);
+                    if (v.empty()) return fallback;
+                    try { return std::stoi(v); } catch (...) { return fallback; }
+                };
+                box->colSpan = std::max(1, spanAttr("colspan", 1));
+                box->rowSpan = std::max(0, spanAttr("rowspan", 1));
+            }
+            const std::string& va = style->verticalAlign;
+            box->verticalAlign = va == "top" ? 1 : va == "middle" ? 2 : va == "bottom" ? 3 : 0;
+            box->noWrap = style->whiteSpace == "nowrap" || style->whiteSpace == "pre";
+            break;
+        }
+        case DisplayValue::TableCaption:
+            box->type = LayoutType::TableCaption;
+            break;
+        default:
+            break;
+    }
+}
+
+// Wraps [first, last) of parent's children in a new anonymous box of `type`
+// that inherits the parent's text properties. splice keeps every moved box
+// at the same address (image loads and focus point at them).
+static LayoutBox* wrapInAnonymousBox(LayoutBox* parent, std::list<LayoutBox>::iterator first,
+                                     std::list<LayoutBox>::iterator last, LayoutType type,
+                                     const CSSComputedStyle* style) {
+    auto it = parent->children.emplace(first);
+    LayoutBox& box = *it;
+    box.type = type;
+    box.anonymous = true;
+    box.domElement = parent->domElement;
+    box.fontSize = parent->fontSize;
+    box.color = parent->color;
+    box.bold = parent->bold;
+    box.italic = parent->italic;
+    box.textAlign = parent->textAlign;
+    box.alignChildren = parent->alignChildren;
+    if (type == LayoutType::Table && style && !style->borderCollapse) {
+        box.borderSpacingH = style->borderSpacingH;
+        box.borderSpacingV = style->borderSpacingV;
+    }
+    box.children.splice(box.children.end(), parent->children, first, last);
+    return &box;
+}
+
+// X11 headers define None as a macro
+#pragma push_macro("None")
+#undef None
+// CSS 2.1 §17.2.1: anonymous table, row and cell boxes around table parts
+// whose parent box is of the wrong kind. Runs once a box's children exist.
+static void fixupTableChildren(LayoutBox* parent, const CSSComputedStyle* style) {
+    if (!parent) return;
+    auto& kids = parent->children;
+    auto wrapRuns = [&](auto belongs, LayoutType wrapper) {
+        for (auto it = kids.begin(); it != kids.end();) {
+            if (!belongs(it->type)) { ++it; continue; }
+            auto end = it;
+            while (end != kids.end() && belongs(end->type)) ++end;
+            LayoutBox* box = wrapInAnonymousBox(parent, it, end, wrapper, style);
+            fixupTableChildren(box, style);
+            it = end;
+        }
+    };
+    auto isCell = [](LayoutType t) { return t == LayoutType::TableCell; };
+    auto isRow = [](LayoutType t) { return t == LayoutType::TableRow; };
+    auto isProperTableChild = [](LayoutType t) {
+        return t == LayoutType::TableRowGroup || t == LayoutType::TableRow || t == LayoutType::TableCaption;
+    };
+    switch (parent->type) {
+        case LayoutType::Table:
+            wrapRuns([&](LayoutType t) { return !isProperTableChild(t) && t != LayoutType::None; },
+                     LayoutType::TableRow);
+            break;
+        case LayoutType::TableRowGroup:
+            wrapRuns([&](LayoutType t) { return !isRow(t) && t != LayoutType::None; }, LayoutType::TableRow);
+            break;
+        case LayoutType::TableRow:
+            wrapRuns([&](LayoutType t) { return !isCell(t) && t != LayoutType::None; }, LayoutType::TableCell);
+            break;
+        default:
+            // Stray cells get a row, then stray rows, row groups and captions a table
+            wrapRuns(isCell, LayoutType::TableRow);
+            wrapRuns(isProperTableChild, LayoutType::Table);
+            break;
+    }
+}
+
+#pragma pop_macro("None")
+
 // Recursively build LayoutBox tree directly from DOM (Firefox pattern)
 void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink, 
                         const std::string& linkHref, const std::string& linkTarget) {
@@ -1372,43 +1500,10 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 box->italic = (style->fontStyle == FontStyle::Italic);
                 box->textDecoration = style->textDecoration;
                 
-                // Background
-                if (!style->backgroundColor.isTransparent()) {
-                    box->bgColor = cssColorToRGB(style->backgroundColor);
-                    box->hasBgColor = true;
-                }
-                if (!style->backgroundImage.empty() && style->backgroundImage != "none") {
-                    box->backgroundImage = style->backgroundImage;
-                    box->hasBgColor = true;
-                }
-                
-                // Margins (from CSS)
-                box->marginTop = style->marginTop.isAuto() ? 0 : style->marginTop.value;
-                box->marginBottom = style->marginBottom.isAuto() ? 0 : style->marginBottom.value;
-                box->marginLeft = style->marginLeft.isAuto() ? 0 : style->marginLeft.value;
-                box->marginRight = style->marginRight.isAuto() ? 0 : style->marginRight.value;
-                box->marginLeftAuto = style->marginLeft.isAuto();
-                box->marginRightAuto = style->marginRight.isAuto();
-                box->marginTopAuto = style->marginTop.isAuto();
-                box->marginBottomAuto = style->marginBottom.isAuto();
-                
-                // Padding (from CSS)
-                box->paddingTop = style->paddingTop.value;
-                box->paddingBottom = style->paddingBottom.value;
-                box->paddingLeft = style->paddingLeft.value;
-                box->paddingRight = style->paddingRight.value;
-                
-                // Border width/color
-                box->borderTop = style->borderTopWidth;
-                box->borderRight = style->borderRightWidth;
-                box->borderBottom = style->borderBottomWidth;
-                box->borderLeft = style->borderLeftWidth;
-                if (style->borderTopWidth > 0) {
-                    box->borderColor = cssColorToRGB(style->borderTopColor);
-                }
-                
-                // Border radius
-                box->borderRadius = style->borderTopLeftRadius;
+                // A text run is an anonymous inline box: it inherits the text
+                // properties only. Margins, padding, borders and backgrounds
+                // belong to (and are painted by) the element's own box
+                // (CSS 2.1 §9.2.2.1).
                 
                 // Opacity
                 box->opacity = style->opacity;
@@ -1438,7 +1533,6 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 box->isLink = true;
                 box->href = href;
                 box->target = target;
-                if (box->color == 0x1F2328 || box->color == 0) box->color = 0x0066CC;
             }
             
             // Fallback margins for common tags (only when CSS engine had no computed style)
@@ -1758,6 +1852,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         btnBox->borderBottom = style->borderBottomWidth;
                         btnBox->borderLeft = style->borderLeftWidth;
                         btnBox->borderColor = cssColorToRGB(style->borderTopColor);
+                        btnBox->borderVisible = style->borderTopColor.a > 0;
                     }
                 } else {
                     btnBox->fontSize = 14;
@@ -1917,8 +2012,16 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     imgBox->hasBgColor = true;
                     imgBox->width = 100;
                     imgBox->height = 100;
-                    imgBox->marginTop = 5;
-                    imgBox->marginBottom = 5;
+                    if (const CSSComputedStyle* imgStyle = g_cssEngine ? g_cssEngine->getComputedStyle(childElement) : nullptr) {
+                        // width/height from CSS or the width/height attributes
+                        imgBox->cssWidth = cssToLayout(imgStyle->width);
+                        imgBox->cssHeight = cssToLayout(imgStyle->height);
+                        imgBox->marginTop = imgStyle->marginTop.isAuto() ? 0 : imgStyle->marginTop.value;
+                        imgBox->marginBottom = imgStyle->marginBottom.isAuto() ? 0 : imgStyle->marginBottom.value;
+                        imgBox->marginLeft = imgStyle->marginLeft.isAuto() ? 0 : imgStyle->marginLeft.value;
+                        imgBox->marginRight = imgStyle->marginRight.isAuto() ? 0 : imgStyle->marginRight.value;
+                        imgBox->floatType = imgStyle->cssFloat;
+                    }
 
                     ZepraBrowser::g_lazyImageLoader.queueImage(imgBox, src, 0, g_activeTabId);
                 }
@@ -1949,9 +2052,23 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
             const CSSComputedStyle* childStyle = g_cssEngine ? 
                 g_cssEngine->getComputedStyle(childElement) : nullptr;
             
+            // Columns and column groups make no boxes (their widths aren't used yet)
+            if (childStyle && (childStyle->display == DisplayValue::TableColumn ||
+                               childStyle->display == DisplayValue::TableColumnGroup)) {
+                continue;
+            }
+
             // 1. CSS display property (highest priority)
             if (childStyle) {
                 switch (childStyle->display) {
+                    case DisplayValue::Table:
+                    case DisplayValue::InlineTable:
+                    case DisplayValue::TableRowGroup:
+                    case DisplayValue::TableHeaderGroup:
+                    case DisplayValue::TableFooterGroup:
+                    case DisplayValue::TableRow:
+                    case DisplayValue::TableCell:
+                    case DisplayValue::TableCaption:
                     case DisplayValue::Block:
                     case DisplayValue::Flex:
                     case DisplayValue::InlineFlex:
@@ -2043,8 +2160,11 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     blockBox->borderBottom = childStyle->borderBottomWidth;
                     blockBox->borderLeft = childStyle->borderLeftWidth;
                     if (childStyle->borderTopWidth > 0 || childStyle->borderRightWidth > 0 ||
-                        childStyle->borderBottomWidth > 0 || childStyle->borderLeftWidth > 0)
-                        blockBox->borderColor = cssColorToRGB(childStyle->borderTopColor);
+                        childStyle->borderBottomWidth > 0 || childStyle->borderLeftWidth > 0) {
+                        Zepra::WebCore::CSSColor borderColor = usedBorderColor(*childStyle);
+                        blockBox->borderColor = cssColorToRGB(borderColor);
+                        blockBox->borderVisible = borderColor.a > 0;
+                    }
                     blockBox->borderRadius = childStyle->borderTopLeftRadius;
                     
                     // Visual
@@ -2132,7 +2252,10 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     } else if (childStyle->display == DisplayValue::InlineBlock ||
                                childStyle->display == DisplayValue::InlineGrid) {
                         blockBox->type = LayoutType::InlineBlock;
+                    } else {
+                        applyTableDisplay(blockBox, childElement, childTag, childStyle);
                     }
+                    blockBox->alignChildren = childStyle->legacyAlign;
 
                     // Flex item properties — applied to ALL children of flex containers.
                     // The parent type isn't known here, so always store these; they're
@@ -2188,8 +2311,12 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     inlineBox->borderRight = childStyle->borderRightWidth;
                     inlineBox->borderBottom = childStyle->borderBottomWidth;
                     inlineBox->borderLeft = childStyle->borderLeftWidth;
-                    if (childStyle->borderTopWidth > 0)
-                        inlineBox->borderColor = cssColorToRGB(childStyle->borderTopColor);
+                    if (childStyle->borderTopWidth > 0 || childStyle->borderRightWidth > 0 ||
+                        childStyle->borderBottomWidth > 0 || childStyle->borderLeftWidth > 0) {
+                        Zepra::WebCore::CSSColor borderColor = usedBorderColor(*childStyle);
+                        inlineBox->borderColor = cssColorToRGB(borderColor);
+                        inlineBox->borderVisible = borderColor.a > 0;
+                    }
                     inlineBox->borderRadius = childStyle->borderTopLeftRadius;
                     inlineBox->opacity = childStyle->opacity;
                     inlineBox->visibilityHidden = (childStyle->visibility == Visibility::Hidden);
@@ -2207,6 +2334,8 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
             }
         }
     }
+
+    fixupTableChildren(parentBox, style);
 }
 #endif
 
@@ -2239,8 +2368,53 @@ void clear(uint32_t c) {
     g_nxGpu.clear(NXRender::Color(c));
 }
 
+// Test hook: with ZEPRA_CAPTURE=<file.bmp> set, the first frame drawn after
+// ZEPRA_CAPTURE_MS milliseconds (default 8000, counted from process start) is
+// written to that file. It reads the GL frame itself, so it works when the
+// screen is off or covered.
+static const auto g_captureClockStart = std::chrono::steady_clock::now();
+static void captureFrameIfRequested() {
+    static const char* path = std::getenv("ZEPRA_CAPTURE");
+    static bool done = false;
+    if (!path || !*path || done) return;
+    const char* delayEnv = std::getenv("ZEPRA_CAPTURE_MS");
+    long delayMs = delayEnv ? std::atol(delayEnv) : 8000;
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - g_captureClockStart).count();
+    if (elapsed < delayMs) return;
+    done = true;
+
+    int w = g_nxGpu.width(), h = g_nxGpu.height();
+    std::vector<uint8_t> rgb;
+    if (!g_nxGpu.readPixels(0, 0, w, h, rgb)) {
+        std::cerr << "[Capture] glReadPixels failed" << std::endl;
+        return;
+    }
+    // 24-bit BMP: rows bottom-up (as GL returns them), BGR, padded to 4 bytes
+    int rowBytes = (w * 3 + 3) & ~3;
+    uint32_t dataSize = (uint32_t)rowBytes * h, fileSize = 54 + dataSize;
+    uint8_t header[54] = {'B', 'M'};
+    auto put32 = [&](int at, uint32_t v) { for (int i = 0; i < 4; i++) header[at + i] = (v >> (8 * i)) & 0xFF; };
+    put32(2, fileSize); put32(10, 54); put32(14, 40); put32(18, (uint32_t)w); put32(22, (uint32_t)h);
+    header[26] = 1; header[28] = 24; put32(34, dataSize);
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(header), sizeof(header));
+    std::vector<uint8_t> row(rowBytes, 0);
+    for (int y = 0; y < h; y++) {
+        const uint8_t* src = rgb.data() + (size_t)y * w * 3;
+        for (int x = 0; x < w; x++) {
+            row[x * 3] = src[x * 3 + 2];
+            row[x * 3 + 1] = src[x * 3 + 1];
+            row[x * 3 + 2] = src[x * 3];
+        }
+        out.write(reinterpret_cast<const char*>(row.data()), rowBytes);
+    }
+    std::cout << "[Capture] wrote " << path << " (" << w << "x" << h << ")" << std::endl;
+}
+
 void present() { 
     g_nxGpu.endFrame();
+    captureFrameIfRequested();
     // glXSwapBuffers(g_display, g_window); // Handled by NXRender Platform
 }
 
