@@ -9,6 +9,7 @@
  */
 
 #include "scripting/script_context.hpp"
+#include "scripting/canvas_bindings.hpp"
 #include <iostream>
 #include <algorithm>
 #include <chrono>
@@ -157,7 +158,7 @@ ScriptContext::ScriptContext() : vm_(nullptr), vmReady_(false) {
 }
 
 ScriptContext::~ScriptContext() {
-    // Per-instance VM destroyed automatically by unique_ptr
+    // Per-instance VM destroyed automatically by unique_ptr (after the canvases)
 }
 
 void ScriptContext::initialize(DOMDocument* document) {
@@ -882,6 +883,9 @@ void ScriptContext::setupWindowGlobals() {
         }
     }
 
+    // <canvas> contexts and Path2D
+    canvasRegistry_ = std::make_unique<CanvasRegistry>(vm_, windowObj);
+
     std::cout << "[ScriptContext] Window globals registered (alert, console, setTimeout, navigator, location, JSON, localStorage, history)" << std::endl;
 }
 
@@ -917,9 +921,10 @@ void ScriptContext::setupDocumentGlobals() {
         
         // setAttribute(name, value)
         auto* setAttrFn = createNativeFunction("setAttribute",
-            [elem](Context*, const std::vector<Value>& args) -> Value {
+            [this, elem](Context*, const std::vector<Value>& args) -> Value {
                 if (args.size() < 2) return Value::undefined();
                 elem->setAttribute(args[0].toString(), args[1].toString());
+                if (canvasRegistry_) canvasRegistry_->attributeChanged(elem, args[0].toString());
                 return Value::undefined();
             }, 2);
         obj->set("setAttribute", Value::object(setAttrFn));
@@ -1049,6 +1054,11 @@ void ScriptContext::setupDocumentGlobals() {
                 return Value::object(rect);
             }, 0);
         obj->set("getBoundingClientRect", Value::object(getBCRFn));
+
+        // <canvas>: width, height, getContext()
+        std::string tag = elem->tagName();
+        std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
+        if (tag == "canvas" && canvasRegistry_) canvasRegistry_->decorate(obj, elem);
         
         return Value::object(obj);
     };

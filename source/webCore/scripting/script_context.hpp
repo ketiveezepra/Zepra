@@ -43,6 +43,8 @@ struct TimerCallback {
 /**
  * @brief Alert dialog handler callback
  */
+class CanvasRegistry;
+
 using AlertHandler = std::function<void(const std::string& message)>;
 using ConfirmHandler = std::function<bool(const std::string& message)>;
 using PromptHandler = std::function<std::string(const std::string& message, const std::string& defaultValue)>;
@@ -78,6 +80,9 @@ public:
     
     // Access internals
     Zepra::Runtime::VM* vm() { return vm_; }
+
+    /// The page's <canvas> bitmaps (for painting them)
+    CanvasRegistry* canvases() { return canvasRegistry_.get(); }
     
     // ====== NEW: Lifecycle Events ======
     
@@ -157,6 +162,9 @@ private:
     AlertHandler alertHandler_;
     ConfirmHandler confirmHandler_;
     PromptHandler promptHandler_;
+
+    // Declared last: goes before the VM whose objects point into it
+    std::unique_ptr<CanvasRegistry> canvasRegistry_;
 };
 
 // ... DevTools classes ...

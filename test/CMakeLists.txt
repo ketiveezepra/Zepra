@@ -129,7 +129,7 @@ add_test(NAME NxCryptoTests COMMAND nxcrypto_tests)
 # =============================================================================
 # NXRender-cpp Tests
 # =============================================================================
-add_executable(nxrender_tests nxrender_tests.cpp)
+add_executable(nxrender_tests nxrender_tests.cpp canvas2d_tests.cpp)
 target_include_directories(nxrender_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/source/nxrender-cpp
 )

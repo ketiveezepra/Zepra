@@ -63,6 +63,8 @@
 #include "css/css_engine.hpp"
 #include "css/ua_stylesheet.h"
 #include "scripting/script_context.hpp"
+#include "scripting/canvas_bindings.hpp"
+#include "nxgfx/canvas2d/canvas_context.h"
 using namespace Zepra::WebCore;
 
 extern "C" {
@@ -2075,6 +2077,43 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 }
                 continue;
             }
+            // <canvas>: a replaced box the size of its bitmap; scripts draw into it
+            if (childTag == "canvas") {
+                LayoutBox* canvasBox = addChild(parentBox);
+                canvasBox->type = LayoutType::InlineBlock;
+                canvasBox->isImage = true;
+                canvasBox->isCanvas = true;
+                canvasBox->naturalWidth = Zepra::WebCore::CanvasRegistry::attributeSize(childElement, "width");
+                canvasBox->naturalHeight = Zepra::WebCore::CanvasRegistry::attributeSize(childElement, "height");
+                if (const CSSComputedStyle* cs = g_cssEngine ? g_cssEngine->getComputedStyle(childElement) : nullptr) {
+                    canvasBox->cssWidth = cssToLayout(cs->width);
+                    canvasBox->cssHeight = cssToLayout(cs->height);
+                    canvasBox->cssMinWidth = cssToLayout(cs->minWidth);
+                    canvasBox->cssMaxWidth = cssToLayout(cs->maxWidth);
+                    canvasBox->cssMinHeight = cssToLayout(cs->minHeight);
+                    canvasBox->cssMaxHeight = cssToLayout(cs->maxHeight);
+                    canvasBox->fontSize = cs->fontSize;
+                    canvasBox->marginTop = cs->marginTop.isAuto() ? 0 : cs->marginTop.value;
+                    canvasBox->marginBottom = cs->marginBottom.isAuto() ? 0 : cs->marginBottom.value;
+                    canvasBox->marginLeft = cs->marginLeft.isAuto() ? 0 : cs->marginLeft.value;
+                    canvasBox->marginRight = cs->marginRight.isAuto() ? 0 : cs->marginRight.value;
+                    canvasBox->paddingTop = cs->paddingTop.value;
+                    canvasBox->paddingBottom = cs->paddingBottom.value;
+                    canvasBox->paddingLeft = cs->paddingLeft.value;
+                    canvasBox->paddingRight = cs->paddingRight.value;
+                    canvasBox->borderTop = cs->borderTopWidth;
+                    canvasBox->borderRight = cs->borderRightWidth;
+                    canvasBox->borderBottom = cs->borderBottomWidth;
+                    canvasBox->borderLeft = cs->borderLeftWidth;
+                    canvasBox->borderColor = cssColorToRGB(cs->borderTopColor);
+                    if (cs->backgroundColor.a > 0) {
+                        canvasBox->bgColor = cssColorToRGB(cs->backgroundColor);
+                        canvasBox->hasBgColor = true;
+                    }
+                    canvasBox->floatType = cs->cssFloat;
+                }
+                continue;
+            }
             // Embedded <svg> — extract and render via nxsvg
             if (childTag == "svg") {
                 auto dim = ZepraBrowser::UI::getSvgDimensions(childElement);
@@ -2623,6 +2662,31 @@ static void layout_gfx_hgradient(float x, float y, float w, float h, uint32_t c1
                              true);
 }
 
+// Paints a <canvas> of the active page. Its bitmap is uploaded to a texture
+// again only when the page has drawn into it since the last upload.
+static void layout_gfx_canvas(float x, float y, float w, float h, DOMElement* canvas) {
+    auto* canvases = g_scriptContext ? g_scriptContext->canvases() : nullptr;
+    Zepra::WebCore::CanvasSurface* surface = canvases ? canvases->find(canvas) : nullptr;
+    NXRender::GpuContext* gpu = NXRender::gpu();
+    if (!surface || !gpu) return;
+    const NXRender::CanvasRenderingContext2D& bitmap = *surface->context2d;
+    if (bitmap.width() == 0 || bitmap.height() == 0) return;
+    if (!surface->textureId || surface->textureVersion != bitmap.version()) {
+        static std::vector<uint8_t> rgba;
+        rgba.resize(size_t(bitmap.width()) * bitmap.height() * 4);
+        bitmap.copyUnpremultiplied(rgba.data());
+        if (!surface->textureId) {
+            surface->textureId = gpu->createTexture(bitmap.width(), bitmap.height(), nullptr);
+            canvases->setTextureReleaser([](uint32_t texture) {
+                if (NXRender::gpu()) NXRender::gpu()->destroyTexture(texture);
+            });
+        }
+        gpu->updateTexture(surface->textureId, bitmap.width(), bitmap.height(), rgba.data());
+        surface->textureVersion = bitmap.version();
+    }
+    gfx::texture(x, y, w, h, surface->textureId);
+}
+
 // Initialize layout engine callbacks
 static void initLayoutEngine() {
     ZepraBrowser::setLayoutCallbacks(
@@ -2648,6 +2712,7 @@ static void initLayoutEngine() {
     ZepraBrowser::setLayoutClipCallbacks(
         [](float x, float y, float w, float h) { g_nxGpu.pushClip(NXRender::Rect(x, y, w, h)); },
         [] { g_nxGpu.popClip(); });
+    ZepraBrowser::setCanvasPaintCallback(layout_gfx_canvas);
     
     std::cout << "[Layout] Layout engine initialized (rounded rect + gradient support)" << std::endl;
     

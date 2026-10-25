@@ -124,6 +124,9 @@ public:
     using TextureId = uint32_t;
     TextureId loadTexture(const std::string& path);
     TextureId createTexture(int width, int height, const uint8_t* pixels);
+    /// Replaces the contents (and size) of a texture from createTexture with
+    /// RGBA pixels; edges clamp, so a scaled texture doesn't wrap
+    void updateTexture(TextureId texture, int width, int height, const uint8_t* pixels);
     void drawTexture(TextureId texture, const Rect& dest);
     void drawTexture(TextureId texture, const Rect& src, const Rect& dest);
     void destroyTexture(TextureId texture);

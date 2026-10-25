@@ -239,6 +239,9 @@ struct LayoutBox {
     // box from CSS width/height and this (CSS 2.1 §10.3.2, §10.6.2)
     float naturalWidth = 0;
     float naturalHeight = 0;
+    // <canvas>: sized like an image (natural size = its width/height
+    // attributes); the bitmap is painted by the gfx_canvas callback
+    bool isCanvas = false;
 
     // Type, size and margins as built. Layout overwrites them (flex items
     // become FlexItem, auto margins and stretched sizes are written back), so
@@ -298,6 +301,10 @@ void setLayoutClipCallbacks(void (*push_clip)(float x, float y, float w, float h
 
 /// The URL inside the first url(...) of a CSS value ("" when there is none)
 std::string cssUrl(const std::string& value);
+
+/// Set the callback that paints a <canvas> bitmap into its content box
+void setCanvasPaintCallback(
+    void (*gfx_canvas)(float x, float y, float w, float h, Zepra::WebCore::DOMElement* canvas));
 
 /**
  * @brief Set the viewport that vw/vh units and percentages of it resolve
