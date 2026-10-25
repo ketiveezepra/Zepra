@@ -48,7 +48,6 @@
 #include <nxgfx/primitives.h>
 #include <nxgfx/text.h>
 #include "nxrender_cpp.h"
-#include "nxsvg.h"
 #include "nxfont.h"
 #include "reox_nxrender_bridge.h"
 #include "../nxrender-cpp/nxpdf/nx_pdf.h"
@@ -92,6 +91,7 @@ extern "C" {
 #include "browser/tab_suspender.h"
 #include "browser/mouse_handler.h"
 #include "browser/lazy_image_loader.h"
+#include "browser/svg_raster.h"
 #include "browser/clipboard.h"
 #include "browser/css_utils.h"
 
@@ -163,8 +163,17 @@ static bool g_currentCursorIsHand = false;
 static std::string g_hoverUrl = "";
 static const char* g_crash_url = nullptr;  // Last URL for crash context
 
-// Resources
-static nxsvg::SvgLoader g_svg;
+// Resources: browser icons, by file name (SVG text; drawn through the SVG texture cache)
+static std::unordered_map<std::string, std::string> g_icons;
+
+static bool loadIcon(const std::string& name, const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+    std::stringstream text;
+    text << file.rdbuf();
+    g_icons[name] = text.str();
+    return true;
+}
 
 // ============================================================================
 // THEME (from app.rx)
@@ -840,6 +849,13 @@ std::string resolveUrl(const std::string& base, const std::string& href) {
     
     // Already absolute
     if (href.find("://") != std::string::npos) return href;
+    // data:, blob:, mailto: ... (a scheme is 2+ letters before ':'; "C:/x" is a path)
+    size_t colon = href.find(':');
+    if (colon >= 2 && colon != std::string::npos && href.find_first_of("/?#") > colon &&
+        std::all_of(href.begin(), href.begin() + colon, [](char c) {
+            return std::isalnum((unsigned char)c) || c == '+' || c == '-' || c == '.';
+        }))
+        return href;
 
     bool protocolRelative = href.length() >= 2 && href[0] == '/' && href[1] == '/';
 
@@ -889,6 +905,22 @@ std::string resolveUrl(const std::string& base, const std::string& href) {
     return origin + basePath + href;
 }
 
+// background-image on a box: a gradient is painted from the CSS text (over
+// the background colour, which hasBgColor turns on); url() is loaded like an <img>
+static void setBackgroundImage(LayoutBox* box, const CSSComputedStyle& style) {
+    box->backgroundImage = style.backgroundImage;
+    if (style.backgroundImage.find("gradient(") != std::string::npos && style.backgroundImage.find("url(") == std::string::npos) {
+        box->hasBgColor = true;
+        return;
+    }
+    std::string url = ZepraBrowser::cssUrl(style.backgroundImage);
+    if (url.empty()) return;
+    box->bgRepeat = style.backgroundRepeat;
+    box->bgSize = style.backgroundSize;
+    box->bgPosition = style.backgroundPosition;
+    ZepraBrowser::g_lazyImageLoader.queueBackground(box, resolveUrl(g_currentUrl, url), g_activeTabId);
+}
+
 // Helper: Preprocess CSS to expand CSS variables (var(--name))
 // LibWebCore doesn't support CSS variables, so we expand them manually
 // Helper: Preprocess CSS to expand CSS variables (var(--name))
@@ -936,8 +968,7 @@ static void rebuildLayoutTree() {
                 g_layoutRoot->hasBgColor = true;
             }
             if (!bodyStyle->backgroundImage.empty() && bodyStyle->backgroundImage != "none") {
-                g_layoutRoot->backgroundImage = bodyStyle->backgroundImage;
-                g_layoutRoot->hasBgColor = true;
+                setBackgroundImage(g_layoutRoot.get(), *bodyStyle);
             }
             
             // Typography
@@ -2059,6 +2090,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     if (const CSSComputedStyle* svgStyle = g_cssEngine ? g_cssEngine->getComputedStyle(childElement) : nullptr) {
                         svgBox->cssWidth = cssToLayout(svgStyle->width);
                         svgBox->cssHeight = cssToLayout(svgStyle->height);
+                        svgBox->color = cssColorToRGB(svgStyle->color);  // currentColor
                     }
                     svgBox->marginTop = 2;
                     svgBox->marginBottom = 2;
@@ -2137,8 +2169,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         blockBox->hasBgColor = true;
                     }
                     if (!childStyle->backgroundImage.empty() && childStyle->backgroundImage != "none") {
-                        blockBox->backgroundImage = childStyle->backgroundImage;
-                        blockBox->hasBgColor = true;
+                        setBackgroundImage(blockBox, *childStyle);
                     }
                     
                     // Margins — transfer values and detect auto for centering
@@ -2465,6 +2496,51 @@ void texture(float x, float y, float w, float h, uint32_t textureId) {
     g_nxGpu.drawTexture(textureId, NXRender::Rect(x, y, w, h));
 }
 
+// SVGs are rasterized (nanosvg, via SvgRaster) at the size they are drawn and
+// kept as textures, least recently used dropped past kSvgCacheBytes.
+struct SvgTexture {
+    uint32_t id = 0;   // 0 = rasterizing failed; not retried for this key
+    size_t bytes = 0;
+    uint64_t lastUse = 0;
+};
+static std::unordered_map<std::string, SvgTexture> g_svgTextures;
+static size_t g_svgTextureBytes = 0;
+static uint64_t g_svgUseClock = 0;
+static constexpr size_t kSvgCacheBytes = 48u << 20;
+
+void svgImage(const std::string& key, const std::string& svgText, float x, float y, float w, float h,
+              uint32_t currentColor, bool whiteIsCurrentColor) {
+    int px = (int)std::lround(x), py = (int)std::lround(y);
+    int pw = (int)std::lround(w), ph = (int)std::lround(h);
+    if (pw <= 0 || ph <= 0 || svgText.empty()) return;
+    std::string cacheKey = key + "|" + std::to_string(pw) + "x" + std::to_string(ph) + "|" +
+                           std::to_string(currentColor & 0xFFFFFF) + (whiteIsCurrentColor ? "t" : "");
+    auto it = g_svgTextures.find(cacheKey);
+    if (it == g_svgTextures.end()) {
+        SvgTexture tex;
+        std::vector<uint8_t> rgba;
+        ZepraBrowser::SvgRaster::Options options;
+        options.currentColor = currentColor & 0xFFFFFF;
+        options.whiteIsCurrentColor = whiteIsCurrentColor;
+        if (ZepraBrowser::SvgRaster::rasterize(svgText, pw, ph, options, rgba)) {
+            tex.id = g_nxGpu.createTexture(pw, ph, rgba.data());
+            tex.bytes = rgba.size();
+        }
+        g_svgTextureBytes += tex.bytes;
+        while (g_svgTextureBytes > kSvgCacheBytes && !g_svgTextures.empty()) {
+            auto oldest = g_svgTextures.begin();
+            for (auto e = g_svgTextures.begin(); e != g_svgTextures.end(); ++e)
+                if (e->second.lastUse < oldest->second.lastUse) oldest = e;
+            if (oldest->second.id) g_nxGpu.destroyTexture(oldest->second.id);
+            g_svgTextureBytes -= oldest->second.bytes;
+            g_svgTextures.erase(oldest);
+        }
+        it = g_svgTextures.emplace(cacheKey, tex).first;
+    }
+    it->second.lastUse = ++g_svgUseClock;
+    if (it->second.id) g_nxGpu.drawTexture(it->second.id, NXRender::Rect((float)px, (float)py, (float)pw, (float)ph));
+}
+
 } // namespace gfx
 
 // ============================================================================
@@ -2485,8 +2561,10 @@ float textWidth(const std::string& str, float size = 14.0f) {
 // SVG HELPER
 // ============================================================================
 
+// Browser icons: white and currentColor paint take the tint
 void svg(const std::string& name, float x, float y, float sz, uint32_t c) {
-    g_svg.draw(name, x, y, sz, R(c), G(c), B(c));
+    auto it = g_icons.find(name);
+    if (it != g_icons.end()) gfx::svgImage("icon:" + name, it->second, x, y, sz, sz, c, true);
 }
 
 // ============================================================================
@@ -2560,21 +2638,16 @@ static void initLayoutEngine() {
     ZepraBrowser::setLayoutCallbacks2(
         layout_gfx_rrect,
         layout_gfx_gradient,
-        // SVG rendering callback: parse and render via NxSVG
-        [](float x, float y, float w, float h, const std::string& svgData, const std::string& svgKey) {
-            std::string key = svgKey;
-            
-            // Load if not already cached
-            if (!g_svg.has(key)) {
-                g_svg.loadFromString(key, svgData);
-            }
-            
-            // Render at position with size
-            float renderSize = std::min(w, h);
-            g_svg.draw(key, x, y, renderSize);
+        // SVG images (<img>, data: and inline <svg>), rasterized at the box size
+        [](float x, float y, float w, float h, const std::string& svgData, const std::string& svgKey,
+           uint32_t currentColor) {
+            gfx::svgImage(svgKey, svgData, x, y, w, h, currentColor, false);
         },
         layout_gfx_hgradient
     );
+    ZepraBrowser::setLayoutClipCallbacks(
+        [](float x, float y, float w, float h) { g_nxGpu.pushClip(NXRender::Rect(x, y, w, h)); },
+        [] { g_nxGpu.popClip(); });
     
     std::cout << "[Layout] Layout engine initialized (rounded rect + gradient support)" << std::endl;
     
@@ -5014,7 +5087,7 @@ bool loadResources() {
     };
     
     for (int i = 0; icons[i]; i++) {
-        g_svg.loadFromFile(icons[i], iconPath + icons[i]);
+        loadIcon(icons[i], iconPath + icons[i]);
     }
     
     if (!nxfont::FontManager::instance().loadSystemFont(14)) {
@@ -5355,7 +5428,7 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
     for (int i = 0; icons[i]; i++) {
         std::cout << "[Init] SVG: " << icons[i] << std::flush;
         try {
-            bool ok = g_svg.loadFromFile(icons[i], iconPath + icons[i]);
+            bool ok = loadIcon(icons[i], iconPath + icons[i]);
             std::cout << (ok ? " OK" : " (not found)") << std::endl;
         } catch (const std::exception& e) {
             std::cout << " CRASH: " << e.what() << std::endl;

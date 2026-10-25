@@ -150,6 +150,16 @@ struct LayoutBox {
     
     // Background image / gradient (CSS string)
     std::string backgroundImage;
+    // background-image: url(...), loaded by LazyImageLoader like an <img>
+    // (texture, or SVG text painted at tile size), and how it is laid out
+    uint32_t bgTextureId = 0;
+    std::string bgSvgData;
+    mutable std::string bgSvgKey;
+    float bgNaturalWidth = 0;
+    float bgNaturalHeight = 0;
+    std::string bgRepeat = "repeat";
+    std::string bgSize;      // "", auto, cover, contain, or one/two lengths
+    std::string bgPosition;  // "" = 0% 0%
     
     // Overflow clipping
     bool overflowHidden = false;
@@ -277,9 +287,17 @@ void setLayoutCallbacks(
 void setLayoutCallbacks2(
     void (*gfx_rrect)(float x, float y, float w, float h, float radius, uint32_t color, uint8_t alpha),
     void (*gfx_gradient)(float x, float y, float w, float h, uint32_t c1, uint32_t c2),
-    void (*gfx_svg)(float x, float y, float w, float h, const std::string& svgData, const std::string& svgKey) = nullptr,
+    void (*gfx_svg)(float x, float y, float w, float h, const std::string& svgData, const std::string& svgKey,
+                    uint32_t currentColor) = nullptr,
     void (*gfx_hgradient)(float x, float y, float w, float h, uint32_t c1, uint32_t c2) = nullptr
 );
+
+/// Clip callbacks: painting between push and pop stays inside the rectangle
+/// (intersected with any enclosing clip). Used for background-image tiles.
+void setLayoutClipCallbacks(void (*push_clip)(float x, float y, float w, float h), void (*pop_clip)());
+
+/// The URL inside the first url(...) of a CSS value ("" when there is none)
+std::string cssUrl(const std::string& value);
 
 /**
  * @brief Set the viewport that vw/vh units and percentages of it resolve

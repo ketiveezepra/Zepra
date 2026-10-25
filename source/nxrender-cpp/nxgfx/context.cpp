@@ -138,12 +138,21 @@ void GpuContext::setViewport(int x, int y, int width, int height) {
 }
 
 void GpuContext::pushClip(const Rect& rect) {
-    impl_->clipStack.push_back(rect);
+    // Nested clips intersect: drawing stays inside every enclosing clip
+    Rect clip = rect;
+    if (!impl_->clipStack.empty()) {
+        const Rect& outer = impl_->clipStack.back();
+        float x0 = std::max(clip.x, outer.x), y0 = std::max(clip.y, outer.y);
+        float x1 = std::min(clip.x + clip.width, outer.x + outer.width);
+        float y1 = std::min(clip.y + clip.height, outer.y + outer.height);
+        clip = Rect(x0, y0, std::max(0.0f, x1 - x0), std::max(0.0f, y1 - y0));
+    }
+    impl_->clipStack.push_back(clip);
     glEnable(GL_SCISSOR_TEST);
-    glScissor(static_cast<int>(rect.x), 
-              static_cast<int>(height_ - rect.y - rect.height),
-              static_cast<int>(rect.width), 
-              static_cast<int>(rect.height));
+    glScissor(static_cast<int>(clip.x),
+              static_cast<int>(height_ - clip.y - clip.height),
+              static_cast<int>(clip.width),
+              static_cast<int>(clip.height));
 }
 
 void GpuContext::popClip() {

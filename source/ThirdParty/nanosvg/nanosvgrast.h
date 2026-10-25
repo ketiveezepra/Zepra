@@ -119,6 +119,7 @@ typedef struct NSVGcachedPaint {
 	signed char type;
 	char spread;
 	float xform[6];
+	float fx, fy;	// radial focal point, relative to the centre in radii
 	unsigned int colors[256];
 } NSVGcachedPaint;
 
@@ -1076,8 +1077,11 @@ static void nsvg__scanlineSolid(unsigned char* dst, int count, unsigned char* co
 	} else if (cache->type == NSVG_PAINT_RADIAL_GRADIENT) {
 		// TODO: spread modes.
 		// TODO: plenty of opportunities to optimize.
-		// TODO: focus (fx,fy)
 		float fx, fy, dx, gx, gy, gd;
+		// Zepra: focal point f. The colour at p is t where p = f + t*(q - f), q on the
+		// unit circle: (1-|f|^2) t^2 - 2 (f.d) t - |d|^2 = 0 with d = p - f.
+		float ffx = cache->fx, ffy = cache->fy, fa = 1.0f - (ffx*ffx + ffy*ffy);
+		int focal = ffx != 0.0f || ffy != 0.0f;
 		float* t = cache->xform;
 		int i, cr, cg, cb, ca;
 		unsigned int c;
@@ -1090,7 +1094,12 @@ static void nsvg__scanlineSolid(unsigned char* dst, int count, unsigned char* co
 			int r,g,b,a,ia;
 			gx = fx*t[0] + fy*t[2] + t[4];
 			gy = fx*t[1] + fy*t[3] + t[5];
-			gd = sqrtf(gx*gx + gy*gy);
+			if (focal) {
+				float ddx = gx - ffx, ddy = gy - ffy, fd = ffx*ddx + ffy*ddy;
+				gd = (fd + sqrtf(fd*fd + fa*(ddx*ddx + ddy*ddy))) / fa;
+			} else {
+				gd = sqrtf(gx*gx + gy*gy);
+			}
 			c = cache->colors[(int)nsvg__clampf(gd*255.0f, 0, 255.0f)];
 			cr = (c) & 0xff;
 			cg = (c >> 8) & 0xff;
@@ -1287,6 +1296,13 @@ static void nsvg__initPaint(NSVGcachedPaint* cache, NSVGpaint* paint, float opac
 
 	cache->spread = grad->spread;
 	memcpy(cache->xform, grad->xform, sizeof(float)*6);
+	cache->fx = grad->fx;
+	cache->fy = grad->fy;
+	{
+		// Zepra: a focus on or outside the circle is moved just inside (SVG 1.1 §13.2.3)
+		float f = sqrtf(cache->fx*cache->fx + cache->fy*cache->fy);
+		if (f > 0.99f) { cache->fx *= 0.99f / f; cache->fy *= 0.99f / f; }
+	}
 
 	if (grad->nstops == 0) {
 		for (i = 0; i < 256; i++)

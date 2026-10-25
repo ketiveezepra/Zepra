@@ -8,6 +8,10 @@
 #include <cctype>
 #include <cmath>
 
+#ifdef NXRENDER_HAVE_WEBP
+#include <webp/decode.h>
+#endif
+
 namespace NXRender {
 
 // ==================================================================
@@ -198,13 +202,23 @@ ImageMetadata WebPDecoder::probe(const uint8_t* data, size_t size) const {
 
 DecodedImage WebPDecoder::decode(const uint8_t* data, size_t size) const {
     DecodedImage result;
-    auto meta = probe(data, size);
-    result.width = meta.width;
-    result.height = meta.height;
     result.sourceFormat = ImageFormat::WebP;
-    result.stride = meta.width * 4;
-    result.pixels.resize(static_cast<size_t>(result.stride) * result.height, 0);
+#ifdef NXRENDER_HAVE_WEBP
+    // Lossy, lossless and alpha; animated files decode to their first frame
+    int width = 0, height = 0;
+    uint8_t* rgba = WebPDecodeRGBA(data, size, &width, &height);
+    if (rgba) {
+        result.width = width;
+        result.height = height;
+        result.stride = width * 4;
+        result.pixels.assign(rgba, rgba + static_cast<size_t>(result.stride) * height);
+        WebPFree(rgba);
+    }
+#else
+    // Built without libwebp: an empty (invalid) image
     (void)data;
+    (void)size;
+#endif
     return result;
 }
 

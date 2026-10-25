@@ -36,9 +36,13 @@ struct PendingImage {
     int tabId;                // Tab that requested this image
     uint64_t generation = 0;  // Loader generation when queued (see cancelAll)
     uint64_t tabGeneration = 0;  // The tab's generation when queued (see cancelTab)
+    bool background = false;  // background-image: fills box->bg*, no placeholder
+    uint64_t sequence = 0;    // queue order: equal priorities load first come, first served
     
     bool operator<(const PendingImage& other) const {
-        return priority < other.priority; // Lower priority = later in queue
+        // Lower priority = later in queue; then later-queued = later
+        if (priority != other.priority) return priority < other.priority;
+        return sequence > other.sequence;
     }
 };
 
@@ -73,6 +77,12 @@ public:
      * @param tabId Tab ID for cancellation
      */
     void queueImage(LayoutBox* box, const std::string& url, int priority = 0, int tabId = -1);
+
+    /**
+     * @brief Queue a CSS background-image for a box (bgTextureId / bgSvgData);
+     * no placeholder text, and a failed load leaves the box as it is
+     */
+    void queueBackground(LayoutBox* box, const std::string& url, int tabId = -1);
     
     /**
      * @brief Queue image with viewport priority
@@ -134,6 +144,7 @@ private:
     // Thread-safe queues
     std::priority_queue<PendingImage> pendingQueue_;
     std::mutex pendingMutex_;
+    uint64_t nextSequence_ = 0;  // guarded by pendingMutex_
     
     std::vector<ImageResult> completedQueue_;
     std::mutex completedMutex_;
@@ -147,7 +158,8 @@ private:
         uint64_t generation = 0;
         int tabId = -1;
         uint64_t tabGeneration = 0;
-        std::string url;           // raster images: key for textureCache_
+        std::string url;           // key for textureCache_
+        bool background = false;   // see PendingImage::background
         std::string errorText;     // non-empty: show this placeholder instead
         uint32_t errorColor = 0;
     };
@@ -174,11 +186,13 @@ private:
     // Texture creator (main thread callback)
     TextureCreator textureCreator_;
     
-    // URL cache to avoid duplicate loads (filled when a texture is created)
+    // URL cache to avoid duplicate loads, filled when an image arrives (also when
+    // its box was replaced by a relayout in the meantime, so the next layout hits it)
     struct CachedTexture {
-        uint32_t textureId;
-        int width;
-        int height;
+        uint32_t textureId = 0;
+        int width = 0;
+        int height = 0;
+        std::string svgData;       // SVG images: the document (textureId stays 0)
     };
     std::unordered_map<std::string, CachedTexture> textureCache_;
     std::mutex cacheMutex_;
