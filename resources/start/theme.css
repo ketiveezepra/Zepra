@@ -1,0 +1,18 @@
+/* Start page theme.
+ *
+ * This built-in file is intentionally empty. To theme the start page, put a
+ * theme.css in your user start directory; it replaces this one and loads after
+ * style.css, so its rules win:
+ *
+ *   Windows  %APPDATA%\Zepra\start\theme.css
+ *   Linux    $XDG_CONFIG_HOME/zepra/start/theme.css (or ~/.config/zepra/start/)
+ *   macOS    ~/Library/Application Support/Zepra/start/theme.css
+ *
+ * Example (dark):
+ *
+ *   body { background: linear-gradient(to bottom, #1E1B2E, #0B0A12); color: #EDEAF5; }
+ *   .search-pill { background: #2A2640; }
+ *   .search-input, .search-input::placeholder { color: #EDEAF5; }
+ *
+ * Press F5 on the start page to reload it after editing.
+ */

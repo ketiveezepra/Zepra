@@ -225,6 +225,7 @@ struct Tab {
     std::unique_ptr<DOMDocument> document;
     std::unique_ptr<CSSEngine> cssEngine;
     std::unique_ptr<ZepraBrowser::LayoutBox> layoutRoot;
+    std::unique_ptr<ScriptContext> scriptContext;  // paused while the tab is in the background
     bool hasRenderedContent = false;  // true if tab has been through parseWithWebCore
     
     // Default constructor
@@ -410,13 +411,19 @@ static bool g_cursorIsPointer = false;  // Should cursor be hand?
 // ============================================================================
 // ASYNC LOADING STATE
 // ============================================================================
-static std::mutex g_loadMutex;                   // Protects g_styledLines, g_pageContent
+static std::mutex g_loadMutex;                   // Protects g_loadResults
 static std::atomic<bool> g_asyncLoadPending{false};  // True when background load in progress
-static std::atomic<bool> g_asyncLoadComplete{false}; // True when load finished (ready to swap)
-static std::string g_pendingUrl;                 // URL being loaded
-static std::string g_pendingContent;             // Content from background load
-static std::string g_pendingTitle;               // Title from background load
-static std::vector<StyledTextLine> g_pendingStyledLines; // Styled lines from background
+static std::atomic<bool> g_asyncLoadComplete{false}; // True when g_loadResults has entries
+
+// A finished background page load, waiting for the main loop to apply it
+struct PageLoadResult {
+    int tabId = 0;          // Tab that started the load
+    std::string url;
+    std::string title;
+    std::string content;
+    std::string error;
+};
+static std::vector<PageLoadResult> g_loadResults;
 
 // ============================================================================
 // LAYOUT ENGINE (Block Formatting Context)
@@ -833,9 +840,17 @@ std::string resolveUrl(const std::string& base, const std::string& href) {
     
     // Already absolute
     if (href.find("://") != std::string::npos) return href;
-    
+
+    bool protocolRelative = href.length() >= 2 && href[0] == '/' && href[1] == '/';
+
+    // The start page's own files live on disk (user start dir, then resources/start)
+    if (!protocolRelative && base.compare(0, 13, ZepraBrowser::UI::kStartPageUrl) == 0) {
+        std::string path = ZepraBrowser::UI::findStartPageFile(RESOURCE_PATH, href);
+        return (path.front() == '/' ? "file://" : "file:///") + path;
+    }
+
     // Protocol-relative (//example.com/path)
-    if (href.length() >= 2 && href[0] == '/' && href[1] == '/') {
+    if (protocolRelative) {
         // Extract protocol from base
         size_t protoEnd = base.find("://");
         if (protoEnd != std::string::npos) {
@@ -1036,16 +1051,17 @@ static void relayoutDocument() {
     if (!g_document || !g_cssEngine) return;
     DOMElement* focusedElement = g_focusedBox ? g_focusedBox->domElement : nullptr;
     // Queued image loads point at boxes of the tree being replaced
-    ZepraBrowser::g_lazyImageLoader.cancelAll();
+    ZepraBrowser::g_lazyImageLoader.cancelTab(g_activeTabId);
     g_styledLines.clear();
     rebuildLayoutTree();
     g_focusedBox = findBoxForElement(g_layoutRoot.get(), focusedElement);
 }
 
 void parseWithWebCore(const std::string& html) {
-    // CRITICAL: Cancel pending image loads before clearing layout boxes
-    // Prevents use-after-free when worker threads hold stale pointers
-    ZepraBrowser::g_lazyImageLoader.cancelAll();
+    // CRITICAL: Cancel this tab's pending image loads before clearing its layout boxes
+    // Prevents use-after-free when worker threads hold stale pointers; other
+    // tabs keep their boxes (and their loads) in Tab::layoutRoot
+    ZepraBrowser::g_lazyImageLoader.cancelTab(g_activeTabId);
     
     g_styledLines.clear();
     
@@ -1150,17 +1166,14 @@ void parseWithWebCore(const std::string& html) {
     // Initialize ScriptContext and execute inline <script> tags
     g_scriptContext = std::make_unique<ScriptContext>();
     
-    // Route console output to active tab
-    Tab* activeTab = nullptr;
-    for (auto& t : g_tabs) {
-        if (t.id == g_activeTabId) { activeTab = &t; break; }
-    }
-    if (activeTab) {
-        g_scriptContext->setConsoleHandler(
-            [activeTab](const std::string& level, const std::string& msg) {
-                activeTab->logConsole("[" + level + "] " + msg);
-            });
-    }
+    // Route console output to this page's tab (by id: g_tabs reallocates as tabs open)
+    int pageTabId = g_activeTabId;
+    g_scriptContext->setConsoleHandler(
+        [pageTabId](const std::string& level, const std::string& msg) {
+            for (Tab& t : g_tabs) {
+                if (t.id == pageTabId) { t.logConsole("[" + level + "] " + msg); break; }
+            }
+        });
     
     g_scriptContext->initialize(g_document.get());
     
@@ -3180,115 +3193,6 @@ void renderLeftSidebar() {
     }
 }
 
-// Start Page
-void renderStartPage(float x, float y, float w, float h) {
-    // Gradient background (from app.rx)
-    gfx::gradient(x, y, w, h, g_theme.gradient_start, g_theme.gradient_end);
-    
-    float cx = x + w / 2;
-    float cy = y + h / 2 - 100;
-    
-    // Zepra logo using actual SVG - render the zepra.svg icon
-    float logoSize = 120;
-    svg("zepra.svg", cx - logoSize/2, cy - logoSize/2 - 20, logoSize, 0xFFFFFF);
-    
-    // Small tagline
-    text("Zepra", cx - 25, cy + logoSize/2 + 10, 0x6B5B95, 14.0f);
-    
-    // Search Box (from app.rx: SearchBox layer)
-    float barW = 500, barH = 48;
-    float barX = cx - barW / 2;
-    float barY = cy + logoSize/2 + 40;
-    
-    // White rounded search bar with focus border
-    gfx::rrect(barX, barY, barW, barH, 24, 0xFFFFFF);
-    if (g_searchFocused) {
-        gfx::border(barX, barY, barW, barH, 2, g_theme.accent);
-    }
-    
-    // Search icon
-    svg("search.svg", barX + 16, barY + 12, 24, 0x6E7681);
-    
-    // Search text or placeholder
-    std::string searchDisplay = g_searchQuery.empty() ? "Search the web..." : g_searchQuery;
-    uint32_t searchColor = g_searchQuery.empty() && !g_searchFocused ? 0x8B949E : 0x1F2328;
-    text(searchDisplay, barX + 48, barY + 30, searchColor, 13.0f);
-    
-    // Blinking cursor when focused
-    if (g_searchFocused) {
-        g_cursorBlink++;
-        if ((g_cursorBlink / 30) % 2 == 0) {
-            float cursorX = barX + 48 + textWidth(g_searchQuery);
-            gfx::rect(cursorX, barY + 12, 2, 24, 0x1F2328);
-        }
-    }
-    
-    // Voice icon with Ketivee logo style
-    svg("ringingBell.svg", barX + barW - 70, barY + 12, 24, 0x6E7681);
-    svg("share.svg", barX + barW - 40, barY + 12, 24, 0x6E7681);
-    
-    // Quick Links with proper icons (Web Apps - like Ketivee ecosystem)
-    float qy = barY + barH + 40;
-    float qGap = 80;
-    struct QuickLink { const char* icon; const char* label; uint32_t color; const char* url; };
-    QuickLink links[] = {
-        {"MialInbox.svg", "Mail", 0x5080DC, "https://mail.ketivee.com"},
-        {"ringingBell.svg", "News", 0x8C64C8, "https://news.ketivee.com"},
-        {"film.svg", "Videos", 0xC878A0, "https://watch.ketivee.com"},
-        {"Picture.svg", "Images", 0xDC6464, "https://photos.ketivee.com"}
-    };
-    
-    for (int i = 0; i < 4; i++) {
-        float qx = cx - qGap * 1.5f + i * qGap;
-        
-        // Glow shadow
-        gfx::circle(qx, qy + 2, 32, (links[i].color & 0xFFFFFF) | 0x30000000);
-        
-        // Main circle
-        gfx::circle(qx, qy, 25, links[i].color);
-        
-        // Icon inside (SVG if available, else we'll use a simple shape)
-        svg(links[i].icon, qx - 12, qy - 12, 24, 0xFFFFFF);
-        
-        // Label
-        text(links[i].label, qx - textWidth(links[i].label)/2, qy + 45, 0x4A4063, 11.0f);
-    }
-    
-    // === WEB APPS ROW (Ketivee Ecosystem) ===
-    float appsY = qy + 90;
-    text("Web Apps", cx - 35, appsY, 0x6B5B95, 13.0f);
-    appsY += 30;
-    
-    struct WebApp { const char* icon; const char* label; const char* url; uint32_t color; };
-    WebApp apps[] = {
-        {"Calendar.svg", "Calendar", "https://calendar.ketivee.com", 0x4285F4},
-        {"creative.svg", "Workspace", "https://app.ketivee.com", 0x34A853},
-        {"DebitCard.svg", "Pay", "https://pay.ketivee.com", 0xFBBC05},
-        {"docs.svg", "Docs", "https://docs.ketivee.com", 0x4285F4},
-        {"KetiveeStudio.svg", "Studio", "https://studio.ketivee.com", 0xEA4335},
-        {"3dSpace.svg", "3D Space", "https://3d.ketivee.com", 0x9B8BBB}
-    };
-    
-    float appGap = 90;
-    float appStartX = cx - (3 * appGap);
-    
-    for (int i = 0; i < 6; i++) {
-        float ax = appStartX + i * appGap;
-        bool hover = hit(ax - 30, appsY - 10, 60, 70);
-        
-        if (hover) {
-            gfx::rrect(ax - 30, appsY - 10, 60, 70, 8, 0xFFFFFF, 100);
-        }
-        
-        // App icon
-        gfx::circle(ax, appsY + 10, 22, apps[i].color);
-        svg(apps[i].icon, ax - 14, appsY - 4, 28, 0xFFFFFF);
-        
-        // Label
-        text(apps[i].label, ax - textWidth(apps[i].label)/2, appsY + 50, 0x4A4063, 10.0f);
-    }
-}
-
 // Sidebar
 void renderSidebar() {
     if (!g_sidebarVisible) return;
@@ -3348,98 +3252,112 @@ void render() {
     }
 
     // === ASYNC LOAD COMPLETION HANDLER ===
-    if (g_asyncLoadComplete.load()) {
-        // Get pending data under lock
-        std::string loadedContent;
-        std::string loadedTitle;
-        std::string loadedUrl;
-        std::string loadedError;
+    if (g_asyncLoadComplete.exchange(false)) {
+        std::vector<PageLoadResult> results;
         {
             std::lock_guard<std::mutex> lock(g_loadMutex);
-            loadedContent = g_pendingContent;
-            loadedTitle = g_pendingTitle;
-            loadedUrl = g_pendingUrl;
-            loadedError = g_loadError;
+            results.swap(g_loadResults);
         }
-        
-        // Apply loaded content to globals
-        g_currentUrl = loadedUrl;
-        g_displayUrl = getDisplayUrl(loadedUrl);
-        g_addressInput = g_displayUrl;
-        
-        if (loadedError.empty()) {
-            g_pageTitle = loadedTitle;
-            
-            // Detect file type from URL extension
-            bool isPdf = false;
-            bool isImage = false;
-            std::string ext;
-            {
-                size_t dotPos = loadedUrl.rfind('.');
-                size_t slashPos = loadedUrl.rfind('/');
-                if (dotPos != std::string::npos && (slashPos == std::string::npos || dotPos > slashPos)) {
-                    ext = loadedUrl.substr(dotPos);
-                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                    // Strip query string
-                    size_t qPos = ext.find('?');
-                    if (qPos != std::string::npos) ext = ext.substr(0, qPos);
-                    
-                    if (ext == ".pdf") isPdf = true;
-                    else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" ||
-                             ext == ".webp" || ext == ".bmp" || ext == ".ico" || ext == ".svg") isImage = true;
-                }
+        for (PageLoadResult& result : results) {
+            Tab* loadTab = nullptr;
+            for (Tab& tab : g_tabs) {
+                if (tab.id == result.tabId) { loadTab = &tab; break; }
             }
+            // The tab was closed, or navigated somewhere else while this loaded
+            if (!loadTab || loadTab->url != result.url) continue;
+            loadTab->isLoading = false;
+            if (loadTab->id != g_activeTabId) {
+                // The page globals belong to the active tab; load this one when it is selected
+                loadTab->pendingLoad = true;
+                loadTab->pendingUrl = result.url;
+                loadTab->title = result.title.length() > 25 ? result.title.substr(0, 25) + "..." : result.title;
+                continue;
+            }
+
+            const std::string& loadedContent = result.content;
+            const std::string& loadedTitle = result.title;
+            const std::string& loadedUrl = result.url;
+            const std::string& loadedError = result.error;
+            g_loadError = loadedError;
+
+            // Apply loaded content to globals
+            g_currentUrl = loadedUrl;
+            g_displayUrl = getDisplayUrl(loadedUrl);
+            g_addressInput = g_displayUrl;
+        
+            if (loadedError.empty()) {
+                g_pageTitle = loadedTitle;
             
-            if (isImage) {
-                std::string imgHtml = ZepraBrowser::UI::getImageViewerHTML(loadedTitle, loadedUrl);
-                g_pageContent = imgHtml;
-#ifdef USE_WEBCORE
-                parseWithWebCore(imgHtml);
-#endif
-            } else if (isPdf) {
-                std::cout << "[Browser] PDF Document intercepted. Processing natively..." << std::endl;
-                auto pdfDoc = nxrender::pdf::Document::OpenFromMemory(loadedContent);
-                if (pdfDoc && pdfDoc->GetPageCount() > 0) {
-                    int pageCount = pdfDoc->GetPageCount();
-                    auto pdfDocPtr = pdfDoc.get();
-                    std::string pdfHtml = ZepraBrowser::UI::getPdfViewerHTML(loadedTitle, pageCount,
-                        [pdfDocPtr](int page) { return pdfDocPtr->ExtractText(page); });
+                // Detect file type from URL extension
+                bool isPdf = false;
+                bool isImage = false;
+                std::string ext;
+                {
+                    size_t dotPos = loadedUrl.rfind('.');
+                    size_t slashPos = loadedUrl.rfind('/');
+                    if (dotPos != std::string::npos && (slashPos == std::string::npos || dotPos > slashPos)) {
+                        ext = loadedUrl.substr(dotPos);
+                        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                        // Strip query string
+                        size_t qPos = ext.find('?');
+                        if (qPos != std::string::npos) ext = ext.substr(0, qPos);
                     
-                    g_pageContent = pdfHtml;
+                        if (ext == ".pdf") isPdf = true;
+                        else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" ||
+                                 ext == ".webp" || ext == ".bmp" || ext == ".ico" || ext == ".svg") isImage = true;
+                    }
+                }
+            
+                if (isImage) {
+                    std::string imgHtml = ZepraBrowser::UI::getImageViewerHTML(loadedTitle, loadedUrl);
+                    g_pageContent = imgHtml;
 #ifdef USE_WEBCORE
-                    parseWithWebCore(pdfHtml);
+                    parseWithWebCore(imgHtml);
 #endif
+                } else if (isPdf) {
+                    std::cout << "[Browser] PDF Document intercepted. Processing natively..." << std::endl;
+                    auto pdfDoc = nxrender::pdf::Document::OpenFromMemory(loadedContent);
+                    if (pdfDoc && pdfDoc->GetPageCount() > 0) {
+                        int pageCount = pdfDoc->GetPageCount();
+                        auto pdfDocPtr = pdfDoc.get();
+                        std::string pdfHtml = ZepraBrowser::UI::getPdfViewerHTML(loadedTitle, pageCount,
+                            [pdfDocPtr](int page) { return pdfDocPtr->ExtractText(page); });
+                    
+                        g_pageContent = pdfHtml;
+#ifdef USE_WEBCORE
+                        parseWithWebCore(pdfHtml);
+#endif
+                    } else {
+                        g_pageContent = "<html><body><h2>Failed to parse PDF document.</h2></body></html>";
+#ifdef USE_WEBCORE
+                        parseWithWebCore(g_pageContent);
+#endif
+                    }
                 } else {
-                    g_pageContent = "<html><body><h2>Failed to parse PDF document.</h2></body></html>";
+                    g_pageContent = loadedContent;
 #ifdef USE_WEBCORE
-                    parseWithWebCore(g_pageContent);
+                    // Parse content (now on main thread, safe for DOM)
+                    parseWithWebCore(loadedContent);
 #endif
                 }
+                std::cout << "[Browser] Async load complete: " << loadedUrl << " (" << loadedContent.size() << " bytes)" << std::endl;
             } else {
-                g_pageContent = loadedContent;
-#ifdef USE_WEBCORE
-                // Parse content (now on main thread, safe for DOM)
-                parseWithWebCore(loadedContent);
-#endif
+                g_pageContent = "";
+                std::cerr << "[Browser] Async load error: " << loadedError << std::endl;
             }
-            std::cout << "[Browser] Async load complete: " << loadedUrl << " (" << loadedContent.size() << " bytes)" << std::endl;
-        } else {
-            g_pageContent = "";
-            std::cerr << "[Browser] Async load error: " << loadedError << std::endl;
-        }
         
-        // Update tab state
-        for (Tab& tab : g_tabs) {
-            if (tab.id == g_activeTabId) {
-                tab.url = loadedUrl;
-                tab.title = loadedTitle.length() > 25 ? loadedTitle.substr(0, 25) + "..." : loadedTitle;
+            // Update tab state
+            for (Tab& tab : g_tabs) {
+                if (tab.id == g_activeTabId) {
+                    tab.url = loadedUrl;
+                    tab.title = loadedTitle.length() > 25 ? loadedTitle.substr(0, 25) + "..." : loadedTitle;
+                }
             }
-        }
         
-        // Reset flags
-        g_isLoading = false;
-        g_asyncLoadPending = false;
-        g_asyncLoadComplete = false;
+            // Reset flags
+            g_isLoading = false;
+            g_asyncLoadPending = false;
+        }
     }
     
     // === SCRIPT TIMERS AND ANIMATION FRAMES ===
@@ -3484,8 +3402,8 @@ void render() {
     // Render current page
     bool isStart = g_currentUrl == "zepra://start" || g_currentUrl.empty();
     if (isStart && !g_layoutRoot) {
-        // Fallback: hardcoded start page if DOM wasn't built yet
-        renderStartPage(contentX, contentY, contentW, contentH);
+        // The start page's DOM isn't built yet: leave the content area blank
+        gfx::rect(contentX, contentY, contentW, contentH, g_theme.bg_primary);
     } else if (isStart && g_layoutRoot) {
         // Start page rendered through layout engine (DOM-based)
         g_linkHitBoxes.clear();
@@ -4266,69 +4184,82 @@ std::string parseSmartUrl(const std::string& input) {
 // EVENT HANDLERS
 // ============================================================================
 
-void onNewTab() {
-    // Save current tab's state before switching
+// Moves the active tab's page (DOM, CSS, layout, scripts) out of the globals into the tab
+static void saveActiveTabState() {
     for (Tab& t : g_tabs) {
         if (t.id == g_activeTabId) {
             t.document = std::move(g_document);
             t.cssEngine = std::move(g_cssEngine);
             t.layoutRoot = std::move(g_layoutRoot);
+            t.scriptContext = std::move(g_scriptContext);
             t.hasRenderedContent = true;
+            g_tabContentCache[t.id] = g_styledLines;
             break;
         }
     }
-    
+}
+
+// Opens a tab, makes it active and loads url in it
+void openNewTab(const std::string& url) {
+    saveActiveTabState();
+
     Tab tab;
     tab.id = g_nextTabId++;
     tab.title = "New Tab";
-    tab.url = "zepra://start";
-    tab.isStart = true;
+    tab.url = url;
+    tab.isStart = (url == ZepraBrowser::UI::kStartPageUrl);
     int newId = tab.id;
     g_tabs.push_back(std::move(tab));
     g_activeTabId = newId;
-    g_currentUrl = "zepra://start";
+    g_currentUrl = url;
     g_searchQuery = "";
-    
+
     // Fresh state for new tab
     g_layoutRoot = nullptr;
     g_document = nullptr;
     g_cssEngine = nullptr;
+    g_scriptContext = nullptr;
+    g_styledLines.clear();
+    g_focusedBox = nullptr;
     Zepra::WebCore::interactionState() = {};
+
+    onNavigate(url);
+}
+
+void onNewTab() {
+    openNewTab(ZepraBrowser::UI::kStartPageUrl);
 }
 
 void onCloseTab(int tabId) {
+    // The tab's layout boxes are destroyed below
+    ZepraBrowser::g_lazyImageLoader.cancelTab(tabId);
+    size_t closedIndex = 0;
     for (auto it = g_tabs.begin(); it != g_tabs.end(); ++it) {
         if (it->id == tabId) {
+            closedIndex = it - g_tabs.begin();
             g_tabs.erase(it);
             break;
         }
     }
+    g_tabContentCache.erase(tabId);
+    if (g_activeTabId != tabId) return;
+
+    // The globals still hold the closed tab's page; nothing may save it back
+    g_activeTabId = 0;
     if (g_tabs.empty()) {
         // Last tab closed — open a new start page tab instead of exiting
         onNewTab();
-    } else if (g_activeTabId == tabId) {
-        g_activeTabId = g_tabs[0].id;
-        g_currentUrl = g_tabs[0].url;
+    } else {
+        onSelectTab(g_tabs[std::min(closedIndex, g_tabs.size() - 1)].id);
     }
 }
 
 void onSelectTab(int tabId) {
     if (tabId == g_activeTabId) return;  // Already on this tab
-    
-    // Save current tab's DOM/CSS/Layout state
-    for (Tab& t : g_tabs) {
-        if (t.id == g_activeTabId) {
-            t.document = std::move(g_document);
-            t.cssEngine = std::move(g_cssEngine);
-            t.layoutRoot = std::move(g_layoutRoot);
-            t.hasRenderedContent = true;
-            break;
-        }
-    }
-    
-    // Save current tab's styled lines to cache
-    g_tabContentCache[g_activeTabId] = g_styledLines;
-    
+
+    // Save current tab's DOM/CSS/Layout/script state and styled lines
+    saveActiveTabState();
+
     // Switch to new tab
     int oldTabId = g_activeTabId;
     g_activeTabId = tabId;
@@ -4346,8 +4277,16 @@ void onSelectTab(int tabId) {
             std::cout << "[Tab] Triggering deferred load for tab " << tabId 
                       << ": " << tab.pendingUrl << std::endl;
             tab.pendingLoad = false;
-            onNavigate(tab.pendingUrl);
+            // Nothing of the previous page stays live while this one loads
+            g_scriptContext = nullptr;
+            g_layoutRoot = nullptr;
+            g_document = nullptr;
+            g_cssEngine = nullptr;
+            Zepra::WebCore::interactionState() = {};
+            g_currentUrl = tab.pendingUrl;
+            std::string url = tab.pendingUrl;
             tab.pendingUrl.clear();
+            onNavigate(url);
             return; // Navigation will handle the rest
         }
     }
@@ -4357,9 +4296,11 @@ void onSelectTab(int tabId) {
         if (tab.id == tabId) {
             g_currentUrl = tab.url;
             g_pageTitle = tab.title;
+            g_isLoading = tab.isLoading;
             
-            // Restore per-tab DOM and CSS engine; hover/focus belong to the old page
+            // Restore per-tab DOM, CSS engine and scripts; hover/focus belong to the old page
             Zepra::WebCore::interactionState() = {};
+            g_scriptContext = std::move(tab.scriptContext);
             if (tab.document) {
                 g_document = std::move(tab.document);
                 g_cssEngine = std::move(tab.cssEngine);
@@ -4442,11 +4383,12 @@ void onNavigate(const std::string& input) {
         }
         
 #ifdef USE_WEBCORE
-        if (url == "zepra://start") {
-            std::string startHtml = ZepraBrowser::UI::getStartPageHTML();
+        if (url == ZepraBrowser::UI::kStartPageUrl) {
+            std::string source;
+            std::string startHtml = ZepraBrowser::UI::loadStartPageHTML(RESOURCE_PATH, &source);
             g_pageContent = startHtml;
             parseWithWebCore(startHtml);
-            std::cout << "[Browser] Start page DOM built" << std::endl;
+            std::cout << "[Browser] Start page DOM built from " << source << std::endl;
         }
 #endif
     } else {
@@ -4457,8 +4399,6 @@ void onNavigate(const std::string& input) {
         g_isLoading = true;
         g_loadError = "";
         g_asyncLoadPending = true;
-        g_asyncLoadComplete = false;
-        g_pendingUrl = url;
         
         std::cout << "[Browser] Loading (async): " << url << std::endl;
         
@@ -4467,12 +4407,14 @@ void onNavigate(const std::string& input) {
             if (tab.id == g_activeTabId) {
                 tab.url = url;
                 tab.isStart = false;
+                tab.isLoading = true;
                 tab.title = "Loading...";
             }
         }
         
-        // Spawn background thread
-        std::thread([url]() {
+        // Spawn background thread; the result goes to the tab that asked for it
+        int tabId = g_activeTabId;
+        std::thread([url, tabId]() {
             // Fetch in background
             HttpResponse resp = httpGet(url);
             
@@ -4486,7 +4428,16 @@ void onNavigate(const std::string& input) {
                 pendingContent = resp.data;
                 pendingTitle = extractTitle(resp.data);
                 if (pendingTitle.empty()) {
-                    pendingTitle = getDisplayUrl(url);
+                    // No <title>: name the tab after the file, not a cut-off URL
+                    std::string path = url.substr(0, url.find_first_of("?#"));
+                    size_t slash = path.find_last_of('/');
+                    size_t schemeEnd = path.find("://");
+                    if (slash != std::string::npos && slash + 1 < path.size() &&
+                        (schemeEnd == std::string::npos || slash > schemeEnd + 2)) {
+                        pendingTitle = path.substr(slash + 1);
+                    } else {
+                        pendingTitle = getDisplayUrl(url);
+                    }
                 }
             } else {
                 pendingError = resp.error;
@@ -4495,9 +4446,13 @@ void onNavigate(const std::string& input) {
             // Store results atomically
             {
                 std::lock_guard<std::mutex> lock(g_loadMutex);
-                g_pendingContent = pendingContent;
-                g_pendingTitle = pendingTitle;
-                g_loadError = pendingError;
+                PageLoadResult result;
+                result.tabId = tabId;
+                result.url = url;
+                result.title = std::move(pendingTitle);
+                result.content = std::move(pendingContent);
+                result.error = std::move(pendingError);
+                g_loadResults.push_back(std::move(result));
             }
             
             // Signal completion
@@ -4674,8 +4629,7 @@ void handleClick(float mx, float my) {
                 if (linkBox.target == "_blank") {
                     // Open in new tab
                     std::cout << "[Browser] Opening in new tab: " << targetUrl << std::endl;
-                    onNewTab();
-                    onNavigate(targetUrl);
+                    openNewTab(targetUrl);
                 } else {
                     // Open in same window (default or _self)
                     onNavigate(targetUrl);
@@ -4726,7 +4680,7 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
                 if (g_addressFocused) {
                     g_addressInput += clipboardText;
                 } else if (g_searchFocused) {
-                    g_searchQuery += clipboardText;
+                    (g_focusedBox ? g_focusedBox->text : g_searchQuery) += clipboardText;
                 } else if (g_consoleFocused) {
                     g_consoleInput += clipboardText;
                 } else if (g_focusedBox) {
@@ -4758,7 +4712,8 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
     } else if (g_addressFocused) {
         activeInput = &g_addressInput;
     } else if (g_searchFocused) {
-        activeInput = &g_searchQuery;
+        // The start page's <input> shows its box's text, so type into that
+        activeInput = g_focusedBox ? &g_focusedBox->text : &g_searchQuery;
     } else if (g_focusedBox) { // Keep existing logic for web content inputs
         activeInput = &g_focusedBox->text;
     }
@@ -4882,14 +4837,14 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
         // Toggle sidebar with F2
         g_sidebarVisible = !g_sidebarVisible;
     } else if (key == KeyCode::F5 || (ctrl && key == KeyCode::R)) {
-        // F5 / Ctrl+R - Refresh page
-        if (!g_currentUrl.empty() && g_currentUrl != "zepra://start") {
+        // F5 / Ctrl+R - Refresh page (on the start page this re-reads its files)
+        if (!g_currentUrl.empty()) {
             std::cout << "[Browser] Refresh: " << g_currentUrl << std::endl;
             onNavigate(g_currentUrl);
         }
     } else if (ctrl && shift && key == KeyCode::R) {
         // Ctrl+Shift+R - Hard refresh (same as normal refresh for now)
-        if (!g_currentUrl.empty() && g_currentUrl != "zepra://start") {
+        if (!g_currentUrl.empty()) {
             std::cout << "[Browser] Hard Refresh: " << g_currentUrl << std::endl;
             onNavigate(g_currentUrl);
         }
@@ -5347,10 +5302,7 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
         return "";
     });
     ::g_mouseHandler.onNewTab([](const std::string& url) {
-        Tab newTab; newTab.id = g_nextTabId++; newTab.url = url;
-        newTab.title = "Loading..."; newTab.isStart = false;
-        g_tabs.push_back(std::move(newTab)); g_activeTabId = newTab.id;
-        g_currentUrl = url; g_addressInput = url;
+        openNewTab(url.empty() ? ZepraBrowser::UI::kStartPageUrl : url);
     });
     ::g_mouseHandler.onSearch([](const std::string& query) {
         std::string searchUrl = getSearchUrl(query);

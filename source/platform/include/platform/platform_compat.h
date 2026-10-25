@@ -165,6 +165,31 @@ static inline std::string getHomeDirectory() {
 }
 
 /**
+ * @brief Get Zepra's per-user configuration directory (not created here)
+ * @return Directory path, or empty string if unavailable
+ *
+ * Linux/NeolyxOS: $XDG_CONFIG_HOME/zepra, else ~/.config/zepra
+ * Windows:        %APPDATA%\Zepra
+ * macOS:          ~/Library/Application Support/Zepra
+ */
+static inline std::string getUserConfigDirectory() {
+#if ZEPRA_OS_WINDOWS
+    const char* appData = std::getenv("APPDATA");
+    if (appData && *appData) return std::string(appData) + "\\Zepra";
+    std::string home = getHomeDirectory();
+    return home.empty() ? std::string() : home + "\\AppData\\Roaming\\Zepra";
+#elif ZEPRA_OS_MACOS
+    std::string home = getHomeDirectory();
+    return home.empty() ? std::string() : home + "/Library/Application Support/Zepra";
+#else
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    if (xdg && *xdg == '/') return std::string(xdg) + "/zepra";
+    std::string home = getHomeDirectory();
+    return home.empty() ? std::string() : home + "/.config/zepra";
+#endif
+}
+
+/**
  * @brief Expand tilde (~) in a path to the user's home directory
  * @param path Input path (may start with ~)
  * @return Expanded path, or original if no ~ prefix
