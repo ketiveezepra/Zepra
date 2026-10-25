@@ -4,7 +4,9 @@
  * @file canvas_bindings.hpp
  * @brief <canvas> for page scripts: width/height, getContext("2d") and the
  *        CanvasRenderingContext2D, CanvasGradient, CanvasPattern, Path2D and
- *        ImageData objects, backed by NXRender's Canvas 2D context.
+ *        ImageData objects, backed by NXRender's Canvas 2D context, and
+ *        getContext("webgl") backed by NXRender's WebGL context
+ *        (webgl_bindings.cpp).
  */
 
 #pragma once
@@ -15,16 +17,21 @@
 #include <string>
 #include <unordered_map>
 
-namespace NXRender { class CanvasRenderingContext2D; }
-namespace Zepra::Runtime { class Object; class VM; }
+namespace NXRender { class CanvasRenderingContext2D; class WebGLRenderingContext; }
+namespace Zepra::Runtime { class Object; class Value; class VM; }
+namespace Zepra::Builtins { class TypedArrayObject; enum class TypedArrayType : uint8_t; }
 
 namespace Zepra::WebCore {
 
 class DOMElement;
 
-/// The bitmap of one <canvas> element and the page's 2D context object for it
+/// The bitmap of one <canvas> element and the page's context object for it:
+/// either a 2D context or a WebGL one, created by the first getContext()
 struct CanvasSurface {
+    CanvasSurface();
+    ~CanvasSurface();
     std::unique_ptr<NXRender::CanvasRenderingContext2D> context2d;
+    std::unique_ptr<NXRender::WebGLRenderingContext> webgl;
     Zepra::Runtime::Object* jsContext = nullptr;  // rooted by CanvasRegistry
     int id = 0;
     // Owned by whoever paints the canvas: its texture and the bitmap version it holds
@@ -54,6 +61,9 @@ public:
     /// width/height attribute as a canvas reads it (a non-negative integer, else the default)
     static int attributeSize(const DOMElement* canvas, const char* name);
 
+    /// A zeroed typed array with the page's prototypes (Uint8ClampedArray for ImageData, ...)
+    Zepra::Builtins::TypedArrayObject* newTypedArray(Zepra::Builtins::TypedArrayType type, size_t length);
+
 private:
     Zepra::Runtime::VM* vm_;
     Zepra::Runtime::Object* root_;  // a global object that keeps the context objects alive
@@ -66,6 +76,12 @@ private:
     CanvasSurface& surfaceFor(DOMElement* canvas);
     CanvasSurface* surfaceById(int id);
     Zepra::Runtime::Object* createContext2D(CanvasSurface& surface, Zepra::Runtime::Object* canvasWrapper);
+
+    // WebGL (webgl_bindings.cpp): one WebGLRenderingContext.prototype per page
+    Zepra::Runtime::Object* webglPrototype_ = nullptr;
+    void installWebGL(Zepra::Runtime::Object* window);
+    Zepra::Runtime::Object* createWebGLContext(CanvasSurface& surface, Zepra::Runtime::Object* canvasWrapper,
+                                               const Zepra::Runtime::Value& attributes);
 };
 
 } // namespace Zepra::WebCore

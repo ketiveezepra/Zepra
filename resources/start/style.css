@@ -7,9 +7,8 @@
  *    margin: 0 auto and the logo row uses justify-content: center;
  *  - in the pill (a flex row) align-items: center does nothing, so padding
  *    places the items vertically;
- *  - <img> only paints inside a flex container, ignores CSS width/height and
- *    takes an SVG's viewBox size, so the images are drawn at the size they
- *    should appear (img/logo.svg is 104x113, the icons 24x24);
+ *  - <img> only paints inside a flex container; the neolyx icons have only a
+ *    viewBox, so their size comes from .pill-icon;
  *  - colors are plain values, not var(): the cascade only reads a var()
  *    fallback, so custom properties set in theme.css would have no effect.
  * theme.css loads after this file and overrides these rules. */
@@ -47,6 +46,7 @@ body {
 }
 
 .pill-icon {
+  height: 24px;
   margin-top: 2px;
   flex-shrink: 0;
 }

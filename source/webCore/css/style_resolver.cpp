@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <iostream>
 #include <cmath>
+#include <cctype>
 #include <unordered_set>
 
 namespace Zepra::WebCore {
@@ -659,13 +660,54 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     else if (property == "background-size") { style.backgroundSize = value; }
     else if (property == "background-position") { style.backgroundPosition = value; }
     else if (property == "background-repeat") { style.backgroundRepeat = value; }
-    else if (property == "background") {
-        // Shorthand: try color first, then store full value for image/gradient
-        if (value.find("url(") != std::string::npos || value.find("gradient") != std::string::npos) {
-            style.backgroundImage = value;
-        } else if (value != "none") {
-            style.backgroundColor = parseColor(value);
+    else if (property == "background" && value != "inherit" && value != "initial" && value != "unset") {
+        // Shorthand (CSS Backgrounds 3 §3.10), one layer: image, repeat,
+        // position [/ size] and colour, in any order; unset parts reset
+        style.backgroundImage.clear();
+        style.backgroundColor = CSSColor::transparent();
+        style.backgroundRepeat = "repeat";
+        style.backgroundPosition.clear();
+        style.backgroundSize.clear();
+        std::vector<std::string> tokens;
+        std::string token;
+        int depth = 0;
+        for (char c : value) {
+            if (c == '(') depth++;
+            if (c == ')') depth--;
+            if (depth == 0 && (std::isspace((unsigned char)c) || c == '/')) {
+                if (!token.empty()) tokens.push_back(token);
+                token.clear();
+                if (c == '/') tokens.push_back("/");
+                continue;
+            }
+            token += c;
         }
+        if (!token.empty()) tokens.push_back(token);
+        bool inSize = false;
+        std::string repeat;
+        for (const std::string& t : tokens) {
+            std::string lower = t;
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            bool isNumber = !t.empty() && (std::isdigit((unsigned char)t[0]) || t[0] == '-' || t[0] == '.');
+            if (t == "/") { inSize = true; continue; }
+            if (lower.compare(0, 4, "url(") == 0 || lower.find("gradient(") != std::string::npos) {
+                style.backgroundImage = t;
+            } else if (lower == "repeat" || lower == "no-repeat" || lower == "repeat-x" || lower == "repeat-y" ||
+                       lower == "space" || lower == "round") {
+                repeat += (repeat.empty() ? "" : " ") + lower;
+            } else if (inSize && (isNumber || lower == "auto" || lower == "cover" || lower == "contain")) {
+                style.backgroundSize += (style.backgroundSize.empty() ? "" : " ") + lower;
+            } else if (isNumber || lower == "left" || lower == "right" || lower == "top" || lower == "bottom" ||
+                       lower == "center") {
+                style.backgroundPosition += (style.backgroundPosition.empty() ? "" : " ") + lower;
+            } else if (lower == "none" || lower == "scroll" || lower == "fixed" || lower == "local" ||
+                       lower == "border-box" || lower == "padding-box" || lower == "content-box") {
+                // image none, attachment, origin/clip: not used
+            } else {
+                style.backgroundColor = parseColor(t);
+            }
+        }
+        if (!repeat.empty()) style.backgroundRepeat = repeat;
     }
     else if (property == "opacity") {
         try { style.opacity = std::stof(value); } catch (...) {}

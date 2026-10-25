@@ -7,12 +7,17 @@
 
 #include "lazy_image_loader.h"
 #include "layout_engine.h"
+#include "svg_raster.h"
+#include "web/paint/image_loader.h"
 #include <iostream>
 #include <chrono>
 #include <cstring>
 #include <algorithm>
 #include <fstream>
 #include <iterator>
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
 // HTTP client for fetching images
 #include "http_client.hpp"
 
@@ -21,6 +26,8 @@ extern "C" {
     unsigned char* stbi_load_from_memory(const unsigned char* buffer, int len, 
                                           int* x, int* y, int* channels_in_file, 
                                           int desired_channels);
+    unsigned char* stbi_load_gif_from_memory(const unsigned char* buffer, int len, int** delays,
+                                             int* x, int* y, int* z, int* comp, int req_comp);
     void stbi_image_free(void* retval_from_stbi_load);
     const char* stbi_failure_reason(void);
 }
@@ -72,6 +79,50 @@ void LazyImageLoader::stop() {
     std::cout << "[LazyImageLoader] Stopped" << std::endl;
 }
 
+// The loaded image on its box: the <img> itself, or the box's background
+static void applyImage(LayoutBox* box, bool background, uint32_t textureId, const std::string& svgData,
+                       int width, int height) {
+    if (background) {
+        box->bgTextureId = textureId;
+        box->bgSvgData = svgData;
+        box->bgNaturalWidth = (float)width;
+        box->bgNaturalHeight = (float)height;
+        return;
+    }
+    box->textureId = textureId;
+    box->svgData = svgData;
+    box->color = 0x000000;  // an SVG image is its own document: currentColor starts black
+    box->naturalWidth = (float)width;
+    box->naturalHeight = (float)height;
+    box->text = "";
+    box->hasBgColor = false;  // drop the loading placeholder's grey box
+    box->isImage = true;
+}
+
+void LazyImageLoader::queueBackground(LayoutBox* box, const std::string& url, int tabId) {
+    if (!box || url.empty()) return;
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex_);
+        auto it = textureCache_.find(url);
+        if (it != textureCache_.end()) {
+            applyImage(box, true, it->second.textureId, it->second.svgData, it->second.width, it->second.height);
+            return;
+        }
+    }
+    PendingImage pending;
+    pending.box = box;
+    pending.url = url;
+    pending.priority = 0;
+    pending.tabId = tabId;
+    pending.generation = generation_.load();
+    pending.tabGeneration = tabGeneration(tabId);
+    pending.background = true;
+    std::lock_guard<std::mutex> lock(pendingMutex_);
+    pending.sequence = nextSequence_++;
+    pendingQueue_.push(pending);
+    pendingCount_++;
+}
+
 void LazyImageLoader::queueImage(LayoutBox* box, const std::string& url, 
                                   int priority, int tabId) {
     if (!box || url.empty()) return;
@@ -82,11 +133,7 @@ void LazyImageLoader::queueImage(LayoutBox* box, const std::string& url,
         auto it = textureCache_.find(url);
         if (it != textureCache_.end()) {
             // Already loaded - update box directly
-            box->textureId = it->second.textureId;
-            box->naturalWidth = (float)it->second.width;
-            box->naturalHeight = (float)it->second.height;
-            box->text = ""; // Clear placeholder
-            box->hasBgColor = false;
+            applyImage(box, false, it->second.textureId, it->second.svgData, it->second.width, it->second.height);
             invalidateIntrinsicWidths();
             // std::cout << "[LazyImageLoader] Cache hit: " << url.substr(url.rfind('/') + 1) << std::endl;
             return;
@@ -103,7 +150,8 @@ void LazyImageLoader::queueImage(LayoutBox* box, const std::string& url,
     
     {
         std::lock_guard<std::mutex> lock(pendingMutex_);
-        pendingQueue_.push(pending);
+        pending.sequence = nextSequence_++;
+    pendingQueue_.push(pending);
         pendingCount_++;
     }
     
@@ -161,53 +209,64 @@ void LazyImageLoader::pollCompleted(std::vector<ImageResult>& results, int maxRe
         std::lock_guard<std::mutex> lock(rawMutex_);
         const uint64_t currentGeneration = generation_.load();
         for (auto& raw : rawImages_) {
-            if (!raw.box || raw.generation != currentGeneration) continue;
-            if (raw.tabGeneration != tabGeneration(raw.tabId)) continue;
-            // Sizes change below; table columns measured the placeholder
-            invalidateIntrinsicWidths();
-
+            // A box replaced by a relayout (or a closed tab) is gone, but the image
+            // still goes into the cache: the new layout asks for the same URL
+            bool boxAlive = raw.box && raw.generation == currentGeneration &&
+                            raw.tabGeneration == tabGeneration(raw.tabId);
             if (!raw.errorText.empty()) {
+                if (!boxAlive || raw.background) continue;
+                invalidateIntrinsicWidths();  // table columns measured the placeholder
                 raw.box->text = raw.errorText;
                 raw.box->color = raw.errorColor;
                 continue;
             }
-            
-            // SVG data (tagged with negative width)
+
+            CachedTexture entry;
             if (raw.width < 0) {
-                raw.box->svgData = std::string(raw.pixels.begin(), raw.pixels.end());
-                raw.box->text = "";
-                raw.box->hasBgColor = false;  // drop the loading placeholder's grey box
-                raw.box->naturalWidth = (float)(-raw.width);
-                raw.box->naturalHeight = (float)raw.height;
-                raw.box->isImage = true;
-                // std::cout << "[LazyImageLoader] SVG applied to box: " 
-                //           << raw.box->naturalWidth << "x" << raw.box->naturalHeight << std::endl;
+                // SVG data (tagged with negative width); painted by the main thread at box size
+                entry.svgData = std::string(raw.pixels.begin(), raw.pixels.end());
+                entry.width = -raw.width;
+                entry.height = raw.height;
+            } else if (textureCreator_ && !raw.pixels.empty()) {
+                // Raster image — create GPU texture (one per frame for an animated GIF)
+                entry.textureId = textureCreator_(raw.width, raw.height, raw.pixels.data());
+                entry.width = raw.width;
+                entry.height = raw.height;
+                if (entry.textureId && raw.delaysMs.size() > 1) {
+                    Animation anim;
+                    size_t frameBytes = (size_t)raw.width * raw.height * 4;
+                    int end = 0;
+                    for (size_t f = 0; f < raw.delaysMs.size(); f++) {
+                        uint32_t tex = f == 0 ? entry.textureId
+                                              : textureCreator_(raw.width, raw.height, raw.pixels.data() + f * frameBytes);
+                        if (!tex) break;
+                        anim.frames.push_back(tex);
+                        end += raw.delaysMs[f];
+                        anim.endsMs.push_back(end);
+                    }
+                    anim.startMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                    if (anim.frames.size() > 1) animations_[entry.textureId] = std::move(anim);
+                }
+                if (!entry.textureId) {
+                    if (boxAlive && !raw.background) {
+                        raw.box->text = "[IMG: GPU Error]";
+                        raw.box->color = 0xFF0000;
+                    }
+                    continue;
+                }
+            } else {
                 continue;
             }
-            
-            // Raster image — create GPU texture
-            if (textureCreator_ && !raw.pixels.empty()) {
-                uint32_t texId = textureCreator_(raw.width, raw.height, raw.pixels.data());
-                
-                if (texId > 0 && raw.box) {
-                    raw.box->textureId = texId;
-                    raw.box->naturalWidth = (float)raw.width;
-                    raw.box->naturalHeight = (float)raw.height;
-                    raw.box->text = "";
-                    raw.box->hasBgColor = false;
-                    if (!raw.url.empty()) {
-                        std::lock_guard<std::mutex> cacheLock(cacheMutex_);
-                        textureCache_[raw.url] = {texId, raw.width, raw.height};
-                    }
-                    
-                    // std::cout << "[LazyImageLoader] Texture created: " << raw.width 
-                    //           << "x" << raw.height << std::endl;
-                } else if (raw.box) {
-                    raw.box->text = "[IMG: GPU Error]";
-                    raw.box->color = 0xFF0000;
-                }
+            if (!raw.url.empty()) {
+                std::lock_guard<std::mutex> cacheLock(cacheMutex_);
+                textureCache_[raw.url] = entry;
             }
+            if (!boxAlive) continue;
+            if (!raw.background) invalidateIntrinsicWidths();  // sizes change; table columns measured the placeholder
+            applyImage(raw.box, raw.background, entry.textureId, entry.svgData, entry.width, entry.height);
         }
+
         rawImages_.clear();
     }
     
@@ -220,6 +279,17 @@ void LazyImageLoader::pollCompleted(std::vector<ImageResult>& results, int maxRe
         results.push_back(completedQueue_.back());
         completedQueue_.pop_back();
     }
+}
+
+uint32_t LazyImageLoader::currentFrame(uint32_t textureId) const {
+    auto it = animations_.find(textureId);
+    if (it == animations_.end()) return textureId;
+    const Animation& anim = it->second;
+    int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    int64_t t = (now - anim.startMs) % anim.endsMs.back();
+    size_t f = std::upper_bound(anim.endsMs.begin(), anim.endsMs.end(), (int)t) - anim.endsMs.begin();
+    return anim.frames[std::min(f, anim.frames.size() - 1)];
 }
 
 void LazyImageLoader::workerThread() {
@@ -268,10 +338,124 @@ void LazyImageLoader::queueError(const PendingImage& pending, const char* text, 
     raw.generation = pending.generation;
     raw.tabId = pending.tabId;
     raw.tabGeneration = pending.tabGeneration;
+    raw.background = pending.background;
     raw.errorText = text;
+
     raw.errorColor = color;
     rawImages_.push_back(std::move(raw));
 }
+
+namespace {
+
+int hexValue(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+std::string percentDecode(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '%' && i + 2 < s.size() && hexValue(s[i + 1]) >= 0 && hexValue(s[i + 2]) >= 0) {
+            out += (char)(hexValue(s[i + 1]) * 16 + hexValue(s[i + 2]));
+            i += 2;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+bool base64Decode(const std::string& in, std::vector<uint8_t>& out) {
+    uint32_t acc = 0;
+    int bits = 0;
+    for (char c : in) {
+        int v;
+        if (c >= 'A' && c <= 'Z') v = c - 'A';
+        else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') v = c - '0' + 52;
+        else if (c == '+' || c == '-') v = 62;
+        else if (c == '/' || c == '_') v = 63;
+        else if (c == '=' || std::isspace((unsigned char)c)) continue;
+        else return false;
+        acc = (acc << 6) | (uint32_t)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back((uint8_t)(acc >> bits));
+        }
+    }
+    return true;
+}
+
+// data:[<mediatype>][;base64],<data>
+bool decodeDataUrl(const std::string& url, std::vector<uint8_t>& data, std::string& contentType) {
+    size_t comma = url.find(',');
+    if (comma == std::string::npos) return false;
+    std::string meta = url.substr(5, comma - 5);
+    std::transform(meta.begin(), meta.end(), meta.begin(), ::tolower);
+    bool isBase64 = meta.size() >= 7 && meta.compare(meta.size() - 7, 7, ";base64") == 0;
+    contentType = meta.substr(0, meta.find(';'));
+    std::string payload = percentDecode(url.substr(comma + 1));
+    if (isBase64) return base64Decode(payload, data);
+    data.assign(payload.begin(), payload.end());
+    return true;
+}
+
+// The format from the first bytes; "" when they say nothing
+std::string sniffFormat(const std::vector<uint8_t>& data) {
+    const uint8_t* b = data.data();
+    size_t n = data.size();
+    if (n >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') return "png";
+    if (n >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return "jpeg";
+    if (n >= 6 && std::memcmp(b, "GIF8", 4) == 0) return "gif";
+    if (n >= 12 && std::memcmp(b, "RIFF", 4) == 0 && std::memcmp(b + 8, "WEBP", 4) == 0) return "webp";
+    if (n >= 2 && b[0] == 'B' && b[1] == 'M') return "bmp";
+    // SVG: text whose first element (after a BOM, <?xml?>, comments, doctype) is <svg
+    std::string head((const char*)b, std::min(n, (size_t)4096));
+    size_t i = (head.size() >= 3 && (uint8_t)head[0] == 0xEF && (uint8_t)head[1] == 0xBB &&
+                (uint8_t)head[2] == 0xBF) ? 3 : 0;
+    while (i < head.size()) {
+        while (i < head.size() && std::isspace((unsigned char)head[i])) i++;
+        if (head.compare(i, 4, "<svg") == 0) return "svg";
+        if (head.compare(i, 4, "<!--") == 0) {
+            size_t e = head.find("-->", i);
+            if (e == std::string::npos) break;
+            i = e + 3;
+        } else if (head.compare(i, 2, "<?") == 0 || head.compare(i, 2, "<!") == 0) {
+            size_t e = head.find('>', i);
+            if (e == std::string::npos) break;
+            i = e + 1;
+        } else {
+            break;
+        }
+    }
+    return "";
+}
+
+std::string formatFromType(std::string type) {
+    std::transform(type.begin(), type.end(), type.begin(), ::tolower);
+    if (type.find("svg") != std::string::npos) return "svg";
+    if (type.find("image/") != std::string::npos) return "raster";
+    return "";
+}
+
+std::string formatFromExtension(std::string url) {
+    std::transform(url.begin(), url.end(), url.begin(), ::tolower);
+    url = url.substr(0, url.find_first_of("?#"));
+    auto ends = [&](const char* ext) {
+        size_t len = std::strlen(ext);
+        return url.size() >= len && url.compare(url.size() - len, len, ext) == 0;
+    };
+    if (ends(".svg")) return "svg";
+    if (ends(".png") || ends(".jpg") || ends(".jpeg") || ends(".gif") || ends(".webp") || ends(".bmp"))
+        return "raster";
+    return "";
+}
+
+} // namespace
 
 ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
     ImageResult result;
@@ -280,20 +464,30 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
     result.textureId = 0;
     result.width = 0;
     result.height = 0;
-    
+
     // Guard against stale box pointer (can happen after page navigation/repaint)
     if (!pending.box) {
         result.error = "Box pointer is null";
         return result;
     }
-    
+    // Every failure leaves a placeholder, never a box stuck on "Loading..."
+    auto fail = [&](const std::string& error, const char* text, uint32_t color) {
+        result.error = error;
+        std::cout << "[LazyImageLoader] " << error << ": " << pending.url.substr(0, 120) << std::endl;
+        queueError(pending, text, color);
+        return result;
+    };
+
     try {
         std::vector<uint8_t> data;
         std::string contentType;
-        
-        // Handle file:// URLs — read from local filesystem
-        if (pending.url.substr(0, 7) == "file://") {
-            std::string filePath = pending.url.substr(7);
+
+        if (pending.url.compare(0, 5, "data:") == 0) {
+            if (!decodeDataUrl(pending.url, data, contentType))
+                return fail("Bad data: URL", "[IMG: Decode Failed]", 0xFF0000);
+        } else if (pending.url.substr(0, 7) == "file://") {
+            // Handle file:// URLs — read from local filesystem
+            std::string filePath = percentDecode(pending.url.substr(7));
             std::ifstream file(filePath, std::ios::binary);
             if (!file.is_open()) {
                 // Try stripping leading slash if present
@@ -301,200 +495,55 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
                     file.open(filePath.substr(1), std::ios::binary);
                 }
             }
-            if (!file.is_open()) {
-                result.error = "File not found: " + filePath;
-                return result;
-            }
+            if (!file.is_open()) return fail("File not found", "[IMG: Not Found]", 0xFF6600);
             data = std::vector<uint8_t>((std::istreambuf_iterator<char>(file)),
                                          std::istreambuf_iterator<char>());
-            // Detect content type from extension
-            std::string lower = filePath;
-            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-            if (lower.rfind(".svg") == lower.length() - 4)
-                contentType = "image/svg+xml";
-            else if (lower.rfind(".png") == lower.length() - 4)
-                contentType = "image/png";
-            else if (lower.rfind(".jpg") == lower.length() - 4 ||
-                     lower.rfind(".jpeg") == lower.length() - 5)
-                contentType = "image/jpeg";
         } else {
-            // HTTP fetch
+            // HTTP fetch; certificates are verified like page loads (#14)
             Zepra::Networking::HttpClientConfig config;
             config.connectTimeoutMs = 10000;
             config.readTimeoutMs = 30000;
             config.followRedirects = true;
             config.maxRedirects = 10;
-            config.verifySsl = false;
+            config.verifySsl = true;
             config.userAgent = "ZepraBrowser/1.0 (NeolyxOS)";
-            
+
             Zepra::Networking::HttpClient client(config);
             Zepra::Networking::HttpRequest request(Zepra::Networking::HttpMethod::GET, pending.url);
-            
             auto response = client.send(request);
-            
             if (!response.isSuccess()) {
-                result.error = response.error();
-                return result;
+                std::string error = response.error().empty()
+                    ? "HTTP " + std::to_string(response.statusCode()) : response.error();
+                return fail(error, "[IMG: Load Failed]", 0xFF6600);
             }
-            
             data = response.body();
             contentType = response.header("Content-Type");
+            // A body shorter than its Content-Length (NXNet's TLS reader can stop
+            // early) is still decoded: a cut GIF or JPEG shows its top part
+            std::string length = response.header("Content-Length");
+            if (!length.empty() && data.size() < std::strtoull(length.c_str(), nullptr, 10)) {
+                std::cout << "[LazyImageLoader] Truncated (" << data.size() << " of " << length
+                          << " bytes): " << pending.url.substr(0, 120) << std::endl;
+            }
+
         }
-        
-        
-        if (data.empty()) {
-            result.error = "Empty response";
-            return result;
-        }
-        // =====================================================================
-        // Image Format Detection (Following Firefox's DecoderFactory pattern)
-        // Tier 1: Content-Type header (most reliable)
-        // Tier 2: URL extension fallback
-        // Tier 3: Magic bytes verification
-        // =====================================================================
-        
-        bool isSvg = false;
-        bool isRaster = false;
-        std::string detectedFormat = "unknown";
-        
-        // Tier 1: Content-Type header (most reliable - Firefox primary method)
-        std::transform(contentType.begin(), contentType.end(), contentType.begin(), ::tolower);
-        
-        if (contentType.find("image/svg") != std::string::npos ||
-            contentType.find("svg+xml") != std::string::npos) {
-            isSvg = true;
-            detectedFormat = "svg";
-        } else if (contentType.find("image/png") != std::string::npos) {
-            isRaster = true;
-            detectedFormat = "png";
-        } else if (contentType.find("image/jpeg") != std::string::npos ||
-                   contentType.find("image/jpg") != std::string::npos) {
-            isRaster = true;
-            detectedFormat = "jpeg";
-        } else if (contentType.find("image/gif") != std::string::npos) {
-            isRaster = true;
-            detectedFormat = "gif";
-        } else if (contentType.find("image/webp") != std::string::npos) {
-            isRaster = true;
-            detectedFormat = "webp";
-        } else if (contentType.find("image/bmp") != std::string::npos) {
-            isRaster = true;
-            detectedFormat = "bmp";
-        } else if (contentType.find("image/") != std::string::npos) {
-            // Generic image type - let stb_image try to decode
-            isRaster = true;
-            detectedFormat = "generic-image";
-        }
-        
-        // Tier 2: URL extension fallback (when Content-Type is missing or generic)
-        if (!isSvg && !isRaster) {
-            std::string urlLower = pending.url;
-            std::transform(urlLower.begin(), urlLower.end(), urlLower.begin(), ::tolower);
-            
-            // Remove query params for extension check
-            size_t queryPos = urlLower.find('?');
-            if (queryPos != std::string::npos) {
-                urlLower = urlLower.substr(0, queryPos);
-            }
-            
-            if (urlLower.rfind(".svg") == urlLower.length() - 4) {
-                isSvg = true;
-                detectedFormat = "svg-url";
-            } else if (urlLower.rfind(".png") == urlLower.length() - 4) {
-                isRaster = true;
-                detectedFormat = "png-url";
-            } else if (urlLower.rfind(".jpg") == urlLower.length() - 4 ||
-                       urlLower.rfind(".jpeg") == urlLower.length() - 5) {
-                isRaster = true;
-                detectedFormat = "jpeg-url";
-            } else if (urlLower.rfind(".gif") == urlLower.length() - 4) {
-                isRaster = true;
-                detectedFormat = "gif-url";
-            } else if (urlLower.rfind(".webp") == urlLower.length() - 5) {
-                isRaster = true;
-                detectedFormat = "webp-url";
-            } else if (urlLower.rfind(".bmp") == urlLower.length() - 4) {
-                isRaster = true;
-                detectedFormat = "bmp-url";
-            }
-        }
-        
-        // Tier 3: Magic bytes detection (content sniffing - last resort)
-        if (!isSvg && !isRaster && data.size() > 16) {
-            const uint8_t* bytes = data.data();
-            
-            // PNG: 89 50 4E 47 0D 0A 1A 0A
-            if (bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47) {
-                isRaster = true;
-                detectedFormat = "png-magic";
-            }
-            // JPEG: FF D8 FF
-            else if (bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) {
-                isRaster = true;
-                detectedFormat = "jpeg-magic";
-            }
-            // GIF: GIF89a or GIF87a
-            else if (bytes[0] == 'G' && bytes[1] == 'I' && bytes[2] == 'F' &&
-                     bytes[3] == '8' && (bytes[4] == '9' || bytes[4] == '7') && bytes[5] == 'a') {
-                isRaster = true;
-                detectedFormat = "gif-magic";
-            }
-            // WebP: RIFF....WEBP
-            else if (bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F' &&
-                     data.size() > 12 && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P') {
-                isRaster = true;
-                detectedFormat = "webp-magic";
-            }
-            // BMP: BM
-            else if (bytes[0] == 'B' && bytes[1] == 'M') {
-                isRaster = true;
-                detectedFormat = "bmp-magic";
-            }
-            // SVG: Check XML/SVG markers at start
-            else if (data.size() > 5) {
-                const char* content = (const char*)bytes;
-                if (strncmp(content, "<?xml", 5) == 0 ||
-                    strncmp(content, "<svg", 4) == 0 ||
-                    (data.size() > 15 && strncmp(content, "<!DOCTYPE svg", 13) == 0)) {
-                    isSvg = true;
-                    detectedFormat = "svg-magic";
-                } else if (data.size() > 100) {
-                    // Deep search for SVG in first 100 bytes
-                    std::string firstBytes(content, std::min((size_t)100, data.size()));
-                    if (firstBytes.find("<svg") != std::string::npos) {
-                        isSvg = true;
-                        detectedFormat = "svg-deep";
-                    }
-                }
-            }
-        }
-        
-        // Debug logging
-        // std::cout << "[LazyImageLoader] Format detected: " << detectedFormat 
-        //           << " (CT: " << (contentType.empty() ? "none" : contentType.substr(0, 30)) << ")" << std::endl;
-        
+
+        if (data.empty()) return fail("Empty response", "[IMG: Load Failed]", 0xFF6600);
+
+        // Format: the bytes first (servers and file names get it wrong), then
+        // Content-Type / data: media type, then the URL's extension
+        std::string format = sniffFormat(data);
+        if (format.empty()) format = formatFromType(contentType);
+        if (format.empty()) format = formatFromExtension(pending.url);
+
         // Handle SVG — queue data for main-thread processing (never write box from worker)
-        if (isSvg) {
-            // Parse viewBox for sizing (quick extraction)
+        if (format == "svg") {
             std::string svgStr(data.begin(), data.end());
-            float svgW = 24, svgH = 24;
-            auto vbPos = svgStr.find("viewBox");
-            if (vbPos != std::string::npos) {
-                auto qStart = svgStr.find('"', vbPos);
-                auto qEnd = svgStr.find('"', qStart + 1);
-                if (qStart != std::string::npos && qEnd != std::string::npos) {
-                    std::string vb = svgStr.substr(qStart + 1, qEnd - qStart - 1);
-                    float vx, vy, vw, vh;
-                    if (sscanf(vb.c_str(), "%f %f %f %f", &vx, &vy, &vw, &vh) == 4) {
-                        svgW = vw; svgH = vh;
-                    }
-                }
-            }
-            
-            // Constrain to reasonable size
-            if (svgW > 256) { svgH *= 256 / svgW; svgW = 256; }
-            if (svgH > 256) { svgW *= 256 / svgH; svgH = 256; }
-            
+            float svgW = 0, svgH = 0;
+            if (!SvgRaster::intrinsicSize(svgStr, svgW, svgH))
+                return fail("Not an SVG document", "[IMG: Decode Failed]", 0xFF0000);
+            int w = std::max(1, (int)std::lround(svgW)), h = std::max(1, (int)std::lround(svgH));
+
             // Queue SVG data for main thread (do NOT write to box here)
             {
                 std::lock_guard<std::mutex> lock(rawMutex_);
@@ -503,47 +552,71 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
                 raw.generation = pending.generation;
                 raw.tabId = pending.tabId;
                 raw.tabGeneration = pending.tabGeneration;
-                raw.width = (int)svgW;
-                raw.height = (int)svgH;
-                // Store SVG XML as pixel data marker (main thread detects this)
+                raw.background = pending.background;
+                raw.url = pending.url;
+                // Store SVG XML as pixel data marker; negative width = SVG flag
                 raw.pixels.assign(data.begin(), data.end());
-                // Tag as SVG by setting negative width (main thread checks this)
-                raw.width = -(int)svgW;  // Negative = SVG flag
-                raw.height = (int)svgH;
+                raw.width = -w;
+                raw.height = h;
                 rawImages_.push_back(std::move(raw));
             }
-            
+
             result.success = true;
-            result.width = (int)svgW;
-            result.height = (int)svgH;
-            // std::cout << "[LazyImageLoader] SVG queued for main thread: " 
-            //           << pending.url.substr(pending.url.rfind('/') + 1) << std::endl;
+            result.width = w;
+            result.height = h;
             return result;
         }
-        
+
         // Unknown format - show warning instead of trying to decode
-        if (!isRaster) {
-            result.error = "Unknown image format (" + detectedFormat + ")";
-            queueError(pending, "[IMG: Unknown]", 0xFF6600); // Orange for warnings
-            // std::cout << "[LazyImageLoader] Skipping unknown format: " << pending.url.substr(0, 80) << std::endl;
-            return result;
+        if (format.empty()) {
+            return fail("Unknown image format (" + (contentType.empty() ? std::string("no type") : contentType) + ")",
+                        "[IMG: Unknown]", 0xFF6600);  // Orange for warnings
         }
-        
-        // Decode raster image (PNG, JPG, etc.)
-        int w, h, channels;
-        unsigned char* pixels = stbi_load_from_memory(data.data(), (int)data.size(), 
-                                                       &w, &h, &channels, 4); // Force RGBA
-        
-        if (!pixels) {
-            result.error = stbi_failure_reason();
-            queueError(pending, "[IMG: Decode Failed]", 0xFF0000);
-            return result;
+
+        // Decode raster image: WebP through libwebp (NXRender's WebPDecoder),
+        // PNG, JPEG, GIF (all frames) and BMP through stb_image
+        int w = 0, h = 0;
+        std::vector<uint8_t> rgba;
+        std::vector<int> delaysMs;  // animated GIF frames
+        if (format == "webp") {
+            NXRender::DecodedImage image = NXRender::WebPDecoder().decode(data.data(), data.size());
+            if (!image.valid()) return fail("WebP decode failed", "[IMG: Decode Failed]", 0xFF0000);
+            w = image.width;
+            h = image.height;
+            rgba = std::move(image.pixels);
+        } else if (format == "gif") {
+            // Every frame, composited by stb (disposal and transparency applied)
+            int frames = 0, channels;
+            int* delays = nullptr;
+            unsigned char* pixels = stbi_load_gif_from_memory(data.data(), (int)data.size(), &delays,
+                                                              &w, &h, &frames, &channels, 4);
+            if (!pixels) return fail(stbi_failure_reason(), "[IMG: Decode Failed]", 0xFF0000);
+            // Keep at most 64 MB of frames; a longer animation stops early
+            size_t frameBytes = (size_t)w * h * 4;
+            int kept = std::max(1, std::min(frames, (int)((64u << 20) / std::max<size_t>(frameBytes, 1))));
+            rgba.assign(pixels, pixels + frameBytes * kept);
+            if (kept > 1) {
+                for (int f = 0; f < kept; f++) {
+                    // As in other browsers, delays of 10 ms or less play at 100 ms
+                    int d = delays ? delays[f] : 100;
+                    delaysMs.push_back(d <= 10 ? 100 : d);
+                }
+            }
+            stbi_image_free(pixels);
+            if (delays) stbi_image_free(delays);
+        } else {
+            int channels;
+            unsigned char* pixels = stbi_load_from_memory(data.data(), (int)data.size(),
+                                                           &w, &h, &channels, 4); // Force RGBA
+            if (!pixels) return fail(stbi_failure_reason(), "[IMG: Decode Failed]", 0xFF0000);
+            rgba.assign(pixels, pixels + (size_t)w * h * 4);
+            stbi_image_free(pixels);
         }
-        
+
         result.width = w;
         result.height = h;
         result.success = true;
-        
+
         // Queue raw pixels for main thread texture creation
         {
             std::lock_guard<std::mutex> lock(rawMutex_);
@@ -552,23 +625,20 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
             raw.generation = pending.generation;
             raw.tabId = pending.tabId;
             raw.tabGeneration = pending.tabGeneration;
+            raw.background = pending.background;
             raw.url = pending.url;
             raw.width = w;
             raw.height = h;
-            raw.pixels.assign(pixels, pixels + (w * h * 4));
+            raw.pixels = std::move(rgba);
+            raw.delaysMs = std::move(delaysMs);
             rawImages_.push_back(std::move(raw));
         }
-        
-        stbi_image_free(pixels);
-        
-        // std::cout << "[LazyImageLoader] Loaded: " << pending.url.substr(pending.url.rfind('/') + 1) 
-        //           << " (" << w << "x" << h << ")" << std::endl;
-        
+
     } catch (const std::exception& e) {
         result.error = e.what();
         queueError(pending, "[IMG: Error]", 0xFF0000);
     }
-    
+
     return result;
 }
 

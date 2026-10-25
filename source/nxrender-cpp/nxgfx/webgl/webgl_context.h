@@ -3,20 +3,31 @@
 
 #pragma once
 
+/**
+ * @file webgl_context.h
+ * @brief WebGL 1.0 for <canvas>, drawn with desktop OpenGL into an FBO
+ *
+ * Page scripts never touch GL: the bindings record WebGLCommands, and
+ * flush() replays them into the drawing buffer (an FBO with a colour
+ * texture) when a GL context is current, normally while the browser
+ * paints the canvas. flush() saves the browser's GL state, applies the
+ * WebGL state left by the previous flush, replays, and restores the
+ * browser's state. Shaders are translated from GLSL ES 1.00 to GLSL 1.20.
+ */
+
 #include <cstdint>
+#include <map>
 #include <string>
-#include <vector>
 #include <unordered_map>
+#include <vector>
 
 namespace NXRender {
 
-// ==================================================================
-// WebGL Rendering Context
-// Maps WebGL 1.0 API to OpenGL ES 2.0 / desktop GL
-// ==================================================================
-
 // WebGL constants (subset matching GL ES 2.0)
 namespace GL {
+    constexpr uint32_t DEPTH_BUFFER_BIT = 0x00000100;
+    constexpr uint32_t STENCIL_BUFFER_BIT = 0x00000400;
+    constexpr uint32_t COLOR_BUFFER_BIT = 0x00004000;
     constexpr uint32_t VERTEX_SHADER = 0x8B31;
     constexpr uint32_t FRAGMENT_SHADER = 0x8B30;
     constexpr uint32_t ARRAY_BUFFER = 0x8892;
@@ -37,6 +48,7 @@ namespace GL {
     constexpr uint32_t POINTS = 0x0000;
     constexpr uint32_t TEXTURE_2D = 0x0DE1;
     constexpr uint32_t TEXTURE_CUBE_MAP = 0x8513;
+    constexpr uint32_t TEXTURE0 = 0x84C0;
     constexpr uint32_t RGBA = 0x1908;
     constexpr uint32_t RGB = 0x1907;
     constexpr uint32_t LUMINANCE = 0x1909;
@@ -50,183 +62,212 @@ namespace GL {
     constexpr uint32_t STENCIL_TEST = 0x0B90;
     constexpr uint32_t SCISSOR_TEST = 0x0C11;
     constexpr uint32_t CULL_FACE = 0x0B44;
+    constexpr uint32_t DITHER = 0x0BD0;
+    constexpr uint32_t POLYGON_OFFSET_FILL = 0x8037;
+    constexpr uint32_t SAMPLE_ALPHA_TO_COVERAGE = 0x809E;
+    constexpr uint32_t SAMPLE_COVERAGE = 0x80A0;
+    constexpr uint32_t UNPACK_ALIGNMENT = 0x0CF5;
+    constexpr uint32_t PACK_ALIGNMENT = 0x0D05;
+    constexpr uint32_t UNPACK_FLIP_Y_WEBGL = 0x9240;
+    constexpr uint32_t UNPACK_PREMULTIPLY_ALPHA_WEBGL = 0x9241;
 }
 
-struct WebGLShader {
-    uint32_t id = 0;
-    uint32_t type = 0;
-    std::string source;
-    bool compiled = false;
-    std::string infoLog;
+/// getContext("webgl", attributes)
+struct WebGLContextAttributes {
+    bool alpha = true;
+    bool depth = true;
+    bool stencil = false;
+    bool antialias = true;  // 4x MSAA when the driver has multisampled renderbuffers
+    bool premultipliedAlpha = true;
+    bool preserveDrawingBuffer = false;
 };
 
-struct WebGLProgram {
-    uint32_t id = 0;
-    uint32_t vs = 0, fs = 0;
-    bool linked = false;
-    std::string infoLog;
-    std::unordered_map<std::string, int> uniformLocations;
-    std::unordered_map<std::string, int> attribLocations;
+/// One recorded WebGL call. Object arguments are handles from newHandle().
+enum class WebGLOp : uint8_t {
+    CreateShader,        // u0 handle, u1 type
+    ShaderSource,        // u0 shader, text
+    CompileShader,       // u0 shader
+    DeleteShader,        // u0 shader
+    CreateProgram,       // u0 handle
+    AttachShader,        // u0 program, u1 shader
+    DetachShader,        // u0 program, u1 shader
+    BindAttribLocation,  // u0 program, u1 index, text name
+    LinkProgram,         // u0 program
+    UseProgram,          // u0 program (0 = none)
+    DeleteProgram,       // u0 program
+    CreateBuffer,        // u0 handle
+    BindBuffer,          // u0 target, u1 buffer
+    BufferData,          // u0 target, u1 usage, u2 size; data (empty = zeroed)
+    BufferSubData,       // u0 target, u1 offset; data
+    DeleteBuffer,        // u0 buffer
+    CreateTexture,       // u0 handle
+    BindTexture,         // u0 target, u1 texture
+    ActiveTexture,       // u0 unit enum (TEXTURE0 + i)
+    TexImage2D,          // u0 target, u1 level, u2 internalformat, u3 width, u4 height, u5 format, u6 type; data
+    TexSubImage2D,       // u0 target, u1 level, u2 x, u3 y, u4 width, u5 height, u6 format, u7 type; data
+    TexParameteri,       // u0 target, u1 pname, u2 param
+    GenerateMipmap,      // u0 target
+    DeleteTexture,       // u0 texture
+    EnableVertexAttribArray,   // u0 index
+    DisableVertexAttribArray,  // u0 index
+    VertexAttribPointer, // u0 index, u1 size, u2 type, u3 normalized, u4 stride, u5 offset
+    VertexAttrib4f,      // u0 index, f0..f3
+    Uniform,             // u0 program, u1 kind (UniformKind), u2 count, u3 transpose; text name; data
+    Viewport,            // u0..u3 (signed as int32)
+    Scissor,             // u0..u3
+    ClearColor,          // f0..f3
+    ClearDepth,          // f0
+    ClearStencil,        // u0
+    Clear,               // u0 mask
+    Enable,              // u0 cap
+    Disable,             // u0 cap
+    BlendFuncSeparate,   // u0 srcRGB, u1 dstRGB, u2 srcAlpha, u3 dstAlpha
+    BlendEquationSeparate, // u0 rgb, u1 alpha
+    BlendColor,          // f0..f3
+    DepthFunc,           // u0
+    DepthMask,           // u0
+    DepthRange,          // f0, f1
+    ColorMask,           // u0..u3
+    StencilFuncSeparate, // u0 face, u1 func, u2 ref, u3 mask
+    StencilOpSeparate,   // u0 face, u1 fail, u2 zfail, u3 zpass
+    StencilMaskSeparate, // u0 face, u1 mask
+    CullFace,            // u0
+    FrontFace,           // u0
+    LineWidth,           // f0
+    PolygonOffset,       // f0, f1
+    PixelStorei,         // u0 pname, u1 param
+    DrawArrays,          // u0 mode, u1 first, u2 count
+    DrawElements,        // u0 mode, u1 count, u2 type, u3 offset
 };
 
-struct WebGLBuffer {
-    uint32_t id = 0;
-    uint32_t target = 0;
-    size_t size = 0;
-};
+/// The value layout of a WebGLOp::Uniform
+enum class UniformKind : uint8_t { F1, F2, F3, F4, I1, I2, I3, I4, Mat2, Mat3, Mat4 };
 
-struct WebGLTexture {
-    uint32_t id = 0;
-    int width = 0, height = 0;
-    uint32_t format = 0;
+struct WebGLCommand {
+    WebGLOp op;
+    uint32_t u[8] = {};
+    float f[4] = {};
+    std::string text;
+    std::vector<uint8_t> data;
 };
-
-struct WebGLFramebuffer {
-    uint32_t id = 0;
-    uint32_t colorAttachment = 0;
-    uint32_t depthAttachment = 0;
-};
-
-struct WebGLRenderbuffer {
-    uint32_t id = 0;
-    int width = 0, height = 0;
-    uint32_t format = 0;
-};
-
-struct WebGLUniformLocation {
-    int location = -1;
-    uint32_t program = 0;
-};
-
-// ==================================================================
-// WebGLRenderingContext
-// ==================================================================
 
 class WebGLRenderingContext {
 public:
-    WebGLRenderingContext(int width, int height);
+    WebGLRenderingContext(int width, int height, WebGLContextAttributes attributes = {});
+    /// Deletes the GL objects when a GL context is current (else they are left to the context)
     ~WebGLRenderingContext();
+    WebGLRenderingContext(const WebGLRenderingContext&) = delete;
+    WebGLRenderingContext& operator=(const WebGLRenderingContext&) = delete;
 
     int drawingBufferWidth() const { return width_; }
     int drawingBufferHeight() const { return height_; }
+    const WebGLContextAttributes& attributes() const { return attributes_; }
+    /// The canvas size changed: the drawing buffer is reallocated and cleared
+    void resize(int width, int height);
 
-    // Shader
-    WebGLShader createShader(uint32_t type);
-    void shaderSource(WebGLShader& shader, const std::string& source);
-    void compileShader(WebGLShader& shader);
-    std::string getShaderInfoLog(const WebGLShader& shader);
-    bool getShaderParameter(const WebGLShader& shader, uint32_t pname);
-    void deleteShader(WebGLShader& shader);
+    // ---- Recording (no GL needed) ----
+    uint32_t newHandle() { return nextHandle_++; }
+    void record(WebGLCommand command);
+    size_t pendingCommands() const { return pending_.size(); }
+    const std::vector<WebGLCommand>& pending() const { return pending_; }
+    size_t pendingBytes() const { return pendingBytes_; }
 
-    // Program
-    WebGLProgram createProgram();
-    void attachShader(WebGLProgram& program, const WebGLShader& shader);
-    void linkProgram(WebGLProgram& program);
-    void useProgram(const WebGLProgram& program);
-    std::string getProgramInfoLog(const WebGLProgram& program);
-    bool getProgramParameter(const WebGLProgram& program, uint32_t pname);
-    void deleteProgram(WebGLProgram& program);
-    void detachShader(WebGLProgram& program, const WebGLShader& shader);
+    // ---- Execution (a GL context must be current) ----
+    /// True when this thread has a current GL context
+    static bool glAvailable();
+    /// Replays the pending commands into the drawing buffer (and resolves it into
+    /// texture() when antialiased). False without GL.
+    bool flush();
+    /// flush(), then reads RGBA bytes of a rectangle (bottom row first, as GL)
+    bool readPixels(int x, int y, int width, int height, uint8_t* rgba);
+    /// The drawing buffer's colour texture (bottom row first), 0 before the first flush
+    uint32_t texture() const { return colorTexture_; }
+    /// The browser composited the drawing buffer: without preserveDrawingBuffer the
+    /// next frame starts from a cleared buffer
+    void markPresented() { presented_ = true; }
 
-    // Uniform
-    WebGLUniformLocation getUniformLocation(const WebGLProgram& program, const std::string& name);
-    void uniform1f(const WebGLUniformLocation& loc, float v);
-    void uniform2f(const WebGLUniformLocation& loc, float v0, float v1);
-    void uniform3f(const WebGLUniformLocation& loc, float v0, float v1, float v2);
-    void uniform4f(const WebGLUniformLocation& loc, float v0, float v1, float v2, float v3);
-    void uniform1i(const WebGLUniformLocation& loc, int v);
-    void uniformMatrix3fv(const WebGLUniformLocation& loc, bool transpose, const float* value);
-    void uniformMatrix4fv(const WebGLUniformLocation& loc, bool transpose, const float* value);
+    /// What the driver said about a shader or program; unknown until it was replayed
+    struct CompileResult {
+        bool known = false;
+        bool ok = true;
+        std::string log;
+    };
+    CompileResult shaderResult(uint32_t shader) const;
+    CompileResult programResult(uint32_t program) const;
 
-    // Attribute
-    int getAttribLocation(const WebGLProgram& program, const std::string& name);
-    void enableVertexAttribArray(int index);
-    void disableVertexAttribArray(int index);
-    void vertexAttribPointer(int index, int size, uint32_t type,
-                             bool normalized, int stride, size_t offset);
-
-    // Buffer
-    WebGLBuffer createBuffer();
-    void bindBuffer(uint32_t target, const WebGLBuffer& buffer);
-    void bufferData(uint32_t target, const void* data, size_t size, uint32_t usage);
-    void bufferSubData(uint32_t target, size_t offset, const void* data, size_t size);
-    void deleteBuffer(WebGLBuffer& buffer);
-
-    // Texture
-    WebGLTexture createTexture();
-    void bindTexture(uint32_t target, const WebGLTexture& texture);
-    void texImage2D(uint32_t target, int level, uint32_t internalFormat,
-                    int width, int height, int border,
-                    uint32_t format, uint32_t type, const void* pixels);
-    void texSubImage2D(uint32_t target, int level, int xoffset, int yoffset,
-                       int width, int height, uint32_t format, uint32_t type, const void* pixels);
-    void texParameteri(uint32_t target, uint32_t pname, int param);
-    void generateMipmap(uint32_t target);
-    void activeTexture(uint32_t textureUnit);
-    void deleteTexture(WebGLTexture& texture);
-
-    // Framebuffer
-    WebGLFramebuffer createFramebuffer();
-    void bindFramebuffer(uint32_t target, const WebGLFramebuffer& fbo);
-    void framebufferTexture2D(uint32_t target, uint32_t attachment,
-                              uint32_t texTarget, const WebGLTexture& texture, int level);
-    void framebufferRenderbuffer(uint32_t target, uint32_t attachment,
-                                 uint32_t rbTarget, const WebGLRenderbuffer& rb);
-    uint32_t checkFramebufferStatus(uint32_t target);
-    void deleteFramebuffer(WebGLFramebuffer& fbo);
-
-    // Renderbuffer
-    WebGLRenderbuffer createRenderbuffer();
-    void bindRenderbuffer(uint32_t target, const WebGLRenderbuffer& rb);
-    void renderbufferStorage(uint32_t target, uint32_t format, int width, int height);
-    void deleteRenderbuffer(WebGLRenderbuffer& rb);
-
-    // Drawing
-    void drawArrays(uint32_t mode, int first, int count);
-    void drawElements(uint32_t mode, int count, uint32_t type, size_t offset);
-
-    // State
-    void viewport(int x, int y, int width, int height);
-    void scissor(int x, int y, int width, int height);
-    void clearColor(float r, float g, float b, float a);
-    void clearDepth(float depth);
-    void clearStencil(int s);
-    void clear(uint32_t mask);
-    void enable(uint32_t cap);
-    void disable(uint32_t cap);
-    void blendFunc(uint32_t sfactor, uint32_t dfactor);
-    void blendFuncSeparate(uint32_t srcRGB, uint32_t dstRGB, uint32_t srcAlpha, uint32_t dstAlpha);
-    void blendEquation(uint32_t mode);
-    void depthFunc(uint32_t func);
-    void depthMask(bool flag);
-    void stencilFunc(uint32_t func, int ref, uint32_t mask);
-    void stencilOp(uint32_t fail, uint32_t zfail, uint32_t zpass);
-    void colorMask(bool r, bool g, bool b, bool a);
-    void cullFace(uint32_t mode);
-    void frontFace(uint32_t mode);
-    void lineWidth(float width);
-    void polygonOffset(float factor, float units);
-    void pixelStorei(uint32_t pname, int param);
-    void readPixels(int x, int y, int width, int height,
-                    uint32_t format, uint32_t type, void* pixels);
-
-    // Error
-    uint32_t getError();
-
-    // Extensions
-    std::vector<std::string> getSupportedExtensions();
-    bool getExtension(const std::string& name);
-
-    // Context
-    bool isContextLost() const { return contextLost_; }
-    void loseContext();
-    void restoreContext();
+    // ---- GLSL ----
+    /// GLSL ES 1.00 source as GLSL 1.20: #version 120, precision statements removed,
+    /// lowp/mediump/highp defined away
+    static std::string translateShader(const std::string& source);
+    /// Names declared with `qualifier` ("attribute", "uniform") at global scope, in order
+    static std::vector<std::string> declaredNames(const std::string& source, const std::string& qualifier);
 
 private:
+    struct AttribState {
+        bool enabled = false;
+        int size = 4;
+        uint32_t type = GL::FLOAT;
+        bool normalized = false;
+        int stride = 0;
+        uint32_t offset = 0;
+        uint32_t buffer = 0;  // handle
+        float value[4] = {0, 0, 0, 1};
+    };
+    // WebGL state, applied at the start of every flush
+    struct State {
+        uint32_t program = 0, arrayBuffer = 0, elementBuffer = 0;
+        uint32_t activeTexture = 0;  // unit index
+        std::map<uint32_t, uint32_t> textures2D, texturesCube;  // unit -> handle
+        AttribState attribs[16];
+        int viewport[4] = {0, 0, 0, 0};
+        int scissor[4] = {0, 0, 0, 0};
+        float clearColor[4] = {0, 0, 0, 0};
+        float clearDepth = 1;
+        int clearStencil = 0;
+        std::map<uint32_t, bool> caps;
+        uint32_t blend[4] = {1, 0, 1, 0};  // ONE, ZERO
+        uint32_t blendEquation[2] = {0x8006, 0x8006};  // FUNC_ADD
+        float blendColor[4] = {0, 0, 0, 0};
+        uint32_t depthFunc = 0x0201;  // LESS
+        bool depthMask = true;
+        float depthRange[2] = {0, 1};
+        bool colorMask[4] = {true, true, true, true};
+        uint32_t stencilFunc[2][3] = {{0x0207, 0, 0xFFFFFFFF}, {0x0207, 0, 0xFFFFFFFF}};  // ALWAYS
+        uint32_t stencilOp[2][3] = {{0x1E00, 0x1E00, 0x1E00}, {0x1E00, 0x1E00, 0x1E00}};  // KEEP
+        uint32_t stencilMask[2] = {0xFFFFFFFF, 0xFFFFFFFF};
+        uint32_t cullFace = 0x0405;   // BACK
+        uint32_t frontFace = 0x0901;  // CCW
+        float lineWidth = 1;
+        float polygonOffset[2] = {0, 0};
+        int unpackAlignment = 4;
+        bool unpackFlipY = false;
+    };
+
+    void ensureDrawingBuffer();
+    void releaseDrawingBuffer();
+    void applyState();
+    void execute(const WebGLCommand& command);
+    void clearDrawingBuffer();
+    uint32_t glName(const std::unordered_map<uint32_t, uint32_t>& names, uint32_t handle) const;
+    int uniformLocation(uint32_t program, const std::string& name);
+
     int width_, height_;
-    bool contextLost_ = false;
-    uint32_t defaultFBO_ = 0;
-    std::vector<std::string> extensions_;
+    WebGLContextAttributes attributes_;
+    uint32_t nextHandle_ = 1;
+    std::vector<WebGLCommand> pending_;
+    size_t pendingBytes_ = 0;
+    State state_;
+    bool presented_ = false;
+    bool needsClear_ = true;
+
+    // GL objects
+    uint32_t fbo_ = 0, colorTexture_ = 0, depthStencil_ = 0;
+    uint32_t msFbo_ = 0, msColor_ = 0;  // multisampled drawing buffer (antialias)
+    int bufferWidth_ = 0, bufferHeight_ = 0;
+    std::unordered_map<uint32_t, uint32_t> shaders_, programs_, buffers_, textures_;
+    std::unordered_map<uint32_t, uint32_t> shaderTypes_;
+    std::unordered_map<uint32_t, CompileResult> shaderResults_, programResults_;
+    std::map<std::pair<uint32_t, std::string>, int> uniformLocations_;
 };
 
 } // namespace NXRender

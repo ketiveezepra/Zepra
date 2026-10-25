@@ -56,12 +56,10 @@ Write start pages, themes included, for what the renderer lays out correctly now
   `align-items: center` does not centre horizontally: use `margin: 0 auto` on a
   fixed-width box, or a flex row with `justify-content: center`.
 - In a flex row, `align-items: center` does not centre items vertically: use padding.
-- `<img>` only paints inside a flex container. It ignores CSS `width`/`height`
-  and margins, and an SVG is drawn at its `viewBox` size (capped at 256 px), so
-  make the SVG the size it should appear (see `img/logo.svg`).
-- Inline `<svg>` elements are not drawn.
-- `::placeholder` styles, `text-align` inside an `<input>`, and SVG `transform`
-  on `<g>` are not applied.
+- `<img>` only paints inside a flex container. An SVG without `width`/`height`
+  attributes is sized as in other browsers (its `viewBox` ratio fitted into
+  300x150), so give such icons a CSS size (see `.pill-icon`).
+- `::placeholder` styles and `text-align` inside an `<input>` are not applied.
 - Scripts run in a per-page VM, but `Promise.then` callbacks never run (see TODO.md).
 
 ## Plugins (not built yet)

@@ -236,6 +236,7 @@ if(USE_NXRENDER)
         source/platform/src/memory/memory_pools.cpp
         source/webCore/browser/tab_suspender.cpp
         source/webCore/browser/lazy_image_loader.cpp
+        source/webCore/browser/svg_raster.cpp
         # WebCore integration
         source/integration/webcore_integration.cpp
         # NXRender-Layout bridge
@@ -559,6 +560,8 @@ if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU")
         "libiconv-2.dll"
         "libglib-2.0-0.dll"
         "libpcre2-8-0.dll"
+        "libwebp-7.dll"
+        "libsharpyuv-0.dll"
         # The exe links libgcc/libstdc++ statically, but the MSYS2 DLLs above
         # (harfbuzz, graphite2) import them, and -Bstatic does not stick for
         # winpthread once a dependency pulls -lpthread

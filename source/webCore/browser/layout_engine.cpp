@@ -9,6 +9,8 @@
 #include <iostream>
 #include <cfloat>
 #include <cmath>
+#include <cstdlib>
+#include <sstream>
 
 #include "../css/css_computed_style.hpp"
 
@@ -34,9 +36,28 @@ static void (*s_gfx_line)(float, float, float, float, uint32_t, float) = nullptr
 // Extended callbacks (set via setLayoutCallbacks2)
 static void (*s_gfx_rrect)(float, float, float, float, float, uint32_t, uint8_t) = nullptr;
 static void (*s_gfx_gradient)(float, float, float, float, uint32_t, uint32_t) = nullptr;
-static void (*s_gfx_svg)(float, float, float, float, const std::string&, const std::string&) = nullptr;
+static void (*s_gfx_svg)(float, float, float, float, const std::string&, const std::string&, uint32_t) = nullptr;
 static void (*s_gfx_canvas)(float, float, float, float, Zepra::WebCore::DOMElement*) = nullptr;
 static void (*s_gfx_hgradient)(float, float, float, float, uint32_t, uint32_t) = nullptr;
+static void (*s_push_clip)(float, float, float, float) = nullptr;
+static void (*s_pop_clip)() = nullptr;
+
+void setLayoutClipCallbacks(void (*push_clip)(float, float, float, float), void (*pop_clip)()) {
+    s_push_clip = push_clip;
+    s_pop_clip = pop_clip;
+}
+
+std::string cssUrl(const std::string& value) {
+    size_t start = value.find("url(");
+    if (start == std::string::npos) return "";
+    start += 4;
+    size_t end = value.find(')', start);
+    if (end == std::string::npos) return "";
+    std::string url = value.substr(start, end - start);
+    size_t a = url.find_first_not_of(" \t\n\r\"'");
+    size_t b = url.find_last_not_of(" \t\n\r\"'");
+    return a == std::string::npos ? "" : url.substr(a, b - a + 1);
+}
 
 // Set rendering callbacks
 void setLayoutCallbacks(
@@ -60,7 +81,7 @@ void setLayoutCallbacks(
 void setLayoutCallbacks2(
     void (*gfx_rrect)(float, float, float, float, float, uint32_t, uint8_t),
     void (*gfx_gradient)(float, float, float, float, uint32_t, uint32_t),
-    void (*gfx_svg)(float, float, float, float, const std::string&, const std::string&),
+    void (*gfx_svg)(float, float, float, float, const std::string&, const std::string&, uint32_t),
     void (*gfx_hgradient)(float, float, float, float, uint32_t, uint32_t)
 ) {
     s_gfx_rrect = gfx_rrect;
@@ -1017,6 +1038,109 @@ bool parseGradientAngle(const std::string& token, float w, float h, float& deg) 
 
 // Paints the top gradient layer of a background: linear-gradient() at any
 // angle with any number of stops; other gradient kinds get their first colour
+// One axis of background-position: a keyword, percentage or length. The
+// result is the offset of the tile in an area 'area' wide, the tile 'tile'.
+static float backgroundOffset(const std::string& token, float area, float tile) {
+    if (token == "left" || token == "top") return 0;
+    if (token == "center") return (area - tile) / 2;
+    if (token == "right" || token == "bottom") return area - tile;
+    char* end = nullptr;
+    float v = std::strtof(token.c_str(), &end);
+    if (end == token.c_str()) return 0;
+    if (*end == '%') return (area - tile) * v / 100.0f;
+    return v;
+}
+
+// background-image: url() — CSS Backgrounds 3 §3.6-3.9: size (auto, cover,
+// contain, lengths, percentages), position (keywords, %, px), repeat. The tile
+// is positioned in the padding box and the painting clipped to the border box.
+static void paintBackgroundImage(const LayoutBox& box, float x, float y) {
+    float nw = box.bgNaturalWidth, nh = box.bgNaturalHeight;
+    if (nw <= 0 || nh <= 0 || box.width <= 0 || box.height <= 0) return;
+    float ax = x + box.borderLeft, ay = y + box.borderTop;
+    float aw = box.width - box.borderLeft - box.borderRight;
+    float ah = box.height - box.borderTop - box.borderBottom;
+    if (aw <= 0 || ah <= 0) return;
+
+    auto words = [](const std::string& s) {
+        std::vector<std::string> out;
+        std::istringstream in(s);
+        for (std::string w; in >> w;) {
+            for (char& c : w) c = (char)std::tolower((unsigned char)c);
+            out.push_back(w);
+        }
+        return out;
+    };
+
+    float tw = nw, th = nh;
+    std::vector<std::string> size = words(box.bgSize);
+    if (!size.empty() && (size[0] == "cover" || size[0] == "contain")) {
+        float s = size[0] == "cover" ? std::max(aw / nw, ah / nh) : std::min(aw / nw, ah / nh);
+        tw = nw * s;
+        th = nh * s;
+    } else if (!size.empty()) {
+        auto length = [](const std::string& t, float area) -> float {
+            if (t == "auto") return -1;
+            char* end = nullptr;
+            float v = std::strtof(t.c_str(), &end);
+            if (end == t.c_str()) return -1;
+            return *end == '%' ? area * v / 100.0f : v;
+        };
+        float w = length(size[0], aw), h = size.size() > 1 ? length(size[1], ah) : -1;
+        if (w > 0 && h > 0) { tw = w; th = h; }
+        else if (w > 0) { tw = w; th = w * nh / nw; }
+        else if (h > 0) { th = h; tw = h * nw / nh; }
+    }
+    if (tw < 0.5f || th < 0.5f) return;
+
+    // Position: one or two values; a single vertical keyword is the y value
+    std::vector<std::string> pos = words(box.bgPosition);
+    std::string px = "0%", py = "0%";
+    if (pos.size() == 1) {
+        if (pos[0] == "top" || pos[0] == "bottom") { px = "center"; py = pos[0]; }
+        else { px = pos[0]; py = "center"; }
+    } else if (pos.size() >= 2) {
+        px = pos[0];
+        py = pos[1];
+        if (px == "top" || px == "bottom" || py == "left" || py == "right") std::swap(px, py);
+    }
+    float ox = backgroundOffset(px, aw, tw), oy = backgroundOffset(py, ah, th);
+
+    std::vector<std::string> rep = words(box.bgRepeat);
+    bool repeatX = true, repeatY = true;
+    if (rep.size() == 1) {
+        if (rep[0] == "no-repeat") repeatX = repeatY = false;
+        else if (rep[0] == "repeat-x") repeatY = false;
+        else if (rep[0] == "repeat-y") repeatX = false;
+    } else if (rep.size() >= 2) {
+        repeatX = rep[0] != "no-repeat";
+        repeatY = rep[1] != "no-repeat";
+    }
+
+    float x0 = ax + ox, y0 = ay + oy;
+    float x1 = x0 + tw, y1 = y0 + th;
+    if (repeatX) { x0 -= std::ceil((x0 - x) / tw) * tw; x1 = x + box.width; }
+    if (repeatY) { y0 -= std::ceil((y0 - y) / th) * th; y1 = y + box.height; }
+    if ((x1 - x0) / tw * (y1 - y0) / th > 10000) return;  // a 1px tile over a page
+
+    if (s_push_clip) s_push_clip(x, y, box.width, box.height);
+    if (box.bgSvgKey.empty() && !box.bgSvgData.empty())
+        box.bgSvgKey = "bg_svg_" + std::to_string(std::hash<std::string>()(box.bgSvgData));
+    for (float ty = y0; ty < y1 - 0.01f; ty += th) {
+        for (float tx = x0; tx < x1 - 0.01f; tx += tw) {
+            if (!box.bgSvgData.empty()) {
+                // Its own document: currentColor is black, not the box's color
+                if (s_gfx_svg) s_gfx_svg(tx, ty, tw, th, box.bgSvgData, box.bgSvgKey, 0x000000);
+            } else if (s_gfx_texture) {
+                s_gfx_texture(tx, ty, tw, th, box.bgTextureId);
+            }
+            if (!repeatX) break;
+        }
+        if (!repeatY) break;
+    }
+    if (s_pop_clip) s_pop_clip();
+}
+
 static void paintGradient(const std::string& css, float x, float y, float w, float h, uint32_t fallback) {
     size_t kind = css.find("gradient(");
     bool isLinear = kind != std::string::npos && kind >= 7 && css.compare(kind - 7, 7, "linear-") == 0;
@@ -1208,7 +1332,7 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
                 paintCells(row, screenX + row.x, screenY + row.y);
         }
     } else if (box.hasBgColor) {
-        if (!box.backgroundImage.empty() && box.backgroundImage.find("gradient") != std::string::npos &&
+        if (box.backgroundImage.find("gradient(") != std::string::npos && box.backgroundImage.find("url(") == std::string::npos &&
             s_gfx_gradient && s_gfx_rect) {
             paintGradient(box.backgroundImage, screenX, screenY, box.width, box.height, box.bgColor);
         } else if (box.borderRadius > 0 && s_gfx_rrect) {
@@ -1217,6 +1341,7 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
             s_gfx_rect(screenX, screenY, box.width, box.height, box.bgColor);
         }
     }
+    if (box.bgTextureId > 0 || !box.bgSvgData.empty()) paintBackgroundImage(box, screenX, screenY);
     
     // Draw border
     if ((box.borderTop > 0 || box.borderRight > 0 || box.borderBottom > 0 || box.borderLeft > 0) &&
@@ -1245,12 +1370,12 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
         }
     } else if (box.isImage) {
         if (!box.svgData.empty() && s_gfx_svg) {
-            // SVG: render via NxSVG on main thread
+            // SVG: rasterized on the main thread; currentColor is the element's color
             if (box.svgKey.empty()) {
                 std::hash<std::string> hasher;
                 box.svgKey = "web_svg_" + std::to_string(hasher(box.svgData));
             }
-            s_gfx_svg(screenX, screenY, box.width, box.height, box.svgData, box.svgKey);
+            s_gfx_svg(screenX, screenY, box.width, box.height, box.svgData, box.svgKey, box.color);
         } else if (box.textureId > 0 && s_gfx_texture) {
             s_gfx_texture(screenX, screenY, box.width, box.height, box.textureId);
         } else if (s_gfx_rect && s_gfx_border) {

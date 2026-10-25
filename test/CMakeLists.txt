@@ -193,6 +193,11 @@ if(TARGET webcore)
         target_link_libraries(webcore_layout_tests pthread)
     endif()
     add_test(NAME WebCoreLayoutTests COMMAND webcore_layout_tests)
+
+    # SVG rasterizing (nanosvg + rewrite pass) for <img>, inline <svg> and icons
+    add_executable(svg_raster_tests svg_raster_tests.cpp)
+    target_link_libraries(svg_raster_tests webcore GTest::gtest GTest::gtest_main)
+    add_test(NAME SvgRasterTests COMMAND svg_raster_tests)
 endif()
 
 # =============================================================================

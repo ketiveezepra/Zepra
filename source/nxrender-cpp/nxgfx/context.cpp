@@ -138,12 +138,21 @@ void GpuContext::setViewport(int x, int y, int width, int height) {
 }
 
 void GpuContext::pushClip(const Rect& rect) {
-    impl_->clipStack.push_back(rect);
+    // Nested clips intersect: drawing stays inside every enclosing clip
+    Rect clip = rect;
+    if (!impl_->clipStack.empty()) {
+        const Rect& outer = impl_->clipStack.back();
+        float x0 = std::max(clip.x, outer.x), y0 = std::max(clip.y, outer.y);
+        float x1 = std::min(clip.x + clip.width, outer.x + outer.width);
+        float y1 = std::min(clip.y + clip.height, outer.y + outer.height);
+        clip = Rect(x0, y0, std::max(0.0f, x1 - x0), std::max(0.0f, y1 - y0));
+    }
+    impl_->clipStack.push_back(clip);
     glEnable(GL_SCISSOR_TEST);
-    glScissor(static_cast<int>(rect.x), 
-              static_cast<int>(height_ - rect.y - rect.height),
-              static_cast<int>(rect.width), 
-              static_cast<int>(rect.height));
+    glScissor(static_cast<int>(clip.x),
+              static_cast<int>(height_ - clip.y - clip.height),
+              static_cast<int>(clip.width),
+              static_cast<int>(clip.height));
 }
 
 void GpuContext::popClip() {
@@ -549,6 +558,31 @@ void GpuContext::drawTexture(TextureId texture, const Rect& dest) {
     glEnd();
     
     glDisable(GL_TEXTURE_2D);
+}
+
+void GpuContext::drawRenderTarget(TextureId texture, const Rect& dest, bool premultiplied, bool opaque) {
+    if (!texture) return;
+
+    glPushAttrib(GL_COLOR_BUFFER_BIT | GL_ENABLE_BIT);
+    if (opaque) {
+        glDisable(GL_BLEND);
+    } else {
+        glEnable(GL_BLEND);
+        glBlendFunc(premultiplied ? GL_ONE : GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    }
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glColor4ub(255, 255, 255, 255);
+
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 1); glVertex2f(dest.x, dest.y);
+    glTexCoord2f(1, 1); glVertex2f(dest.x + dest.width, dest.y);
+    glTexCoord2f(1, 0); glVertex2f(dest.x + dest.width, dest.y + dest.height);
+    glTexCoord2f(0, 0); glVertex2f(dest.x, dest.y + dest.height);
+    glEnd();
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glPopAttrib();
 }
 
 void GpuContext::drawTexture(TextureId texture, const Rect& src, const Rect& dest) {

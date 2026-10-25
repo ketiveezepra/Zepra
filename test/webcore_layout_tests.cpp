@@ -556,3 +556,92 @@ TEST(Serialization, OuterAndInnerHTML) {
     EXPECT_EQ(div->innerHTML(), "x &amp; y<br><span title=\"say &quot;hi&quot;\">z</span>");
     EXPECT_EQ(div->outerHTML(), "<div id=\"a\">" + div->innerHTML() + "</div>");
 }
+
+// ---------------------------------------------------------------------------
+// Background images: the shorthand, and the tiles painted for url() images
+// ---------------------------------------------------------------------------
+
+TEST(Cascade, BackgroundShorthandSplitsItsParts) {
+    StyledDoc d("<!doctype html><div id=a></div><div id=b></div><div id=c></div>",
+                "#a { background: #ddd url('img/x.svg') no-repeat center / contain }"
+                "#b { background: linear-gradient(to right, red, blue) }"
+                "#c { background: url(a.png); background-color: #f00 }");
+    const CSSComputedStyle* a = d.style("a");
+    ASSERT_NE(a, nullptr);
+    EXPECT_EQ(a->backgroundImage, "url('img/x.svg')");
+    EXPECT_EQ(a->backgroundColor.r, 0xDD);
+    EXPECT_EQ(a->backgroundColor.a, 255);
+    EXPECT_EQ(a->backgroundRepeat, "no-repeat");
+    EXPECT_EQ(a->backgroundPosition, "center");
+    EXPECT_EQ(a->backgroundSize, "contain");
+    EXPECT_EQ(d.style("b")->backgroundImage, "linear-gradient(to right, red, blue)");
+    EXPECT_TRUE(d.style("b")->backgroundColor.isTransparent());
+    EXPECT_EQ(d.style("c")->backgroundColor.r, 0xFF);
+    EXPECT_EQ(ZepraBrowser::cssUrl(a->backgroundImage), "img/x.svg");
+}
+
+struct Tile {
+    float x, y, w, h;
+};
+std::vector<Tile> g_tiles;
+std::vector<Tile> g_clips;
+
+std::vector<Tile> paintBackgroundTiles(float w, float h, float nw, float nh, const std::string& repeat,
+                                       const std::string& size, const std::string& position) {
+    g_tiles.clear();
+    g_clips.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t) {}, [](float, float, float, float, uint32_t, float) {},
+        nullptr, nullptr, nullptr,
+        [](float x, float y, float w, float h, uint32_t) { g_tiles.push_back({x, y, w, h}); });
+    ZepraBrowser::setLayoutClipCallbacks([](float x, float y, float w, float h) { g_clips.push_back({x, y, w, h}); },
+                                         [] {});
+    LayoutBox box;
+    box.width = w;
+    box.height = h;
+    box.bgTextureId = 7;
+    box.bgNaturalWidth = nw;
+    box.bgNaturalHeight = nh;
+    box.bgRepeat = repeat;
+    box.bgSize = size;
+    box.bgPosition = position;
+    ZepraBrowser::paintBox(box, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutClipCallbacks(nullptr, nullptr);
+    return g_tiles;
+}
+
+TEST(BackgroundImage, RepeatTilesTheBox) {
+    auto tiles = paintBackgroundTiles(100, 50, 40, 20, "repeat", "", "");
+    ASSERT_EQ(tiles.size(), 9u);  // 3 across (0, 40, 80) x 3 down (0, 20, 40)
+    EXPECT_FLOAT_EQ(tiles[1].x, 40);
+    EXPECT_FLOAT_EQ(tiles[3].y, 20);
+    ASSERT_EQ(g_clips.size(), 1u);  // clipped to the box
+    EXPECT_FLOAT_EQ(g_clips[0].w, 100);
+}
+
+TEST(BackgroundImage, RepeatXWithAPercentPosition) {
+    auto tiles = paintBackgroundTiles(100, 50, 40, 20, "repeat-x", "", "0 50%");
+    ASSERT_EQ(tiles.size(), 3u);
+    EXPECT_FLOAT_EQ(tiles[0].y, 15);  // (50 - 20) * 50%
+}
+
+TEST(BackgroundImage, NoRepeatCentredAndContained) {
+    auto tiles = paintBackgroundTiles(200, 80, 40, 20, "no-repeat", "contain", "center");
+    ASSERT_EQ(tiles.size(), 1u);
+    EXPECT_FLOAT_EQ(tiles[0].w, 160);
+    EXPECT_FLOAT_EQ(tiles[0].h, 80);
+    EXPECT_FLOAT_EQ(tiles[0].x, 20);
+}
+
+TEST(BackgroundImage, CoverAndLengthSizes) {
+    auto cover = paintBackgroundTiles(100, 100, 40, 20, "no-repeat", "cover", "center");
+    ASSERT_EQ(cover.size(), 1u);
+    EXPECT_FLOAT_EQ(cover[0].w, 200);
+    EXPECT_FLOAT_EQ(cover[0].x, -50);
+    auto sized = paintBackgroundTiles(100, 100, 40, 20, "no-repeat", "32px", "right bottom");
+    ASSERT_EQ(sized.size(), 1u);
+    EXPECT_FLOAT_EQ(sized[0].h, 16);
+    EXPECT_FLOAT_EQ(sized[0].x, 68);
+    EXPECT_FLOAT_EQ(sized[0].y, 84);
+}

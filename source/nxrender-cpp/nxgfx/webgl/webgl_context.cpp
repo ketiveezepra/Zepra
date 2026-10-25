@@ -5,10 +5,19 @@
 #include "nxgfx/gl_includes.h"
 #ifdef __linux__
 #include <GL/glx.h>
-#elif _WIN32
-#include <windows.h>
+#elif defined(__APPLE__)
+#include <OpenGL/OpenGL.h>
 #endif
+#include <algorithm>
+#include <cctype>
 #include <cstring>
+#include <iostream>
+#include <regex>
+#include <type_traits>
+
+#ifndef APIENTRY
+#define APIENTRY
+#endif
 
 namespace NXRender {
 
@@ -16,108 +25,119 @@ namespace NXRender {
 // GL 2.0+ function loading (same pattern as shader.cpp)
 // ==================================================================
 
-typedef GLuint (*PFN_glCreateShader)(GLenum);
-typedef void   (*PFN_glShaderSource)(GLuint, GLsizei, const GLchar**, const GLint*);
-typedef void   (*PFN_glCompileShader)(GLuint);
-typedef void   (*PFN_glGetShaderiv)(GLuint, GLenum, GLint*);
-typedef void   (*PFN_glGetShaderInfoLog)(GLuint, GLsizei, GLsizei*, GLchar*);
-typedef GLuint (*PFN_glCreateProgram)();
-typedef void   (*PFN_glAttachShader)(GLuint, GLuint);
-typedef void   (*PFN_glDetachShader)(GLuint, GLuint);
-typedef void   (*PFN_glLinkProgram)(GLuint);
-typedef void   (*PFN_glGetProgramiv)(GLuint, GLenum, GLint*);
-typedef void   (*PFN_glGetProgramInfoLog)(GLuint, GLsizei, GLsizei*, GLchar*);
-typedef void   (*PFN_glUseProgram)(GLuint);
-typedef void   (*PFN_glDeleteShader)(GLuint);
-typedef void   (*PFN_glDeleteProgram)(GLuint);
-typedef GLint  (*PFN_glGetUniformLocation)(GLuint, const GLchar*);
-typedef GLint  (*PFN_glGetAttribLocation)(GLuint, const GLchar*);
-typedef void   (*PFN_glUniform1f)(GLint, GLfloat);
-typedef void   (*PFN_glUniform2f)(GLint, GLfloat, GLfloat);
-typedef void   (*PFN_glUniform3f)(GLint, GLfloat, GLfloat, GLfloat);
-typedef void   (*PFN_glUniform4f)(GLint, GLfloat, GLfloat, GLfloat, GLfloat);
-typedef void   (*PFN_glUniform1i)(GLint, GLint);
-typedef void   (*PFN_glUniformMatrix3fv)(GLint, GLsizei, GLboolean, const GLfloat*);
-typedef void   (*PFN_glUniformMatrix4fv)(GLint, GLsizei, GLboolean, const GLfloat*);
-typedef void   (*PFN_glEnableVertexAttribArray)(GLuint);
-typedef void   (*PFN_glDisableVertexAttribArray)(GLuint);
-typedef void   (*PFN_glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
-typedef void   (*PFN_glGenBuffers)(GLsizei, GLuint*);
-typedef void   (*PFN_glDeleteBuffers)(GLsizei, const GLuint*);
-typedef void   (*PFN_glBindBuffer)(GLenum, GLuint);
-typedef void   (*PFN_glBufferData)(GLenum, GLsizeiptr, const void*, GLenum);
-typedef void   (*PFN_glBufferSubData)(GLenum, GLintptr, GLsizeiptr, const void*);
-typedef void   (*PFN_glGenFramebuffers)(GLsizei, GLuint*);
-typedef void   (*PFN_glDeleteFramebuffers)(GLsizei, const GLuint*);
-typedef void   (*PFN_glBindFramebuffer)(GLenum, GLuint);
-typedef void   (*PFN_glFramebufferTexture2D)(GLenum, GLenum, GLenum, GLuint, GLint);
-typedef void   (*PFN_glFramebufferRenderbuffer)(GLenum, GLenum, GLenum, GLuint);
-typedef GLenum (*PFN_glCheckFramebufferStatus)(GLenum);
-typedef void   (*PFN_glGenRenderbuffers)(GLsizei, GLuint*);
-typedef void   (*PFN_glDeleteRenderbuffers)(GLsizei, const GLuint*);
-typedef void   (*PFN_glBindRenderbuffer)(GLenum, GLuint);
-typedef void   (*PFN_glRenderbufferStorage)(GLenum, GLenum, GLsizei, GLsizei);
-typedef void   (*PFN_glGenerateMipmap)(GLenum);
-typedef void   (*PFN_glActiveTexture)(GLenum);
-typedef void   (*PFN_glBlendFuncSeparate)(GLenum, GLenum, GLenum, GLenum);
-typedef void   (*PFN_glBlendEquation)(GLenum);
+namespace {
 
-#define NX_WGL(type, name) static type nx_##name = nullptr
+typedef GLuint (APIENTRY *PFN_CreateShader)(GLenum);
+typedef void   (APIENTRY *PFN_ShaderSource)(GLuint, GLsizei, const GLchar**, const GLint*);
+typedef void   (APIENTRY *PFN_CompileShader)(GLuint);
+typedef void   (APIENTRY *PFN_GetShaderiv)(GLuint, GLenum, GLint*);
+typedef void   (APIENTRY *PFN_GetShaderInfoLog)(GLuint, GLsizei, GLsizei*, GLchar*);
+typedef GLuint (APIENTRY *PFN_CreateProgram)();
+typedef void   (APIENTRY *PFN_AttachShader)(GLuint, GLuint);
+typedef void   (APIENTRY *PFN_DetachShader)(GLuint, GLuint);
+typedef void   (APIENTRY *PFN_BindAttribLocation)(GLuint, GLuint, const GLchar*);
+typedef void   (APIENTRY *PFN_LinkProgram)(GLuint);
+typedef void   (APIENTRY *PFN_GetProgramiv)(GLuint, GLenum, GLint*);
+typedef void   (APIENTRY *PFN_GetProgramInfoLog)(GLuint, GLsizei, GLsizei*, GLchar*);
+typedef void   (APIENTRY *PFN_UseProgram)(GLuint);
+typedef void   (APIENTRY *PFN_DeleteShader)(GLuint);
+typedef void   (APIENTRY *PFN_DeleteProgram)(GLuint);
+typedef GLint  (APIENTRY *PFN_GetUniformLocation)(GLuint, const GLchar*);
+typedef void   (APIENTRY *PFN_UniformNfv)(GLint, GLsizei, const GLfloat*);
+typedef void   (APIENTRY *PFN_UniformNiv)(GLint, GLsizei, const GLint*);
+typedef void   (APIENTRY *PFN_UniformMatrixNfv)(GLint, GLsizei, GLboolean, const GLfloat*);
+typedef void   (APIENTRY *PFN_EnableVertexAttribArray)(GLuint);
+typedef void   (APIENTRY *PFN_DisableVertexAttribArray)(GLuint);
+typedef void   (APIENTRY *PFN_VertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
+typedef void   (APIENTRY *PFN_VertexAttrib4f)(GLuint, GLfloat, GLfloat, GLfloat, GLfloat);
+typedef void   (APIENTRY *PFN_GetVertexAttribiv)(GLuint, GLenum, GLint*);
+typedef void   (APIENTRY *PFN_GenBuffers)(GLsizei, GLuint*);
+typedef void   (APIENTRY *PFN_DeleteBuffers)(GLsizei, const GLuint*);
+typedef void   (APIENTRY *PFN_BindBuffer)(GLenum, GLuint);
+typedef void   (APIENTRY *PFN_BufferData)(GLenum, ptrdiff_t, const void*, GLenum);
+typedef void   (APIENTRY *PFN_BufferSubData)(GLenum, ptrdiff_t, ptrdiff_t, const void*);
+typedef void   (APIENTRY *PFN_GenFramebuffers)(GLsizei, GLuint*);
+typedef void   (APIENTRY *PFN_DeleteFramebuffers)(GLsizei, const GLuint*);
+typedef void   (APIENTRY *PFN_BindFramebuffer)(GLenum, GLuint);
+typedef void   (APIENTRY *PFN_FramebufferTexture2D)(GLenum, GLenum, GLenum, GLuint, GLint);
+typedef void   (APIENTRY *PFN_FramebufferRenderbuffer)(GLenum, GLenum, GLenum, GLuint);
+typedef GLenum (APIENTRY *PFN_CheckFramebufferStatus)(GLenum);
+typedef void   (APIENTRY *PFN_GenRenderbuffers)(GLsizei, GLuint*);
+typedef void   (APIENTRY *PFN_DeleteRenderbuffers)(GLsizei, const GLuint*);
+typedef void   (APIENTRY *PFN_BindRenderbuffer)(GLenum, GLuint);
+typedef void   (APIENTRY *PFN_RenderbufferStorage)(GLenum, GLenum, GLsizei, GLsizei);
+typedef void   (APIENTRY *PFN_GenerateMipmap)(GLenum);
+typedef void   (APIENTRY *PFN_ActiveTexture)(GLenum);
+typedef void   (APIENTRY *PFN_BlendFuncSeparate)(GLenum, GLenum, GLenum, GLenum);
+typedef void   (APIENTRY *PFN_BlendEquationSeparate)(GLenum, GLenum);
+typedef void   (APIENTRY *PFN_BlendColor)(GLfloat, GLfloat, GLfloat, GLfloat);
+typedef void   (APIENTRY *PFN_StencilFuncSeparate)(GLenum, GLenum, GLint, GLuint);
+typedef void   (APIENTRY *PFN_StencilOpSeparate)(GLenum, GLenum, GLenum, GLenum);
+typedef void   (APIENTRY *PFN_StencilMaskSeparate)(GLenum, GLuint);
+typedef void   (APIENTRY *PFN_BindVertexArray)(GLuint);
+typedef void   (APIENTRY *PFN_RenderbufferStorageMultisample)(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
+typedef void   (APIENTRY *PFN_BlitFramebuffer)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
 
-NX_WGL(PFN_glCreateShader, glCreateShader);
-NX_WGL(PFN_glShaderSource, glShaderSource);
-NX_WGL(PFN_glCompileShader, glCompileShader);
-NX_WGL(PFN_glGetShaderiv, glGetShaderiv);
-NX_WGL(PFN_glGetShaderInfoLog, glGetShaderInfoLog);
-NX_WGL(PFN_glCreateProgram, glCreateProgram);
-NX_WGL(PFN_glAttachShader, glAttachShader);
-NX_WGL(PFN_glDetachShader, glDetachShader);
-NX_WGL(PFN_glLinkProgram, glLinkProgram);
-NX_WGL(PFN_glGetProgramiv, glGetProgramiv);
-NX_WGL(PFN_glGetProgramInfoLog, glGetProgramInfoLog);
-NX_WGL(PFN_glUseProgram, glUseProgram);
-NX_WGL(PFN_glDeleteShader, glDeleteShader);
-NX_WGL(PFN_glDeleteProgram, glDeleteProgram);
-NX_WGL(PFN_glGetUniformLocation, glGetUniformLocation);
-NX_WGL(PFN_glGetAttribLocation, glGetAttribLocation);
-NX_WGL(PFN_glUniform1f, glUniform1f);
-NX_WGL(PFN_glUniform2f, glUniform2f);
-NX_WGL(PFN_glUniform3f, glUniform3f);
-NX_WGL(PFN_glUniform4f, glUniform4f);
-NX_WGL(PFN_glUniform1i, glUniform1i);
-NX_WGL(PFN_glUniformMatrix3fv, glUniformMatrix3fv);
-NX_WGL(PFN_glUniformMatrix4fv, glUniformMatrix4fv);
-NX_WGL(PFN_glEnableVertexAttribArray, glEnableVertexAttribArray);
-NX_WGL(PFN_glDisableVertexAttribArray, glDisableVertexAttribArray);
-NX_WGL(PFN_glVertexAttribPointer, glVertexAttribPointer);
-NX_WGL(PFN_glGenBuffers, glGenBuffers);
-NX_WGL(PFN_glDeleteBuffers, glDeleteBuffers);
-NX_WGL(PFN_glBindBuffer, glBindBuffer);
-NX_WGL(PFN_glBufferData, glBufferData);
-NX_WGL(PFN_glBufferSubData, glBufferSubData);
-NX_WGL(PFN_glGenFramebuffers, glGenFramebuffers);
-NX_WGL(PFN_glDeleteFramebuffers, glDeleteFramebuffers);
-NX_WGL(PFN_glBindFramebuffer, glBindFramebuffer);
-NX_WGL(PFN_glFramebufferTexture2D, glFramebufferTexture2D);
-NX_WGL(PFN_glFramebufferRenderbuffer, glFramebufferRenderbuffer);
-NX_WGL(PFN_glCheckFramebufferStatus, glCheckFramebufferStatus);
-NX_WGL(PFN_glGenRenderbuffers, glGenRenderbuffers);
-NX_WGL(PFN_glDeleteRenderbuffers, glDeleteRenderbuffers);
-NX_WGL(PFN_glBindRenderbuffer, glBindRenderbuffer);
-NX_WGL(PFN_glRenderbufferStorage, glRenderbufferStorage);
-NX_WGL(PFN_glGenerateMipmap, glGenerateMipmap);
-NX_WGL(PFN_glActiveTexture, glActiveTexture);
-NX_WGL(PFN_glBlendFuncSeparate, glBlendFuncSeparate);
-NX_WGL(PFN_glBlendEquation, glBlendEquation);
+struct GLFunctions {
+    PFN_CreateShader CreateShader = nullptr;
+    PFN_ShaderSource ShaderSource = nullptr;
+    PFN_CompileShader CompileShader = nullptr;
+    PFN_GetShaderiv GetShaderiv = nullptr;
+    PFN_GetShaderInfoLog GetShaderInfoLog = nullptr;
+    PFN_CreateProgram CreateProgram = nullptr;
+    PFN_AttachShader AttachShader = nullptr;
+    PFN_DetachShader DetachShader = nullptr;
+    PFN_BindAttribLocation BindAttribLocation = nullptr;
+    PFN_LinkProgram LinkProgram = nullptr;
+    PFN_GetProgramiv GetProgramiv = nullptr;
+    PFN_GetProgramInfoLog GetProgramInfoLog = nullptr;
+    PFN_UseProgram UseProgram = nullptr;
+    PFN_DeleteShader DeleteShader = nullptr;
+    PFN_DeleteProgram DeleteProgram = nullptr;
+    PFN_GetUniformLocation GetUniformLocation = nullptr;
+    PFN_UniformNfv Uniformfv[4] = {};
+    PFN_UniformNiv Uniformiv[4] = {};
+    PFN_UniformMatrixNfv UniformMatrixfv[3] = {};  // 2, 3, 4
+    PFN_EnableVertexAttribArray EnableVertexAttribArray = nullptr;
+    PFN_DisableVertexAttribArray DisableVertexAttribArray = nullptr;
+    PFN_VertexAttribPointer VertexAttribPointer = nullptr;
+    PFN_VertexAttrib4f VertexAttrib4f = nullptr;
+    PFN_GetVertexAttribiv GetVertexAttribiv = nullptr;
+    PFN_GenBuffers GenBuffers = nullptr;
+    PFN_DeleteBuffers DeleteBuffers = nullptr;
+    PFN_BindBuffer BindBuffer = nullptr;
+    PFN_BufferData BufferData = nullptr;
+    PFN_BufferSubData BufferSubData = nullptr;
+    PFN_GenFramebuffers GenFramebuffers = nullptr;
+    PFN_DeleteFramebuffers DeleteFramebuffers = nullptr;
+    PFN_BindFramebuffer BindFramebuffer = nullptr;
+    PFN_FramebufferTexture2D FramebufferTexture2D = nullptr;
+    PFN_FramebufferRenderbuffer FramebufferRenderbuffer = nullptr;
+    PFN_CheckFramebufferStatus CheckFramebufferStatus = nullptr;
+    PFN_GenRenderbuffers GenRenderbuffers = nullptr;
+    PFN_DeleteRenderbuffers DeleteRenderbuffers = nullptr;
+    PFN_BindRenderbuffer BindRenderbuffer = nullptr;
+    PFN_RenderbufferStorage RenderbufferStorage = nullptr;
+    PFN_GenerateMipmap GenerateMipmap = nullptr;
+    PFN_ActiveTexture ActiveTexture = nullptr;
+    PFN_BlendFuncSeparate BlendFuncSeparate = nullptr;
+    PFN_BlendEquationSeparate BlendEquationSeparate = nullptr;
+    PFN_BlendColor BlendColor = nullptr;
+    PFN_StencilFuncSeparate StencilFuncSeparate = nullptr;
+    PFN_StencilOpSeparate StencilOpSeparate = nullptr;
+    PFN_StencilMaskSeparate StencilMaskSeparate = nullptr;
+    PFN_BindVertexArray BindVertexArray = nullptr;  // optional
+    PFN_RenderbufferStorageMultisample RenderbufferStorageMultisample = nullptr;  // optional (antialias)
+    PFN_BlitFramebuffer BlitFramebuffer = nullptr;  // optional (antialias)
+    bool loaded = false;
+};
 
-#undef NX_WGL
+GLFunctions g;
 
-static bool s_wglLoaded = false;
-
-static void* wglGetProc(const char* name) {
+void* getProc(const char* name) {
 #ifdef __linux__
     return reinterpret_cast<void*>(glXGetProcAddress(reinterpret_cast<const GLubyte*>(name)));
-#elif _WIN32
+#elif defined(_WIN32)
     return reinterpret_cast<void*>(wglGetProcAddress(name));
 #elif defined(__APPLE__)
     return nxAppleGetProcAddress(name);
@@ -127,440 +147,840 @@ static void* wglGetProc(const char* name) {
 #endif
 }
 
-static void loadWebGLFunctions() {
-    if (s_wglLoaded) return;
-    s_wglLoaded = true;
-
-    #define WGL_LOAD(name) nx_##name = reinterpret_cast<decltype(nx_##name)>(wglGetProc(#name))
-    WGL_LOAD(glCreateShader);
-    WGL_LOAD(glShaderSource);
-    WGL_LOAD(glCompileShader);
-    WGL_LOAD(glGetShaderiv);
-    WGL_LOAD(glGetShaderInfoLog);
-    WGL_LOAD(glCreateProgram);
-    WGL_LOAD(glAttachShader);
-    WGL_LOAD(glDetachShader);
-    WGL_LOAD(glLinkProgram);
-    WGL_LOAD(glGetProgramiv);
-    WGL_LOAD(glGetProgramInfoLog);
-    WGL_LOAD(glUseProgram);
-    WGL_LOAD(glDeleteShader);
-    WGL_LOAD(glDeleteProgram);
-    WGL_LOAD(glGetUniformLocation);
-    WGL_LOAD(glGetAttribLocation);
-    WGL_LOAD(glUniform1f);
-    WGL_LOAD(glUniform2f);
-    WGL_LOAD(glUniform3f);
-    WGL_LOAD(glUniform4f);
-    WGL_LOAD(glUniform1i);
-    WGL_LOAD(glUniformMatrix3fv);
-    WGL_LOAD(glUniformMatrix4fv);
-    WGL_LOAD(glEnableVertexAttribArray);
-    WGL_LOAD(glDisableVertexAttribArray);
-    WGL_LOAD(glVertexAttribPointer);
-    WGL_LOAD(glGenBuffers);
-    WGL_LOAD(glDeleteBuffers);
-    WGL_LOAD(glBindBuffer);
-    WGL_LOAD(glBufferData);
-    WGL_LOAD(glBufferSubData);
-    WGL_LOAD(glGenFramebuffers);
-    WGL_LOAD(glDeleteFramebuffers);
-    WGL_LOAD(glBindFramebuffer);
-    WGL_LOAD(glFramebufferTexture2D);
-    WGL_LOAD(glFramebufferRenderbuffer);
-    WGL_LOAD(glCheckFramebufferStatus);
-    WGL_LOAD(glGenRenderbuffers);
-    WGL_LOAD(glDeleteRenderbuffers);
-    WGL_LOAD(glBindRenderbuffer);
-    WGL_LOAD(glRenderbufferStorage);
-    WGL_LOAD(glGenerateMipmap);
-    WGL_LOAD(glActiveTexture);
-    WGL_LOAD(glBlendFuncSeparate);
-    WGL_LOAD(glBlendEquation);
-    #undef WGL_LOAD
+// Loads the entry points once a context is current; false when a required one is missing
+bool loadFunctions() {
+    if (g.loaded) return true;
+    #define LOAD(field, name) g.field = reinterpret_cast<std::remove_reference_t<decltype(g.field)>>(getProc(name))
+    LOAD(CreateShader, "glCreateShader");
+    LOAD(ShaderSource, "glShaderSource");
+    LOAD(CompileShader, "glCompileShader");
+    LOAD(GetShaderiv, "glGetShaderiv");
+    LOAD(GetShaderInfoLog, "glGetShaderInfoLog");
+    LOAD(CreateProgram, "glCreateProgram");
+    LOAD(AttachShader, "glAttachShader");
+    LOAD(DetachShader, "glDetachShader");
+    LOAD(BindAttribLocation, "glBindAttribLocation");
+    LOAD(LinkProgram, "glLinkProgram");
+    LOAD(GetProgramiv, "glGetProgramiv");
+    LOAD(GetProgramInfoLog, "glGetProgramInfoLog");
+    LOAD(UseProgram, "glUseProgram");
+    LOAD(DeleteShader, "glDeleteShader");
+    LOAD(DeleteProgram, "glDeleteProgram");
+    LOAD(GetUniformLocation, "glGetUniformLocation");
+    LOAD(Uniformfv[0], "glUniform1fv");
+    LOAD(Uniformfv[1], "glUniform2fv");
+    LOAD(Uniformfv[2], "glUniform3fv");
+    LOAD(Uniformfv[3], "glUniform4fv");
+    LOAD(Uniformiv[0], "glUniform1iv");
+    LOAD(Uniformiv[1], "glUniform2iv");
+    LOAD(Uniformiv[2], "glUniform3iv");
+    LOAD(Uniformiv[3], "glUniform4iv");
+    LOAD(UniformMatrixfv[0], "glUniformMatrix2fv");
+    LOAD(UniformMatrixfv[1], "glUniformMatrix3fv");
+    LOAD(UniformMatrixfv[2], "glUniformMatrix4fv");
+    LOAD(EnableVertexAttribArray, "glEnableVertexAttribArray");
+    LOAD(DisableVertexAttribArray, "glDisableVertexAttribArray");
+    LOAD(VertexAttribPointer, "glVertexAttribPointer");
+    LOAD(VertexAttrib4f, "glVertexAttrib4f");
+    LOAD(GetVertexAttribiv, "glGetVertexAttribiv");
+    LOAD(GenBuffers, "glGenBuffers");
+    LOAD(DeleteBuffers, "glDeleteBuffers");
+    LOAD(BindBuffer, "glBindBuffer");
+    LOAD(BufferData, "glBufferData");
+    LOAD(BufferSubData, "glBufferSubData");
+    LOAD(GenFramebuffers, "glGenFramebuffers");
+    LOAD(DeleteFramebuffers, "glDeleteFramebuffers");
+    LOAD(BindFramebuffer, "glBindFramebuffer");
+    LOAD(FramebufferTexture2D, "glFramebufferTexture2D");
+    LOAD(FramebufferRenderbuffer, "glFramebufferRenderbuffer");
+    LOAD(CheckFramebufferStatus, "glCheckFramebufferStatus");
+    LOAD(GenRenderbuffers, "glGenRenderbuffers");
+    LOAD(DeleteRenderbuffers, "glDeleteRenderbuffers");
+    LOAD(BindRenderbuffer, "glBindRenderbuffer");
+    LOAD(RenderbufferStorage, "glRenderbufferStorage");
+    LOAD(GenerateMipmap, "glGenerateMipmap");
+    LOAD(ActiveTexture, "glActiveTexture");
+    LOAD(BlendFuncSeparate, "glBlendFuncSeparate");
+    LOAD(BlendEquationSeparate, "glBlendEquationSeparate");
+    LOAD(BlendColor, "glBlendColor");
+    LOAD(StencilFuncSeparate, "glStencilFuncSeparate");
+    LOAD(StencilOpSeparate, "glStencilOpSeparate");
+    LOAD(StencilMaskSeparate, "glStencilMaskSeparate");
+    LOAD(BindVertexArray, "glBindVertexArray");
+    LOAD(RenderbufferStorageMultisample, "glRenderbufferStorageMultisample");
+    LOAD(BlitFramebuffer, "glBlitFramebuffer");
+    if (!g.RenderbufferStorageMultisample) LOAD(RenderbufferStorageMultisample, "glRenderbufferStorageMultisampleEXT");
+    if (!g.BlitFramebuffer) LOAD(BlitFramebuffer, "glBlitFramebufferEXT");
+    #undef LOAD
+    // Older drivers expose the framebuffer object calls only as EXT_framebuffer_object
+    if (!g.GenFramebuffers) {
+        #define LOAD_EXT(field, name) if (!g.field) g.field = reinterpret_cast<std::remove_reference_t<decltype(g.field)>>(getProc(name))
+        LOAD_EXT(GenFramebuffers, "glGenFramebuffersEXT");
+        LOAD_EXT(DeleteFramebuffers, "glDeleteFramebuffersEXT");
+        LOAD_EXT(BindFramebuffer, "glBindFramebufferEXT");
+        LOAD_EXT(FramebufferTexture2D, "glFramebufferTexture2DEXT");
+        LOAD_EXT(FramebufferRenderbuffer, "glFramebufferRenderbufferEXT");
+        LOAD_EXT(CheckFramebufferStatus, "glCheckFramebufferStatusEXT");
+        LOAD_EXT(GenRenderbuffers, "glGenRenderbuffersEXT");
+        LOAD_EXT(DeleteRenderbuffers, "glDeleteRenderbuffersEXT");
+        LOAD_EXT(BindRenderbuffer, "glBindRenderbufferEXT");
+        LOAD_EXT(RenderbufferStorage, "glRenderbufferStorageEXT");
+        LOAD_EXT(GenerateMipmap, "glGenerateMipmapEXT");
+        #undef LOAD_EXT
+    }
+    g.loaded = g.CreateShader && g.ShaderSource && g.CompileShader && g.LinkProgram && g.UseProgram &&
+               g.GetUniformLocation && g.VertexAttribPointer && g.GenBuffers && g.BufferData &&
+               g.GenFramebuffers && g.BindFramebuffer && g.FramebufferTexture2D && g.ActiveTexture &&
+               g.GenRenderbuffers && g.RenderbufferStorage && g.FramebufferRenderbuffer;
+    return g.loaded;
 }
+
+// GL constants that gl.h of GL 1.1 lacks
+constexpr GLenum kFramebuffer = 0x8D40;
+constexpr GLenum kRenderbuffer = 0x8D41;
+constexpr GLenum kColorAttachment0 = 0x8CE0;
+constexpr GLenum kDepthAttachment = 0x8D00;
+constexpr GLenum kStencilAttachment = 0x8D20;
+constexpr GLenum kDepth24Stencil8 = 0x88F0;
+constexpr GLenum kDepthComponent24 = 0x81A6;
+constexpr GLenum kFramebufferBinding = 0x8CA6;
+constexpr GLenum kReadFramebuffer = 0x8CA8;
+constexpr GLenum kDrawFramebuffer = 0x8CA9;
+constexpr GLenum kReadFramebufferBinding = 0x8CAA;
+constexpr GLenum kMaxSamples = 0x8D57;
+constexpr GLenum kRenderbufferBinding = 0x8CA7;
+constexpr GLenum kFramebufferComplete = 0x8CD5;
+constexpr GLenum kCurrentProgram = 0x8B8D;
+constexpr GLenum kArrayBufferBinding = 0x8894;
+constexpr GLenum kElementArrayBufferBinding = 0x8895;
+constexpr GLenum kActiveTexture = 0x84E0;
+constexpr GLenum kTextureBindingCubeMap = 0x8514;
+constexpr GLenum kVertexArrayBinding = 0x85B5;
+constexpr GLenum kVertexProgramPointSize = 0x8642;
+constexpr GLenum kPointSprite = 0x8861;
+constexpr GLenum kCompileStatus = 0x8B81;
+constexpr GLenum kLinkStatus = 0x8B82;
+constexpr GLenum kInfoLogLength = 0x8B84;
+constexpr GLenum kVertexAttribArrayEnabled = 0x8622;
+constexpr GLenum kFront = 0x0404;
+constexpr GLenum kBack = 0x0405;
+constexpr GLenum kFrontAndBack = 0x0408;
+constexpr int kMaxUnits = 8;
+
+int32_t asInt(uint32_t v) { return static_cast<int32_t>(v); }
+
+// The browser's GL state around a flush
+class SavedGLState {
+public:
+    SavedGLState() {
+        glPushAttrib(GL_ALL_ATTRIB_BITS);
+        glPushClientAttrib(GL_CLIENT_ALL_ATTRIB_BITS);
+        glGetIntegerv(kCurrentProgram, &program_);
+        glGetIntegerv(kArrayBufferBinding, &arrayBuffer_);
+        glGetIntegerv(kFramebufferBinding, &framebuffer_);
+        readFramebuffer_ = framebuffer_;
+        if (g.BlitFramebuffer) glGetIntegerv(kReadFramebufferBinding, &readFramebuffer_);
+        glGetIntegerv(kRenderbufferBinding, &renderbuffer_);
+        glGetIntegerv(kActiveTexture, &activeTexture_);
+        if (g.BindVertexArray) {
+            glGetIntegerv(kVertexArrayBinding, &vertexArray_);
+            g.BindVertexArray(0);
+        }
+        // Element buffer binding belongs to the vertex array: read it on VAO 0
+        glGetIntegerv(kElementArrayBufferBinding, &elementBuffer_);
+        for (int unit = 0; unit < kMaxUnits; ++unit) {
+            g.ActiveTexture(GL::TEXTURE0 + unit);
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &textures2D_[unit]);
+            glGetIntegerv(kTextureBindingCubeMap, &texturesCube_[unit]);
+        }
+        for (GLuint i = 0; i < 16 && g.GetVertexAttribiv; ++i) {
+            g.GetVertexAttribiv(i, kVertexAttribArrayEnabled, &attribEnabled_[i]);
+        }
+        while (glGetError() != GL_NO_ERROR) {}
+    }
+
+    ~SavedGLState() {
+        for (int unit = 0; unit < kMaxUnits; ++unit) {
+            g.ActiveTexture(GL::TEXTURE0 + unit);
+            glBindTexture(GL_TEXTURE_2D, textures2D_[unit]);
+            glBindTexture(GL::TEXTURE_CUBE_MAP, texturesCube_[unit]);
+        }
+        g.ActiveTexture(activeTexture_);
+        for (GLuint i = 0; i < 16; ++i) {
+            if (attribEnabled_[i]) g.EnableVertexAttribArray(i);
+            else g.DisableVertexAttribArray(i);
+        }
+        g.BindBuffer(GL::ELEMENT_ARRAY_BUFFER, elementBuffer_);
+        if (g.BindVertexArray) g.BindVertexArray(vertexArray_);
+        g.BindBuffer(GL::ARRAY_BUFFER, arrayBuffer_);
+        g.UseProgram(program_);
+        g.BindRenderbuffer(kRenderbuffer, renderbuffer_);
+        g.BindFramebuffer(kFramebuffer, framebuffer_);
+        if (readFramebuffer_ != framebuffer_) g.BindFramebuffer(kReadFramebuffer, readFramebuffer_);
+        glPopClientAttrib();
+        glPopAttrib();
+    }
+
+private:
+    GLint program_ = 0, arrayBuffer_ = 0, elementBuffer_ = 0, framebuffer_ = 0, readFramebuffer_ = 0, renderbuffer_ = 0;
+    GLint activeTexture_ = GL::TEXTURE0, vertexArray_ = 0;
+    GLint textures2D_[kMaxUnits] = {}, texturesCube_[kMaxUnits] = {};
+    GLint attribEnabled_[16] = {};
+};
+
+std::string stripComments(const std::string& source) {
+    std::string out;
+    out.reserve(source.size());
+    for (size_t i = 0; i < source.size(); ++i) {
+        if (source.compare(i, 2, "//") == 0) {
+            while (i < source.size() && source[i] != '\n') ++i;
+            if (i < source.size()) out += '\n';
+        } else if (source.compare(i, 2, "/*") == 0) {
+            size_t end = source.find("*/", i + 2);
+            // Keep line breaks so line numbers in driver logs still match
+            for (size_t j = i; j < std::min(end, source.size()); ++j) {
+                if (source[j] == '\n') out += '\n';
+            }
+            out += ' ';
+            if (end == std::string::npos) break;
+            i = end + 1;
+        } else {
+            out += source[i];
+        }
+    }
+    return out;
+}
+
+} // namespace
 
 // ==================================================================
 // Construction
 // ==================================================================
 
-WebGLRenderingContext::WebGLRenderingContext(int width, int height)
-    : width_(width), height_(height) {
-    loadWebGLFunctions();
-    if (nx_glGenFramebuffers) nx_glGenFramebuffers(1, &defaultFBO_);
+WebGLRenderingContext::WebGLRenderingContext(int width, int height, WebGLContextAttributes attributes)
+    : width_(std::max(width, 0)), height_(std::max(height, 0)), attributes_(attributes) {
+    state_.viewport[2] = state_.scissor[2] = width_;
+    state_.viewport[3] = state_.scissor[3] = height_;
+    state_.caps[GL::DITHER] = true;
 }
 
 WebGLRenderingContext::~WebGLRenderingContext() {
-    if (defaultFBO_ && nx_glDeleteFramebuffers) nx_glDeleteFramebuffers(1, &defaultFBO_);
+    if (!glAvailable() || !g.loaded) return;
+    for (auto& [handle, name] : shaders_) g.DeleteShader(name);
+    for (auto& [handle, name] : programs_) g.DeleteProgram(name);
+    for (auto& [handle, name] : buffers_) g.DeleteBuffers(1, &name);
+    for (auto& [handle, name] : textures_) glDeleteTextures(1, &name);
+    releaseDrawingBuffer();
+}
+
+bool WebGLRenderingContext::glAvailable() {
+#ifdef _WIN32
+    return wglGetCurrentContext() != nullptr;
+#elif defined(__linux__)
+    return glXGetCurrentContext() != nullptr;
+#elif defined(__APPLE__)
+    return CGLGetCurrentContext() != nullptr;
+#else
+    return false;
+#endif
+}
+
+void WebGLRenderingContext::resize(int width, int height) {
+    width_ = std::max(width, 0);
+    height_ = std::max(height, 0);
+    // Resizing resets the viewport only if the page never set it, but always clears
+    needsClear_ = true;
+}
+
+void WebGLRenderingContext::record(WebGLCommand command) {
+    pendingBytes_ += sizeof(WebGLCommand) + command.data.size() + command.text.size();
+    pending_.push_back(std::move(command));
+}
+
+WebGLRenderingContext::CompileResult WebGLRenderingContext::shaderResult(uint32_t shader) const {
+    auto it = shaderResults_.find(shader);
+    return it == shaderResults_.end() ? CompileResult{} : it->second;
+}
+
+WebGLRenderingContext::CompileResult WebGLRenderingContext::programResult(uint32_t program) const {
+    auto it = programResults_.find(program);
+    return it == programResults_.end() ? CompileResult{} : it->second;
 }
 
 // ==================================================================
-// Shader
+// GLSL
 // ==================================================================
 
-WebGLShader WebGLRenderingContext::createShader(uint32_t type) {
-    WebGLShader s;
-    s.type = type;
-    if (nx_glCreateShader) s.id = nx_glCreateShader(type);
-    return s;
+std::string WebGLRenderingContext::translateShader(const std::string& source) {
+    std::string body = stripComments(source);
+    // GLSL 1.20 has no precision statements; #version 100 and OES extensions
+    // (standard derivatives are core in 1.20) go away too
+    static const std::regex precision(R"(\bprecision\s+(lowp|mediump|highp)\s+\w+\s*;)");
+    static const std::regex version(R"((^|\n)[ \t]*#[ \t]*version[^\n]*)");
+    static const std::regex extension(R"((^|\n)[ \t]*#[ \t]*extension[ \t]+GL_OES_\w+[^\n]*)");
+    body = std::regex_replace(body, precision, "");
+    body = std::regex_replace(body, version, "$1");
+    body = std::regex_replace(body, extension, "$1");
+    return "#version 120\n"
+           "#define lowp\n"
+           "#define mediump\n"
+           "#define highp\n"
+           "#line 0\n" + body;
 }
 
-void WebGLRenderingContext::shaderSource(WebGLShader& shader, const std::string& source) {
-    shader.source = source;
-    if (nx_glShaderSource) {
-        const char* src = source.c_str();
-        nx_glShaderSource(shader.id, 1, &src, nullptr);
-    }
-}
-
-void WebGLRenderingContext::compileShader(WebGLShader& shader) {
-    if (!nx_glCompileShader) return;
-    nx_glCompileShader(shader.id);
-    GLint status = 0;
-    if (nx_glGetShaderiv) nx_glGetShaderiv(shader.id, GL_COMPILE_STATUS, &status);
-    shader.compiled = (status == GL_TRUE);
-    GLint logLen = 0;
-    if (nx_glGetShaderiv) nx_glGetShaderiv(shader.id, GL_INFO_LOG_LENGTH, &logLen);
-    if (logLen > 0 && nx_glGetShaderInfoLog) {
-        shader.infoLog.resize(logLen);
-        nx_glGetShaderInfoLog(shader.id, logLen, nullptr, &shader.infoLog[0]);
-    }
-}
-
-std::string WebGLRenderingContext::getShaderInfoLog(const WebGLShader& shader) {
-    return shader.infoLog;
-}
-
-bool WebGLRenderingContext::getShaderParameter(const WebGLShader& shader, uint32_t /*pname*/) {
-    return shader.compiled;
-}
-
-void WebGLRenderingContext::deleteShader(WebGLShader& shader) {
-    if (shader.id && nx_glDeleteShader) { nx_glDeleteShader(shader.id); shader.id = 0; }
-}
-
-// ==================================================================
-// Program
-// ==================================================================
-
-WebGLProgram WebGLRenderingContext::createProgram() {
-    WebGLProgram p;
-    if (nx_glCreateProgram) p.id = nx_glCreateProgram();
-    return p;
-}
-
-void WebGLRenderingContext::attachShader(WebGLProgram& program, const WebGLShader& shader) {
-    if (nx_glAttachShader) nx_glAttachShader(program.id, shader.id);
-    if (shader.type == GL::VERTEX_SHADER) program.vs = shader.id;
-    else program.fs = shader.id;
-}
-
-void WebGLRenderingContext::linkProgram(WebGLProgram& program) {
-    if (!nx_glLinkProgram) return;
-    nx_glLinkProgram(program.id);
-    GLint status = 0;
-    if (nx_glGetProgramiv) nx_glGetProgramiv(program.id, GL_LINK_STATUS, &status);
-    program.linked = (status == GL_TRUE);
-    GLint logLen = 0;
-    if (nx_glGetProgramiv) nx_glGetProgramiv(program.id, GL_INFO_LOG_LENGTH, &logLen);
-    if (logLen > 0 && nx_glGetProgramInfoLog) {
-        program.infoLog.resize(logLen);
-        nx_glGetProgramInfoLog(program.id, logLen, nullptr, &program.infoLog[0]);
-    }
-}
-
-void WebGLRenderingContext::useProgram(const WebGLProgram& program) {
-    if (nx_glUseProgram) nx_glUseProgram(program.id);
-}
-
-std::string WebGLRenderingContext::getProgramInfoLog(const WebGLProgram& program) {
-    return program.infoLog;
-}
-
-bool WebGLRenderingContext::getProgramParameter(const WebGLProgram& program, uint32_t /*pname*/) {
-    return program.linked;
-}
-
-void WebGLRenderingContext::deleteProgram(WebGLProgram& program) {
-    if (program.id && nx_glDeleteProgram) { nx_glDeleteProgram(program.id); program.id = 0; }
-}
-
-void WebGLRenderingContext::detachShader(WebGLProgram& program, const WebGLShader& shader) {
-    if (nx_glDetachShader) nx_glDetachShader(program.id, shader.id);
-}
-
-// ==================================================================
-// Uniform
-// ==================================================================
-
-WebGLUniformLocation WebGLRenderingContext::getUniformLocation(const WebGLProgram& program,
-                                                                 const std::string& name) {
-    WebGLUniformLocation loc;
-    loc.program = program.id;
-    if (nx_glGetUniformLocation) loc.location = nx_glGetUniformLocation(program.id, name.c_str());
-    return loc;
-}
-
-void WebGLRenderingContext::uniform1f(const WebGLUniformLocation& loc, float v) {
-    if (nx_glUniform1f) nx_glUniform1f(loc.location, v);
-}
-void WebGLRenderingContext::uniform2f(const WebGLUniformLocation& loc, float v0, float v1) {
-    if (nx_glUniform2f) nx_glUniform2f(loc.location, v0, v1);
-}
-void WebGLRenderingContext::uniform3f(const WebGLUniformLocation& loc, float v0, float v1, float v2) {
-    if (nx_glUniform3f) nx_glUniform3f(loc.location, v0, v1, v2);
-}
-void WebGLRenderingContext::uniform4f(const WebGLUniformLocation& loc,
-                                        float v0, float v1, float v2, float v3) {
-    if (nx_glUniform4f) nx_glUniform4f(loc.location, v0, v1, v2, v3);
-}
-void WebGLRenderingContext::uniform1i(const WebGLUniformLocation& loc, int v) {
-    if (nx_glUniform1i) nx_glUniform1i(loc.location, v);
-}
-void WebGLRenderingContext::uniformMatrix3fv(const WebGLUniformLocation& loc,
-                                               bool transpose, const float* value) {
-    if (nx_glUniformMatrix3fv) nx_glUniformMatrix3fv(loc.location, 1, transpose ? GL_TRUE : GL_FALSE, value);
-}
-void WebGLRenderingContext::uniformMatrix4fv(const WebGLUniformLocation& loc,
-                                               bool transpose, const float* value) {
-    if (nx_glUniformMatrix4fv) nx_glUniformMatrix4fv(loc.location, 1, transpose ? GL_TRUE : GL_FALSE, value);
-}
-
-// ==================================================================
-// Attribute
-// ==================================================================
-
-int WebGLRenderingContext::getAttribLocation(const WebGLProgram& program, const std::string& name) {
-    if (nx_glGetAttribLocation) return nx_glGetAttribLocation(program.id, name.c_str());
-    return -1;
-}
-
-void WebGLRenderingContext::enableVertexAttribArray(int index) {
-    if (nx_glEnableVertexAttribArray) nx_glEnableVertexAttribArray(index);
-}
-
-void WebGLRenderingContext::disableVertexAttribArray(int index) {
-    if (nx_glDisableVertexAttribArray) nx_glDisableVertexAttribArray(index);
-}
-
-void WebGLRenderingContext::vertexAttribPointer(int index, int size, uint32_t type,
-                                                  bool normalized, int stride, size_t offset) {
-    if (nx_glVertexAttribPointer)
-        nx_glVertexAttribPointer(index, size, type, normalized ? GL_TRUE : GL_FALSE,
-                                  stride, reinterpret_cast<const void*>(offset));
-}
-
-// ==================================================================
-// Buffer
-// ==================================================================
-
-WebGLBuffer WebGLRenderingContext::createBuffer() {
-    WebGLBuffer b;
-    if (nx_glGenBuffers) nx_glGenBuffers(1, &b.id);
-    return b;
-}
-
-void WebGLRenderingContext::bindBuffer(uint32_t target, const WebGLBuffer& buffer) {
-    if (nx_glBindBuffer) nx_glBindBuffer(target, buffer.id);
-}
-
-void WebGLRenderingContext::bufferData(uint32_t target, const void* data,
-                                         size_t size, uint32_t usage) {
-    if (nx_glBufferData) nx_glBufferData(target, size, data, usage);
-}
-
-void WebGLRenderingContext::bufferSubData(uint32_t target, size_t offset,
-                                            const void* data, size_t size) {
-    if (nx_glBufferSubData) nx_glBufferSubData(target, offset, size, data);
-}
-
-void WebGLRenderingContext::deleteBuffer(WebGLBuffer& buffer) {
-    if (buffer.id && nx_glDeleteBuffers) { nx_glDeleteBuffers(1, &buffer.id); buffer.id = 0; }
-}
-
-// ==================================================================
-// Texture
-// ==================================================================
-
-WebGLTexture WebGLRenderingContext::createTexture() {
-    WebGLTexture t;
-    glGenTextures(1, &t.id);
-    return t;
-}
-
-void WebGLRenderingContext::bindTexture(uint32_t target, const WebGLTexture& texture) {
-    glBindTexture(target, texture.id);
-}
-
-void WebGLRenderingContext::texImage2D(uint32_t target, int level, uint32_t internalFormat,
-                                         int width, int height, int border,
-                                         uint32_t format, uint32_t type, const void* pixels) {
-    glTexImage2D(target, level, internalFormat, width, height, border, format, type, pixels);
-}
-
-void WebGLRenderingContext::texSubImage2D(uint32_t target, int level, int xoffset, int yoffset,
-                                            int width, int height, uint32_t format,
-                                            uint32_t type, const void* pixels) {
-    glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
-}
-
-void WebGLRenderingContext::texParameteri(uint32_t target, uint32_t pname, int param) {
-    glTexParameteri(target, pname, param);
-}
-
-void WebGLRenderingContext::generateMipmap(uint32_t target) {
-    if (nx_glGenerateMipmap) nx_glGenerateMipmap(target);
-}
-
-void WebGLRenderingContext::activeTexture(uint32_t textureUnit) {
-    if (nx_glActiveTexture) nx_glActiveTexture(textureUnit);
-}
-
-void WebGLRenderingContext::deleteTexture(WebGLTexture& texture) {
-    if (texture.id) { glDeleteTextures(1, &texture.id); texture.id = 0; }
-}
-
-// ==================================================================
-// Framebuffer
-// ==================================================================
-
-WebGLFramebuffer WebGLRenderingContext::createFramebuffer() {
-    WebGLFramebuffer fbo;
-    if (nx_glGenFramebuffers) nx_glGenFramebuffers(1, &fbo.id);
-    return fbo;
-}
-
-void WebGLRenderingContext::bindFramebuffer(uint32_t target, const WebGLFramebuffer& fbo) {
-    if (nx_glBindFramebuffer) nx_glBindFramebuffer(target, fbo.id);
-}
-
-void WebGLRenderingContext::framebufferTexture2D(uint32_t target, uint32_t attachment,
-                                                    uint32_t texTarget,
-                                                    const WebGLTexture& texture, int level) {
-    if (nx_glFramebufferTexture2D) nx_glFramebufferTexture2D(target, attachment, texTarget, texture.id, level);
-}
-
-void WebGLRenderingContext::framebufferRenderbuffer(uint32_t target, uint32_t attachment,
-                                                      uint32_t rbTarget,
-                                                      const WebGLRenderbuffer& rb) {
-    if (nx_glFramebufferRenderbuffer) nx_glFramebufferRenderbuffer(target, attachment, rbTarget, rb.id);
-}
-
-uint32_t WebGLRenderingContext::checkFramebufferStatus(uint32_t target) {
-    if (nx_glCheckFramebufferStatus) return nx_glCheckFramebufferStatus(target);
-    return 0;
-}
-
-void WebGLRenderingContext::deleteFramebuffer(WebGLFramebuffer& fbo) {
-    if (fbo.id && nx_glDeleteFramebuffers) { nx_glDeleteFramebuffers(1, &fbo.id); fbo.id = 0; }
-}
-
-// ==================================================================
-// Renderbuffer
-// ==================================================================
-
-WebGLRenderbuffer WebGLRenderingContext::createRenderbuffer() {
-    WebGLRenderbuffer rb;
-    if (nx_glGenRenderbuffers) nx_glGenRenderbuffers(1, &rb.id);
-    return rb;
-}
-
-void WebGLRenderingContext::bindRenderbuffer(uint32_t target, const WebGLRenderbuffer& rb) {
-    if (nx_glBindRenderbuffer) nx_glBindRenderbuffer(target, rb.id);
-}
-
-void WebGLRenderingContext::renderbufferStorage(uint32_t target, uint32_t format,
-                                                  int width, int height) {
-    if (nx_glRenderbufferStorage) nx_glRenderbufferStorage(target, format, width, height);
-}
-
-void WebGLRenderingContext::deleteRenderbuffer(WebGLRenderbuffer& rb) {
-    if (rb.id && nx_glDeleteRenderbuffers) { nx_glDeleteRenderbuffers(1, &rb.id); rb.id = 0; }
-}
-
-// ==================================================================
-// Drawing
-// ==================================================================
-
-void WebGLRenderingContext::drawArrays(uint32_t mode, int first, int count) {
-    glDrawArrays(mode, first, count);
-}
-
-void WebGLRenderingContext::drawElements(uint32_t mode, int count, uint32_t type, size_t offset) {
-    glDrawElements(mode, count, type, reinterpret_cast<const void*>(offset));
-}
-
-// ==================================================================
-// State
-// ==================================================================
-
-void WebGLRenderingContext::viewport(int x, int y, int w, int h) { glViewport(x, y, w, h); }
-void WebGLRenderingContext::scissor(int x, int y, int w, int h) { glScissor(x, y, w, h); }
-void WebGLRenderingContext::clearColor(float r, float g, float b, float a) { glClearColor(r, g, b, a); }
-void WebGLRenderingContext::clearDepth(float depth) { glClearDepth(depth); }
-void WebGLRenderingContext::clearStencil(int s) { glClearStencil(s); }
-void WebGLRenderingContext::clear(uint32_t mask) { glClear(mask); }
-void WebGLRenderingContext::enable(uint32_t cap) { glEnable(cap); }
-void WebGLRenderingContext::disable(uint32_t cap) { glDisable(cap); }
-void WebGLRenderingContext::blendFunc(uint32_t sfactor, uint32_t dfactor) { glBlendFunc(sfactor, dfactor); }
-
-void WebGLRenderingContext::blendFuncSeparate(uint32_t srcRGB, uint32_t dstRGB,
-                                                uint32_t srcAlpha, uint32_t dstAlpha) {
-    if (nx_glBlendFuncSeparate) nx_glBlendFuncSeparate(srcRGB, dstRGB, srcAlpha, dstAlpha);
-}
-
-void WebGLRenderingContext::blendEquation(uint32_t mode) {
-    if (nx_glBlendEquation) nx_glBlendEquation(mode);
-}
-
-void WebGLRenderingContext::depthFunc(uint32_t func) { glDepthFunc(func); }
-void WebGLRenderingContext::depthMask(bool flag) { glDepthMask(flag ? GL_TRUE : GL_FALSE); }
-void WebGLRenderingContext::stencilFunc(uint32_t func, int ref, uint32_t mask) { glStencilFunc(func, ref, mask); }
-void WebGLRenderingContext::stencilOp(uint32_t fail, uint32_t zfail, uint32_t zpass) { glStencilOp(fail, zfail, zpass); }
-void WebGLRenderingContext::colorMask(bool r, bool g, bool b, bool a) { glColorMask(r, g, b, a); }
-void WebGLRenderingContext::cullFace(uint32_t mode) { glCullFace(mode); }
-void WebGLRenderingContext::frontFace(uint32_t mode) { glFrontFace(mode); }
-void WebGLRenderingContext::lineWidth(float w) { glLineWidth(w); }
-void WebGLRenderingContext::polygonOffset(float factor, float units) { glPolygonOffset(factor, units); }
-void WebGLRenderingContext::pixelStorei(uint32_t pname, int param) { glPixelStorei(pname, param); }
-
-void WebGLRenderingContext::readPixels(int x, int y, int w, int h,
-                                         uint32_t format, uint32_t type, void* pixels) {
-    glReadPixels(x, y, w, h, format, type, pixels);
-}
-
-uint32_t WebGLRenderingContext::getError() { return glGetError(); }
-
-// ==================================================================
-// Extensions
-// ==================================================================
-
-std::vector<std::string> WebGLRenderingContext::getSupportedExtensions() {
-    if (extensions_.empty()) {
-        const char* ext = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
-        if (ext) {
-            std::string all(ext);
-            size_t pos = 0;
-            while (pos < all.size()) {
-                size_t next = all.find(' ', pos);
-                if (next == std::string::npos) next = all.size();
-                extensions_.push_back(all.substr(pos, next - pos));
-                pos = next + 1;
+std::vector<std::string> WebGLRenderingContext::declaredNames(const std::string& source, const std::string& qualifier) {
+    std::vector<std::string> names;
+    const std::string body = stripComments(source);
+    // qualifier [precision] type name[, name][[n]] ;
+    const std::regex declaration("\\b" + qualifier + R"(\s+(?:(?:lowp|mediump|highp)\s+)?\w+\s+([^;{}()]+);)");
+    for (auto it = std::sregex_iterator(body.begin(), body.end(), declaration); it != std::sregex_iterator(); ++it) {
+        std::string list = (*it)[1].str();
+        size_t start = 0;
+        while (start <= list.size()) {
+            size_t comma = list.find(',', start);
+            std::string item = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+            size_t a = 0;
+            while (a < item.size() && std::isspace(static_cast<unsigned char>(item[a]))) ++a;
+            size_t b = a;
+            while (b < item.size() && (std::isalnum(static_cast<unsigned char>(item[b])) || item[b] == '_')) ++b;
+            if (b > a && std::find(names.begin(), names.end(), item.substr(a, b - a)) == names.end()) {
+                names.push_back(item.substr(a, b - a));
             }
+            if (comma == std::string::npos) break;
+            start = comma + 1;
         }
     }
-    return extensions_;
+    return names;
 }
 
-bool WebGLRenderingContext::getExtension(const std::string& name) {
-    auto exts = getSupportedExtensions();
-    for (const auto& e : exts) {
-        if (e == name) return true;
+// ==================================================================
+// Drawing buffer
+// ==================================================================
+
+void WebGLRenderingContext::releaseDrawingBuffer() {
+    if (fbo_) g.DeleteFramebuffers(1, &fbo_);
+    if (msFbo_) g.DeleteFramebuffers(1, &msFbo_);
+    if (msColor_) g.DeleteRenderbuffers(1, &msColor_);
+    if (depthStencil_) g.DeleteRenderbuffers(1, &depthStencil_);
+    if (colorTexture_) glDeleteTextures(1, &colorTexture_);
+    fbo_ = msFbo_ = msColor_ = depthStencil_ = colorTexture_ = 0;
+    bufferWidth_ = bufferHeight_ = 0;
+}
+
+void WebGLRenderingContext::ensureDrawingBuffer() {
+    if (fbo_ && bufferWidth_ == width_ && bufferHeight_ == height_) return;
+    releaseDrawingBuffer();
+
+    glGenTextures(1, &colorTexture_);
+    g.ActiveTexture(GL::TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, colorTexture_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, attributes_.alpha ? GL_RGBA8 : GL_RGB8, width_, height_, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+
+    g.GenFramebuffers(1, &fbo_);
+    g.BindFramebuffer(kFramebuffer, fbo_);
+    g.FramebufferTexture2D(kFramebuffer, kColorAttachment0, GL_TEXTURE_2D, colorTexture_, 0);
+
+    // antialias: draw into a 4x multisampled framebuffer, resolved into the texture after each flush
+    GLint samples = 0;
+    if (attributes_.antialias && g.RenderbufferStorageMultisample && g.BlitFramebuffer) {
+        glGetIntegerv(kMaxSamples, &samples);
+        samples = std::min(samples, 4);
     }
-    return false;
+    auto storage = [&](GLenum format) {
+        if (samples > 1) g.RenderbufferStorageMultisample(kRenderbuffer, samples, format, width_, height_);
+        else g.RenderbufferStorage(kRenderbuffer, format, width_, height_);
+    };
+    if (samples > 1) {
+        g.GenRenderbuffers(1, &msColor_);
+        g.BindRenderbuffer(kRenderbuffer, msColor_);
+        storage(attributes_.alpha ? GL_RGBA8 : GL_RGB8);
+        g.GenFramebuffers(1, &msFbo_);
+        g.BindFramebuffer(kFramebuffer, msFbo_);
+        g.FramebufferRenderbuffer(kFramebuffer, kColorAttachment0, kRenderbuffer, msColor_);
+    }
+    if (attributes_.depth || attributes_.stencil) {
+        g.GenRenderbuffers(1, &depthStencil_);
+        g.BindRenderbuffer(kRenderbuffer, depthStencil_);
+        storage(attributes_.stencil ? kDepth24Stencil8 : kDepthComponent24);
+        g.FramebufferRenderbuffer(kFramebuffer, kDepthAttachment, kRenderbuffer, depthStencil_);
+        if (attributes_.stencil) {
+            g.FramebufferRenderbuffer(kFramebuffer, kStencilAttachment, kRenderbuffer, depthStencil_);
+        }
+    }
+    if (g.CheckFramebufferStatus && g.CheckFramebufferStatus(kFramebuffer) != kFramebufferComplete) {
+        std::cerr << "[WebGL] drawing buffer " << width_ << "x" << height_ << " is incomplete" << std::endl;
+    }
+    bufferWidth_ = width_;
+    bufferHeight_ = height_;
+    needsClear_ = true;
 }
 
-void WebGLRenderingContext::loseContext() { contextLost_ = true; }
-void WebGLRenderingContext::restoreContext() { contextLost_ = false; }
+// Transparent black, depth 1, stencil 0, whatever masks and scissor the page set
+void WebGLRenderingContext::clearDrawingBuffer() {
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDepthMask(GL_TRUE);
+    glStencilMask(0xFFFFFFFF);
+    glClearColor(0, 0, 0, 0);
+    glClearDepth(1);
+    glClearStencil(0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+}
+
+// ==================================================================
+// Replay
+// ==================================================================
+
+uint32_t WebGLRenderingContext::glName(const std::unordered_map<uint32_t, uint32_t>& names, uint32_t handle) const {
+    auto it = names.find(handle);
+    return it == names.end() ? 0 : it->second;
+}
+
+int WebGLRenderingContext::uniformLocation(uint32_t program, const std::string& name) {
+    auto key = std::make_pair(program, name);
+    auto it = uniformLocations_.find(key);
+    if (it != uniformLocations_.end()) return it->second;
+    GLuint id = glName(programs_, program);
+    int location = id ? g.GetUniformLocation(id, name.c_str()) : -1;
+    uniformLocations_[key] = location;
+    return location;
+}
+
+void WebGLRenderingContext::applyState() {
+    const State& s = state_;
+    g.UseProgram(glName(programs_, s.program));
+    for (GLuint i = 0; i < 16; ++i) {
+        const AttribState& a = s.attribs[i];
+        if (g.VertexAttrib4f) g.VertexAttrib4f(i, a.value[0], a.value[1], a.value[2], a.value[3]);
+        if (a.enabled) {
+            g.BindBuffer(GL::ARRAY_BUFFER, glName(buffers_, a.buffer));
+            g.VertexAttribPointer(i, a.size, a.type, a.normalized, a.stride,
+                                  reinterpret_cast<const void*>(static_cast<uintptr_t>(a.offset)));
+            g.EnableVertexAttribArray(i);
+        } else {
+            g.DisableVertexAttribArray(i);
+        }
+    }
+    g.BindBuffer(GL::ARRAY_BUFFER, glName(buffers_, s.arrayBuffer));
+    g.BindBuffer(GL::ELEMENT_ARRAY_BUFFER, glName(buffers_, s.elementBuffer));
+    for (int unit = 0; unit < kMaxUnits; ++unit) {
+        g.ActiveTexture(GL::TEXTURE0 + unit);
+        auto t2 = s.textures2D.find(unit);
+        auto tc = s.texturesCube.find(unit);
+        glBindTexture(GL_TEXTURE_2D, t2 == s.textures2D.end() ? 0 : glName(textures_, t2->second));
+        glBindTexture(GL::TEXTURE_CUBE_MAP, tc == s.texturesCube.end() ? 0 : glName(textures_, tc->second));
+        glDisable(GL_TEXTURE_2D);
+    }
+    g.ActiveTexture(GL::TEXTURE0 + s.activeTexture);
+
+    glViewport(s.viewport[0], s.viewport[1], s.viewport[2], s.viewport[3]);
+    glScissor(s.scissor[0], s.scissor[1], s.scissor[2], s.scissor[3]);
+    glClearColor(s.clearColor[0], s.clearColor[1], s.clearColor[2], s.clearColor[3]);
+    glClearDepth(s.clearDepth);
+    glClearStencil(s.clearStencil);
+    // Fixed-function parts of the browser's pipeline that would still act on a program's output
+    for (GLenum cap : {GLenum(GL_ALPHA_TEST), GLenum(GL_COLOR_LOGIC_OP), GLenum(GL_LIGHTING), GLenum(GL_FOG),
+                       GLenum(GL_TEXTURE_2D), GLenum(GL_LINE_SMOOTH), GLenum(GL_POLYGON_SMOOTH)}) {
+        glDisable(cap);
+    }
+    glEnable(kVertexProgramPointSize);
+    glEnable(kPointSprite);
+    for (GLenum cap : {GL::BLEND, GL::CULL_FACE, GL::DEPTH_TEST, GL::DITHER, GL::POLYGON_OFFSET_FILL,
+                       GL::SAMPLE_ALPHA_TO_COVERAGE, GL::SAMPLE_COVERAGE, GL::SCISSOR_TEST, GL::STENCIL_TEST}) {
+        auto it = s.caps.find(cap);
+        if (it != s.caps.end() && it->second) glEnable(cap);
+        else glDisable(cap);
+    }
+    if (g.BlendFuncSeparate) g.BlendFuncSeparate(s.blend[0], s.blend[1], s.blend[2], s.blend[3]);
+    if (g.BlendEquationSeparate) g.BlendEquationSeparate(s.blendEquation[0], s.blendEquation[1]);
+    if (g.BlendColor) g.BlendColor(s.blendColor[0], s.blendColor[1], s.blendColor[2], s.blendColor[3]);
+    glDepthFunc(s.depthFunc);
+    glDepthMask(s.depthMask);
+    glDepthRange(s.depthRange[0], s.depthRange[1]);
+    glColorMask(s.colorMask[0], s.colorMask[1], s.colorMask[2], s.colorMask[3]);
+    for (int face = 0; face < 2; ++face) {
+        GLenum f = face == 0 ? kFront : kBack;
+        if (g.StencilFuncSeparate) g.StencilFuncSeparate(f, s.stencilFunc[face][0], asInt(s.stencilFunc[face][1]), s.stencilFunc[face][2]);
+        if (g.StencilOpSeparate) g.StencilOpSeparate(f, s.stencilOp[face][0], s.stencilOp[face][1], s.stencilOp[face][2]);
+        if (g.StencilMaskSeparate) g.StencilMaskSeparate(f, s.stencilMask[face]);
+    }
+    glCullFace(s.cullFace);
+    glFrontFace(s.frontFace);
+    glLineWidth(s.lineWidth);
+    glPolygonOffset(s.polygonOffset[0], s.polygonOffset[1]);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, s.unpackAlignment);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+}
+
+bool WebGLRenderingContext::flush() {
+    if (!glAvailable() || !loadFunctions()) return false;
+    if (width_ == 0 || height_ == 0) {
+        pending_.clear();
+        pendingBytes_ = 0;
+        return true;
+    }
+    const bool drawsSomething = !pending_.empty();
+    if (!drawsSomething && fbo_ && bufferWidth_ == width_ && bufferHeight_ == height_) return true;
+
+    SavedGLState saved;
+    ensureDrawingBuffer();
+    g.BindFramebuffer(kFramebuffer, msFbo_ ? msFbo_ : fbo_);
+    if (needsClear_ || (drawsSomething && presented_ && !attributes_.preserveDrawingBuffer)) {
+        clearDrawingBuffer();
+        needsClear_ = false;
+    }
+    presented_ = false;
+    applyState();
+
+    std::vector<WebGLCommand> commands;
+    commands.swap(pending_);
+    pendingBytes_ = 0;
+    for (const WebGLCommand& command : commands) execute(command);
+
+    if (msFbo_) {
+        // Resolve the samples into the texture the browser composites
+        glDisable(GL_SCISSOR_TEST);
+        g.BindFramebuffer(kReadFramebuffer, msFbo_);
+        g.BindFramebuffer(kDrawFramebuffer, fbo_);
+        g.BlitFramebuffer(0, 0, width_, height_, 0, 0, width_, height_, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
+    return true;
+}
+
+bool WebGLRenderingContext::readPixels(int x, int y, int width, int height, uint8_t* rgba) {
+    if (!flush() || !fbo_) return false;
+    SavedGLState saved;
+    g.BindFramebuffer(kFramebuffer, fbo_);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    return true;
+}
+
+void WebGLRenderingContext::execute(const WebGLCommand& c) {
+    State& s = state_;
+    const uint32_t* u = c.u;
+    switch (c.op) {
+        // ---- Shaders and programs ----
+        case WebGLOp::CreateShader:
+            shaders_[u[0]] = g.CreateShader(u[1]);
+            shaderTypes_[u[0]] = u[1];
+            break;
+        case WebGLOp::ShaderSource: {
+            GLuint id = glName(shaders_, u[0]);
+            if (!id) break;
+            const std::string translated = translateShader(c.text);
+            const char* text = translated.c_str();
+            g.ShaderSource(id, 1, &text, nullptr);
+            break;
+        }
+        case WebGLOp::CompileShader: {
+            GLuint id = glName(shaders_, u[0]);
+            if (!id) break;
+            g.CompileShader(id);
+            GLint ok = 0, length = 0;
+            g.GetShaderiv(id, kCompileStatus, &ok);
+            g.GetShaderiv(id, kInfoLogLength, &length);
+            CompileResult result{true, ok == GL_TRUE, {}};
+            if (length > 1) {
+                result.log.resize(static_cast<size_t>(length));
+                g.GetShaderInfoLog(id, length, nullptr, &result.log[0]);
+                result.log.resize(std::strlen(result.log.c_str()));
+            }
+            if (!result.ok) std::cerr << "[WebGL] shader did not compile:\n" << result.log << std::endl;
+            shaderResults_[u[0]] = std::move(result);
+            break;
+        }
+        case WebGLOp::DeleteShader: {
+            auto it = shaders_.find(u[0]);
+            if (it != shaders_.end()) { g.DeleteShader(it->second); shaders_.erase(it); }
+            break;
+        }
+        case WebGLOp::CreateProgram:
+            programs_[u[0]] = g.CreateProgram();
+            break;
+        case WebGLOp::AttachShader:
+            if (glName(programs_, u[0]) && glName(shaders_, u[1])) g.AttachShader(glName(programs_, u[0]), glName(shaders_, u[1]));
+            break;
+        case WebGLOp::DetachShader:
+            if (g.DetachShader && glName(programs_, u[0]) && glName(shaders_, u[1])) g.DetachShader(glName(programs_, u[0]), glName(shaders_, u[1]));
+            break;
+        case WebGLOp::BindAttribLocation:
+            if (glName(programs_, u[0])) g.BindAttribLocation(glName(programs_, u[0]), u[1], c.text.c_str());
+            break;
+        case WebGLOp::LinkProgram: {
+            GLuint id = glName(programs_, u[0]);
+            if (!id) break;
+            g.LinkProgram(id);
+            GLint ok = 0, length = 0;
+            g.GetProgramiv(id, kLinkStatus, &ok);
+            g.GetProgramiv(id, kInfoLogLength, &length);
+            CompileResult result{true, ok == GL_TRUE, {}};
+            if (length > 1) {
+                result.log.resize(static_cast<size_t>(length));
+                g.GetProgramInfoLog(id, length, nullptr, &result.log[0]);
+                result.log.resize(std::strlen(result.log.c_str()));
+            }
+            if (!result.ok) std::cerr << "[WebGL] program did not link:\n" << result.log << std::endl;
+            programResults_[u[0]] = std::move(result);
+            for (auto it = uniformLocations_.begin(); it != uniformLocations_.end();) {
+                it = it->first.first == u[0] ? uniformLocations_.erase(it) : std::next(it);
+            }
+            // Linking the current program makes the new executable current
+            if (s.program == u[0]) g.UseProgram(id);
+            break;
+        }
+        case WebGLOp::UseProgram:
+            s.program = u[0];
+            g.UseProgram(glName(programs_, u[0]));
+            break;
+        case WebGLOp::DeleteProgram: {
+            auto it = programs_.find(u[0]);
+            if (it != programs_.end()) { g.DeleteProgram(it->second); programs_.erase(it); }
+            if (s.program == u[0]) s.program = 0;
+            break;
+        }
+
+        // ---- Buffers ----
+        case WebGLOp::CreateBuffer: {
+            GLuint id = 0;
+            g.GenBuffers(1, &id);
+            buffers_[u[0]] = id;
+            break;
+        }
+        case WebGLOp::BindBuffer:
+            if (u[0] == GL::ARRAY_BUFFER) s.arrayBuffer = u[1];
+            else s.elementBuffer = u[1];
+            g.BindBuffer(u[0], glName(buffers_, u[1]));
+            break;
+        case WebGLOp::BufferData:
+            if (c.data.empty()) {
+                std::vector<uint8_t> zeros(u[2], 0);
+                g.BufferData(u[0], static_cast<ptrdiff_t>(zeros.size()), zeros.data(), u[1]);
+            } else {
+                g.BufferData(u[0], static_cast<ptrdiff_t>(c.data.size()), c.data.data(), u[1]);
+            }
+            break;
+        case WebGLOp::BufferSubData:
+            if (g.BufferSubData) g.BufferSubData(u[0], static_cast<ptrdiff_t>(u[1]), static_cast<ptrdiff_t>(c.data.size()), c.data.data());
+            break;
+        case WebGLOp::DeleteBuffer: {
+            auto it = buffers_.find(u[0]);
+            if (it != buffers_.end()) { g.DeleteBuffers(1, &it->second); buffers_.erase(it); }
+            if (s.arrayBuffer == u[0]) s.arrayBuffer = 0;
+            if (s.elementBuffer == u[0]) s.elementBuffer = 0;
+            for (AttribState& a : s.attribs) {
+                if (a.buffer == u[0]) a.buffer = 0;
+            }
+            break;
+        }
+
+        // ---- Textures ----
+        case WebGLOp::CreateTexture: {
+            GLuint id = 0;
+            glGenTextures(1, &id);
+            textures_[u[0]] = id;
+            break;
+        }
+        case WebGLOp::BindTexture:
+            (u[0] == GL::TEXTURE_CUBE_MAP ? s.texturesCube : s.textures2D)[s.activeTexture] = u[1];
+            glBindTexture(u[0], glName(textures_, u[1]));
+            break;
+        case WebGLOp::ActiveTexture:
+            s.activeTexture = std::min<uint32_t>(u[0] - GL::TEXTURE0, kMaxUnits - 1);
+            g.ActiveTexture(GL::TEXTURE0 + s.activeTexture);
+            break;
+        case WebGLOp::TexImage2D:
+            glTexImage2D(u[0], asInt(u[1]), asInt(u[2]), asInt(u[3]), asInt(u[4]), 0, u[5], u[6],
+                         c.data.empty() ? nullptr : c.data.data());
+            break;
+        case WebGLOp::TexSubImage2D:
+            if (!c.data.empty()) glTexSubImage2D(u[0], asInt(u[1]), asInt(u[2]), asInt(u[3]), asInt(u[4]), asInt(u[5]), u[6], u[7], c.data.data());
+            break;
+        case WebGLOp::TexParameteri:
+            glTexParameteri(u[0], u[1], asInt(u[2]));
+            break;
+        case WebGLOp::GenerateMipmap:
+            if (g.GenerateMipmap) g.GenerateMipmap(u[0]);
+            break;
+        case WebGLOp::DeleteTexture: {
+            auto it = textures_.find(u[0]);
+            if (it != textures_.end()) { glDeleteTextures(1, &it->second); textures_.erase(it); }
+            for (auto* bindings : {&s.textures2D, &s.texturesCube}) {
+                for (auto& [unit, handle] : *bindings) {
+                    if (handle == u[0]) handle = 0;
+                }
+            }
+            break;
+        }
+
+        // ---- Attributes and uniforms ----
+        case WebGLOp::EnableVertexAttribArray:
+            if (u[0] < 16) { s.attribs[u[0]].enabled = true; g.EnableVertexAttribArray(u[0]); }
+            break;
+        case WebGLOp::DisableVertexAttribArray:
+            if (u[0] < 16) { s.attribs[u[0]].enabled = false; g.DisableVertexAttribArray(u[0]); }
+            break;
+        case WebGLOp::VertexAttribPointer:
+            if (u[0] < 16) {
+                AttribState& a = s.attribs[u[0]];
+                a.size = asInt(u[1]); a.type = u[2]; a.normalized = u[3] != 0;
+                a.stride = asInt(u[4]); a.offset = u[5]; a.buffer = s.arrayBuffer;
+                g.VertexAttribPointer(u[0], a.size, a.type, a.normalized, a.stride,
+                                      reinterpret_cast<const void*>(static_cast<uintptr_t>(a.offset)));
+            }
+            break;
+        case WebGLOp::VertexAttrib4f:
+            if (u[0] < 16) {
+                std::copy(c.f, c.f + 4, s.attribs[u[0]].value);
+                if (g.VertexAttrib4f) g.VertexAttrib4f(u[0], c.f[0], c.f[1], c.f[2], c.f[3]);
+            }
+            break;
+        case WebGLOp::Uniform: {
+            // A location belongs to its program, which must be the current one
+            if (u[0] != s.program) break;
+            int location = uniformLocation(u[0], c.text);
+            if (location < 0) break;
+            const auto kind = static_cast<UniformKind>(u[1]);
+            const GLsizei count = static_cast<GLsizei>(u[2]);
+            const auto* floats = reinterpret_cast<const GLfloat*>(c.data.data());
+            const auto* ints = reinterpret_cast<const GLint*>(c.data.data());
+            switch (kind) {
+                case UniformKind::F1: case UniformKind::F2: case UniformKind::F3: case UniformKind::F4:
+                    if (auto fn = g.Uniformfv[static_cast<int>(kind) - static_cast<int>(UniformKind::F1)]) fn(location, count, floats);
+                    break;
+                case UniformKind::I1: case UniformKind::I2: case UniformKind::I3: case UniformKind::I4:
+                    if (auto fn = g.Uniformiv[static_cast<int>(kind) - static_cast<int>(UniformKind::I1)]) fn(location, count, ints);
+                    break;
+                case UniformKind::Mat2: case UniformKind::Mat3: case UniformKind::Mat4:
+                    if (auto fn = g.UniformMatrixfv[static_cast<int>(kind) - static_cast<int>(UniformKind::Mat2)]) {
+                        fn(location, count, u[3] ? GL_TRUE : GL_FALSE, floats);
+                    }
+                    break;
+            }
+            break;
+        }
+
+        // ---- Fixed state ----
+        case WebGLOp::Viewport:
+            for (int i = 0; i < 4; ++i) s.viewport[i] = asInt(u[i]);
+            glViewport(s.viewport[0], s.viewport[1], s.viewport[2], s.viewport[3]);
+            break;
+        case WebGLOp::Scissor:
+            for (int i = 0; i < 4; ++i) s.scissor[i] = asInt(u[i]);
+            glScissor(s.scissor[0], s.scissor[1], s.scissor[2], s.scissor[3]);
+            break;
+        case WebGLOp::ClearColor:
+            std::copy(c.f, c.f + 4, s.clearColor);
+            glClearColor(c.f[0], c.f[1], c.f[2], c.f[3]);
+            break;
+        case WebGLOp::ClearDepth:
+            s.clearDepth = c.f[0];
+            glClearDepth(c.f[0]);
+            break;
+        case WebGLOp::ClearStencil:
+            s.clearStencil = asInt(u[0]);
+            glClearStencil(s.clearStencil);
+            break;
+        case WebGLOp::Clear:
+            glClear(u[0] & (GL::COLOR_BUFFER_BIT | GL::DEPTH_BUFFER_BIT | GL::STENCIL_BUFFER_BIT));
+            break;
+        case WebGLOp::Enable:
+        case WebGLOp::Disable:
+            s.caps[u[0]] = c.op == WebGLOp::Enable;
+            if (s.caps[u[0]]) glEnable(u[0]);
+            else glDisable(u[0]);
+            break;
+        case WebGLOp::BlendFuncSeparate:
+            std::copy(u, u + 4, s.blend);
+            if (g.BlendFuncSeparate) g.BlendFuncSeparate(u[0], u[1], u[2], u[3]);
+            break;
+        case WebGLOp::BlendEquationSeparate:
+            s.blendEquation[0] = u[0]; s.blendEquation[1] = u[1];
+            if (g.BlendEquationSeparate) g.BlendEquationSeparate(u[0], u[1]);
+            break;
+        case WebGLOp::BlendColor:
+            std::copy(c.f, c.f + 4, s.blendColor);
+            if (g.BlendColor) g.BlendColor(c.f[0], c.f[1], c.f[2], c.f[3]);
+            break;
+        case WebGLOp::DepthFunc:
+            s.depthFunc = u[0];
+            glDepthFunc(u[0]);
+            break;
+        case WebGLOp::DepthMask:
+            s.depthMask = u[0] != 0;
+            glDepthMask(s.depthMask);
+            break;
+        case WebGLOp::DepthRange:
+            s.depthRange[0] = c.f[0]; s.depthRange[1] = c.f[1];
+            glDepthRange(c.f[0], c.f[1]);
+            break;
+        case WebGLOp::ColorMask:
+            for (int i = 0; i < 4; ++i) s.colorMask[i] = u[i] != 0;
+            glColorMask(s.colorMask[0], s.colorMask[1], s.colorMask[2], s.colorMask[3]);
+            break;
+        case WebGLOp::StencilFuncSeparate:
+            for (int face = 0; face < 2; ++face) {
+                if (u[0] == kFrontAndBack || u[0] == (face == 0 ? kFront : kBack)) {
+                    s.stencilFunc[face][0] = u[1]; s.stencilFunc[face][1] = u[2]; s.stencilFunc[face][2] = u[3];
+                }
+            }
+            if (g.StencilFuncSeparate) g.StencilFuncSeparate(u[0], u[1], asInt(u[2]), u[3]);
+            break;
+        case WebGLOp::StencilOpSeparate:
+            for (int face = 0; face < 2; ++face) {
+                if (u[0] == kFrontAndBack || u[0] == (face == 0 ? kFront : kBack)) {
+                    s.stencilOp[face][0] = u[1]; s.stencilOp[face][1] = u[2]; s.stencilOp[face][2] = u[3];
+                }
+            }
+            if (g.StencilOpSeparate) g.StencilOpSeparate(u[0], u[1], u[2], u[3]);
+            break;
+        case WebGLOp::StencilMaskSeparate:
+            for (int face = 0; face < 2; ++face) {
+                if (u[0] == kFrontAndBack || u[0] == (face == 0 ? kFront : kBack)) s.stencilMask[face] = u[1];
+            }
+            if (g.StencilMaskSeparate) g.StencilMaskSeparate(u[0], u[1]);
+            break;
+        case WebGLOp::CullFace:
+            s.cullFace = u[0];
+            glCullFace(u[0]);
+            break;
+        case WebGLOp::FrontFace:
+            s.frontFace = u[0];
+            glFrontFace(u[0]);
+            break;
+        case WebGLOp::LineWidth:
+            s.lineWidth = c.f[0];
+            glLineWidth(c.f[0]);
+            break;
+        case WebGLOp::PolygonOffset:
+            s.polygonOffset[0] = c.f[0]; s.polygonOffset[1] = c.f[1];
+            glPolygonOffset(c.f[0], c.f[1]);
+            break;
+        case WebGLOp::PixelStorei:
+            if (u[0] == GL::UNPACK_ALIGNMENT) {
+                s.unpackAlignment = asInt(u[1]);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, s.unpackAlignment);
+            }
+            break;
+
+        // ---- Drawing ----
+        case WebGLOp::DrawArrays:
+            if (s.program) glDrawArrays(u[0], asInt(u[1]), asInt(u[2]));
+            break;
+        case WebGLOp::DrawElements:
+            if (s.program && s.elementBuffer) {
+                glDrawElements(u[0], asInt(u[1]), u[2], reinterpret_cast<const void*>(static_cast<uintptr_t>(u[3])));
+            }
+            break;
+    }
+}
 
 } // namespace NXRender

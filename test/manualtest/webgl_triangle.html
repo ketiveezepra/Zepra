@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>WebGL triangle</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 20px; background: #ffffff; color: #222222; }
+  canvas { display: block; margin: 12px 0; }
+  #status { font-size: 14px; color: #37474f; }
+</style>
+</head>
+<body>
+<h1>WebGL triangle</h1>
+<p>A triangle with red, green and blue corners and an orange square, drawn with WebGL 1
+   (shaders, one interleaved vertex buffer, attributes, uniforms, drawArrays).</p>
+<canvas id="gl" width="400" height="300"></canvas>
+<p id="status">running...</p>
+<script>
+(function () {
+  var status = document.getElementById('status');
+  var canvas = document.getElementById('gl');
+  var gl = canvas.getContext('webgl');
+  if (!gl) { status.textContent = 'getContext("webgl") returned null'; return; }
+
+  function compile(type, source) {
+    var shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      throw new Error('shader: ' + gl.getShaderInfoLog(shader));
+    }
+    return shader;
+  }
+
+  var vs = compile(gl.VERTEX_SHADER,
+    'attribute vec2 a_position;\n' +
+    'attribute vec3 a_color;\n' +
+    'uniform vec2 u_offset;\n' +
+    'uniform float u_scale;\n' +
+    'varying vec3 v_color;\n' +
+    'void main() {\n' +
+    '  v_color = a_color;\n' +
+    '  gl_Position = vec4(a_position * u_scale + u_offset, 0.0, 1.0);\n' +
+    '}\n');
+  var fs = compile(gl.FRAGMENT_SHADER,
+    'precision mediump float;\n' +
+    'varying vec3 v_color;\n' +
+    'uniform vec4 u_tint;\n' +
+    'void main() {\n' +
+    '  gl_FragColor = vec4(v_color, 1.0) * u_tint;\n' +
+    '}\n');
+
+  var program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    status.textContent = 'link failed: ' + gl.getProgramInfoLog(program);
+    return;
+  }
+
+  // x, y, r, g, b per vertex: the triangle (3 vertices), then the square (a 4-vertex strip)
+  var vertices = new Float32Array([
+     0.0,  0.7,   1, 0, 0,
+    -0.6, -0.6,   0, 1, 0,
+     0.6, -0.6,   0, 0, 1,
+    -1.0, -1.0,   1, 1, 1,
+     1.0, -1.0,   1, 1, 1,
+    -1.0,  1.0,   1, 1, 1,
+     1.0,  1.0,   1, 1, 1
+  ]);
+  var buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+  gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+  gl.clearColor(31 / 255, 41 / 255, 61 / 255, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(program);
+
+  var stride = 5 * vertices.BYTES_PER_ELEMENT;
+  var aPosition = gl.getAttribLocation(program, 'a_position');
+  var aColor = gl.getAttribLocation(program, 'a_color');
+  gl.enableVertexAttribArray(aPosition);
+  gl.vertexAttribPointer(aPosition, 2, gl.FLOAT, false, stride, 0);
+  gl.enableVertexAttribArray(aColor);
+  gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, stride, 2 * vertices.BYTES_PER_ELEMENT);
+
+  var uOffset = gl.getUniformLocation(program, 'u_offset');
+  var uScale = gl.getUniformLocation(program, 'u_scale');
+  var uTint = gl.getUniformLocation(program, 'u_tint');
+
+  gl.uniform2f(uOffset, -0.25, 0.0);
+  gl.uniform1f(uScale, 1.0);
+  gl.uniform4fv(uTint, [1, 1, 1, 1]);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  gl.uniform2fv(uOffset, new Float32Array([0.62, 0.55]));
+  gl.uniform1f(uScale, 0.22);
+  gl.uniform4f(uTint, 1.0, 0.6, 0.0, 1.0);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 3, 4);
+
+  var error = gl.getError();
+  status.textContent = 'drew 2 objects; attributes ' + aPosition + '/' + aColor +
+                       ', getError() = ' + error + (error === gl.NO_ERROR ? ' (NO_ERROR)' : '');
+  console.log('webgl_triangle: ' + status.textContent);
+})();
+</script>
+</body>
+</html>

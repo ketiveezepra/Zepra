@@ -75,7 +75,7 @@ int main(int argc, char* argv[]) {
     std::cout << "║  Rendering: NXRender + NXGFX (Native, No SDL)            ║" << std::endl;
     std::cout << "║  Graphics:  OpenGL Direct                                ║" << std::endl;
     std::cout << "║  Fonts:     FreeType (nxfont.h)                          ║" << std::endl;
-    std::cout << "║  Icons:     NxSVG (nxsvg.h)                              ║" << std::endl;
+    std::cout << "║  Icons:     nanosvg (webCore/browser/svg_raster)         ║" << std::endl;
     std::cout << "╚══════════════════════════════════════════════════════════╝" << std::endl;
     std::cout << std::endl;
     

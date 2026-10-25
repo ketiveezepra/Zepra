@@ -5,6 +5,9 @@
 #include "browser/dom.hpp"
 #include "css/css_computed_style.hpp"
 #include "nxgfx/canvas2d/canvas_context.h"
+#include "nxgfx/webgl/webgl_context.h"
+
+#include "builtins/typed_array.hpp"
 
 #include "runtime/execution/vm.hpp"
 #include "runtime/execution/js_error.hpp"
@@ -336,14 +339,14 @@ void definePathMethods(Object* obj, Target target) {
 }
 
 // ImageData as a plain object: width, height and data (an array of bytes)
-Object* makeImageData(const NX::ImageData& d) {
+// ImageData: width, height and a Uint8ClampedArray of RGBA bytes
+Object* makeImageData(CanvasRegistry& registry, const NX::ImageData& d) {
     auto* obj = new Object();
     obj->set("width", Value::number(d.width));
     obj->set("height", Value::number(d.height));
-    std::vector<Value> bytes;
-    bytes.reserve(d.data.size());
-    for (uint8_t b : d.data) bytes.push_back(Value::number(b));
-    obj->set("data", Value::object(new Array(std::move(bytes))));
+    Builtins::TypedArrayObject* bytes = registry.newTypedArray(Builtins::TypedArrayType::Uint8Clamped, d.data.size());
+    if (!d.data.empty()) std::memcpy(bytes->data(), d.data.data(), d.data.size());
+    obj->set("data", Value::object(bytes));
     return obj;
 }
 
@@ -357,6 +360,12 @@ bool readImageData(const Value& v, NX::ImageData& out) {
     out = NX::ImageData(w, h);
     Object* bytes = data.asObject();
     size_t n = static_cast<size_t>(w) * h * 4;
+    if (auto* typed = dynamic_cast<Builtins::TypedArrayObject*>(bytes)) {
+        if (typed->type() == Builtins::TypedArrayType::Uint8Clamped || typed->type() == Builtins::TypedArrayType::Uint8) {
+            std::memcpy(out.data.data(), typed->data(), std::min(n, typed->byteLength()));
+            return true;
+        }
+    }
     for (size_t i = 0; i < n; i++) {
         double b = bytes->get(static_cast<uint32_t>(i)).toNumber();
         out.data[i] = static_cast<uint8_t>(std::isnan(b) ? 0 : std::clamp(std::lround(b), 0L, 255L));
@@ -411,6 +420,21 @@ CanvasRegistry::CanvasRegistry(VM* vm, Object* window) : vm_(vm) {
     }, 1);
     if (vm_) vm_->setGlobal("Path2D", Value::object(path2dCtor));
     if (window) window->set("Path2D", Value::object(path2dCtor));
+    installWebGL(window);
+}
+
+CanvasSurface::CanvasSurface() = default;
+CanvasSurface::~CanvasSurface() = default;
+
+Builtins::TypedArrayObject* CanvasRegistry::newTypedArray(Builtins::TypedArrayType type, size_t length) {
+    auto prototypeOf = [this](const char* name) -> Object* {
+        if (!vm_) return nullptr;
+        Value proto = vm_->getMember(vm_->getGlobal(name), "prototype");
+        return proto.isObject() ? proto.asObject() : nullptr;
+    };
+    return Builtins::TypedArrayBuiltin::construct(type, {Value::number(static_cast<double>(length))},
+                                                  prototypeOf(Builtins::typedArrayName(type)),
+                                                  prototypeOf("ArrayBuffer"));
 }
 
 CanvasRegistry::~CanvasRegistry() {
@@ -462,8 +486,6 @@ CanvasSurface& CanvasRegistry::surfaceFor(DOMElement* canvas) {
     if (!slot) {
         slot = std::make_unique<CanvasSurface>();
         slot->id = idFor(canvas);
-        slot->context2d = std::make_unique<NX::CanvasRenderingContext2D>(
-            attributeSize(canvas, "width"), attributeSize(canvas, "height"));
     }
     return *slot;
 }
@@ -472,7 +494,11 @@ void CanvasRegistry::attributeChanged(DOMElement* canvas, const std::string& nam
     if (name != "width" && name != "height") return;
     if (CanvasSurface* s = find(canvas)) {
         // Setting either dimension resets the bitmap and the context state
-        s->context2d->resize(attributeSize(canvas, "width"), attributeSize(canvas, "height"));
+        if (s->webgl) {
+            s->webgl->resize(attributeSize(canvas, "width"), attributeSize(canvas, "height"));
+            return;
+        }
+        if (s->context2d) s->context2d->resize(attributeSize(canvas, "width"), attributeSize(canvas, "height"));
         if (s->jsContext) {
             defineHidden(s->jsContext, "__fillStyle", Value::undefined());
             defineHidden(s->jsContext, "__strokeStyle", Value::undefined());
@@ -501,12 +527,21 @@ void CanvasRegistry::decorate(Object* wrapper, DOMElement* canvas) {
     method(wrapper, "getContext", 1, [this, canvas, wrapper](Context*, const Args& a) -> Value {
         if (a.empty()) throw JSError("TypeError", "Failed to execute 'getContext' on 'HTMLCanvasElement': 1 argument required.");
         std::string type = a[0].toString();
-        if (type != "2d") return Value::null();  // webgl, webgpu, bitmaprenderer: not supported
+        const bool webgl = type == "webgl" || type == "experimental-webgl";
+        if (type != "2d" && !webgl) return Value::null();  // webgl2, webgpu, bitmaprenderer: not supported
         CanvasSurface& s = surfaceFor(canvas);
         if (!s.jsContext) {
-            s.jsContext = createContext2D(s, wrapper);
+            if (webgl) {
+                s.jsContext = createWebGLContext(s, wrapper, a.size() > 1 ? a[1] : Value::undefined());
+            } else {
+                s.context2d = std::make_unique<NX::CanvasRenderingContext2D>(
+                    attributeSize(canvas, "width"), attributeSize(canvas, "height"));
+                s.jsContext = createContext2D(s, wrapper);
+            }
             root_->set("c" + std::to_string(s.id), Value::object(s.jsContext));
         }
+        // A canvas keeps the kind of context it was first asked for
+        if (webgl != static_cast<bool>(s.webgl)) return Value::null();
         return Value::object(s.jsContext);
     });
     method(wrapper, "toDataURL", 0, [](Context*, const Args&) -> Value {
@@ -873,7 +908,7 @@ Object* CanvasRegistry::createContext2D(CanvasSurface& surface, Object* canvasWr
         Value id = v.asObject()->get("__canvasId");
         if (!id.isNumber()) return nullptr;
         CanvasSurface* s = surfaceById(static_cast<int>(id.toNumber()));
-        if (s) return s->context2d->snapshot();
+        if (s && s->context2d) return s->context2d->snapshot();
         // A canvas that has no context yet is transparent
         auto blank = std::make_shared<NX::CanvasImage>();
         return blank;
@@ -922,7 +957,7 @@ Object* CanvasRegistry::createContext2D(CanvasSurface& surface, Object* canvasWr
     });
 
     // --- Pixels ---
-    method(obj, "createImageData", 1, [ctx](Context*, const Args& a) -> Value {
+    method(obj, "createImageData", 1, [this, ctx](Context*, const Args& a) -> Value {
         need(a, 1, "createImageData");
         int w, h;
         if (a[0].isObject()) {
@@ -934,13 +969,13 @@ Object* CanvasRegistry::createContext2D(CanvasSurface& surface, Object* canvasWr
             h = static_cast<int>(std::fabs(num(a, 1)));
         }
         if (w <= 0 || h <= 0) throw JSError("IndexSizeError", "The source width or height is 0.");
-        return Value::object(makeImageData(ctx->createImageData(w, h)));
+        return Value::object(makeImageData(*this, ctx->createImageData(w, h)));
     });
-    method(obj, "getImageData", 4, [ctx](Context*, const Args& a) -> Value {
+    method(obj, "getImageData", 4, [this, ctx](Context*, const Args& a) -> Value {
         need(a, 4, "getImageData");
         int sw = static_cast<int>(num(a, 2)), sh = static_cast<int>(num(a, 3));
         if (sw == 0 || sh == 0) throw JSError("IndexSizeError", "The source width or height is 0.");
-        return Value::object(makeImageData(ctx->getImageData(static_cast<int>(num(a, 0)), static_cast<int>(num(a, 1)), sw, sh)));
+        return Value::object(makeImageData(*this, ctx->getImageData(static_cast<int>(num(a, 0)), static_cast<int>(num(a, 1)), sw, sh)));
     });
     method(obj, "putImageData", 3, [ctx](Context*, const Args& a) -> Value {
         need(a, 3, "putImageData");

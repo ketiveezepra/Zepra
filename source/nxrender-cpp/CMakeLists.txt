@@ -245,6 +245,19 @@ target_link_libraries(nxrender PUBLIC
     ${HARFBUZZ_LINK_LIBS}
 )
 
+# WebP decoding (web/paint/image_loader.cpp) through libwebp, when installed
+if(PkgConfig_FOUND)
+    pkg_check_modules(LIBWEBP QUIET libwebp)
+endif()
+if(LIBWEBP_FOUND)
+    target_include_directories(nxrender PRIVATE ${LIBWEBP_INCLUDE_DIRS})
+    target_link_libraries(nxrender PUBLIC ${LIBWEBP_LINK_LIBRARIES})
+    target_compile_definitions(nxrender PUBLIC NXRENDER_HAVE_WEBP)
+    message(STATUS "WebP images: libwebp ${LIBWEBP_VERSION}")
+else()
+    message(STATUS "WebP images: libwebp not found, WebP images will not decode")
+endif()
+
 # Platform-specific sources and linkage
 if(UNIX AND NOT APPLE)
     # Linux/NeolyxOS: X11 and Wayland backends
