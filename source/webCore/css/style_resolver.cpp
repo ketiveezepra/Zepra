@@ -13,6 +13,7 @@
 
 #include "css/css_engine.hpp"
 #include "browser/dom.hpp"
+#include "css/presentational_hints.hpp"
 #include <sstream>
 #include <algorithm>
 #include <iostream>
@@ -68,55 +69,6 @@ void StyleResolver::addStyleSheet(std::shared_ptr<CSSStyleSheet> sheet, StyleOri
     cascade_.invalidateIndex();
 }
 
-void StyleResolver::addUserAgentStyleSheet() {
-    // Default browser styles (simplified user-agent stylesheet)
-    const std::string uaStyles = R"(
-        html, body { display: block; margin: 8px; }
-        head, script, style, meta, link, title { display: none; }
-        
-        h1 { display: block; font-size: 2em; font-weight: bold; margin: 0.67em 0; }
-        h2 { display: block; font-size: 1.5em; font-weight: bold; margin: 0.83em 0; }
-        h3 { display: block; font-size: 1.17em; font-weight: bold; margin: 1em 0; }
-        h4 { display: block; font-weight: bold; margin: 1.33em 0; }
-        h5 { display: block; font-size: 0.83em; font-weight: bold; margin: 1.67em 0; }
-        h6 { display: block; font-size: 0.67em; font-weight: bold; margin: 2.33em 0; }
-        
-        p { display: block; margin: 1em 0; }
-        div { display: block; }
-        span { display: inline; }
-        
-        a { color: #0066cc; text-decoration: underline; cursor: pointer; }
-        a:visited { color: #551a8b; }
-        
-        strong, b { font-weight: bold; }
-        em, i { font-style: italic; }
-        u { text-decoration: underline; }
-        s, strike { text-decoration: line-through; }
-        
-        pre, code { font-family: monospace; }
-        pre { white-space: pre; display: block; margin: 1em 0; }
-        code { white-space: pre-wrap; }
-        
-        ul, ol { display: block; margin: 1em 0; padding-left: 40px; }
-        li { display: list-item; }
-        
-        table { display: table; border-collapse: separate; border-spacing: 2px; }
-        tr { display: table-row; }
-        td, th { display: table-cell; padding: 1px; }
-        th { font-weight: bold; text-align: center; }
-        
-        img { display: inline-block; }
-        
-        input, textarea, select, button { display: inline-block; }
-    )";
-    
-    CSSParser parser;
-    auto sheet = parser.parse(uaStyles);
-    if (sheet) {
-        stylesheets_.push_back({std::move(sheet), StyleOrigin::UserAgent});
-    }
-}
-
 CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSComputedStyle* parentStyle) {
     CSSComputedStyle computed;
     
@@ -138,12 +90,27 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
     // Step 3: Sort by cascade order
     cascade_.sortByCascade(matchedRules);
     
-    // Step 4: Apply matched rules in order (lowest priority first)
+    // Step 4: Apply matched rules in order (lowest priority first). The
+    // element's presentational hints (bgcolor, width, align...) go after the
+    // user-agent and user rules and before the first author rule.
+    bool hintsApplied = false;
+    auto applyHints = [&]() {
+        hintsApplied = true;
+        std::string hints = presentationalHintStyle(element);
+        if (hints.empty()) return;
+        CSSParser hintParser;
+        auto decl = hintParser.parseInlineStyle(hints);
+        if (decl) applyDeclarations(computed, decl.get(), parentStyle);
+    };
     for (const auto& match : matchedRules) {
+        if (!hintsApplied && match.origin != StyleOrigin::UserAgent && match.origin != StyleOrigin::User) {
+            applyHints();
+        }
         if (match.rule && match.rule->style()) {
             applyDeclarations(computed, match.rule->style(), parentStyle);
         }
     }
+    if (!hintsApplied) applyHints();
     
     // Step 5: Apply inline styles (highest priority)
     std::string inlineStyle = element->getAttribute("style");
@@ -153,6 +120,29 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
         if (decl) {
             applyDeclarations(computed, decl.get(), parentStyle);
         }
+    }
+
+    // <center> and align="center" stop at tables: a table doesn't pass the
+    // legacy -webkit-* alignment on to its cells (cells use their own align)
+    if ((computed.display == DisplayValue::Table || computed.display == DisplayValue::InlineTable) &&
+        computed.legacyAlign != 0) {
+        computed.textAlign = TextAlign::Start;
+        computed.legacyAlign = 0;
+    }
+
+    // Font-relative margins and paddings resolve against the element's own
+    // font size; layout only resolves percentages and viewport units
+    auto resolveFontRelative = [&](CSSLength& len) {
+        if (len.unit == CSSLength::Unit::Em || len.unit == CSSLength::Unit::Rem ||
+            len.unit == CSSLength::Unit::Pt || len.unit == CSSLength::Unit::Ex ||
+            len.unit == CSSLength::Unit::Ch) {
+            len = CSSLength::px(len.toPx(computed.fontSize, 16.0f, 0, 0, 0));
+        }
+    };
+    for (CSSLength* len : {&computed.marginTop, &computed.marginRight, &computed.marginBottom,
+                           &computed.marginLeft, &computed.paddingTop, &computed.paddingRight,
+                           &computed.paddingBottom, &computed.paddingLeft}) {
+        resolveFontRelative(*len);
     }
     
     return computed;
@@ -220,10 +210,19 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         else if (property == "font-weight") style.fontWeight = parentStyle->fontWeight;
         else if (property == "font-style") style.fontStyle = parentStyle->fontStyle;
         else if (property == "line-height") style.lineHeight = parentStyle->lineHeight;
-        else if (property == "text-align") style.textAlign = parentStyle->textAlign;
+        else if (property == "text-align") {
+            style.textAlign = parentStyle->textAlign;
+            style.legacyAlign = parentStyle->legacyAlign;
+        }
         else if (property == "letter-spacing") style.letterSpacing = parentStyle->letterSpacing;
         else if (property == "word-spacing") style.wordSpacing = parentStyle->wordSpacing;
         else if (property == "white-space") style.whiteSpace = parentStyle->whiteSpace;
+        else if (property == "vertical-align") style.verticalAlign = parentStyle->verticalAlign;
+        else if (property == "border-spacing") {
+            style.borderSpacingH = parentStyle->borderSpacingH;
+            style.borderSpacingV = parentStyle->borderSpacingV;
+        }
+        else if (property == "border-collapse") style.borderCollapse = parentStyle->borderCollapse;
         else if (property == "visibility") style.visibility = parentStyle->visibility;
         else if (property == "cursor") style.cursor = parentStyle->cursor;
         return;
@@ -237,6 +236,14 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         else if (property == "display") style.display = DisplayValue::Inline;
         else if (property == "position") style.position = PositionValue::Static;
         else if (property == "opacity") style.opacity = 1.0f;
+        else if (property == "font-style") style.fontStyle = FontStyle::Normal;
+        else if (property == "line-height") style.lineHeight = 1.2f;
+        else if (property == "white-space") style.whiteSpace = "normal";
+        else if (property == "vertical-align") style.verticalAlign = "baseline";
+        else if (property == "text-align") {
+            style.textAlign = TextAlign::Start;
+            style.legacyAlign = 0;
+        }
         return;
     }
     
@@ -288,6 +295,13 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         else if (value == "table") style.display = DisplayValue::Table;
         else if (value == "table-row") style.display = DisplayValue::TableRow;
         else if (value == "table-cell") style.display = DisplayValue::TableCell;
+        else if (value == "inline-table") style.display = DisplayValue::InlineTable;
+        else if (value == "table-row-group") style.display = DisplayValue::TableRowGroup;
+        else if (value == "table-header-group") style.display = DisplayValue::TableHeaderGroup;
+        else if (value == "table-footer-group") style.display = DisplayValue::TableFooterGroup;
+        else if (value == "table-column") style.display = DisplayValue::TableColumn;
+        else if (value == "table-column-group") style.display = DisplayValue::TableColumnGroup;
+        else if (value == "table-caption") style.display = DisplayValue::TableCaption;
         else if (value == "list-item") style.display = DisplayValue::ListItem;
         else if (value == "contents") style.display = DisplayValue::Contents;
     }
@@ -345,11 +359,20 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         else style.fontStyle = FontStyle::Normal;
     }
     else if (property == "text-align") {
+        // -webkit-left/center/right also align block descendants (the HTML
+        // align attributes and <center> map to them)
+        int legacy = 0;
         if (value == "left" || value == "start") style.textAlign = TextAlign::Left;
         else if (value == "right" || value == "end") style.textAlign = TextAlign::Right;
         else if (value == "center") style.textAlign = TextAlign::Center;
         else if (value == "justify") style.textAlign = TextAlign::Justify;
+        else if (value == "-webkit-left") { style.textAlign = TextAlign::Left; legacy = 1; }
+        else if (value == "-webkit-center") { style.textAlign = TextAlign::Center; legacy = 2; }
+        else if (value == "-webkit-right") { style.textAlign = TextAlign::Right; legacy = 3; }
+        else return;
+        style.legacyAlign = legacy;
     }
+    else if (property == "vertical-align") { style.verticalAlign = value; }
     else if (property == "text-decoration" || property == "text-decoration-line") {
         style.textDecoration = value;
     }
@@ -363,6 +386,21 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         if (!len.isAuto()) style.wordSpacing = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
     }
     else if (property == "white-space") { style.whiteSpace = value; }
+
+    // =====================================================================
+    // Tables
+    // =====================================================================
+    else if (property == "border-spacing") {
+        auto parts = splitValues(value);
+        if (!parts.empty()) {
+            float h = parseLength(parts[0]).toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+            float v = parts.size() > 1 ? parseLength(parts[1]).toPx(style.fontSize, 16.0f, 1920, 1080, 0) : h;
+            style.borderSpacingH = std::max(0.0f, h);
+            style.borderSpacingV = std::max(0.0f, v);
+        }
+    }
+    else if (property == "border-collapse") { style.borderCollapse = (value == "collapse"); }
+    else if (property == "table-layout") { style.tableLayoutFixed = (value == "fixed"); }
     else if (property == "line-height") {
         if (value == "normal") { style.lineHeight = 1.2f; }
         else if (value.find_first_of("0123456789.") != std::string::npos) {
@@ -512,6 +550,13 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
             if (token == "thin") { bw = 1; continue; }
             if (token == "medium") { bw = 3; continue; }
             if (token == "thick") { bw = 5; continue; }
+            // A width ("1px", ".5em", "0") before the colour checks: unknown
+            // words parse as black, so "1px" would otherwise count as a colour
+            if (std::isdigit((unsigned char)token[0]) || token[0] == '.') {
+                CSSLength len = parseLength(token);
+                if (!len.isAuto()) bw = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+                continue;
+            }
             if (token[0] == '#' || token.substr(0,3) == "rgb" || 
                 CSSColor::parse(token).a != 0 || token == "transparent") {
                 bc = CSSColor::parse(token); continue;

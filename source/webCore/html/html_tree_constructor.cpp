@@ -108,6 +108,7 @@ std::unique_ptr<DOMDocument> HTML5TreeConstructor::construct(const std::string& 
     tok.tokenize();
 
     tokenizer_ = nullptr;
+    doc_->setQuirksMode(quirksMode_);
     return std::move(doc_);
 }
 

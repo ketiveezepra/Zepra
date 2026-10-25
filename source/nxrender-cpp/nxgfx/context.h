@@ -12,6 +12,8 @@
 #include <string>
 #include <memory>
 #include <functional>
+#include <vector>
+#include <cstdint>
 
 namespace NXRender {
 
@@ -43,6 +45,10 @@ public:
     void beginFrame();
     void endFrame();
     void present();
+
+    /// Copy the current frame (the buffer being drawn) as RGB bytes,
+    /// bottom row first; false when nothing could be read
+    bool readPixels(int x, int y, int width, int height, std::vector<uint8_t>& rgb);
     
     // Viewport
     void setViewport(int x, int y, int width, int height);

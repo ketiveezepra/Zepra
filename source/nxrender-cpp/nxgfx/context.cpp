@@ -121,6 +121,16 @@ void GpuContext::present() {
     // Swap buffers handled by window system
 }
 
+bool GpuContext::readPixels(int x, int y, int width, int height, std::vector<uint8_t>& rgb) {
+    if (width <= 0 || height <= 0) return false;
+    rgb.assign(static_cast<size_t>(width) * height * 3, 0);
+    // Clear errors left by earlier drawing so the check below is about this read
+    for (int i = 0; i < 16 && glGetError() != GL_NO_ERROR; i++) {}
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(x, y, width, height, GL_RGB, GL_UNSIGNED_BYTE, rgb.data());
+    return glGetError() == GL_NO_ERROR;
+}
+
 void GpuContext::setViewport(int x, int y, int width, int height) {
     glViewport(x, y, width, height);
     width_ = width;
