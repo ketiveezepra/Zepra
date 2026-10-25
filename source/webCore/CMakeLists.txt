@@ -113,6 +113,9 @@ else()
         if(TARGET networking)
             target_link_libraries(webcore PUBLIC networking)
         endif()
+
+        # NXRender: the Canvas 2D context behind <canvas> (scripting/canvas_bindings.cpp)
+        target_link_libraries(webcore PUBLIC nxrender)
         
         if(OpenGL_FOUND)
             target_link_libraries(webcore PUBLIC OpenGL::GL)

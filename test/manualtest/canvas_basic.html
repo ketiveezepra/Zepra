@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Canvas 2D basics</title>
+<style>
+  body { background: #ffffff; color: #222222; font-family: Arial, sans-serif; margin: 16px; }
+  canvas { border: 1px solid #999999; }
+  p { margin: 8px 0; }
+</style>
+</head>
+<body>
+<p>Canvas 2D: rectangles, a path, gradients, arcs, transforms, text.</p>
+<canvas id="c" width="480" height="320"></canvas>
+<script>
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d');
+
+  // Rectangles: fill, stroke, clear
+  ctx.fillStyle = '#e53935';
+  ctx.fillRect(20, 20, 100, 60);
+  ctx.strokeStyle = '#1e88e5';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(140, 20, 100, 60);
+  ctx.fillStyle = 'rgba(67, 160, 71, 0.6)';
+  ctx.fillRect(60, 50, 100, 60);
+  ctx.clearRect(80, 60, 20, 20);
+
+  // A path: a closed star, filled and outlined
+  ctx.beginPath();
+  for (var i = 0; i < 10; i++) {
+    var r = i % 2 === 0 ? 50 : 20;
+    var a = -Math.PI / 2 + i * Math.PI / 5;
+    var x = 330 + r * Math.cos(a), y = 70 + r * Math.sin(a);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = '#fdd835';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = '#6d4c41';
+  ctx.stroke();
+
+  // A curve with round caps
+  ctx.beginPath();
+  ctx.moveTo(400, 30);
+  ctx.bezierCurveTo(440, 0, 470, 80, 440, 110);
+  ctx.lineWidth = 6;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#8e24aa';
+  ctx.stroke();
+
+  // Gradients: linear and radial
+  var lin = ctx.createLinearGradient(20, 0, 220, 0);
+  lin.addColorStop(0, '#ff9800');
+  lin.addColorStop(0.5, '#ffffff');
+  lin.addColorStop(1, '#3f51b5');
+  ctx.fillStyle = lin;
+  ctx.fillRect(20, 140, 200, 50);
+
+  var rad = ctx.createRadialGradient(300, 175, 5, 300, 175, 45);
+  rad.addColorStop(0, '#ffffff');
+  rad.addColorStop(1, '#00897b');
+  ctx.fillStyle = rad;
+  ctx.beginPath();
+  ctx.arc(300, 175, 45, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Arcs: a pie slice and an outlined half circle
+  ctx.beginPath();
+  ctx.moveTo(410, 175);
+  ctx.arc(410, 175, 40, -Math.PI / 2, Math.PI / 3);
+  ctx.closePath();
+  ctx.fillStyle = '#d81b60';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(410, 175, 50, Math.PI / 2, Math.PI * 1.5);
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'butt';
+  ctx.strokeStyle = '#37474f';
+  ctx.stroke();
+
+  // Transforms with save/restore: rotated squares
+  for (var k = 0; k < 6; k++) {
+    ctx.save();
+    ctx.translate(60 + k * 30, 260);
+    ctx.rotate(k * Math.PI / 12);
+    ctx.fillStyle = 'hsl(' + (k * 50) + ', 70%, 50%)';
+    ctx.fillRect(-10, -10, 20, 20);
+    ctx.restore();
+  }
+
+  // Dashed line
+  ctx.beginPath();
+  ctx.setLineDash([8, 4]);
+  ctx.moveTo(20, 300);
+  ctx.lineTo(240, 300);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#000000';
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Text
+  ctx.font = 'bold 24px Arial';
+  ctx.fillStyle = '#263238';
+  ctx.fillText('Zepra canvas', 270, 270);
+  ctx.font = '16px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#546e7a';
+  ctx.fillText('centred text', 360, 300);
+
+  console.log('canvas_basic: drew ' + canvas.width + 'x' + canvas.height);
+</script>
+</body>
+</html>
