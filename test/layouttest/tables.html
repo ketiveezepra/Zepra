@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Table layout test</title>
+<style>
+  body { font-family: sans-serif; font-size: 14px; color: #222; }
+  h2 { font-size: 16px; margin: 14px 0 6px; }
+  .note { color: #666; font-size: 12px; }
+  .css-table { display: table; border-spacing: 4px; background-color: #ddd; }
+  .css-row { display: table-row; }
+  .css-cell { display: table-cell; background-color: #fff; padding: 4px 8px; }
+  .stray { display: table-cell; background-color: #cde; padding: 4px; }
+  .fixed { table-layout: fixed; width: 360px; }
+  .collapse { border-collapse: collapse; }
+  .collapse td { border: 1px solid #888; padding: 3px 6px; }
+</style>
+</head>
+<body>
+
+<h2>1. Basic grid: border=1 cellpadding=4, th bold and centered</h2>
+<table border="1" cellpadding="4">
+  <tr><th>Name</th><th>Language</th><th>Year</th></tr>
+  <tr><td>Zepra</td><td>C++</td><td align="right">2025</td></tr>
+  <tr><td>A much longer cell</td><td>C</td><td align="right">1972</td></tr>
+</table>
+<p class="note">Expected: three aligned columns; header row bold and centered; year column right-aligned.</p>
+
+<h2>2. colspan and rowspan</h2>
+<table border="1" cellspacing="0" cellpadding="6">
+  <tr><td colspan="3" bgcolor="#ffcc66" align="center">colspan=3 header</td></tr>
+  <tr><td rowspan="2" bgcolor="#99ccff" valign="middle">rowspan=2</td><td>B1</td><td>C1</td></tr>
+  <tr><td>B2</td><td>C2</td></tr>
+  <tr><td>A3</td><td colspan="2" bgcolor="#ccffcc">colspan=2</td></tr>
+</table>
+<p class="note">Expected: orange bar over all three columns; blue cell two rows tall; green cell under B and C.</p>
+
+<h2>3. Nested tables, width=100% inside a cell</h2>
+<table width="70%" bgcolor="#eeeeee" cellpadding="4">
+  <tr>
+    <td width="120" bgcolor="#ffffff">fixed 120px</td>
+    <td>
+      <table width="100%" bgcolor="#ff6600" cellspacing="0" cellpadding="2">
+        <tr><td><font color="#ffffff"><b>inner left</b></font></td><td align="right"><font color="#ffffff">inner right</font></td></tr>
+      </table>
+    </td>
+  </tr>
+</table>
+<p class="note">Expected: grey table 70% wide; white 120px cell; orange inner table filling the rest, white text at both ends.</p>
+
+<h2>4. Legacy attributes: center, align, valign, height, nowrap, font size</h2>
+<center>
+  <table width="60%" border="0" cellpadding="0" cellspacing="0" bgcolor="#f6f6ef">
+    <tr style="height:40px">
+      <td valign="top" bgcolor="#ffdddd">top</td>
+      <td valign="middle" bgcolor="#ddffdd">middle</td>
+      <td valign="bottom" bgcolor="#ddddff">bottom</td>
+      <td nowrap align="center"><font size="5">big</font> <font size="1">small</font></td>
+    </tr>
+  </table>
+  <div>centered text inside center</div>
+</center>
+<div align="right">div align=right</div>
+<p class="note">Expected: table centered, 60% wide, 40px tall row with top/middle/bottom text; "big" larger than "small".</p>
+
+<h2>5. CSS display:table and anonymous boxes</h2>
+<div class="css-table">
+  <div class="css-row"><div class="css-cell">row 1 cell 1</div><div class="css-cell">row 1 cell 2</div></div>
+  <div class="css-row"><div class="css-cell">r2c1</div><div class="css-cell">row 2 cell 2 is wider</div></div>
+</div>
+<div>
+  <span class="stray">stray cell A</span><span class="stray">stray cell B</span>
+</div>
+<p class="note">Expected: a grey 2x2 grid with aligned columns; then two blue cells side by side in an anonymous table.</p>
+
+<h2>6. table-layout: fixed and border-collapse</h2>
+<table class="fixed" border="1">
+  <tr><td style="width:60px">60px</td><td>rest</td><td>rest</td></tr>
+</table>
+<table class="collapse">
+  <tr><td>collapse</td><td>no spacing</td></tr>
+  <tr><td>between</td><td>cells</td></tr>
+</table>
+<p class="note">Expected: a 360px fixed table (60px then two equal columns); a collapsed table with no gaps between cells.</p>
+
+<h2>7. Hacker News shape</h2>
+<table border="0" cellpadding="0" cellspacing="0" width="85%" bgcolor="#f6f6ef">
+  <tr><td bgcolor="#ff6600">
+    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="padding:2px">
+      <tr><td style="width:18px;padding-right:4px"><span style="display:block;width:16px;height:16px;border:1px solid white"></span></td>
+        <td><b>Site Name</b> new | past | comments</td>
+        <td style="text-align:right;padding-right:4px">login</td></tr>
+    </table>
+  </td></tr>
+  <tr style="height:10px"></tr>
+  <tr><td>
+    <table border="0" cellpadding="0" cellspacing="0">
+      <tr><td align="right" valign="top">1.</td><td valign="top">^</td><td>First story title (example.com)</td></tr>
+      <tr><td colspan="2"></td><td><font size="1">100 points by someone 2 hours ago | 30 comments</font></td></tr>
+      <tr style="height:5px"></tr>
+      <tr><td align="right" valign="top">10.</td><td valign="top">^</td><td>Tenth story title (example.org)</td></tr>
+      <tr><td colspan="2"></td><td><font size="1">5 points by another 1 hour ago | discuss</font></td></tr>
+    </table>
+  </td></tr>
+</table>
+<p class="note">Expected: orange header bar across the table; ranks right-aligned in one column; titles and subtext lines start at the same x.</p>
+
+</body>
+</html>
