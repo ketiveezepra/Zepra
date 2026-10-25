@@ -59,6 +59,13 @@ public:
         }
     }
     
+    // Point a closed upvalue at a stack slot again (a generator or async
+    // function resuming); the caller has copied the closed value there
+    void reopen(Value* location) {
+        location_ = location;
+        isClosed_ = false;
+    }
+
     bool isClosed() const { return isClosed_; }
     
     // Linked list for open upvalues

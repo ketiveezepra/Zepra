@@ -18,6 +18,7 @@
 #include "runtime/objects/function.hpp"
 #include "runtime/objects/object.hpp"
 #include "runtime/objects/value.hpp"
+#include "runtime/execution/vm.hpp"
 #include <cassert>
 #include <stdexcept>
 
@@ -43,6 +44,11 @@ MicrotaskQueue& MicrotaskQueue::instance() {
 }
 
 void MicrotaskQueue::enqueue(std::function<void()> task) {
+    // Inside a running script the job belongs to that VM's own queue
+    if (VM* vm = VM::current()) {
+        vm->enqueueJob(std::move(task));
+        return;
+    }
     queue_.push_back(std::move(task));
 }
 

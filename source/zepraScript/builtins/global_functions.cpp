@@ -275,12 +275,9 @@ Function* GlobalFunctions::createQueueMicrotask() {
         auto* function = static_cast<Function*>(callback.asObject());
         VM* vm = VM::current();
         if (!vm) throw JSError("TypeError", "queueMicrotask called outside a running script");
-        Runtime::MicrotaskQueue::instance().enqueue([vm, function]() {
-            try {
-                vm->executeCallback(function, Value::undefined(), {});
-            } catch (const std::exception& e) {
-                std::cerr << "Uncaught (in microtask) " << e.what() << std::endl;
-            }
+        // A throw from the callback is reported by the microtask checkpoint
+        vm->enqueueJob([vm, function]() {
+            vm->executeCallback(function, Value::undefined(), {});
         });
         return Value::undefined();
     }, 1);
