@@ -35,6 +35,7 @@ struct PendingImage {
     int priority;             // Higher = load first (viewport images get higher priority)
     int tabId;                // Tab that requested this image
     uint64_t generation = 0;  // Loader generation when queued (see cancelAll)
+    uint64_t tabGeneration = 0;  // The tab's generation when queued (see cancelTab)
     
     bool operator<(const PendingImage& other) const {
         return priority < other.priority; // Lower priority = later in queue
@@ -144,6 +145,8 @@ private:
         int width;
         int height;
         uint64_t generation = 0;
+        int tabId = -1;
+        uint64_t tabGeneration = 0;
         std::string url;           // raster images: key for textureCache_
         std::string errorText;     // non-empty: show this placeholder instead
         uint32_t errorColor = 0;
@@ -154,6 +157,11 @@ private:
     // Bumped by cancelAll(): results queued under an older generation refer
     // to layout boxes that may have been destroyed, and are dropped.
     std::atomic<uint64_t> generation_{0};
+
+    // Per-tab generations, bumped by cancelTab() the same way
+    std::unordered_map<int, uint64_t> tabGenerations_;
+    std::mutex tabGenMutex_;
+    uint64_t tabGeneration(int tabId);
 
     // Hands a failure placeholder to the main thread (workers never touch boxes)
     void queueError(const PendingImage& pending, const char* text, uint32_t color);

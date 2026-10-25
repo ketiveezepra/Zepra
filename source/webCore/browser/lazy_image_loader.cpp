@@ -86,6 +86,7 @@ void LazyImageLoader::queueImage(LayoutBox* box, const std::string& url,
             box->width = (float)it->second.width;
             box->height = (float)it->second.height;
             box->text = ""; // Clear placeholder
+            box->hasBgColor = false;
             // std::cout << "[LazyImageLoader] Cache hit: " << url.substr(url.rfind('/') + 1) << std::endl;
             return;
         }
@@ -97,6 +98,7 @@ void LazyImageLoader::queueImage(LayoutBox* box, const std::string& url,
     pending.priority = priority;
     pending.tabId = tabId;
     pending.generation = generation_.load();
+    pending.tabGeneration = tabGeneration(tabId);
     
     {
         std::lock_guard<std::mutex> lock(pendingMutex_);
@@ -116,11 +118,25 @@ void LazyImageLoader::queueImageWithViewport(LayoutBox* box, const std::string& 
     queueImage(box, url, priority, tabId);
 }
 
+uint64_t LazyImageLoader::tabGeneration(int tabId) {
+    std::lock_guard<std::mutex> lock(tabGenMutex_);
+    return tabGenerations_[tabId];
+}
+
 void LazyImageLoader::cancelTab(int tabId) {
-    // We can't easily remove from priority_queue, so we'll mark entries
-    // and skip them in worker. For now, just clear all.
-    // TODO: Implement proper per-tab cancellation
-    std::cout << "[LazyImageLoader] Cancel requested for tab " << tabId << std::endl;
+    {
+        std::lock_guard<std::mutex> lock(tabGenMutex_);
+        ++tabGenerations_[tabId];
+    }
+    // Drop the tab's queued loads; ones a worker already took are dropped in pollCompleted
+    std::lock_guard<std::mutex> lock(pendingMutex_);
+    std::priority_queue<PendingImage> kept;
+    while (!pendingQueue_.empty()) {
+        if (pendingQueue_.top().tabId != tabId) kept.push(pendingQueue_.top());
+        pendingQueue_.pop();
+    }
+    pendingQueue_.swap(kept);
+    pendingCount_ = (int)pendingQueue_.size();
 }
 
 void LazyImageLoader::cancelAll() {
@@ -145,6 +161,7 @@ void LazyImageLoader::pollCompleted(std::vector<ImageResult>& results, int maxRe
         const uint64_t currentGeneration = generation_.load();
         for (auto& raw : rawImages_) {
             if (!raw.box || raw.generation != currentGeneration) continue;
+            if (raw.tabGeneration != tabGeneration(raw.tabId)) continue;
 
             if (!raw.errorText.empty()) {
                 raw.box->text = raw.errorText;
@@ -156,6 +173,7 @@ void LazyImageLoader::pollCompleted(std::vector<ImageResult>& results, int maxRe
             if (raw.width < 0) {
                 raw.box->svgData = std::string(raw.pixels.begin(), raw.pixels.end());
                 raw.box->text = "";
+                raw.box->hasBgColor = false;  // drop the loading placeholder's grey box
                 raw.box->width = (float)(-raw.width);
                 raw.box->height = (float)raw.height;
                 raw.box->isImage = true;
@@ -173,6 +191,7 @@ void LazyImageLoader::pollCompleted(std::vector<ImageResult>& results, int maxRe
                     raw.box->width = (float)raw.width;
                     raw.box->height = (float)raw.height;
                     raw.box->text = "";
+                    raw.box->hasBgColor = false;
                     if (!raw.url.empty()) {
                         std::lock_guard<std::mutex> cacheLock(cacheMutex_);
                         textureCache_[raw.url] = {texId, raw.width, raw.height};
@@ -244,6 +263,8 @@ void LazyImageLoader::queueError(const PendingImage& pending, const char* text, 
     raw.width = 0;
     raw.height = 0;
     raw.generation = pending.generation;
+    raw.tabId = pending.tabId;
+    raw.tabGeneration = pending.tabGeneration;
     raw.errorText = text;
     raw.errorColor = color;
     rawImages_.push_back(std::move(raw));
@@ -477,6 +498,8 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
                 RawImage raw;
                 raw.box = pending.box;
                 raw.generation = pending.generation;
+                raw.tabId = pending.tabId;
+                raw.tabGeneration = pending.tabGeneration;
                 raw.width = (int)svgW;
                 raw.height = (int)svgH;
                 // Store SVG XML as pixel data marker (main thread detects this)
@@ -524,6 +547,8 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
             RawImage raw;
             raw.box = pending.box;
             raw.generation = pending.generation;
+            raw.tabId = pending.tabId;
+            raw.tabGeneration = pending.tabGeneration;
             raw.url = pending.url;
             raw.width = w;
             raw.height = h;

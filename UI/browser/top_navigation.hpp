@@ -213,7 +213,7 @@ inline bool handleTopBarClick(float mx, float my) {
 
     // 1. Shield Logo
     if (mx >= leftX && mx <= leftX + 24 && my >= y && my <= y + 24) {
-        g_currentUrl = "zepra://start";
+        onNavigate("zepra://start");
         return true;
     }
     leftX += 40;
