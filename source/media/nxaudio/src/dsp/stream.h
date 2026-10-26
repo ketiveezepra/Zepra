@@ -44,6 +44,7 @@ typedef enum {
     NX_CODEC_OGG,
     NX_CODEC_AIFF,
     NX_CODEC_OPUS,
+    NX_CODEC_PCM,       /* decoded float samples in memory */
 } nx_codec_t;
 
 /* ============ Forward Declaration ============ */
@@ -100,6 +101,14 @@ struct nx_audio_stream {
  * Open audio stream from file
  */
 nx_error_t nx_stream_open(nx_audio_stream_t *stream, const char *filepath);
+
+/**
+ * Open a stream over decoded interleaved float samples in memory.
+ * The samples are not copied and must outlive the stream.
+ */
+nx_error_t nx_stream_open_pcm(nx_audio_stream_t *stream,
+                              const float *samples, size_t frames,
+                              uint32_t sample_rate, uint16_t channels);
 
 /**
  * Read decoded audio frames

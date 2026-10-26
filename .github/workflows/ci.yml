@@ -46,6 +46,10 @@ jobs:
       - name: NXRender tests
         run: ctest --test-dir build/test -R "NxRenderTests|NxPdfTest" --output-on-failure
 
+      # Plays through the null device: no sound hardware on the runner
+      - name: NXAudio tests
+        run: ctest --test-dir build/source/media/nxaudio --output-on-failure
+
   # ============================================================================
   # Windows — MSYS2 UCRT64 (GCC), Win32/WGL backend
   # ============================================================================

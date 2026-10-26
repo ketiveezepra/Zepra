@@ -70,7 +70,13 @@ size_t nx_resample_output_frames(nx_resampler_t *rs, size_t input_frames);
 size_t nx_resample_input_frames(nx_resampler_t *rs, size_t output_frames);
 
 /**
- * Process samples
+ * Input frames held back for interpolation. At end of stream, feed this
+ * many + 1 frames of silence to get the tail out.
+ */
+size_t nx_resample_latency(nx_resampler_t *rs);
+
+/**
+ * Process samples (streaming: state carries over between calls)
  * @param in: Input samples (interleaved)
  * @param in_frames: Number of input frames
  * @param out: Output samples (interleaved)

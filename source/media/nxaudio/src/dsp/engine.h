@@ -45,15 +45,19 @@ typedef struct {
     nx_effects_t     effects;
     nx_metadata_t    metadata;
     
-    float           *decode_buffer;
-    float           *resample_buffer;
-    size_t           buffer_size;
+    float           *decode_buffer;     /* one decoder read, source rate */
+    float           *pending;           /* output-rate frames not mixed yet */
+    size_t           pending_frames;
+    size_t           pending_capacity;
+    int              needs_resample;
+    int              source_done;       /* decoder ended and resampler flushed */
     
     int              mixer_channel;
     float            volume;
     float            pan;
     int              looping;
     int              paused;
+    float            applied_gain[2];   /* L/R gain at the end of the last block, for ramps */
 } nx_sound_state_t;
 
 /* ============ Engine Instance ============ */
@@ -101,6 +105,12 @@ void nx_engine_destroy(nx_engine_t *engine);
  * Load sound from file
  */
 nx_sound_t nx_engine_load(nx_engine_t *engine, const char *filepath);
+
+/**
+ * Load decoded interleaved float samples (not copied; must outlive the sound)
+ */
+nx_sound_t nx_engine_load_pcm(nx_engine_t *engine, const float *samples, size_t frames,
+                              uint32_t sample_rate, uint16_t channels);
 
 /**
  * Unload sound
@@ -168,7 +178,13 @@ int nx_engine_is_playing(nx_engine_t *engine, nx_sound_t sound);
 void nx_engine_set_master_volume(nx_engine_t *engine, float volume);
 
 /**
+ * Check if sound played to its end (and isn't looping)
+ */
+int nx_engine_is_finished(nx_engine_t *engine, nx_sound_t sound);
+
+/**
  * Process audio (call from audio thread)
+ * Fills `frames` frames of interleaved float at the output rate (any count).
  * Returns frames rendered
  */
 size_t nx_engine_render(nx_engine_t *engine, float *output, size_t frames);

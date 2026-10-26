@@ -189,7 +189,9 @@ nxaudio_device_t nxaudio_device_default_input(void);
  * =========================================================================*/
 
 /**
- * Create audio context with default config
+ * Create audio context with default config (48 kHz, 512-frame periods).
+ * Opens the default output device and starts its audio thread; with no
+ * sound device it plays to the null device instead of failing.
  */
 nxaudio_context_t nxaudio_context_create(void);
 
@@ -202,6 +204,13 @@ nxaudio_context_t nxaudio_context_create_ex(const nxaudio_context_config_t *conf
  * Destroy audio context
  */
 void nxaudio_context_destroy(nxaudio_context_t ctx);
+
+/**
+ * Name of the output backend the context plays through:
+ * "pulse", "alsa", "wasapi", "coreaudio" or "null" (no sound device).
+ * Set NXAUDIO_BACKEND to one of these to force it.
+ */
+const char* nxaudio_context_backend(nxaudio_context_t ctx);
 
 /**
  * Set listener properties
@@ -309,6 +318,16 @@ nxaudio_error_t nxaudio_object_set_gain(nxaudio_object_t obj, float gain);
  * Check if object is playing
  */
 int nxaudio_object_is_playing(nxaudio_object_t obj);
+
+/**
+ * Current playback position in seconds
+ */
+float nxaudio_object_get_time(nxaudio_object_t obj);
+
+/**
+ * Jump to a position in seconds
+ */
+nxaudio_error_t nxaudio_object_seek(nxaudio_object_t obj, float time_sec);
 
 /* ===========================================================================
  * HRTF API (Spatial Audio Engine)

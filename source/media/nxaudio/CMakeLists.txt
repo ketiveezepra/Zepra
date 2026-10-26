@@ -30,8 +30,39 @@ set(NXAUDIO_SPATIAL_SOURCES
     src/spatial/mixer.c
 )
 
+set(NXAUDIO_DSP_SOURCES
+    src/dsp/engine.c
+    src/dsp/stream.c
+    src/dsp/resample.c
+    src/dsp/mixer.c
+    src/dsp/effects.c
+    src/metadata/metadata.c
+)
+
+set(NXAUDIO_CODEC_SOURCES
+    src/codecs/loader.c
+    src/codecs/wav.c
+    src/codecs/aiff.c
+    src/codecs/flac.c
+    src/codecs/mp3.c
+    src/codecs/ogg.c
+)
+
+# Output devices; each file compiles to nothing off its own platform
+set(NXAUDIO_DEVICE_SOURCES
+    src/device/device.c
+    src/device/device_null.c
+    src/device/device_pulse.c
+    src/device/device_alsa.c
+    src/device/device_wasapi.c
+    src/device/device_coreaudio.c
+)
+
 set(NXAUDIO_ALL_SOURCES
     ${NXAUDIO_CORE_SOURCES}
+    ${NXAUDIO_DSP_SOURCES}
+    ${NXAUDIO_CODEC_SOURCES}
+    ${NXAUDIO_DEVICE_SOURCES}
     ${NXAUDIO_SPATIAL_SOURCES}
 )
 
@@ -50,9 +81,21 @@ target_include_directories(nxaudio_static PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
-# Link math library
-target_link_libraries(nxaudio PRIVATE m)
-target_link_libraries(nxaudio_static PRIVATE m)
+# Platform libraries. PulseAudio and ALSA are dlopen'd, so Linux only
+# needs libdl; Windows needs COM for WASAPI; macOS the audio frameworks.
+find_package(Threads REQUIRED)
+set(NXAUDIO_PLATFORM_LIBS Threads::Threads)
+if(WIN32)
+    list(APPEND NXAUDIO_PLATFORM_LIBS ole32)
+elseif(APPLE)
+    list(APPEND NXAUDIO_PLATFORM_LIBS "-framework AudioToolbox" "-framework CoreAudio")
+else()
+    list(APPEND NXAUDIO_PLATFORM_LIBS m ${CMAKE_DL_LIBS})
+endif()
+
+target_link_libraries(nxaudio PRIVATE ${NXAUDIO_PLATFORM_LIBS})
+# Static consumers (the browser) need the same libraries at link time
+target_link_libraries(nxaudio_static PUBLIC ${NXAUDIO_PLATFORM_LIBS})
 
 # SIMD optimizations
 if(NXAUDIO_ENABLE_SIMD)
@@ -108,10 +151,14 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/nxaudio.pc
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
 )
 
-# Tests
-if(NXAUDIO_BUILD_TESTS)
+# Command-line player: nxaudio_play <file.wav>
+add_executable(nxaudio_play src/player.c)
+target_link_libraries(nxaudio_play PRIVATE nxaudio_static)
+
+# Tests (also built when the parent project enables testing)
+if(NXAUDIO_BUILD_TESTS OR BUILD_TESTING)
     enable_testing()
-    add_subdirectory(tests EXCLUDE_FROM_ALL)
+    add_subdirectory(tests)
 endif()
 
 # Examples

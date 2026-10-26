@@ -11,6 +11,7 @@
 #include "ogg.h"
 #include "aiff.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,7 +22,11 @@ static int str_ends_with(const char *str, const char *suffix) {
     size_t str_len = strlen(str);
     size_t suf_len = strlen(suffix);
     if (suf_len > str_len) return 0;
-    return strcasecmp(str + str_len - suf_len, suffix) == 0;
+    const char *tail = str + str_len - suf_len;
+    for (size_t i = 0; i < suf_len; i++) {
+        if (tolower((unsigned char)tail[i]) != tolower((unsigned char)suffix[i])) return 0;
+    }
+    return 1;
 }
 
 audio_format_t audio_detect_format_ext(const char *filepath) {
@@ -92,11 +97,11 @@ const char* audio_format_name(audio_format_t format) {
 }
 
 int audio_format_supported(audio_format_t format) {
+    /* MP3 and OGG parse headers but decode to silence, and FLAC returns its
+     * output buffer without decoding into it; refuse them until the
+     * decoders are real */
     switch (format) {
         case AUDIO_FORMAT_WAV:
-        case AUDIO_FORMAT_MP3:
-        case AUDIO_FORMAT_FLAC:
-        case AUDIO_FORMAT_OGG:
         case AUDIO_FORMAT_AIFF:
             return 1;
         default:
@@ -146,7 +151,11 @@ int audio_load(const char *filepath, audio_data_t *audio) {
         format = audio_detect_format_ext(filepath);
     }
     
-    printf("[Audio] Loading %s as %s\n", filepath, audio_format_name(format));
+    if (!audio_format_supported(format)) {
+        fprintf(stderr, "[Audio] Unsupported format: %s (%s)\n", audio_format_name(format), filepath);
+        free(data);
+        return -5;
+    }
     
     int result = -1;
     audio->format = format;
