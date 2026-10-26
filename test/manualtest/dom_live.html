@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Live DOM manual test</title>
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 24px; background: #fafafa; color: #222; }
+  .panel { border: 2px solid #4a7; padding: 10px 16px; margin: 12px 0; border-radius: 6px; background: #fff; width: 520px; }
+  .panel h2 { margin: 0 0 6px 0; font-size: 18px; }
+  .done { color: #888; text-decoration: line-through; }
+  .hot { border-color: #c48; background: #fff4fa; }
+  button { padding: 6px 12px; margin-right: 8px; }
+  table { border-collapse: collapse; }
+  td, th { border: 1px solid #bbb; padding: 3px 8px; }
+  #status { font-weight: bold; }
+</style>
+</head>
+<body>
+  <h1>Live DOM manual test</h1>
+  <p>Everything in the panels below is built by the script. Open DevTools (F12): the Inspector
+     tree shows the script-built nodes and follows each change. Click <b>Add item</b> to append
+     a list item, <b>Remove first</b> to remove one, and the link (its navigation is canceled).</p>
+  <p id="status">scripts did not run</p>
+  <div id="app"></div>
+  <script>
+    var app = document.getElementById("app");
+
+    // 1. createElement / appendChild / textContent / classList
+    var list = document.createElement("div");
+    list.className = "panel";
+    list.id = "list-panel";
+    var heading = document.createElement("h2");
+    heading.textContent = "Items (createElement + appendChild)";
+    list.appendChild(heading);
+    var ul = document.createElement("ul");
+    ul.id = "items";
+    ["alpha", "beta", "gamma"].forEach(function (name, i) {
+      var li = document.createElement("li");
+      li.textContent = name;
+      if (i === 1) li.classList.add("done");
+      ul.appendChild(li);
+    });
+    list.appendChild(ul);
+    var add = document.createElement("button");
+    add.id = "add";
+    add.textContent = "Add item";
+    var removeFirst = document.createElement("button");
+    removeFirst.id = "remove";
+    removeFirst.textContent = "Remove first";
+    list.append(add, removeFirst);
+    app.appendChild(list);
+
+    var added = 0;
+    add.addEventListener("click", function (e) {
+      added++;
+      var li = document.createElement("li");
+      li.textContent = "added " + added + " (" + e.type + " at " + Math.round(e.clientX) + "," + Math.round(e.clientY) + ")";
+      ul.appendChild(li);
+      console.log("click handler appended item " + added);
+    });
+    removeFirst.onclick = function () {
+      if (ul.firstElementChild) ul.removeChild(ul.firstElementChild);
+    };
+
+    // 2. innerHTML with a table, insertAdjacentHTML
+    var tablePanel = document.createElement("div");
+    tablePanel.className = "panel";
+    tablePanel.innerHTML = "<h2>Table (innerHTML)</h2><table><thead><tr><th>Name</th><th>Value</th></tr></thead>" +
+                           "<tbody id='rows'><tr><td>one</td><td>1</td></tr></tbody></table>";
+    app.appendChild(tablePanel);
+    document.getElementById("rows").insertAdjacentHTML("beforeend", "<tr><td>two</td><td>2</td></tr>");
+
+    // 3. style and a timer that rewrites text and classes
+    var clock = document.createElement("div");
+    clock.className = "panel";
+    clock.id = "ticker";
+    clock.innerHTML = "<h2>Timer (textContent, style, classList.toggle)</h2><p id='ticks'>tick 0</p>";
+    app.appendChild(clock);
+    var ticks = 0;
+    var timer = setInterval(function () {
+      ticks++;
+      document.getElementById("ticks").textContent = "tick " + ticks;
+      clock.classList.toggle("hot");
+      clock.style.width = (520 - ticks * 10) + "px";
+      if (ticks === 6) clearInterval(timer);
+    }, 500);
+
+    // 4. a link whose navigation the page cancels
+    var linkPanel = document.createElement("div");
+    linkPanel.className = "panel";
+    linkPanel.innerHTML = "<h2>Events</h2><a id='nav' href='https://example.com/'>this link is canceled by preventDefault</a>" +
+                          "<p id='events'>no clicks yet</p>";
+    app.appendChild(linkPanel);
+    document.getElementById("nav").addEventListener("click", function (e) {
+      e.preventDefault();
+      document.getElementById("events").textContent = "link click canceled";
+    });
+    document.addEventListener("click", function (e) {
+      console.log("document saw a click on <" + e.target.tagName.toLowerCase() + ">");
+    });
+
+    document.addEventListener("DOMContentLoaded", function () {
+      var s = document.getElementById("status");
+      s.textContent = "DOMContentLoaded ran; same wrapper: " + (s === document.querySelector("#status"));
+      s.style.color = "#2a7";
+    });
+  </script>
+</body>
+</html>

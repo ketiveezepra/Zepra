@@ -80,6 +80,13 @@ public:
      * @brief Parse HTML fragment into element
      */
     std::unique_ptr<DOMElement> parseFragment(const std::string& html);
+
+    /**
+     * @brief Parse HTML as the content of an element named `contextTag`
+     * (innerHTML): the top-level nodes, without a parent
+     */
+    std::vector<std::unique_ptr<DOMNode>> parseFragmentNodes(const std::string& html,
+                                                             const std::string& contextTag);
     
 private:
     // Tree construction

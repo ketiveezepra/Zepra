@@ -25,6 +25,15 @@ void noteDomMutation();
 class DOMDocument;
 class RenderNode;
 
+/// Whether an element matches a CSS selector list, as the style cascade matches it
+bool selectorMatches(DOMElement* element, const std::string& selector);
+/// Elements below `root` in document order that match a CSS selector list;
+/// only the first one when `firstOnly`
+std::vector<DOMElement*> selectDescendants(const DOMNode* root, const std::string& selector,
+                                           bool firstOnly = false);
+/// Elements below `root` that carry every class in a space-separated list
+std::vector<DOMElement*> descendantsWithClasses(const DOMNode* root, const std::string& classNames);
+
 /**
  * @brief DOM node types
  */
@@ -34,6 +43,17 @@ enum class NodeType {
     Comment = 8,
     Document = 9,
     DocumentFragment = 11
+};
+
+/**
+ * @brief The script object bound to a node (one per node, made by the page's
+ * bindings); told when the node is destroyed so it stops pointing at it
+ */
+class NodeBinding {
+public:
+    virtual void nodeDestroyed() = 0;
+protected:
+    ~NodeBinding() = default;
 };
 
 /**
@@ -80,6 +100,10 @@ public:
     // Rendering
     RenderNode* renderNode() const { return renderNode_; }
     void setRenderNode(RenderNode* node) { renderNode_ = node; }
+
+    // Script wrapper (not owned)
+    NodeBinding* binding() const { return binding_; }
+    void setBinding(NodeBinding* binding) { binding_ = binding; }
     
 protected:
     NodeType nodeType_;
@@ -87,6 +111,10 @@ protected:
     DOMDocument* document_ = nullptr;
     std::vector<std::unique_ptr<DOMNode>> children_;
     RenderNode* renderNode_ = nullptr;
+    NodeBinding* binding_ = nullptr;
+
+    /// Gives an inserted subtree this node's owner document
+    void adopt(DOMNode* child);
 };
 
 /**
@@ -127,6 +155,18 @@ public:
     
 private:
     std::string data_;
+};
+
+/**
+ * @brief DOM document fragment: a parentless container whose children move
+ * into the tree when it is inserted
+ */
+class DOMDocumentFragment : public DOMNode {
+public:
+    DOMDocumentFragment() : DOMNode(NodeType::DocumentFragment) {}
+
+    std::string nodeName() const override { return "#document-fragment"; }
+    std::unique_ptr<DOMNode> cloneNode(bool deep) const override;
 };
 
 /**
@@ -224,6 +264,7 @@ public:
     std::unique_ptr<DOMElement> createElement(const std::string& tagName);
     std::unique_ptr<DOMText> createTextNode(const std::string& data);
     std::unique_ptr<DOMComment> createComment(const std::string& data);
+    std::unique_ptr<DOMDocumentFragment> createDocumentFragment();
     
     // Queries
     DOMElement* getElementById(const std::string& id);

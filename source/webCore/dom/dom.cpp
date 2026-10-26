@@ -6,9 +6,69 @@
  */
 
 #include "browser/dom.hpp"
+#include "css/css_engine.hpp"
+#include "html/html_parser.hpp"
 #include <algorithm>
+#include <cctype>
+#include <functional>
 
 namespace Zepra::WebCore {
+
+// ============================================================================
+// Selector queries
+// ============================================================================
+
+bool selectorMatches(DOMElement* element, const std::string& selector) {
+    CSSCascade cascade;
+    return cascade.selectorMatches(element, selector);
+}
+
+std::vector<DOMElement*> selectDescendants(const DOMNode* root, const std::string& selector, bool firstOnly) {
+    std::vector<DOMElement*> found;
+    CSSCascade cascade;  // matches selectors as the style cascade does
+    std::function<bool(const DOMNode*)> visit = [&](const DOMNode* node) {
+        for (const auto& child : node->childNodes()) {
+            if (child->nodeType() != NodeType::Element) continue;
+            auto* element = static_cast<DOMElement*>(child.get());
+            if (cascade.selectorMatches(element, selector)) {
+                found.push_back(element);
+                if (firstOnly) return true;
+            }
+            if (visit(element)) return true;
+        }
+        return false;
+    };
+    visit(root);
+    return found;
+}
+
+std::vector<DOMElement*> descendantsWithClasses(const DOMNode* root, const std::string& names) {
+    std::vector<std::string> wanted;
+    size_t i = 0;
+    while (i < names.size()) {
+        while (i < names.size() && std::isspace(static_cast<unsigned char>(names[i]))) i++;
+        size_t start = i;
+        while (i < names.size() && !std::isspace(static_cast<unsigned char>(names[i]))) i++;
+        if (i > start) wanted.push_back(names.substr(start, i - start));
+    }
+    std::vector<DOMElement*> found;
+    if (wanted.empty()) return found;
+    std::function<void(const DOMNode*)> visit = [&](const DOMNode* node) {
+        for (const auto& child : node->childNodes()) {
+            if (child->nodeType() != NodeType::Element) continue;
+            auto* element = static_cast<DOMElement*>(child.get());
+            std::vector<std::string> classes = element->classList();
+            bool all = true;
+            for (const auto& name : wanted) {
+                if (std::find(classes.begin(), classes.end(), name) == classes.end()) { all = false; break; }
+            }
+            if (all) found.push_back(element);
+            visit(element);
+        }
+    };
+    visit(root);
+    return found;
+}
 
 // ============================================================================
 // DOMNode
@@ -16,7 +76,15 @@ namespace Zepra::WebCore {
 
 DOMNode::DOMNode(NodeType type) : nodeType_(type) {}
 
-DOMNode::~DOMNode() = default;
+DOMNode::~DOMNode() {
+    if (binding_) binding_->nodeDestroyed();
+}
+
+void DOMNode::adopt(DOMNode* child) {
+    if (child->document_ == document_) return;
+    child->document_ = document_;
+    for (const auto& grandchild : child->children_) child->adopt(grandchild.get());
+}
 
 DOMNode* DOMNode::previousSibling() const {
     if (!parent_) return nullptr;
@@ -49,7 +117,7 @@ DOMNode* DOMNode::appendChild(std::unique_ptr<DOMNode> child) {
     noteDomMutation();
     
     child->parent_ = this;
-    child->document_ = this->document_;
+    adopt(child.get());
     DOMNode* ptr = child.get();
     children_.push_back(std::move(child));
     return ptr;
@@ -60,7 +128,7 @@ DOMNode* DOMNode::insertBefore(std::unique_ptr<DOMNode> child, DOMNode* refChild
     noteDomMutation();
     
     child->parent_ = this;
-    child->document_ = this->document_;
+    adopt(child.get());
     DOMNode* ptr = child.get();
     
     if (!refChild) {
@@ -96,7 +164,7 @@ DOMNode* DOMNode::replaceChild(std::unique_ptr<DOMNode> newChild, DOMNode* oldCh
     for (auto it = children_.begin(); it != children_.end(); ++it) {
         if (it->get() == oldChild) {
             newChild->parent_ = this;
-            newChild->document_ = this->document_;
+            adopt(newChild.get());
             oldChild->parent_ = nullptr;
             DOMNode* ptr = newChild.get();
             *it = std::move(newChild);
@@ -125,7 +193,9 @@ DOMText::DOMText(const std::string& data)
     : DOMNode(NodeType::Text), data_(data) {}
 
 std::unique_ptr<DOMNode> DOMText::cloneNode(bool) const {
-    return std::make_unique<DOMText>(data_);
+    auto clone = std::make_unique<DOMText>(data_);
+    clone->setOwnerDocument(document_);
+    return clone;
 }
 
 // ============================================================================
@@ -136,7 +206,22 @@ DOMComment::DOMComment(const std::string& data)
     : DOMNode(NodeType::Comment), data_(data) {}
 
 std::unique_ptr<DOMNode> DOMComment::cloneNode(bool) const {
-    return std::make_unique<DOMComment>(data_);
+    auto clone = std::make_unique<DOMComment>(data_);
+    clone->setOwnerDocument(document_);
+    return clone;
+}
+
+// ============================================================================
+// DOMDocumentFragment
+// ============================================================================
+
+std::unique_ptr<DOMNode> DOMDocumentFragment::cloneNode(bool deep) const {
+    auto clone = std::make_unique<DOMDocumentFragment>();
+    clone->setOwnerDocument(document_);
+    if (deep) {
+        for (const auto& child : children_) clone->appendChild(child->cloneNode(true));
+    }
+    return clone;
 }
 
 // ============================================================================
@@ -251,10 +336,10 @@ std::string DOMElement::innerHTML() const {
 }
 
 void DOMElement::setInnerHTML(const std::string& html) {
-    // Clear children first
     children_.clear();
     noteDomMutation();
-    // Would parse HTML here - stub
+    HTMLParser parser;
+    for (auto& node : parser.parseFragmentNodes(html, tagName_)) appendChild(std::move(node));
 }
 
 std::string DOMElement::textContent() const {
@@ -311,20 +396,16 @@ std::vector<DOMElement*> DOMElement::getElementsByTagName(const std::string& nam
 }
 
 std::vector<DOMElement*> DOMElement::getElementsByClassName(const std::string& className) {
-    std::vector<DOMElement*> result;
-    // Stub
-    return result;
+    return descendantsWithClasses(this, className);
 }
 
 DOMElement* DOMElement::querySelector(const std::string& selector) {
-    // Stub
-    return nullptr;
+    auto found = selectDescendants(this, selector, true);
+    return found.empty() ? nullptr : found.front();
 }
 
 std::vector<DOMElement*> DOMElement::querySelectorAll(const std::string& selector) {
-    std::vector<DOMElement*> result;
-    // Stub
-    return result;
+    return selectDescendants(this, selector, false);
 }
 
 std::string DOMElement::style(const std::string& property) const {
@@ -338,6 +419,7 @@ void DOMElement::setStyle(const std::string& property, const std::string& value)
 
 std::unique_ptr<DOMNode> DOMElement::cloneNode(bool deep) const {
     auto clone = std::make_unique<DOMElement>(tagName_);
+    clone->document_ = document_;
     clone->attributes_ = attributes_;
     clone->styleMap_ = styleMap_;
     
@@ -419,6 +501,12 @@ std::unique_ptr<DOMComment> DOMDocument::createComment(const std::string& data) 
     return comment;
 }
 
+std::unique_ptr<DOMDocumentFragment> DOMDocument::createDocumentFragment() {
+    auto fragment = std::make_unique<DOMDocumentFragment>();
+    fragment->setOwnerDocument(this);
+    return fragment;
+}
+
 DOMElement* DOMDocument::getElementById(const std::string& id) {
     if (documentElement_) {
         return documentElement_->getElementById(id);
@@ -434,15 +522,16 @@ std::vector<DOMElement*> DOMDocument::getElementsByTagName(const std::string& ta
 }
 
 std::vector<DOMElement*> DOMDocument::getElementsByClassName(const std::string& className) {
-    return {};
+    return descendantsWithClasses(this, className);
 }
 
 DOMElement* DOMDocument::querySelector(const std::string& selector) {
-    return nullptr;
+    auto found = selectDescendants(this, selector, true);
+    return found.empty() ? nullptr : found.front();
 }
 
 std::vector<DOMElement*> DOMDocument::querySelectorAll(const std::string& selector) {
-    return {};
+    return selectDescendants(this, selector, false);
 }
 
 std::unique_ptr<DOMNode> DOMDocument::cloneNode(bool deep) const {

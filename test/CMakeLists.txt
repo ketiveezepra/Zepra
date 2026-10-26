@@ -194,6 +194,14 @@ if(TARGET webcore)
     endif()
     add_test(NAME WebCoreLayoutTests COMMAND webcore_layout_tests)
 
+    # Page scripts and the DOM: live wrappers, mutations, events
+    add_executable(webcore_dom_bindings_tests webcore_dom_bindings_tests.cpp)
+    target_link_libraries(webcore_dom_bindings_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(webcore_dom_bindings_tests pthread)
+    endif()
+    add_test(NAME WebCoreDomBindingsTests COMMAND webcore_dom_bindings_tests)
+
     # SVG rasterizing (nanosvg + rewrite pass) for <img>, inline <svg> and icons
     add_executable(svg_raster_tests svg_raster_tests.cpp)
     target_link_libraries(svg_raster_tests webcore GTest::gtest GTest::gtest_main)

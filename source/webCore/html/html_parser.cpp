@@ -13,6 +13,7 @@
 #include "html/html_tree_constructor.hpp"
 #include <algorithm>
 #include <cctype>
+#include <functional>
 
 namespace Zepra::WebCore {
 
@@ -50,6 +51,49 @@ std::unique_ptr<DOMElement> HTMLParser::parseFragment(const std::string& html) {
         }
     }
     return nullptr;
+}
+
+std::vector<std::unique_ptr<DOMNode>> HTMLParser::parseFragmentNodes(const std::string& html,
+                                                                     const std::string& contextTag) {
+    // The content is parsed inside a marked wrapper of the kind its context
+    // allows: table rows need a table around them, options a select
+    std::string tag = contextTag;
+    std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
+    std::string open = "<div data-zepra-fragment>", close = "</div>", inner;
+    if (tag == "table") {
+        open = "<table data-zepra-fragment>"; close = "</table>";
+    } else if (tag == "tbody" || tag == "thead" || tag == "tfoot") {
+        open = "<table data-zepra-fragment><" + tag + ">"; close = "</" + tag + "></table>"; inner = tag;
+    } else if (tag == "tr") {
+        open = "<table data-zepra-fragment><tbody><tr>"; close = "</tr></tbody></table>"; inner = "tr";
+    } else if (tag == "select" || tag == "datalist") {
+        open = "<select data-zepra-fragment>"; close = "</select>";
+    } else if (tag == "ul" || tag == "ol") {
+        open = "<" + tag + " data-zepra-fragment>"; close = "</" + tag + ">";
+    }
+
+    std::vector<std::unique_ptr<DOMNode>> nodes;
+    HTML5TreeConstructor constructor;
+    auto doc = constructor.construct("<!DOCTYPE html><body>" + open + html + close);
+    if (!doc) return nodes;
+
+    std::function<DOMElement*(DOMNode*, const std::string&, bool)> find =
+        [&](DOMNode* node, const std::string& name, bool marked) -> DOMElement* {
+            for (const auto& child : node->childNodes()) {
+                if (child->nodeType() != NodeType::Element) continue;
+                auto* el = static_cast<DOMElement*>(child.get());
+                if (marked ? el->hasAttribute("data-zepra-fragment") : el->tagName() == name) return el;
+                if (DOMElement* found = find(el, name, marked)) return found;
+            }
+            return nullptr;
+        };
+    DOMElement* context = find(doc.get(), "", true);
+    if (context && !inner.empty()) context = find(context, inner, false);
+    if (!context) return nodes;
+
+    while (DOMNode* last = context->lastChild()) nodes.push_back(context->removeChild(last));
+    std::reverse(nodes.begin(), nodes.end());
+    return nodes;
 }
 
 // ============================================================================
