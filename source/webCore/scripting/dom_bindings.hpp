@@ -59,6 +59,8 @@ public:
 
     /// The JS object of a node: made on first use, the same one afterwards
     Zepra::Runtime::Value wrap(DOMNode* node);
+    /// The node behind a wrapper object; null for any other object (or a destroyed node)
+    static DOMNode* nodeOf(const Zepra::Runtime::Object* object);
 
     /// Fires a plain event at a node, or at the window when `target` is
     /// null; false when a listener canceled it

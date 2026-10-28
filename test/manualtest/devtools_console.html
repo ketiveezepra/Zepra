@@ -14,16 +14,25 @@
 <body>
   <h1 id="title">DevTools manual test</h1>
   <p>Open DevTools with <b>F12</b>. In the Inspector the card below gains a <code>data-ticks</code>
-     attribute and a class every 800 ms (expand it to watch); the Console shows one log, one warning
-     and two errors; the Network panel lists this file.</p>
+     attribute and a class every 800 ms (expand it to watch); the Console shows logged objects, arrays,
+     a Map, a DOM node and an error as expandable rows (click a triangle), one warning and two errors;
+     the Network panel lists this file. In the console input try <code>$0</code> (the Inspector's
+     selection), <code>$$('p')</code>, <code>$('#card')</code> and <code>$_</code>.</p>
   <div id="card" class="box demo">
     <h2>Ticks</h2>
     <p>The border colour follows the tick class.</p>
   </div>
   <script>
     console.log("page loaded: " + document.title);
+    console.log({ a: 1, b: [1, 2] }, document.body);
+    console.log("mixed:", 42, true, null, undefined, "text", [1, "two", { three: 3 }]);
+    console.log(new Map([["key", { nested: true }], ["list", [1, 2, 3]]]), new Set([1, 2]));
+    console.info("%s has %d children", "the card", document.getElementById("card").childNodes.length);
     console.warn("a warning from the page");
-    console.error("an error from the page");
+    console.error("an error from the page", new TypeError("thrown by the page"));
+    console.group("a group");
+    console.log("inside the group", { depth: 1 });
+    console.groupEnd();
     var count = 0;
     var timer = setInterval(function () {
       count++;
