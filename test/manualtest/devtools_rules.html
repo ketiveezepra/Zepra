@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DevTools Rules pane</title>
+<link rel="stylesheet" href="devtools_rules.css">
+<style>
+  section { color: #1d3a8a; font-size: 18px; text-align: left; }
+  .card { background-color: #fff7e6; }
+  #special { border-color: #d0662b; }
+  p { color: #444; margin: 6px 0; }
+  .note { color: #b0185c !important; font-weight: bold; }
+  .highlight { background-color: #ffe14d; padding: 2px 4px; }
+</style>
+</head>
+<body>
+  <h1>Rules pane test</h1>
+  <section id="outer" style="font-family: serif; letter-spacing: 1px">
+    <div class="card" id="special">
+      <p class="note" style="color: #00a">Inline color loses to an !important rule.</p>
+      <p>Plain paragraph: color from <span class="highlight">p</span>, font from the section.</p>
+    </div>
+    <div class="card">
+      <p>Second card: the .card selector matches both cards.</p>
+      <span>Inherited color and font-size come from the section.</span>
+    </div>
+  </section>
+</body>
+</html>

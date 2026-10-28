@@ -2,9 +2,9 @@
 // Licensed under KPL-2.0. See LICENSE file for details.
 /**
  * @file devtools_panel.cpp
- * @brief Docked developer tools: Inspector (DOM tree, box model, computed
- *        styles, element picker), Console (page output, JS input) and
- *        Network (the tab's NetworkMonitor).
+ * @brief Docked developer tools: Inspector (DOM tree, style rules, box model,
+ *        computed styles, element picker), Console (page output, JS input)
+ *        and Network (the tab's NetworkMonitor).
  */
 #include "devtools_panel.hpp"
 
@@ -370,6 +370,28 @@ const char* resourceTypeStr(zepra::NetworkResourceType t) {
 
 float clampScroll(float v, float max) { return std::max(0.0f, std::min(v, std::max(0.0f, max))); }
 
+// The longest prefix of `s` that fits in `maxW`, with "..." when cut
+std::string fitText(const Painter& p, const std::string& s, float size, float maxW) {
+    if (p.textWidth(s, size) <= maxW) return s;
+    size_t lo = 0, hi = s.size();
+    while (lo < hi) {
+        size_t mid = (lo + hi + 1) / 2;
+        if (p.textWidth(s.substr(0, mid) + "...", size) <= maxW) lo = mid; else hi = mid - 1;
+    }
+    return s.substr(0, lo) + "...";
+}
+
+// Every layout box of an element in `elements` (one walk of the box tree)
+void collectBoxes(LayoutBox* box, const std::unordered_set<const DOMElement*>& elements,
+                  std::vector<LayoutBox*>& out, size_t limit) {
+    if (!box || out.size() >= limit) return;
+    if (box->domElement && !box->anonymous && elements.count(box->domElement)) out.push_back(box);
+    for (auto& child : box->children) collectBoxes(&child, elements, out, limit);
+}
+
+constexpr float kRuleLineH = 16;
+constexpr size_t kMaxHighlighted = 2000;
+
 } // namespace
 
 bool DevToolsPanel::Rect::contains(float px, float py) const {
@@ -424,7 +446,14 @@ void DevToolsPanel::syncWithDocument(const Page& page) {
         pickHover_ = nullptr;
         treeScroll_ = 0;
         stylesScroll_ = 0;
+        rulesScroll_ = 0;
         networkSelected_ = -1;
+        styleEdits_.clear();
+        highlightKey_ = nullptr;
+        highlightSelector_.clear();
+        highlighted_.clear();
+        rulesElement_ = nullptr;
+        rulesDirty_ = true;
         if (document_) {
             if (DOMElement* html = document_->documentElement()) expanded_.insert(html);
             if (DOMElement* body = document_->body()) expanded_.insert(body);
@@ -436,6 +465,12 @@ void DevToolsPanel::syncWithDocument(const Page& page) {
         if (selected_ && (!document_ || !document_->contains(selected_))) selected_ = nullptr;
         if (hoveredRow_ && (!document_ || !document_->contains(hoveredRow_))) hoveredRow_ = nullptr;
         if (pickHover_ && (!document_ || !document_->contains(pickHover_))) pickHover_ = nullptr;
+        // An edit is dropped when its element left the page or a script rewrote its style attribute
+        styleEdits_.erase(std::remove_if(styleEdits_.begin(), styleEdits_.end(), [&](const auto& e) {
+            return !document_ || !document_->contains(e.first) || e.first->getAttribute("style") != e.second.writtenStyle;
+        }), styleEdits_.end());
+        refreshHighlight(page);
+        rulesDirty_ = true;
     }
 }
 
@@ -553,16 +588,21 @@ void DevToolsPanel::drawToolbar(const Painter& p, const Page& page, float mouseX
 // ---------------------------------------------------------------------------
 
 void DevToolsPanel::drawInspector(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY) {
-    float treeW = std::floor(area.w * 0.55f);
+    // DOM tree | Rules | Layout and Computed, as Firefox's three-pane Inspector
+    float treeW = std::floor(area.w * 0.42f);
+    float rulesW = std::floor(area.w * 0.31f);
     tree_ = {area.x, area.y, treeW, area.h};
-    styles_ = {area.x + treeW, area.y, area.w - treeW, area.h};
+    rules_ = {area.x + treeW, area.y, rulesW, area.h};
+    styles_ = {area.x + treeW + rulesW, area.y, area.w - treeW - rulesW, area.h};
     if (!page.document) {
         p.text("No document", area.x + 12, area.y + 24, kMuted, kFont);
         return;
     }
     drawTree(p, page, tree_, mouseX, mouseY);
+    p.rect(rules_.x, rules_.y, 1, rules_.h, kBorder, 255);
+    drawRules(p, page, rules_, mouseX, mouseY);
     p.rect(styles_.x, styles_.y, 1, styles_.h, kBorder, 255);
-    drawStyles(p, page, styles_);
+    drawStyles(p, page, styles_, mouseX, mouseY);
 }
 
 void DevToolsPanel::drawTree(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY) {
@@ -653,9 +693,10 @@ void DevToolsPanel::drawTree(const Painter& p, const Page& page, const Rect& are
     }
 }
 
-void DevToolsPanel::drawStyles(const Painter& p, const Page& page, const Rect& area) {
+void DevToolsPanel::drawStyles(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY) {
     DOMElement* el = elementForStyles();
     float x0 = area.x + 12;
+    computedHits_.clear();
     if (!el) {
         p.text("Select an element to see its layout and computed styles.", x0, area.y + 24, kMuted, kFont);
         return;
@@ -727,12 +768,46 @@ void DevToolsPanel::drawStyles(const Painter& p, const Page& page, const Rect& a
         float nameW = 0;
         for (const auto& pr : props) nameW = std::max(nameW, p.textWidth(pr.first, kSmallFont));
         nameW = std::min(nameW + 16, area.w * 0.45f);
+        const ComputedHit* hovered = nullptr;
         for (const auto& [name, value] : props) {
             if (y + 16 >= area.y && y <= area.y + area.h) {
+                Rect row{area.x + 1, y, area.w - 1, 16};
+                computedHits_.push_back({row, name});
+                if (row.contains(mouseX, mouseY) && mouseY >= area.y + 24) {
+                    p.rect(row.x, row.y, row.w, row.h, kHover, 255);
+                    hovered = &computedHits_.back();
+                }
                 p.text(name, x0, y + 12, kAttrName, kSmallFont);
                 p.text(truncate(value, 60), x0 + nameW, y + 12, kText, kSmallFont);
             }
             y += 16;
+        }
+        // Hovering a property shows the declaration it comes from
+        if (hovered && page.css) {
+            const ElementRules& rules = rulesFor(page, el);
+            DeclarationRef ref = rules.winner(hovered->property);
+            const RuleBlock* block = rules.block(ref);
+            const RuleDeclaration* decl = rules.declaration(ref);
+            std::string line1, line2;
+            if (!block || !decl) {
+                line1 = "No rule sets it: initial or inherited default";
+            } else {
+                if (ref.group >= 0) line1 = "Inherited from " + elementSelector(rules.inherited[ref.group].ancestor) + ": ";
+                if (block->kind == RuleKind::Inline) line1 += "element { } (style attribute)";
+                else if (block->kind == RuleKind::Hints) line1 += "the element's presentational attributes";
+                else line1 += block->selector + "  (" + block->source + ")";
+                line2 = decl->property + ": " + decl->value + (decl->important ? " !important" : "") + ";";
+            }
+            float tw = area.w - 24;
+            line1 = fitText(p, line1, kSmallFont, tw - 16);
+            line2 = fitText(p, line2, kSmallFont, tw - 16);
+            float th = line2.empty() ? 22 : 38;
+            float tx = x0, ty = hovered->r.y + hovered->r.h + 2;
+            if (ty + th > area.y + area.h) ty = hovered->r.y - th - 2;
+            p.rect(tx, ty, tw, th, kToolbar, 255);
+            p.rect(tx, ty, tw, 1, kAccent, 255);
+            p.text(line1, tx + 8, ty + 15, kTag, kSmallFont);
+            if (!line2.empty()) p.text(line2, tx + 8, ty + 31, kText, kSmallFont);
         }
     }
     p.popClip();
@@ -750,9 +825,22 @@ void DevToolsPanel::drawPageOverlay(const Painter& p, const Page& page, float cl
         hover = static_cast<DOMElement*>(n);
     }
     DOMElement* selected = tab_ == PanelTab::Inspector ? elementForStyles() : nullptr;
-    if (!hover && !selected) return;
+    bool ruleHighlight = tab_ == PanelTab::Inspector && !highlighted_.empty();
+    if (!hover && !selected && !ruleHighlight) return;
 
     p.pushClip(clipX, clipY, clipW, clipH);
+    // Elements matching the clicked selector of a rule: content box and outline
+    if (ruleHighlight) {
+        std::unordered_set<const DOMElement*> wanted(highlighted_.begin(), highlighted_.end());
+        std::vector<LayoutBox*> boxes;
+        collectBoxes(page.layoutRoot, wanted, boxes, kMaxHighlighted);
+        for (LayoutBox* b : boxes) {
+            float x = b->screenX, y = b->screenY, w = b->width, h = b->height;
+            p.rect(x, y, w, h, kContentColor, 70);
+            p.rect(x, y, w, 1, kAttrName, 255); p.rect(x, y + h - 1, w, 1, kAttrName, 255);
+            p.rect(x, y, 1, h, kAttrName, 255); p.rect(x + w - 1, y, 1, h, kAttrName, 255);
+        }
+    }
     auto paint = [&](DOMElement* el, bool strong) {
         LayoutBox* b = findBoxForElement(page.layoutRoot, el);
         if (!b) return;
@@ -799,6 +887,221 @@ void DevToolsPanel::drawPageOverlay(const Painter& p, const Page& page, float cl
     if (selected) paint(selected, true);
     if (hover && hover != selected) paint(hover, false);
     p.popClip();
+}
+
+// ---------------------------------------------------------------------------
+// Rules
+// ---------------------------------------------------------------------------
+
+const StyleEdit* DevToolsPanel::styleEditFor(const DOMElement* element) const {
+    for (const auto& [owner, edit] : styleEdits_) {
+        if (owner == element) return &edit;
+    }
+    return nullptr;
+}
+
+const ElementRules& DevToolsPanel::rulesFor(const Page& page, DOMElement* element) {
+    size_t sheets = page.css ? page.css->styleSheets().size() : 0;
+    if (rulesDirty_ || element != rulesElement_ || page.domVersion != rulesDomVersion_ || sheets != rulesSheetCount_) {
+        if (element != rulesElement_) rulesScroll_ = 0;
+        rulesElement_ = element;
+        rulesDomVersion_ = page.domVersion;
+        rulesSheetCount_ = sheets;
+        rulesDirty_ = false;
+        rulesModel_ = page.css && element
+            ? collectElementRules(*page.css, element, [this](const DOMElement* e) { return styleEditFor(e); })
+            : ElementRules{};
+    }
+    return rulesModel_;
+}
+
+void DevToolsPanel::drawRules(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY) {
+    ruleHits_.clear();
+    float x0 = area.x + 12;
+    p.rect(area.x + 1, area.y, area.w - 1, 24, kToolbar, 255);
+    p.text("Rules", x0, area.y + 16, kText, kFont);
+    DOMElement* el = elementForStyles();
+    if (!el) {
+        p.text("Select an element to see its rules.", x0, area.y + 44, kMuted, kFont);
+        return;
+    }
+    if (!page.css) {
+        p.text("No stylesheets", x0, area.y + 44, kMuted, kFont);
+        return;
+    }
+    const ElementRules& rules = rulesFor(page, el);
+    Rect body{area.x + 1, area.y + 24, area.w - 1, area.h - 24};
+    bool mouseIn = body.contains(mouseX, mouseY);
+    float y = body.y + 6 - rulesScroll_;
+    p.pushClip(body.x, body.y, body.w, body.h);
+
+    auto drawBlock = [&](const RuleBlock& block, int group, int blockIndex) {
+        if (block.kind == RuleKind::Hints) return;
+        bool visible = y + kRuleLineH * (block.declarations.size() + 2) >= body.y && y <= body.y + body.h;
+        // Selector line: the selector (click: highlight what it matches) and where the rule is from
+        std::string source = block.kind == RuleKind::Inline ? "style attribute" : block.source;
+        float sourceW = p.textWidth(source, kSmallFont);
+        std::string selector = fitText(p, block.selector, kFont, std::max(40.0f, area.w - 40 - sourceW - 16));
+        const void* key = block.kind == RuleKind::Inline ? (const void*)block.element : (const void*)block.rule;
+        bool active = highlightKey_ && highlightKey_ == key;
+        float selW = p.textWidth(selector, kFont);
+        Rect selRect{x0 - 2, y, selW + 4, kRuleLineH};
+        if (visible) {
+            if (active) p.rect(selRect.x, selRect.y, selRect.w, selRect.h, kSelection, 255);
+            else if (mouseIn && selRect.contains(mouseX, mouseY)) p.rect(selRect.x, selRect.y, selRect.w, selRect.h, kHover, 255);
+            p.text(selector, x0, y + 12, active ? kText : kTag, kFont);
+            p.text(" {", x0 + selW, y + 12, kMuted, kFont);
+            p.text(source, area.x + area.w - 12 - sourceW, y + 12, kMuted, kSmallFont);
+        }
+        ruleHits_.push_back({selRect, group, blockIndex, -1});
+        y += kRuleLineH;
+
+        // Declarations: struck through when they lose the cascade or are switched off
+        for (size_t i = 0; i < block.declarations.size(); i++) {
+            const RuleDeclaration& d = block.declarations[i];
+            Rect row{body.x, y, body.w, kRuleLineH};
+            bool hovered = mouseIn && row.contains(mouseX, mouseY);
+            if (y + kRuleLineH >= body.y && y <= body.y + body.h) {
+                if (hovered) p.rect(row.x, row.y, row.w, row.h, kHover, 255);
+                // Checkbox: shown unchecked on a switched-off declaration, checked on hover
+                float cx = x0 + 4, cy = y + 3;
+                if (d.disabled || hovered) {
+                    p.rect(cx, cy, 10, 1, kMuted, 255); p.rect(cx, cy + 9, 10, 1, kMuted, 255);
+                    p.rect(cx, cy, 1, 10, kMuted, 255); p.rect(cx + 9, cy, 1, 10, kMuted, 255);
+                    if (!d.disabled) {
+                        p.rect(cx + 1, cy + 1, 8, 8, kAccent, 255);
+                        p.line(cx + 2, cy + 5, cx + 4, cy + 7, kBg);
+                        p.line(cx + 4, cy + 7, cx + 8, cy + 2, kBg);
+                    }
+                }
+                bool struck = d.disabled || d.overridden;
+                float x = x0 + 20;
+                auto put = [&](const std::string& t, uint32_t c) {
+                    p.text(t, x, y + 12, struck ? kMuted : c, kSmallFont);
+                    x += p.textWidth(t, kSmallFont);
+                };
+                float startX = x;
+                put(d.property, kAttrName);
+                put(": ", kMuted);
+                std::string value = d.value + (d.important ? " !important" : "");
+                float room = area.x + area.w - 12 - x - p.textWidth(";", kSmallFont);
+                put(fitText(p, value, kSmallFont, std::max(20.0f, room)), kText);
+                put(";", kMuted);
+                if (struck) p.rect(startX, y + 8, x - startX, 1, d.disabled ? kMuted : kText, 255);
+            }
+            ruleHits_.push_back({row, group, blockIndex, (int)i});
+            y += kRuleLineH;
+        }
+        if (visible) p.text("}", x0, y + 12, kMuted, kFont);
+        y += kRuleLineH + 6;
+    };
+
+    for (size_t b = 0; b < rules.blocks.size(); b++) drawBlock(rules.blocks[b], -1, (int)b);
+    for (size_t g = 0; g < rules.inherited.size(); g++) {
+        const InheritedRules& group = rules.inherited[g];
+        bool any = std::any_of(group.blocks.begin(), group.blocks.end(),
+                               [](const RuleBlock& b) { return b.kind != RuleKind::Hints; });
+        if (!any) continue;
+        p.rect(body.x, y, body.w, 20, kBgAlt, 255);
+        p.rect(body.x, y, body.w, 1, kBorder, 255);
+        float labelW = p.textWidth("Inherited from ", kSmallFont);
+        p.text("Inherited from ", x0, y + 14, kMuted, kSmallFont);
+        p.text(fitText(p, elementSelector(group.ancestor), kSmallFont, area.w - 24 - labelW), x0 + labelW, y + 14,
+               kTag, kSmallFont);
+        y += 26;
+        for (size_t b = 0; b < group.blocks.size(); b++) drawBlock(group.blocks[b], (int)g, (int)b);
+    }
+    p.popClip();
+    rulesMax_ = (y + rulesScroll_) - (body.y + body.h) + 8;
+    rulesScroll_ = clampScroll(rulesScroll_, rulesMax_);
+    if (rulesMax_ > 0) {
+        float total = body.h + rulesMax_;
+        float thumbH = std::max(20.0f, body.h * body.h / total);
+        float thumbY = body.y + (body.h - thumbH) * (rulesScroll_ / rulesMax_);
+        p.rect(area.x + area.w - 8, thumbY, 6, thumbH, kBorder, 255);
+    }
+}
+
+void DevToolsPanel::onRulesClick(const Page& page, float x, float y) {
+    DOMElement* el = elementForStyles();
+    if (!el || !page.css || y < rules_.y + 24) return;   // the header, or rows scrolled under it
+    for (const RuleHit& hit : ruleHits_) {
+        if (!hit.r.contains(x, y)) continue;
+        if (hit.declaration < 0) {
+            const ElementRules& rules = rulesFor(page, el);
+            if (const RuleBlock* block = rules.block({hit.group, hit.block, 0})) highlightRule(page, *block);
+        } else {
+            toggleDeclaration(page, hit);
+        }
+        return;
+    }
+}
+
+// Clicking a selector highlights the elements it matches; clicking it again stops
+void DevToolsPanel::highlightRule(const Page& page, const RuleBlock& block) {
+    const void* key = block.kind == RuleKind::Inline ? (const void*)block.element : (const void*)block.rule;
+    if (highlightKey_ == key) {
+        highlightKey_ = nullptr;
+        highlightSelector_.clear();
+        highlighted_.clear();
+        return;
+    }
+    highlightKey_ = key;
+    highlightSelector_ = block.kind == RuleKind::Inline ? std::string() : block.selector;
+    highlighted_.clear();
+    if (block.kind == RuleKind::Inline) highlighted_.push_back(block.element);
+    refreshHighlight(page);
+}
+
+// The matched elements again after the DOM changed (the cascade's own matcher)
+void DevToolsPanel::refreshHighlight(const Page& page) {
+    if (!highlightKey_) return;
+    if (highlightSelector_.empty()) {
+        if (!document_ || highlighted_.empty() || !document_->contains(highlighted_[0])) {
+            highlightKey_ = nullptr;
+            highlighted_.clear();
+        }
+        return;
+    }
+    highlighted_ = page.document ? selectDescendants(page.document, highlightSelector_) : std::vector<DOMElement*>{};
+    if (highlighted_.size() > kMaxHighlighted) highlighted_.resize(kMaxHighlighted);
+}
+
+// Switches a declaration off (or back on) for the element it applies to: the
+// element's style attribute is rewritten, the shared stylesheets stay as they are
+void DevToolsPanel::toggleDeclaration(const Page& page, const RuleHit& hit) {
+    DOMElement* el = elementForStyles();
+    const ElementRules& rules = rulesFor(page, el);
+    const RuleBlock* block = rules.block({hit.group, hit.block, hit.declaration});
+    const RuleDeclaration* decl = rules.declaration({hit.group, hit.block, hit.declaration});
+    if (!block || !decl || block->kind == RuleKind::Hints || !block->element) return;
+    DOMElement* owner = block->element;
+    DisabledDeclaration key{block->kind == RuleKind::Style ? block->rule : nullptr, decl->property};
+
+    auto it = std::find_if(styleEdits_.begin(), styleEdits_.end(), [&](const auto& e) { return e.first == owner; });
+    if (it == styleEdits_.end()) {
+        StyleEdit edit;
+        edit.hadStyle = owner->hasAttribute("style");
+        edit.originalStyle = owner->getAttribute("style");
+        styleEdits_.push_back({owner, std::move(edit)});
+        it = styleEdits_.end() - 1;
+    }
+    StyleEdit& edit = it->second;
+    auto found = std::find(edit.disabled.begin(), edit.disabled.end(), key);
+    if (found != edit.disabled.end()) edit.disabled.erase(found);
+    else edit.disabled.push_back(key);
+
+    if (edit.disabled.empty()) {
+        // Everything is back on: the original attribute, exactly
+        if (edit.hadStyle) owner->setAttribute("style", edit.originalStyle);
+        else owner->removeAttribute("style");
+        styleEdits_.erase(it);
+    } else {
+        edit.writtenStyle = styleAttributeFor(*page.css, owner, edit);
+        owner->setAttribute("style", edit.writtenStyle);
+    }
+    // The attribute change bumps domMutationVersion(): the browser restyles and lays out again
+    rulesDirty_ = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1277,6 +1580,8 @@ bool DevToolsPanel::onMouseDown(float x, float y, const Page& page) {
                         selected_ = row.node;
                     }
                 }
+            } else if (rules_.contains(x, y)) {
+                onRulesClick(page, x, y);
             }
             break;
         case PanelTab::Console:
@@ -1344,6 +1649,7 @@ bool DevToolsPanel::onMouseWheel(float x, float y, float delta) {
     switch (tab_) {
         case PanelTab::Inspector:
             if (tree_.contains(x, y)) treeScroll_ = clampScroll(treeScroll_ + step, treeMax_);
+            else if (rules_.contains(x, y)) rulesScroll_ = clampScroll(rulesScroll_ + step, rulesMax_);
             else if (styles_.contains(x, y)) stylesScroll_ = clampScroll(stylesScroll_ + step, stylesMax_);
             break;
         case PanelTab::Console:
