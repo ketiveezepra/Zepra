@@ -1326,7 +1326,7 @@ void parseWithWebCore(const std::string& html) {
                             HttpResponse cssResult = httpGet(cssUrl, Zepra::WebCore::ResourceKind::Stylesheet);
                             if (cssResult.success && !cssResult.data.empty()) {
                                 // std::cout << "[CSS] Loaded " << cssResult.data.size() << " bytes of CSS" << std::endl;
-                                g_cssEngine->addStyleSheet(cssResult.data, StyleOrigin::Author);
+                                g_cssEngine->addStyleSheet(cssResult.data, StyleOrigin::Author, cssUrl);
                             } else {
                                 std::cerr << "[CSS] Failed to load: " << cssResult.error << std::endl;
                             }

@@ -67,6 +67,13 @@ void CSSStyleDeclaration::setProperty(const std::string& property, const std::st
     properties_[normalized] = propVal;
 }
 
+bool CSSStyleDeclaration::hasImportant() const {
+    for (const auto& entry : properties_) {
+        if (entry.second.important) return true;
+    }
+    return false;
+}
+
 std::string CSSStyleDeclaration::removeProperty(const std::string& property) {
     std::string normalized = normalizeProperty(property);
     auto it = properties_.find(normalized);

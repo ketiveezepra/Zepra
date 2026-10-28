@@ -55,6 +55,9 @@ public:
     /// Remove property
     std::string removeProperty(const std::string& property);
 
+    /// Whether any property is set with !important
+    bool hasImportant() const;
+
     /// CSS text representation
     std::string cssText() const;
     void setCssText(const std::string& text);
