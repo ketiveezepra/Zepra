@@ -36,6 +36,7 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 
 | Date | PR | What changed |
 | :--- | :--- | :--- |
+| 2026-10-29 | #30 | **Network panel sees every request; keep-alive** (open): every request of a tab in the DevTools Network panel (document, stylesheets, scripts, images from the loader threads, fetch/XHR) with type filter chips and a summary of requests, bytes on the wire and total time; a thread-safe `NetworkMonitor`; real `fetch()` (Promise, `Response.text()/json()`, `Headers`) and `XMLHttpRequest` settled from the timer pump; HTTP/1.1 responses read to their announced end (Content-Length, chunked), a shared keep-alive pool, TLS session resumption, stylesheets and scripts requested in parallel: Hacker News `load` 5.5 s → 3.1–3.5 s here, Wikipedia 18 requests in the panel (`docs/devtools/network-timings.md`) |
 | 2026-10-29 | #29 | **Console values**: `console.log(obj)` shows Firefox-style previews (`Object { a: 1, b: (2) […] }`, `Array(3) [ … ]`, `Map(2) { "a" → 1 }`, `<div id="x">`, `function f()`, errors with their stack, getters shown not run) as expandable rows; `console.info/debug/dir/table/trace/assert/count/time/group`; console helpers `$0` (Inspector selection), `$`, `$$`, `$_`, `clear()`; input errors as `name: message` with their stack, syntax errors with `<console>:line:col` |
 | 2026-10-26 | #27 | **Live DOM for scripts** (open): one JS object per node whose properties change the C++ DOM (appendChild, innerHTML, textContent, classList, style, dataset, cloneNode, fragments); DOM events with capture/bubble, `addEventListener`, on* handlers, DOMContentLoaded/load, page clicks (a canceled click does not navigate); `querySelector` matches through the cascade; the Inspector follows script-built content |
 | 2026-10-25 | #26 | **DevTools** (open): docked Inspector (live DOM tree, page highlight, box model, computed styles, picker), Console (levels, eval in the page), Network panel; F12 keeps the page usable |
@@ -59,8 +60,8 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 ### 🔨 Active now / next
 1. **Built-ins pass** (#17) — in review.
 2. **Promises and microtasks** (#20) — in review. Next for async: async generators, `for await`, top-level await.
-3. **DOM bindings** — the tree, attributes, classes, inline style and click events are live (#27). Still missing: layout geometry for scripts (`getBoundingClientRect`, `offsetWidth`, `scrollTop` read 0), mouse-move/keyboard/input/submit events, form control values beyond the attribute, `MutationObserver`/`IntersectionObserver`/`ResizeObserver` (stubs), `fetch`/XHR (stub), `document.write`, `window.getComputedStyle`.
-4. **Network speed** — `http_client` waits on a 1 s `poll()` and has no keep-alive, so Hacker News takes 8–17 s.
+3. **DOM bindings** — the tree, attributes, classes, inline style and click events are live (#27). Still missing: layout geometry for scripts (`getBoundingClientRect`, `offsetWidth`, `scrollTop` read 0), mouse-move/keyboard/input/submit events, form control values beyond the attribute, `MutationObserver`/`IntersectionObserver`/`ResizeObserver` (stubs), `document.write`, `window.getComputedStyle`. `fetch`/XHR are real (network panel PR); still no `Request`/`Response` constructors, `arrayBuffer()`/`blob()`, `AbortController`, streaming, CORS checks.
+4. **Network speed** — responses end where their headers say and connections are kept alive (network panel PR). Hacker News `load` fires at 3.1–3.5 s on a 300 ms round trip, where `curl` alone needs 1.4–1.8 s for the document. Left: HTTP/2, compression (`Accept-Encoding: identity`), a disk cache, and images start only after layout.
 5. **Memory after the runaway guard** — reclaim what a killed script allocated (needs the GC stage).
 
 ### ⚠️ Known gaps (ZepraScript)
@@ -86,9 +87,9 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 - [~] **Asynchronous JS Execution:** Scripts still run on the UI thread. Mitigated: a runaway script is stopped after 10 s or 1 GB of growth and the page keeps working (#15).
 
 ### 3. Network Reliability
-- [ ] **Keep-Alive Delay:** *(still open: HN takes 8–17 s)* Rewrite the `http_client` 1000ms `poll()` hack to parse HTTP headers (`Content-Length`) and break immediately when the payload finishes.
+- [x] **Keep-Alive Delay:** `http_client` reads each response to the end its headers announce (Content-Length, chunked, close) and reuses connections through a shared pool; TLS sessions resume (NXNet `fix/http-keepalive` + the network panel PR). HN `load`: 5.5 s → 3.1–3.5 s here, the rest is the document's own fetch.
 - [x] **TLS Integration:** HTTPS works through OpenSSL in NXNet (Wikipedia, Hacker News load) and certificates are verified (#14).
-- [ ] **Chunked Decoding:** *(not checked)* Fix the empty body and chunked decoding bugs in the new `nxhttp` C engine.
+- [x] **Chunked Decoding:** one reader (`http_response_reader`) frames responses for both `http_client` and the `nxhttp` C engine: chunked with extensions and trailers, Content-Length lists, 1xx/204/304/HEAD without a body; covered by `nxhttp_tests` (`HttpFraming.*`).
 
 ### 4. Storage Persistence (B13-B15)
 - [x] **Data Saving:** History, settings and bookmarks are written to disk (`9eda6cc`). Not run yet: the crash-recovery test below. `localStorage` is in-memory only.

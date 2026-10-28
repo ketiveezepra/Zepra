@@ -219,7 +219,6 @@ if(USE_NXRENDER)
         source/sandbox/src/sandbox_manager.cpp
         source/platform/src/config/config_manager.cpp
         source/NXNet/networking/remote/zep_remote.cpp
-        source/NXNet/networking/network/network_monitor.cpp
         source/NXNet/networking/network/monitored_http.cpp
         source/sandbox/src/security/security_checker.cpp
         source/webCore/browser/mouse_handler.cpp
@@ -292,7 +291,6 @@ else()
         UI/settings/settings_ui.cpp
         source/sandbox/src/sandbox_manager.cpp
         source/platform/src/config/config_manager.cpp
-        source/NXNet/networking/network/network_monitor.cpp
     )
 
 

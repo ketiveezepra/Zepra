@@ -51,6 +51,40 @@ struct TimerCallback {
 class CanvasRegistry;
 class DOMBindings;
 
+/**
+ * @brief A request made by fetch() or XMLHttpRequest
+ */
+struct FetchRequest {
+    std::string method = "GET";
+    std::string url;                 ///< as the script gave it (the handler resolves it)
+    std::vector<std::pair<std::string, std::string>> headers;
+    std::string body;
+    bool xhr = false;                ///< XMLHttpRequest rather than fetch()
+};
+
+/**
+ * @brief What came back. A non-empty `error` means no response arrived
+ * (DNS, connection, TLS); an HTTP error status is a response like any other.
+ */
+struct FetchResponse {
+    int status = 0;
+    std::string statusText;
+    std::string url;                 ///< final URL after redirects
+    std::vector<std::pair<std::string, std::string>> headers;
+    std::string body;
+    std::string error;
+};
+
+using FetchDone = std::function<void(FetchResponse response)>;
+/**
+ * @brief Performs a FetchRequest and calls `done` once, from any thread.
+ * The browser installs one that runs the request on a worker thread; the
+ * script context settles the promise on the main thread in processTimers().
+ */
+using FetchHandler = std::function<void(const FetchRequest& request, FetchDone done)>;
+struct FetchInbox;
+struct XhrState;
+
 using AlertHandler = std::function<void(const std::string& message)>;
 using ConfirmHandler = std::function<bool(const std::string& message)>;
 using PromptHandler = std::function<std::string(const std::string& message, const std::string& defaultValue)>;
@@ -87,6 +121,16 @@ public:
     void clearTimeout(int id);
     void clearInterval(int id);
     void processTimers();
+
+    // ====== fetch / XMLHttpRequest ======
+
+    /// Where fetch() and XMLHttpRequest requests go. Without one they fail.
+    void setFetchHandler(FetchHandler handler) { fetchHandler_ = std::move(handler); }
+    /// Settles the fetch()/XHR requests whose responses have arrived
+    /// (processTimers() calls this; tests call it directly)
+    void processNetworkResponses();
+    /// Requests handed to the handler whose response has not been settled yet
+    int pendingFetchCount() const;
 
     /// Runs the requestAnimationFrame callbacks registered before this frame,
     /// passing the performance.now() timestamp
@@ -210,6 +254,21 @@ private:
     std::vector<std::function<void()>> domContentLoadedListeners_;
     std::vector<std::function<void()>> loadListeners_;
     
+    // fetch / XMLHttpRequest (fetch_bindings.cpp)
+    FetchHandler fetchHandler_;
+    std::shared_ptr<FetchInbox> fetchInbox_;
+    int nextFetchId_ = 1;
+    void setupFetchGlobals(Zepra::Runtime::Object* windowObj);
+    void startFetch(int id, bool xhr, const FetchRequest& request);
+    bool waitForFetch(int id, FetchResponse& response, int timeoutMs);
+    void settleFetch(int id, const FetchResponse& response);
+    void settleXhr(int id, const FetchResponse& response);
+    void settleXhrNow(Zepra::Runtime::Object* xhr, const std::shared_ptr<XhrState>& state,
+                      const FetchResponse& response);
+    std::unordered_map<int, std::shared_ptr<XhrState>> xhrInFlight_;   // by request id, while sent
+    Zepra::Runtime::Object* makeFetchResponse(const std::shared_ptr<const FetchResponse>& response);
+    Zepra::Runtime::Value makeScriptError(const std::string& type, const std::string& message);
+
     // Dialog handlers
     AlertHandler alertHandler_;
     ConfirmHandler confirmHandler_;

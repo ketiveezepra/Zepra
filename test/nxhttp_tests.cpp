@@ -378,3 +378,457 @@ TEST(NxHttpSummaryTests, PrintSecurityReport) {
     
     EXPECT_TRUE(true);
 }
+
+// =============================================================================
+// HTTP/1.1 response framing (networking/http_response_reader)
+// =============================================================================
+
+#include "http_response_reader.hpp"
+#include "http_client.hpp"
+#include "network_monitor.h"
+
+#include <atomic>
+#include <functional>
+#include <mutex>
+#include <set>
+#include <thread>
+#include <vector>
+
+namespace {
+
+// Feeds `bytes` to the reader `step` bytes at a time, then reports EOF
+Zepra::Networking::HttpReadFn feed(const std::string& bytes, size_t step, size_t* calls = nullptr) {
+    auto pos = std::make_shared<size_t>(0);
+    return [bytes, step, pos, calls](char* buf, size_t len) -> long {
+        if (calls) ++*calls;
+        if (*pos >= bytes.size()) return 0;
+        size_t n = std::min({step, len, bytes.size() - *pos});
+        memcpy(buf, bytes.data() + *pos, n);
+        *pos += n;
+        return (long)n;
+    };
+}
+
+std::string bodyOf(const Zepra::Networking::HttpWireResponse& r) {
+    return std::string(r.body.begin(), r.body.end());
+}
+
+} // namespace
+
+TEST(HttpFraming, ContentLengthStopsAtTheBody) {
+    using namespace Zepra::Networking;
+    // Two responses back to back: the reader must not consume the second one
+    std::string wire = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello"
+                       "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+    for (size_t step : {1u, 3u, 7u, 4096u}) {
+        HttpWireResponse r;
+        ASSERT_TRUE(readHttpResponse(feed(wire, step), false, r)) << r.error;
+        EXPECT_EQ(r.statusCode, 200);
+        EXPECT_EQ(r.statusMessage, "OK");
+        EXPECT_EQ(bodyOf(r), "hello");
+        EXPECT_TRUE(r.complete);
+        ASSERT_NE(r.header("content-type"), nullptr);
+        EXPECT_EQ(*r.header("content-type"), "text/plain");
+        EXPECT_EQ(r.bytesReceived, step >= 4096 ? wire.size() : r.bytesReceived);
+        // Only when the whole first response fits the reads exactly is the connection reusable
+        if (step == 1) EXPECT_TRUE(r.keepAlive);
+    }
+}
+
+TEST(HttpFraming, ContentLengthExactReadKeepsAlive) {
+    using namespace Zepra::Networking;
+    std::string wire = "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world";
+    HttpWireResponse r;
+    size_t calls = 0;
+    ASSERT_TRUE(readHttpResponse(feed(wire, 4096, &calls), false, r));
+    EXPECT_EQ(bodyOf(r), "hello world");
+    EXPECT_TRUE(r.complete);
+    EXPECT_TRUE(r.keepAlive);
+    EXPECT_EQ(r.bytesReceived, wire.size());
+    EXPECT_EQ(calls, 1u) << "must not wait for EOF or an idle timeout once Content-Length bytes arrived";
+}
+
+TEST(HttpFraming, ChunkedWithExtensionsAndTrailers) {
+    using namespace Zepra::Networking;
+    std::string wire = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                       "6;ext=1\r\nhello \r\n5\r\nworld\r\n0\r\nX-Trailer: yes\r\n\r\n";
+    for (size_t step : {1u, 5u, 4096u}) {
+        HttpWireResponse r;
+        size_t calls = 0;
+        ASSERT_TRUE(readHttpResponse(feed(wire, step, &calls), false, r)) << r.error;
+        EXPECT_EQ(bodyOf(r), "hello world");
+        EXPECT_TRUE(r.complete);
+        EXPECT_TRUE(r.keepAlive);
+        if (step == 4096) EXPECT_EQ(calls, 1u) << "the last chunk ends the read";
+    }
+}
+
+TEST(HttpFraming, TruncatedChunkedIsIncompleteAndNotReusable) {
+    using namespace Zepra::Networking;
+    std::string wire = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel";
+    HttpWireResponse r;
+    ASSERT_TRUE(readHttpResponse(feed(wire, 4096), false, r));
+    EXPECT_EQ(bodyOf(r), "hel");
+    EXPECT_FALSE(r.complete);
+    EXPECT_FALSE(r.keepAlive);
+}
+
+TEST(HttpFraming, NoBodyResponses) {
+    using namespace Zepra::Networking;
+    HttpWireResponse r;
+    ASSERT_TRUE(readHttpResponse(feed("HTTP/1.1 204 No Content\r\n\r\n", 4096), false, r));
+    EXPECT_TRUE(r.complete);
+    EXPECT_TRUE(r.keepAlive);
+    EXPECT_TRUE(r.body.empty());
+
+    ASSERT_TRUE(readHttpResponse(feed("HTTP/1.1 304 Not Modified\r\nContent-Length: 500\r\n\r\n", 4096), false, r));
+    EXPECT_TRUE(r.complete);
+    EXPECT_TRUE(r.body.empty());
+
+    // HEAD: Content-Length describes the body a GET would have
+    ASSERT_TRUE(readHttpResponse(feed("HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n", 4096), true, r));
+    EXPECT_TRUE(r.complete);
+    EXPECT_TRUE(r.keepAlive);
+}
+
+TEST(HttpFraming, CloseDelimitedBodyAndConnectionClose) {
+    using namespace Zepra::Networking;
+    HttpWireResponse r;
+    ASSERT_TRUE(readHttpResponse(feed("HTTP/1.1 200 OK\r\n\r\nuntil close", 3), false, r));
+    EXPECT_EQ(bodyOf(r), "until close");
+    EXPECT_TRUE(r.complete);
+    EXPECT_FALSE(r.keepAlive);
+
+    ASSERT_TRUE(readHttpResponse(feed("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok", 4096), false, r));
+    EXPECT_EQ(bodyOf(r), "ok");
+    EXPECT_FALSE(r.keepAlive);
+
+    // HTTP/1.0 is close by default unless keep-alive is announced
+    ASSERT_TRUE(readHttpResponse(feed("HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok", 4096), false, r));
+    EXPECT_FALSE(r.keepAlive);
+    ASSERT_TRUE(readHttpResponse(feed("HTTP/1.0 200 OK\r\nConnection: Keep-Alive\r\nContent-Length: 2\r\n\r\nok", 4096), false, r));
+    EXPECT_TRUE(r.keepAlive);
+}
+
+TEST(HttpFraming, InterimResponsesAreSkipped) {
+    using namespace Zepra::Networking;
+    HttpWireResponse r;
+    std::string wire = "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </a.css>\r\n\r\n"
+                       "HTTP/1.1 201 Created\r\nContent-Length: 3\r\n\r\nyes";
+    ASSERT_TRUE(readHttpResponse(feed(wire, 4096), false, r));
+    EXPECT_EQ(r.statusCode, 201);
+    EXPECT_EQ(bodyOf(r), "yes");
+}
+
+TEST(HttpFraming, BadStatusLineAndBadContentLength) {
+    using namespace Zepra::Networking;
+    HttpWireResponse r;
+    EXPECT_FALSE(readHttpResponse(feed("<html>not http</html>", 4096), false, r));
+    EXPECT_FALSE(r.error.empty());
+    EXPECT_FALSE(readHttpResponse(feed("HTTP/1.1 200 OK\r\nContent-Length: 5, 7\r\n\r\nhello", 4096), false, r));
+    EXPECT_FALSE(readHttpResponse(feed("", 4096), false, r));
+}
+
+// =============================================================================
+// Keep-alive against an in-process server
+// =============================================================================
+
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+namespace {
+
+// A tiny HTTP/1.1 server on 127.0.0.1: /cl answers with Content-Length,
+// /chunked with chunked encoding, /close with "Connection: close", /nolen
+// with a close-delimited body. It counts the connections it accepted.
+class TestHttpServer {
+public:
+    TestHttpServer() {
+        listenFd_ = socket(AF_INET, SOCK_STREAM, 0);
+        int one = 1;
+        setsockopt(listenFd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        sockaddr_in addr = {};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        if (bind(listenFd_, (sockaddr*)&addr, sizeof(addr)) != 0 || listen(listenFd_, 8) != 0) {
+            close(listenFd_);
+            listenFd_ = -1;
+            return;
+        }
+        socklen_t len = sizeof(addr);
+        getsockname(listenFd_, (sockaddr*)&addr, &len);
+        port_ = ntohs(addr.sin_port);
+        thread_ = std::thread([this] { acceptLoop(); });
+    }
+    ~TestHttpServer() {
+        stop_ = true;
+        if (thread_.joinable()) thread_.join();
+        if (listenFd_ >= 0) close(listenFd_);
+    }
+    bool ok() const { return listenFd_ >= 0; }
+    int port() const { return port_; }
+    int connections() const { return connections_; }
+    int requests() const { return requests_; }
+
+private:
+    void acceptLoop() {
+        while (!stop_) {
+            pollfd pfd = {listenFd_, POLLIN, 0};
+            if (poll(&pfd, 1, 20) <= 0) continue;
+            int fd = accept(listenFd_, nullptr, nullptr);
+            if (fd < 0) continue;
+            connections_++;
+            // One thread per connection: a kept-alive connection waiting for its
+            // next request must not hold up the others
+            std::lock_guard<std::mutex> lock(workersMutex_);
+            workers_.emplace_back([this, fd] {
+                serve(fd);
+                close(fd);
+            });
+        }
+        std::lock_guard<std::mutex> lock(workersMutex_);
+        for (auto& w : workers_) w.join();
+        workers_.clear();
+    }
+    void serve(int fd) {
+        std::string buf;
+        char tmp[4096];
+        while (!stop_) {
+            size_t end = buf.find("\r\n\r\n");
+            if (end == std::string::npos) {
+                pollfd pfd = {fd, POLLIN, 0};
+                if (poll(&pfd, 1, 2000) <= 0) return;
+                long n = recv(fd, tmp, sizeof(tmp), 0);
+                if (n <= 0) return;
+                buf.append(tmp, (size_t)n);
+                continue;
+            }
+            std::string head = buf.substr(0, end);
+            buf.erase(0, end + 4);
+            requests_++;
+            std::string path = head.substr(head.find(' ') + 1);
+            path = path.substr(0, path.find(' '));
+            std::string response;
+            bool closeAfter = false;
+            if (path == "/chunked") {
+                response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n"
+                           "6\r\nhello \r\n7\r\nchunked\r\n0\r\n\r\n";
+            } else if (path == "/close") {
+                response = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 6\r\n\r\nclosed";
+                closeAfter = true;
+            } else if (path == "/nolen") {
+                response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nno length";
+                closeAfter = true;
+            } else {
+                std::string body = "hello " + path;
+                response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " +
+                           std::to_string(body.size()) + "\r\n\r\n" + body;
+            }
+            // Send in two pieces so the client sees a partial body first
+            size_t half = response.size() / 2;
+            send(fd, response.data(), half, 0);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            send(fd, response.data() + half, response.size() - half, 0);
+            if (closeAfter) return;
+        }
+    }
+
+    int listenFd_ = -1;
+    int port_ = 0;
+    std::atomic<bool> stop_{false};
+    std::atomic<int> connections_{0};
+    std::atomic<int> requests_{0};
+    std::thread thread_;
+    std::mutex workersMutex_;
+    std::vector<std::thread> workers_;
+};
+
+Zepra::Networking::HttpClientConfig localConfig() {
+    Zepra::Networking::HttpClientConfig config;
+    config.connectTimeoutMs = 2000;
+    config.readTimeoutMs = 2000;
+    config.useCookies = false;
+    config.followRedirects = false;
+    return config;
+}
+
+} // namespace
+
+TEST(HttpKeepAlive, RequestsShareOneConnection) {
+    TestHttpServer server;
+    ASSERT_TRUE(server.ok());
+    std::string base = "http://127.0.0.1:" + std::to_string(server.port());
+
+    Zepra::Networking::HttpClient client(localConfig());
+    auto t0 = std::chrono::steady_clock::now();
+    auto a = client.get(base + "/cl");
+    ASSERT_FALSE(a.hasError()) << a.error();
+    EXPECT_EQ(a.statusCode(), 200);
+    EXPECT_EQ(a.bodyString(), "hello /cl");
+    EXPECT_FALSE(a.connectionReused());
+    EXPECT_GT(a.bytesReceived(), a.body().size());
+
+    auto b = client.get(base + "/chunked");
+    ASSERT_FALSE(b.hasError()) << b.error();
+    EXPECT_EQ(b.bodyString(), "hello chunked");
+    EXPECT_TRUE(b.connectionReused());
+
+    // Another client instance shares the pool
+    Zepra::Networking::HttpClient other(localConfig());
+    auto c = other.get(base + "/again");
+    ASSERT_FALSE(c.hasError()) << c.error();
+    EXPECT_EQ(c.bodyString(), "hello /again");
+    EXPECT_TRUE(c.connectionReused());
+    auto elapsed = std::chrono::steady_clock::now() - t0;
+
+    EXPECT_EQ(server.connections(), 1);
+    EXPECT_EQ(server.requests(), 3);
+    // No idle-timeout waits: three requests with 5 ms pauses finish well under a second
+    EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 500);
+}
+
+TEST(HttpKeepAlive, ConnectionCloseOpensANewOne) {
+    TestHttpServer server;
+    ASSERT_TRUE(server.ok());
+    std::string base = "http://127.0.0.1:" + std::to_string(server.port());
+    Zepra::Networking::HttpClient client(localConfig());
+
+    auto a = client.get(base + "/close");
+    ASSERT_FALSE(a.hasError()) << a.error();
+    EXPECT_EQ(a.bodyString(), "closed");
+
+    auto b = client.get(base + "/nolen");
+    ASSERT_FALSE(b.hasError()) << b.error();
+    EXPECT_EQ(b.bodyString(), "no length");
+    EXPECT_FALSE(b.connectionReused());
+
+    auto c = client.get(base + "/cl");
+    ASSERT_FALSE(c.hasError()) << c.error();
+    EXPECT_FALSE(c.connectionReused());
+    EXPECT_EQ(server.connections(), 3);
+}
+
+TEST(HttpKeepAlive, LoaderThreadsShareThePoolSafely) {
+    TestHttpServer server;
+    ASSERT_TRUE(server.ok());
+    std::string base = "http://127.0.0.1:" + std::to_string(server.port());
+
+    std::atomic<int> failures{0};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 4; t++) {
+        threads.emplace_back([&, t] {
+            Zepra::Networking::HttpClient client(localConfig());
+            for (int i = 0; i < 5; i++) {
+                std::string path = "/t" + std::to_string(t) + "-" + std::to_string(i);
+                auto r = client.get(base + path);
+                if (r.hasError() || r.bodyString() != "hello " + path) failures++;
+            }
+        });
+    }
+    for (auto& th : threads) th.join();
+    EXPECT_EQ(failures, 0);
+    EXPECT_EQ(server.requests(), 20);
+    // Every request got its own correct body (no two requests shared a connection
+    // at the same time), and the pool kept the connections to one per concurrent
+    // thread rather than one per request
+    EXPECT_LE(server.connections(), 4);
+}
+#endif // !_WIN32
+
+// =============================================================================
+// NetworkMonitor: recording from loader threads while the UI reads
+// =============================================================================
+
+TEST(NetworkMonitorThreads, ConcurrentRecordingAndReading) {
+    zepra::NetworkMonitor monitor;
+    constexpr int kWriters = 4, kPerWriter = 250;
+    std::atomic<bool> writing{true};
+    std::atomic<int> reads{0};
+
+    // UI thread: snapshots and visits while writers append
+    std::thread reader([&] {
+        while (writing) {
+            std::vector<zepra::NetworkEntry> snapshot = monitor.getEntries();
+            size_t seen = 0;
+            monitor.forEachEntry([&](const zepra::NetworkEntry&) { seen++; });
+            EXPECT_GE(seen, snapshot.size());
+            (void)monitor.getTotalTransferSize();
+            reads++;
+        }
+    });
+
+    std::vector<std::thread> writers;
+    for (int w = 0; w < kWriters; w++) {
+        writers.emplace_back([&, w] {
+            for (int i = 0; i < kPerWriter; i++) {
+                zepra::NetworkRequest req;
+                req.method = "GET";
+                req.url = "https://example.test/" + std::to_string(w) + "/" + std::to_string(i) + ".png";
+                req.initiator = zepra::NetworkResourceType::IMAGE;
+                uint64_t id = monitor.recordRequest(req);
+                ASSERT_NE(id, 0u);
+                zepra::NetworkResponse res;
+                res.status_code = 200;
+                res.content_type = "image/png";
+                res.content_length = 10;
+                res.transferred_bytes = 12;
+                monitor.recordResponse(id, res);
+            }
+        });
+    }
+    for (auto& t : writers) t.join();
+    writing = false;
+    reader.join();
+
+    std::vector<zepra::NetworkEntry> entries = monitor.getEntries();
+    ASSERT_EQ(entries.size(), (size_t)kWriters * kPerWriter);
+    std::set<uint64_t> ids;
+    for (const auto& e : entries) {
+        EXPECT_TRUE(e.completed);
+        EXPECT_FALSE(e.failed);
+        EXPECT_EQ(e.type, zepra::NetworkResourceType::IMAGE) << "the initiator names the type";
+        EXPECT_EQ(e.response.status_code, 200);
+        EXPECT_EQ(e.response.transferred_bytes, 12u);
+        EXPECT_GE(e.response.duration_ms, 0.0);
+        ids.insert(e.request.id);
+    }
+    EXPECT_EQ(ids.size(), entries.size()) << "ids are unique across threads";
+    EXPECT_DOUBLE_EQ(monitor.getTotalTransferSize(), 12.0 * kWriters * kPerWriter);
+    EXPECT_GT(reads, 0);
+}
+
+TEST(NetworkMonitorThreads, ErrorsClearAndCallbacksOutsideTheLock) {
+    zepra::NetworkMonitor monitor;
+    int callbacks = 0;
+    monitor.setResponseCallback([&](const zepra::NetworkEntry& e) {
+        callbacks++;
+        // Reading from the callback must not deadlock
+        EXPECT_GE(monitor.getEntries().size(), 1u);
+        EXPECT_TRUE(e.completed);
+    });
+    zepra::NetworkRequest req;
+    req.method = "GET";
+    req.url = "https://example.test/a.css";
+    uint64_t id = monitor.recordRequest(req);
+    EXPECT_EQ(monitor.getEntries()[0].type, zepra::NetworkResourceType::STYLESHEET) << "guessed from the URL";
+    monitor.recordError(id, "DNS resolution failed");
+    auto entries = monitor.getEntries();
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_TRUE(entries[0].failed);
+    EXPECT_EQ(entries[0].error, "DNS resolution failed");
+    EXPECT_EQ(callbacks, 1);
+
+    // A response for a request cleared while in flight is dropped, not crashed on
+    uint64_t late = monitor.recordRequest(req);
+    monitor.clear();
+    zepra::NetworkResponse res;
+    res.status_code = 200;
+    monitor.recordResponse(late, res);
+    EXPECT_TRUE(monitor.getEntries().empty());
+    EXPECT_EQ(callbacks, 1);
+}

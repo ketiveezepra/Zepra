@@ -9,6 +9,7 @@
 #include "devtools_panel.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -1099,11 +1100,38 @@ void DevToolsPanel::evaluateConsoleInput(const Page& page) {
 // Network
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// The type filter chips of the Network toolbar, in order
+constexpr const char* kNetworkFilters[] = {"All", "HTML", "CSS", "JS", "Img", "XHR", "Other"};
+constexpr int kNetworkFilterCount = 7;
+
+bool networkFilterMatches(int filter, zepra::NetworkResourceType type) {
+    using T = zepra::NetworkResourceType;
+    switch (filter) {
+        case 1: return type == T::DOCUMENT;
+        case 2: return type == T::STYLESHEET;
+        case 3: return type == T::SCRIPT;
+        case 4: return type == T::IMAGE;
+        case 5: return type == T::XHR || type == T::FETCH;
+        case 6: return type == T::FONT || type == T::MEDIA || type == T::WEBSOCKET || type == T::OTHER;
+        default: return true;
+    }
+}
+
+} // namespace
+
 void DevToolsPanel::drawNetwork(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY) {
     const float barH = 26, headH = 22, detailH = 22;
     networkToolbar_ = {area.x, area.y, area.w, barH};
+    // A snapshot: loader threads append to the monitor while this draws
     std::vector<zepra::NetworkEntry> entries;
-    if (page.network) entries = page.network->getEntries();   // copy: the loader thread appends
+    if (page.network) entries = page.network->getEntries();
+    std::vector<const zepra::NetworkEntry*> shown;
+    shown.reserve(entries.size());
+    for (const auto& e : entries) {
+        if (networkFilterMatches(networkFilter_, e.type)) shown.push_back(&e);
+    }
 
     p.rect(networkToolbar_.x, networkToolbar_.y, networkToolbar_.w, barH, kToolbar, 255);
     p.rect(networkToolbar_.x, networkToolbar_.y + barH - 1, networkToolbar_.w, 1, kBorder, 255);
@@ -1111,17 +1139,47 @@ void DevToolsPanel::drawNetwork(const Painter& p, const Page& page, const Rect& 
     p.rect(clearButton_.x, clearButton_.y, clearButton_.w, clearButton_.h,
            clearButton_.contains(mouseX, mouseY) ? kHover : kBg, 255);
     p.text("Clear", clearButton_.x + 8, clearButton_.y + 14, kText, kSmallFont);
+
+    // Type filter chips
+    networkFilterButtons_.clear();
+    float fx = clearButton_.x + clearButton_.w + 14;
+    p.rect(fx - 7, area.y + 6, 1, barH - 12, kBorder, 255);
+    for (int i = 0; i < kNetworkFilterCount; i++) {
+        Rect b = {fx, area.y + 4, p.textWidth(kNetworkFilters[i], kSmallFont) + 14, barH - 8};
+        bool active = i == networkFilter_;
+        p.rect(b.x, b.y, b.w, b.h, active ? kSelection : b.contains(mouseX, mouseY) ? kHover : kToolbar, 255);
+        p.text(kNetworkFilters[i], b.x + 7, b.y + 14, active ? kText : kMuted, kSmallFont);
+        networkFilterButtons_.push_back(b);
+        fx += b.w + 4;
+    }
+
+    // Summary: requests, bytes off the wire, first request start to last response end
     {
-        size_t bytes = 0; double total = 0; int failed = 0;
+        size_t bytes = 0;
+        int failed = 0;
+        bool any = false;
+        auto now = std::chrono::system_clock::now();
+        std::chrono::system_clock::time_point first, last;
         for (const auto& e : entries) {
-            bytes += e.response.content_length;
-            total = std::max(total, e.response.duration_ms);
+            bytes += e.response.transferred_bytes ? e.response.transferred_bytes : e.response.content_length;
             if (e.failed) failed++;
+            auto start = e.request.start_time;
+            auto end = e.completed ? e.response.end_time : now;
+            if (!any || start < first) first = start;
+            if (!any || end > last) last = end;
+            any = true;
         }
-        std::string summary = std::to_string(entries.size()) + (entries.size() == 1 ? " request" : " requests") +
-            "   " + zepra::formatSize(bytes) + " transferred   " + fmtPx((float)total) + " ms";
+        double totalMs = any ? std::chrono::duration<double, std::milli>(last - first).count() : 0;
+        std::string summary;
+        if (networkFilter_ != 0) summary += std::to_string(shown.size()) + " of ";
+        summary += std::to_string(entries.size()) + (entries.size() == 1 && networkFilter_ == 0 ? " request" : " requests") +
+            "   " + zepra::formatSize(bytes) + " transferred   " +
+            (any ? zepra::formatDuration(std::max(totalMs, 1.0)) : std::string("0 ms"));
         if (failed) summary += "   " + std::to_string(failed) + " failed";
-        p.text(summary, area.x + area.w - 12 - p.textWidth(summary, kSmallFont), area.y + 17, kMuted, kSmallFont);
+        float sw = p.textWidth(summary, kSmallFont);
+        if (area.x + area.w - 12 - sw > fx + 8) {
+            p.text(summary, area.x + area.w - 12 - sw, area.y + 17, kMuted, kSmallFont);
+        }
     }
 
     // Columns
@@ -1140,19 +1198,21 @@ void DevToolsPanel::drawNetwork(const Painter& p, const Page& page, const Rect& 
         cx += c.w;
     }
 
-    bool hasDetail = networkSelected_ >= 0 && networkSelected_ < (int)entries.size();
+    bool hasDetail = networkSelected_ >= 0 && networkSelected_ < (int)shown.size();
     networkList_ = {area.x, headY + headH, area.w, area.h - barH - headH - (hasDetail ? detailH : 0)};
-    networkMax_ = entries.size() * kRowH - networkList_.h + 4;
+    networkMax_ = shown.size() * kRowH - networkList_.h + 4;
     networkScroll_ = clampScroll(networkScroll_, networkMax_);
 
     p.pushClip(networkList_.x, networkList_.y, networkList_.w, networkList_.h);
     if (entries.empty()) {
         p.text("No requests recorded for this tab yet.", area.x + 12, networkList_.y + 22, kMuted, kFont);
+    } else if (shown.empty()) {
+        p.text(std::string("No ") + kNetworkFilters[networkFilter_] + " requests.", area.x + 12, networkList_.y + 22, kMuted, kFont);
     }
     float ry = networkList_.y - networkScroll_;
-    for (size_t i = 0; i < entries.size(); i++, ry += kRowH) {
+    for (size_t i = 0; i < shown.size(); i++, ry += kRowH) {
         if (ry + kRowH < networkList_.y || ry > networkList_.y + networkList_.h) continue;
-        const auto& e = entries[i];
+        const auto& e = *shown[i];
         bool selected = (int)i == networkSelected_;
         bool hovered = networkList_.contains(mouseX, mouseY) && mouseY >= ry && mouseY < ry + kRowH;
         p.rect(area.x, ry, area.w, kRowH, selected ? kSelection : hovered ? kHover : (i % 2 ? kBgAlt : kBg), 255);
@@ -1167,18 +1227,19 @@ void DevToolsPanel::drawNetwork(const Painter& p, const Page& page, const Rect& 
         p.text(truncate(urlHost(e.request.url), 26), colX[3], baseline, kMuted, kSmallFont);
         p.text(resourceTypeStr(e.type), colX[4], baseline, kMuted, kSmallFont);
         p.text(e.response.content_length ? zepra::formatSize(e.response.content_length) : "-", colX[5], baseline, kMuted, kSmallFont);
-        std::string timeStr = e.completed || e.failed ? fmtPx((float)e.response.duration_ms) + " ms" : "pending";
+        std::string timeStr = e.completed || e.failed ? zepra::formatDuration(std::max(e.response.duration_ms, 1.0)) : "pending";
         p.text(timeStr, colX[6], baseline, kMuted, kSmallFont);
     }
     p.popClip();
 
     if (hasDetail) {
-        const auto& e = entries[networkSelected_];
+        const auto& e = *shown[networkSelected_];
         float dy = area.y + area.h - detailH;
         p.rect(area.x, dy, area.w, detailH, kToolbar, 255);
         p.rect(area.x, dy, area.w, 1, kBorder, 255);
         std::string detail = e.request.method + " " + e.request.url;
         if (!e.response.content_type.empty()) detail += "   " + e.response.content_type;
+        if (e.response.transferred_bytes) detail += "   " + zepra::formatSize(e.response.transferred_bytes) + " on the wire";
         if (e.failed && !e.error.empty()) detail += "   " + e.error;
         p.text(truncate(detail, 220), area.x + 12, dy + 15, e.failed ? kErrorText : kText, kSmallFont);
     }
@@ -1254,7 +1315,17 @@ bool DevToolsPanel::onMouseDown(float x, float y, const Page& page) {
             if (clearButton_.contains(x, y)) {
                 if (page.network) page.network->clear();
                 networkSelected_ = -1;
-            } else if (networkList_.contains(x, y)) {
+                break;
+            }
+            for (size_t i = 0; i < networkFilterButtons_.size(); i++) {
+                if (networkFilterButtons_[i].contains(x, y)) {
+                    networkFilter_ = (int)i;
+                    networkSelected_ = -1;
+                    networkScroll_ = 0;
+                    return true;
+                }
+            }
+            if (networkList_.contains(x, y)) {
                 int idx = (int)std::floor((y - networkList_.y + networkScroll_) / kRowH);
                 networkSelected_ = idx >= 0 ? idx : -1;
             }
