@@ -16,6 +16,8 @@
 #include <chrono>
 #include <memory>
 #include <unordered_map>
+#include <cctype>
+#include <cstdio>
 
 // ZepraScript internal headers
 #include "runtime/execution/vm.hpp"
@@ -147,8 +149,7 @@ ScriptContext::ScriptContext() : vm_(nullptr), vmReady_(false) {
         // Uncaught errors from microtasks and unhandled promise rejections
         // reach the page console
         vm_->setErrorReporter([this](const std::string& message) {
-            if (consoleHandler_) consoleHandler_("error", message);
-            else std::cerr << "[console.error] " << message << std::endl;
+            emitConsole("error", message);
         });
         std::cout << "[ScriptContext] Per-tab VM initialized" << std::endl;
     } catch (const std::exception& e) {
@@ -171,7 +172,8 @@ ScriptResult ScriptContext::evaluate(const std::string& code, const std::string&
     return run(code, filename, nullptr);
 }
 
-ScriptResult ScriptContext::run(const std::string& code, const std::string& filename, Zepra::Runtime::Value* value) {
+ScriptResult ScriptContext::run(const std::string& code, const std::string& filename, Zepra::Runtime::Value* value,
+                                Zepra::Runtime::Value* thrown) {
     ScriptResult result;
     
     if (code.empty()) {
@@ -222,9 +224,7 @@ ScriptResult ScriptContext::run(const std::string& code, const std::string& file
         if (parser.hasErrors()) {
             result.success = false;
             result.error = "SyntaxError: " + parser.errors().front();
-            if (consoleHandler_) {
-                consoleHandler_("error", result.error);
-            }
+            if (!quietErrors_) emitConsole("error", result.error);
             return result;
         }
         
@@ -237,9 +237,7 @@ ScriptResult ScriptContext::run(const std::string& code, const std::string& file
             if (!checker.check(ast.get())) {
                 result.success = false;
                 result.error = "SyntaxError: Validation failed";
-                if (consoleHandler_) {
-                    consoleHandler_("error", result.error);
-                }
+                if (!quietErrors_) emitConsole("error", result.error);
                 return result;
             }
         }
@@ -252,9 +250,7 @@ ScriptResult ScriptContext::run(const std::string& code, const std::string& file
             result.error = generator.errors().empty()
                 ? std::string("SyntaxError: Bytecode generation failed")
                 : "SyntaxError: " + generator.errors().front();
-            if (consoleHandler_) {
-                consoleHandler_("error", result.error);
-            }
+            if (!quietErrors_) emitConsole("error", result.error);
             return result;
         }
         
@@ -283,27 +279,42 @@ ScriptResult ScriptContext::run(const std::string& code, const std::string& file
         } else {
             result.success = false;
             result.error = execResult.error;
-            if (consoleHandler_) {
-                consoleHandler_("error", execResult.error);
-            }
+            if (thrown && execResult.status == Zepra::Runtime::ExecutionResult::Status::Exception) *thrown = execResult.value;
+            if (!quietErrors_) emitConsole("error", execResult.error);
         }
     } catch (const std::exception& e) {
         result.success = false;
         result.error = std::string("RuntimeError: ") + e.what();
-        if (consoleHandler_) {
-            consoleHandler_("error", result.error);
-        }
+        if (!quietErrors_) emitConsole("error", result.error);
     }
     
     return result;
 }
 
 void ScriptContext::log(const std::string& message) {
-    if (consoleHandler_) {
-        consoleHandler_("log", message);
-    } else {
-        std::cout << "[console] " << message << std::endl;
+    emitConsole("log", message);
+}
+
+void ScriptContext::emitConsole(const std::string& level, const std::string& text) {
+    ConsoleMessage m;
+    m.level = level;
+    m.text = text;
+    m.depth = consoleGroupDepth_;
+    emitConsole(std::move(m));
+}
+
+void ScriptContext::emitConsole(ConsoleMessage message) {
+    if (consoleMessageHandler_) {
+        consoleMessageHandler_(message);
+        return;
     }
+    if (message.level == "clear") return;
+    if (consoleHandler_) {
+        consoleHandler_(message.level, message.text);
+        return;
+    }
+    std::ostream& out = (message.level == "error" || message.level == "warn") ? std::cerr : std::cout;
+    out << "[console." << message.level << "] " << message.text << std::endl;
 }
 
 int ScriptContext::scheduleTimer(int id, std::function<void()> callback, int delay, bool repeating) {
@@ -392,18 +403,18 @@ void ScriptContext::runTask(const std::function<void()>& task, const char* what)
     try {
         task();
     } catch (const std::exception& e) {
-        if (consoleHandler_) consoleHandler_("error", std::string("Uncaught exception in ") + what + ": " + e.what());
+        emitConsole("error", std::string("Uncaught exception in ") + what + ": " + e.what());
         if (vm_->isTerminationRequested()) {
             vm_->discardJobs();
             return;
         }
     } catch (...) {
-        if (consoleHandler_) consoleHandler_("error", std::string("Uncaught exception in ") + what);
+        emitConsole("error", std::string("Uncaught exception in ") + what);
     }
     try {
         vm_->runMicrotasks();
     } catch (const std::exception& e) {
-        if (consoleHandler_) consoleHandler_("error", std::string("Microtasks stopped: ") + e.what());
+        emitConsole("error", std::string("Microtasks stopped: ") + e.what());
     }
 }
 
@@ -477,8 +488,7 @@ void ScriptContext::setupGlobals() {
     if (vm_) {
         // The window object and the DOM interfaces (EventTarget, Node, Event, ...)
         domBindings_ = std::make_unique<DOMBindings>(vm_, [this](const std::string& message) {
-            if (consoleHandler_) consoleHandler_("error", message);
-            else std::cerr << "[console.error] " << message << std::endl;
+            emitConsole("error", message);
         });
     }
     setupWindowGlobals();
@@ -516,42 +526,11 @@ void ScriptContext::setupWindowGlobals() {
         }, 2);
     vm_->setGlobal("prompt", Value::object(promptFn));
     
-    // console.log — bridge to console handler. The handler is looked up on every
+    // The console: every method formats its arguments as the DevTools panel
+    // shows them (see console_format.hpp). The handler is looked up on every
     // call, so one installed (or replaced) after initialize() still gets output.
-    auto* logFn = createNativeFunction("log",
-        [this](Context*, const std::vector<Value>& args) -> Value {
-            std::string msg;
-            for (size_t i = 0; i < args.size(); i++) {
-                if (i > 0) msg += " ";
-                msg += args[i].toString();
-            }
-            if (consoleHandler_) consoleHandler_("log", msg);
-            else std::cout << "[console.log] " << msg << std::endl;
-            return Value::undefined();
-        }, 0);  // variadic
-    
     auto* consoleObj = new Object();
-    consoleObj->set("log", Value::object(logFn));
-    
-    auto* warnFn = createNativeFunction("warn",
-        [this](Context*, const std::vector<Value>& args) -> Value {
-            std::string msg;
-            for (auto& a : args) msg += a.toString() + " ";
-            if (consoleHandler_) consoleHandler_("warn", msg);
-            else std::cerr << "[console.warn] " << msg << std::endl;
-            return Value::undefined();
-        }, 0);
-    consoleObj->set("warn", Value::object(warnFn));
-    
-    auto* errorFn = createNativeFunction("error",
-        [this](Context*, const std::vector<Value>& args) -> Value {
-            std::string msg;
-            for (auto& a : args) msg += a.toString() + " ";
-            if (consoleHandler_) consoleHandler_("error", msg);
-            else std::cerr << "[console.error] " << msg << std::endl;
-            return Value::undefined();
-        }, 0);
-    consoleObj->set("error", Value::object(errorFn));
+    setupConsole(consoleObj);
     vm_->setGlobal("console", Value::object(consoleObj));
     
     // setTimeout(callback, delay)
@@ -924,6 +903,215 @@ void ScriptContext::setupDocumentGlobals() {
     });
     domBindings_->installDocument(document_);
     if (document_) vm_->setGlobal("__document_ref__", vm_->getGlobal("document"));
+}
+
+// ============================================================================
+// Console
+// ============================================================================
+
+void ScriptContext::setupConsole(Zepra::Runtime::Object* consoleObj) {
+    using namespace Zepra::Runtime;
+    auto method = [&](const char* name, auto fn) {
+        consoleObj->set(name, Value::object(createNativeFunction(name, fn, 0)));
+    };
+    auto message = [this](const std::string& level, const std::vector<Value>& args) {
+        ConsoleMessage m;
+        m.level = level;
+        m.values = formatArguments(args);
+        m.text = previewText(m.values);
+        m.depth = consoleGroupDepth_;
+        return m;
+    };
+    // log/info/debug/warn/error: the arguments, formatted
+    for (const char* level : {"log", "info", "debug", "warn", "error"}) {
+        std::string lv = level;
+        method(level, [this, message, lv](Context*, const std::vector<Value>& args) -> Value {
+            emitConsole(message(lv, args));
+            return Value::undefined();
+        });
+    }
+    // dir: like log, with the object opened
+    method("dir", [this, message](Context*, const std::vector<Value>& args) -> Value {
+        ConsoleMessage m = message("log", args);
+        for (ValuePreview& v : m.values) v.expanded = v.expandable;
+        emitConsole(std::move(m));
+        return Value::undefined();
+    });
+    // table: the rows as a log entry, opened
+    method("table", [this, message](Context*, const std::vector<Value>& args) -> Value {
+        ConsoleMessage m = message("log", args.empty() ? args : std::vector<Value>{args[0]});
+        for (ValuePreview& v : m.values) v.expanded = v.expandable;
+        emitConsole(std::move(m));
+        return Value::undefined();
+    });
+    // trace: the arguments and the call stack
+    method("trace", [this, message](Context*, const std::vector<Value>& args) -> Value {
+        ConsoleMessage m = message("trace", args);
+        std::string stack = vm_ ? vm_->captureStackTrace() : "";
+        while (!stack.empty() && stack.back() == '\n') stack.pop_back();
+        m.text = "console.trace()" + (m.text.empty() ? "" : " " + m.text) + (stack.empty() ? "" : "\n" + stack);
+        emitConsole(std::move(m));
+        return Value::undefined();
+    });
+    // assert(condition, ...data)
+    method("assert", [this, message](Context*, const std::vector<Value>& args) -> Value {
+        if (!args.empty() && args[0].isTruthy()) return Value::undefined();
+        std::vector<Value> rest(args.size() > 1 ? args.begin() + 1 : args.end(), args.end());
+        ConsoleMessage m = message("error", rest);
+        ValuePreview head;
+        head.kind = ValuePreview::Kind::String;
+        head.text = "Assertion failed" + std::string(rest.empty() ? "" : ":");
+        m.values.insert(m.values.begin(), head);
+        m.text = previewText(m.values);
+        emitConsole(std::move(m));
+        return Value::undefined();
+    });
+    auto label = [](const std::vector<Value>& args) {
+        return args.empty() || args[0].isUndefined() ? std::string("default") : args[0].toString();
+    };
+    method("count", [this, label](Context*, const std::vector<Value>& args) -> Value {
+        std::string l = label(args);
+        emitConsole("log", l + ": " + std::to_string(++consoleCounts_[l]));
+        return Value::undefined();
+    });
+    method("countReset", [this, label](Context*, const std::vector<Value>& args) -> Value {
+        std::string l = label(args);
+        if (consoleCounts_.erase(l) == 0) emitConsole("warn", "Counter \"" + l + "\" doesn't exist.");
+        return Value::undefined();
+    });
+    auto nowMs = [] {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    method("time", [this, label, nowMs](Context*, const std::vector<Value>& args) -> Value {
+        std::string l = label(args);
+        if (consoleTimers_.count(l)) emitConsole("warn", "Timer \"" + l + "\" already exists.");
+        else consoleTimers_[l] = nowMs();
+        return Value::undefined();
+    });
+    auto timerText = [this, nowMs](const std::string& l, bool end) -> std::string {
+        auto it = consoleTimers_.find(l);
+        if (it == consoleTimers_.end()) return "";
+        char buf[64];
+        std::snprintf(buf, sizeof buf, "%.2fms", nowMs() - it->second);
+        if (end) consoleTimers_.erase(it);
+        return l + ": " + buf + (end ? " - timer ended" : "");
+    };
+    method("timeEnd", [this, label, timerText](Context*, const std::vector<Value>& args) -> Value {
+        std::string l = label(args), t = timerText(l, true);
+        if (t.empty()) emitConsole("warn", "Timer \"" + l + "\" doesn't exist.");
+        else emitConsole("log", t);
+        return Value::undefined();
+    });
+    method("timeLog", [this, label, timerText](Context*, const std::vector<Value>& args) -> Value {
+        std::string l = label(args), t = timerText(l, false);
+        if (t.empty()) emitConsole("warn", "Timer \"" + l + "\" doesn't exist.");
+        else emitConsole("log", t);
+        return Value::undefined();
+    });
+    // group / groupCollapsed / groupEnd: the entries that follow are indented
+    for (const char* name : {"group", "groupCollapsed"}) {
+        method(name, [this, message](Context*, const std::vector<Value>& args) -> Value {
+            ConsoleMessage m = message("group", args);
+            if (m.text.empty()) m.text = "console.group";
+            emitConsole(std::move(m));
+            consoleGroupDepth_++;
+            return Value::undefined();
+        });
+    }
+    method("groupEnd", [this](Context*, const std::vector<Value>&) -> Value {
+        if (consoleGroupDepth_ > 0) consoleGroupDepth_--;
+        return Value::undefined();
+    });
+    method("clear", [this](Context*, const std::vector<Value>&) -> Value {
+        emitConsole("clear", "");
+        return Value::undefined();
+    });
+}
+
+Zepra::Runtime::Value ScriptContext::callDocumentMethod(const char* name, const std::vector<Zepra::Runtime::Value>& args) {
+    using namespace Zepra::Runtime;
+    Value doc = vm_->getGlobal("document");
+    if (!doc.isObject()) return Value::null();
+    Value fn = vm_->getMember(doc, name);
+    if (!fn.isObject() || !fn.asObject()->isCallable()) return Value::null();
+    return vm_->call(static_cast<Function*>(fn.asObject()), doc, args);
+}
+
+// The console's own helpers, as Firefox has them. A page that defines a
+// global of the same name ($ for jQuery) keeps it.
+void ScriptContext::installConsoleHelpers() {
+    using namespace Zepra::Runtime;
+    if (consoleHelpersInstalled_ || !vm_) return;
+    consoleHelpersInstalled_ = true;
+    auto helper = [&](const char* name, auto fn, size_t arity) {
+        if (!vm_->getGlobal(name).isUndefined()) return;
+        vm_->setGlobal(name, Value::object(createNativeFunction(name, fn, arity)));
+    };
+    helper("$", [this](Context*, const std::vector<Value>& args) -> Value {
+        return callDocumentMethod("querySelector", args);
+    }, 1);
+    helper("$$", [this](Context*, const std::vector<Value>& args) -> Value {
+        return callDocumentMethod("querySelectorAll", args);
+    }, 1);
+    helper("clear", [this](Context*, const std::vector<Value>&) -> Value {
+        emitConsole("clear", "");
+        return Value::undefined();
+    }, 0);
+    helper("copy", [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1);
+    if (vm_->getGlobal("$_").isUndefined()) vm_->setGlobal("$_", Value::undefined());
+    if (vm_->getGlobal("$0").isUndefined()) vm_->setGlobal("$0", Value::undefined());
+}
+
+void ScriptContext::setInspectedNode(DOMNode* node) {
+    if (!vm_ || !domBindings_) return;
+    vm_->setGlobal("$0", node ? domBindings_->wrap(node) : Zepra::Runtime::Value::undefined());
+}
+
+ConsoleMessage ScriptContext::evaluateConsole(const std::string& code, DOMNode* inspected) {
+    using namespace Zepra::Runtime;
+    ConsoleMessage m;
+    if (!vm_ || !vmReady_) {
+        m.level = "error";
+        m.text = "No script context for this page";
+        return m;
+    }
+    installConsoleHelpers();
+    setInspectedNode(inspected);
+    Value value, thrown;
+    quietErrors_ = true;
+    ScriptResult r = run(code, "<console>", &value, &thrown);
+    quietErrors_ = false;
+    FormatOptions options;
+    options.quoteStrings = true;
+    if (r.success) {
+        vm_->setGlobal("$_", value);
+        m.level = "result";
+        m.values.push_back(formatValue(value, options));
+        m.text = m.values[0].text;
+        return m;
+    }
+    m.level = "error";
+    if (!thrown.isUndefined()) {
+        // The thrown value itself: "TypeError: x is not a function" with its stack
+        m.values.push_back(formatValue(thrown, options));
+        m.text = m.values[0].text;
+        return m;
+    }
+    m.text = r.error.empty() ? "Evaluation failed" : r.error;
+    // "SyntaxError: 1:5: message" -> "SyntaxError: message" at <console>:1:5
+    const std::string prefix = "SyntaxError: ";
+    if (m.text.rfind(prefix, 0) == 0) {
+        std::string rest = m.text.substr(prefix.size());
+        size_t a = rest.find(':'), b = a == std::string::npos ? a : rest.find(':', a + 1);
+        if (b != std::string::npos && a > 0 && std::isdigit((unsigned char)rest[0]) &&
+            std::all_of(rest.begin() + a + 1, rest.begin() + b, [](unsigned char c) { return std::isdigit(c); })) {
+            m.source = "<console>:" + rest.substr(0, b);
+            size_t msg = b + 1;
+            while (msg < rest.size() && rest[msg] == ' ') msg++;
+            m.text = prefix + rest.substr(msg);
+        }
+    }
+    return m;
 }
 
 // ============================================================================

@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "input/events.h"
+#include "scripting/console_format.hpp"
 
 namespace Zepra::WebCore {
 class DOMDocument;
@@ -48,7 +49,7 @@ struct Page {
     Zepra::WebCore::CSSEngine* css = nullptr;
     ZepraBrowser::LayoutBox* layoutRoot = nullptr;
     Zepra::WebCore::ScriptContext* script = nullptr;
-    std::vector<std::string>* consoleLog = nullptr;   ///< Tab::consoleLog ("[level] message" lines)
+    std::vector<Zepra::WebCore::ConsoleMessage>* consoleLog = nullptr;   ///< Tab::consoleLog (the panel expands and clears it)
     zepra::NetworkMonitor* network = nullptr;
     uint64_t domVersion = 0;                           ///< Zepra::WebCore::domMutationVersion()
 };
@@ -106,6 +107,18 @@ private:
         bool closing = false;      // the "</tag>" row of an expanded element
     };
     struct Rect { float x = 0, y = 0, w = 0, h = 0; bool contains(float px, float py) const; };
+    /// One drawn line of the console: a message with its values inline, a
+    /// property of an expanded value, or a further line of a multi-line text
+    struct ConsoleRow {
+        Zepra::WebCore::ConsoleMessage* message = nullptr;
+        uint64_t messageId = 0;                         ///< message->id: rows are matched by it on a click
+        Zepra::WebCore::ValuePreview* node = nullptr;   ///< the property shown (null on a message row)
+        int depth = 0;                                  ///< indentation (group nesting + tree depth)
+        std::string line;                               ///< a continuation line's text
+        bool continuation = false;
+        struct Toggle { size_t value; float x0, x1; };  ///< the triangle of message->values[value]
+        std::vector<Toggle> toggles;                    ///< set while drawing a message row
+    };
 
     // Layout of the last draw (for hit testing)
     Rect panel_, toolbar_, pickerButton_, closeButton_, tree_, styles_, consoleList_, consoleInputBox_,
@@ -143,6 +156,8 @@ private:
     size_t consoleSeen_ = 0;
     bool showErrors_ = true, showWarnings_ = true, showLogs_ = true;
     int caretBlink_ = 0;
+    std::vector<ConsoleRow> consoleRows_;   // the rows of the last draw (for hit testing)
+    uint64_t nextConsoleId_ = 1;
 
     // Network
     float networkScroll_ = 0, networkMax_ = 0;
@@ -157,6 +172,7 @@ private:
     void drawConsole(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
     void drawNetwork(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
     void evaluateConsoleInput(const Page& page);
+    void buildConsoleRows(const Page& page);
     Zepra::WebCore::DOMElement* elementForStyles() const;
 };
 

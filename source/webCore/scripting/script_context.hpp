@@ -7,6 +7,7 @@
 
 #include "browser/dom.hpp"
 #include "browser/event.hpp"
+#include "scripting/console_format.hpp"
 #include <string>
 #include <functional>
 #include <vector>
@@ -24,6 +25,9 @@ namespace Zepra::Runtime {
 namespace Zepra::WebCore {
 
 using ConsoleHandler = std::function<void(const std::string& level, const std::string& message)>;
+/// Receives every console entry with its structured values (see ConsoleMessage).
+/// When set, it replaces the plain ConsoleHandler.
+using ConsoleMessageHandler = std::function<void(const ConsoleMessage& message)>;
 
 struct ScriptResult {
     bool success = false;
@@ -64,7 +68,18 @@ public:
     
     // Console
     void setConsoleHandler(ConsoleHandler handler) { consoleHandler_ = handler; }
+    void setConsoleMessageHandler(ConsoleMessageHandler handler) { consoleMessageHandler_ = handler; }
     void log(const std::string& message);
+
+    /**
+     * @brief Runs a line typed into the DevTools console, with its helpers
+     * ($0 = `inspected`, $, $$, $_, clear(), copy()) in place.
+     * @return a "result" message holding the value (strings quoted), or an
+     * "error" message: the thrown value, or "SyntaxError: ..." with its source position
+     */
+    ConsoleMessage evaluateConsole(const std::string& code, DOMNode* inspected = nullptr);
+    /// Sets the console's $0 (the element selected in the Inspector)
+    void setInspectedNode(DOMNode* node);
     
     // Timers
     int setTimeout(std::function<void()> callback, int delay);
@@ -147,15 +162,29 @@ private:
     void setupGlobals();
     void setupWindowGlobals();
     void setupDocumentGlobals();
-    /// Compiles and runs `code`; `value` (optional) receives its completion value
-    ScriptResult run(const std::string& code, const std::string& filename, Zepra::Runtime::Value* value);
+    /// Compiles and runs `code`; `value` (optional) receives its completion
+    /// value, `thrown` (optional) the exception that ended it
+    ScriptResult run(const std::string& code, const std::string& filename, Zepra::Runtime::Value* value,
+                     Zepra::Runtime::Value* thrown = nullptr);
+    /// Hands a console entry to the message handler, else the text handler, else the terminal
+    void emitConsole(ConsoleMessage message);
+    void emitConsole(const std::string& level, const std::string& text);
+    void setupConsole(Zepra::Runtime::Object* consoleObj);
+    void installConsoleHelpers();
+    Zepra::Runtime::Value callDocumentMethod(const char* method, const std::vector<Zepra::Runtime::Value>& args);
     /// Runs host-initiated script work (a callback, an event) as a task: under
     /// the run limits, followed by the microtasks it queued
     void runTask(const std::function<void()>& task, const char* what);
     
     DOMDocument* document_ = nullptr;
     ConsoleHandler consoleHandler_;
+    ConsoleMessageHandler consoleMessageHandler_;
     std::string lastError_;
+    bool quietErrors_ = false;          // evaluateConsole reports its own errors
+    bool consoleHelpersInstalled_ = false;
+    int consoleGroupDepth_ = 0;
+    std::unordered_map<std::string, int> consoleCounts_;
+    std::unordered_map<std::string, double> consoleTimers_;
     
     // ZepraScript Engine (Per-instance VM — each tab gets its own)
     Zepra::Runtime::VM* vm_ = nullptr;
