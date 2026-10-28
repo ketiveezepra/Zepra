@@ -31,6 +31,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <future>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -83,6 +84,7 @@ extern "C" {
 // ===========================================================================
 #include "nxhttp.h"
 #include "http_client.hpp"
+#include "browser/network_recorder.hpp"
 #include "network_monitor.h"
 
 // ===========================================================================
@@ -211,6 +213,28 @@ static Theme g_theme;
 // The inline struct Tab below is used for backward compatibility
 
 
+// ============================================================================
+// Per-tab network monitors
+// ============================================================================
+// Loader threads (images, fetch, the document fetch) record into a tab's
+// monitor while the UI thread draws it and tabs open and close, so the
+// monitors live in this registry behind a mutex rather than in the Tab
+// (g_tabs reallocates), and a thread holds a shared_ptr while it records.
+static std::mutex g_tabMonitorsMutex;
+static std::unordered_map<int, std::shared_ptr<zepra::NetworkMonitor>> g_tabMonitors;
+
+static std::shared_ptr<zepra::NetworkMonitor> monitorForTab(int tabId) {
+    std::lock_guard<std::mutex> lock(g_tabMonitorsMutex);
+    auto& monitor = g_tabMonitors[tabId];
+    if (!monitor) monitor = std::make_shared<zepra::NetworkMonitor>();
+    return monitor;
+}
+
+static void dropTabMonitor(int tabId) {
+    std::lock_guard<std::mutex> lock(g_tabMonitorsMutex);
+    g_tabMonitors.erase(tabId);  // a recording thread's shared_ptr keeps it until it is done
+}
+
 struct Tab {
     int id = 0;
     std::string title;
@@ -230,9 +254,6 @@ struct Tab {
     
     // Per-tab console log (production: each tab has its own console)
     std::vector<std::string> consoleLog;
-    
-    // Per-tab network monitor (Tab A/B isolation for DevTools Network panel)
-    std::unique_ptr<zepra::NetworkMonitor> networkMonitor;
     
     // Per-tab DOM/CSS/Layout isolation
     std::unique_ptr<DOMDocument> document;
@@ -258,19 +279,14 @@ struct Tab {
         if (consoleLog.size() > 500) consoleLog.erase(consoleLog.begin());
     }
     
-    // Get network monitor (lazy init)
+    // The tab's network monitor (DevTools Network panel); see monitorForTab
     zepra::NetworkMonitor& getNetworkMonitor() {
-        if (!networkMonitor) {
-            networkMonitor = std::make_unique<zepra::NetworkMonitor>();
-        }
-        return *networkMonitor;
+        return *monitorForTab(id);
     }
     
     // Clear network log (on navigation)
     void clearNetworkLog() {
-        if (networkMonitor) {
-            networkMonitor->clear();
-        }
+        monitorForTab(id)->clear();
     }
 };
 
@@ -456,9 +472,22 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inAnchor
 struct HttpResponse {
     bool success = false;
     int statusCode = 0;
+    std::string statusText;
     std::string contentType;
     std::string data;
     std::string error;
+    std::string finalUrl;                                          // after redirects
+    std::vector<std::pair<std::string, std::string>> headers;      // response headers
+    size_t transferred = 0;                                        // bytes off the wire
+};
+
+/// What a request is for and who asked (the Network panel shows it)
+struct HttpRequestOptions {
+    std::string method = "GET";
+    std::vector<std::pair<std::string, std::string>> headers;
+    std::string body;
+    Zepra::WebCore::ResourceKind kind = Zepra::WebCore::ResourceKind::Other;
+    int tabId = -1;   // -1: the active tab
 };
 
 // Helper to configure client matching previous curl settings
@@ -473,64 +502,145 @@ struct HttpResponse {
     return nx_http_client_create(&config);
 }
 
-HttpResponse httpGet(const std::string& url) {
+// Records every request of every tab into that tab's monitor. WebCore's
+// loaders (images, fetch/XHR) call it from their threads; the monitor locks.
+class TabNetworkRecorder : public Zepra::WebCore::NetworkRecorder {
+public:
+    uint64_t willSendRequest(const Zepra::WebCore::ResourceRequestInfo& request) override {
+        int tabId = request.tabId >= 0 ? request.tabId : g_activeTabId;
+        std::shared_ptr<zepra::NetworkMonitor> monitor = monitorForTab(tabId);
+        zepra::NetworkRequest req;
+        req.method = request.method;
+        req.url = request.url;
+        req.initiator = resourceType(request.kind);
+        req.is_fetch = request.kind == Zepra::WebCore::ResourceKind::Fetch;
+        req.is_xhr = request.kind == Zepra::WebCore::ResourceKind::Xhr;
+        uint64_t id = monitor->recordRequest(req);
+        if (!id) return 0;
+        std::lock_guard<std::mutex> lock(mutex_);
+        uint64_t handle = nextHandle_++;
+        inFlight_[handle] = {std::move(monitor), id, request.url.compare(0, 8, "https://") == 0};
+        return handle;
+    }
+
+    void didFinishRequest(uint64_t handle, const Zepra::WebCore::ResourceResponseInfo& response) override {
+        InFlight entry;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = inFlight_.find(handle);
+            if (it == inFlight_.end()) return;
+            entry = std::move(it->second);
+            inFlight_.erase(it);
+        }
+        if (response.status == 0 && !response.error.empty()) {
+            entry.monitor->recordError(entry.id, response.error);
+            return;
+        }
+        zepra::NetworkResponse res;
+        res.status_code = response.status;
+        res.status_text = response.statusText;
+        res.content_type = response.mimeType;
+        res.content_length = response.bodySize;
+        res.transferred_bytes = response.transferredBytes;
+        res.is_secure = entry.secure;
+        entry.monitor->recordResponse(entry.id, res);
+    }
+
+    static zepra::NetworkResourceType resourceType(Zepra::WebCore::ResourceKind kind) {
+        using K = Zepra::WebCore::ResourceKind;
+        using T = zepra::NetworkResourceType;
+        switch (kind) {
+            case K::Document: return T::DOCUMENT;
+            case K::Stylesheet: return T::STYLESHEET;
+            case K::Script: return T::SCRIPT;
+            case K::Image: return T::IMAGE;
+            case K::Font: return T::FONT;
+            case K::Fetch: return T::FETCH;
+            case K::Xhr: return T::XHR;
+            case K::Media: return T::MEDIA;
+            default: return T::OTHER;
+        }
+    }
+
+private:
+    struct InFlight {
+        std::shared_ptr<zepra::NetworkMonitor> monitor;
+        uint64_t id = 0;
+        bool secure = false;
+    };
+    std::mutex mutex_;
+    std::unordered_map<uint64_t, InFlight> inFlight_;
+    uint64_t nextHandle_ = 1;
+};
+static TabNetworkRecorder g_tabNetworkRecorder;
+
+static Zepra::Networking::HttpMethod httpMethodFromString(const std::string& method) {
+    using M = Zepra::Networking::HttpMethod;
+    if (method == "POST") return M::POST;
+    if (method == "PUT") return M::PUT;
+    if (method == "DELETE") return M::DELETE;
+    if (method == "PATCH") return M::PATCH;
+    if (method == "HEAD") return M::HEAD;
+    if (method == "OPTIONS") return M::OPTIONS;
+    return M::GET;
+}
+
+// One HTTP(S) or file:// request, recorded in the tab's Network panel from
+// start to finish. Safe to call from any thread.
+HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& options) {
     HttpResponse response;
     
-    std::cout << "[Browser] httpGet called: " << url << std::endl;
+    std::cout << "[Browser] " << options.method << " " << url << std::endl;
     
-    // Get active tab for network logging
-    Tab* activeTab = nullptr;
-    for (auto& t : g_tabs) {
-        if (t.id == g_activeTabId) { activeTab = &t; break; }
-    }
-    
-    // Create network request for logging
-    zepra::NetworkRequest netReq;
-    netReq.method = "GET";
-    netReq.url = url;
-    netReq.origin = activeTab ? activeTab->url : "";
-    
-    // Record request to active tab's monitor
-    uint64_t requestId = 0;
-    if (activeTab) {
-        requestId = activeTab->getNetworkMonitor().recordRequest(netReq);
-    }
+    Zepra::WebCore::ResourceRequestInfo info;
+    info.tabId = options.tabId;
+    info.method = options.method;
+    info.url = url;
+    info.kind = options.kind;
+    const uint64_t recordId = g_tabNetworkRecorder.willSendRequest(info);
+    const auto started = std::chrono::steady_clock::now();
+    auto finish = [&]() {
+        double elapsedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        if (response.error.empty()) {
+            std::cout << "[Browser] " << response.statusCode << " " << url << " (" << response.data.size()
+                      << " bytes, " << (int)elapsedMs << " ms)" << std::endl;
+        } else {
+            std::cerr << "[Browser] FAILED " << url << ": " << response.error << " (" << (int)elapsedMs << " ms)" << std::endl;
+        }
+        Zepra::WebCore::ResourceResponseInfo done;
+        done.status = response.statusCode;
+        done.statusText = response.statusText;
+        done.mimeType = response.contentType;
+        done.bodySize = response.data.size();
+        done.transferredBytes = response.transferred;
+        done.error = response.error;
+        g_tabNetworkRecorder.didFinishRequest(recordId, done);
+        return response;
+    };
     
     // Handle file:// protocol
     if (url.substr(0, 7) == "file://") {
         std::string path = Zepra::Platform::fileUrlToPath(url);
         
-        std::ifstream file(path);
+        std::ifstream file(path, std::ios::binary);
         if (file.is_open()) {
             std::stringstream buffer;
             buffer << file.rdbuf();
             response.data = buffer.str();
             response.success = true;
             response.statusCode = 200;
+            response.statusText = "OK";
             response.contentType = getContentType(path);
+            response.finalUrl = url;
+            response.transferred = response.data.size();
             std::cout << "[Browser] loaded local file (text) " << response.data.size() << " bytes" << std::endl;
-            
-            // Log response for file://
-            if (activeTab && requestId) {
-                zepra::NetworkResponse netRes;
-                netRes.status_code = 200;
-                netRes.status_text = "OK";
-                netRes.content_type = response.contentType;
-                netRes.content_length = response.data.size();
-                activeTab->getNetworkMonitor().recordResponse(requestId, netRes);
-            }
         } else {
             response.success = false;
-            response.statusCode = 404;
+            response.statusCode = 0;
             response.error = "File not found: " + path;
             std::cerr << "[Browser] Failed to open local file: " << path << std::endl;
-            
-            // Log error response
-            if (activeTab && requestId) {
-                activeTab->getNetworkMonitor().recordError(requestId, response.error);
-            }
         }
-        return response;
+        return finish();
     }
 
     try {
@@ -545,48 +655,95 @@ HttpResponse httpGet(const std::string& url) {
         config.useCookies = true;
         
         Zepra::Networking::HttpClient client(config);
-        Zepra::Networking::HttpRequest request(Zepra::Networking::HttpMethod::GET, url);
+        Zepra::Networking::HttpRequest request(httpMethodFromString(options.method), url);
+        for (const auto& [name, value] : options.headers) request.setHeader(name, value);
+        if (!options.body.empty()) request.setBody(options.body);
         
         auto netResponse = client.send(request);
         
         response.statusCode = netResponse.statusCode();
+        response.statusText = netResponse.statusMessage();
         response.success = netResponse.isSuccess();
         response.contentType = netResponse.header("Content-Type");
+        response.finalUrl = netResponse.url().empty() ? url : netResponse.url();
+        response.transferred = netResponse.bytesReceived();
+        for (const auto& [name, value] : netResponse.headers()) response.headers.emplace_back(name, value);
         
         if (netResponse.hasError()) {
+            response.success = false;
             response.error = netResponse.error();
-            
-            // Log error to tab's network monitor
-            if (activeTab && requestId) {
-                activeTab->getNetworkMonitor().recordError(requestId, response.error);
-            }
         } else {
             const auto& body = netResponse.body();
             response.data = std::string(body.begin(), body.end());
-            
-            // Log successful response to tab's network monitor
-            if (activeTab && requestId) {
-                zepra::NetworkResponse netRes;
-                netRes.status_code = response.statusCode;
-                netRes.status_text = "OK";
-                netRes.content_type = response.contentType;
-                netRes.content_length = response.data.size();
-                netRes.is_secure = (url.substr(0, 5) == "https");
-                activeTab->getNetworkMonitor().recordResponse(requestId, netRes);
-            }
         }
         
     } catch (const std::exception& e) {
         response.success = false;
         response.error = std::string("HTTP request failed: ") + e.what();
-        
-        // Log exception to tab's network monitor
-        if (activeTab && requestId) {
-            activeTab->getNetworkMonitor().recordError(requestId, response.error);
-        }
     }
     
-    return response;
+    return finish();
+}
+
+// ----------------------------------------------------------------------------
+// Sub-resource prefetch
+// ----------------------------------------------------------------------------
+// The parser loads stylesheets and scripts one after another, in document
+// order. Before it starts, every one of them is requested at once on its own
+// thread (they share the keep-alive pool), so the page waits for the slowest
+// request instead of the sum of all of them. httpGet() picks up the result.
+static std::mutex g_prefetchMutex;
+static std::unordered_map<std::string, std::shared_future<HttpResponse>> g_prefetched;
+static constexpr size_t kMaxPrefetchThreads = 12;
+
+HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& options);
+
+static void prefetchResource(const std::string& url, Zepra::WebCore::ResourceKind kind, int tabId) {
+    std::lock_guard<std::mutex> lock(g_prefetchMutex);
+    if (g_prefetched.size() >= kMaxPrefetchThreads || g_prefetched.count(url)) return;
+    HttpRequestOptions options;
+    options.kind = kind;
+    options.tabId = tabId;
+    // A promise, not std::async: a future from std::async blocks when its last
+    // reference goes, which would make dropPrefetches() wait for stale downloads
+    std::promise<HttpResponse> promise;
+    g_prefetched[url] = promise.get_future().share();
+    std::thread([url, options, promise = std::move(promise)]() mutable {
+        promise.set_value(httpRequest(url, options));
+    }).detach();
+}
+
+static bool takePrefetched(const std::string& url, HttpResponse& out) {
+    std::shared_future<HttpResponse> future;
+    {
+        std::lock_guard<std::mutex> lock(g_prefetchMutex);
+        auto it = g_prefetched.find(url);
+        if (it == g_prefetched.end()) return false;
+        future = it->second;
+        g_prefetched.erase(it);
+    }
+    out = future.get();
+    return true;
+}
+
+// Forgets prefetches a navigation left behind (their threads finish on their own)
+static void dropPrefetches() {
+    std::lock_guard<std::mutex> lock(g_prefetchMutex);
+    g_prefetched.clear();
+}
+
+HttpResponse httpGet(const std::string& url,
+                     Zepra::WebCore::ResourceKind kind = Zepra::WebCore::ResourceKind::Other,
+                     int tabId = -1) {
+    HttpResponse prefetched;
+    if ((kind == Zepra::WebCore::ResourceKind::Stylesheet || kind == Zepra::WebCore::ResourceKind::Script) &&
+        takePrefetched(url, prefetched)) {
+        return prefetched;
+    }
+    HttpRequestOptions options;
+    options.kind = kind;
+    options.tabId = tabId;
+    return httpRequest(url, options);
 }
 
 
@@ -1112,6 +1269,36 @@ void parseWithWebCore(const std::string& html) {
                                    StyleOrigin::UserAgent);
     }
     
+    // Request every external stylesheet and script now, in parallel; the
+    // passes below find them loaded or in flight (see prefetchResource)
+    dropPrefetches();
+    {
+        std::function<void(DOMNode*)> prefetchFrom = [&](DOMNode* node) {
+            if (auto* el = dynamic_cast<DOMElement*>(node)) {
+                std::string tag = el->tagName();
+                std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
+                if (tag == "link") {
+                    std::string rel = el->getAttribute("rel");
+                    std::transform(rel.begin(), rel.end(), rel.begin(), ::tolower);
+                    std::string href = el->getAttribute("href");
+                    if (rel.find("stylesheet") != std::string::npos && !href.empty()) {
+                        prefetchResource(resolveUrl(g_currentUrl, href), Zepra::WebCore::ResourceKind::Stylesheet, g_activeTabId);
+                    }
+                } else if (tag == "script") {
+                    std::string type = el->getAttribute("type");
+                    std::string src = el->getAttribute("src");
+                    bool runnable = type.empty() || type == "text/javascript" || type == "application/javascript" || type == "module";
+                    if (runnable && !src.empty()) {
+                        prefetchResource(resolveUrl(g_currentUrl, src), Zepra::WebCore::ResourceKind::Script, g_activeTabId);
+                    }
+                }
+            }
+            for (const auto& child : node->childNodes()) prefetchFrom(child.get());
+        };
+        if (g_document->head()) prefetchFrom(g_document->head());
+        if (g_document->body()) prefetchFrom(g_document->body());
+    }
+
     // Extract <style> elements and load <link rel="stylesheet"> external CSS
     auto* headEl = g_document->head();
     if (headEl) {
@@ -1136,7 +1323,7 @@ void parseWithWebCore(const std::string& html) {
                             // std::cout << "[CSS] Loading external stylesheet: " << cssUrl << std::endl;
                             
                             // Fetch the CSS file
-                            HttpResponse cssResult = httpGet(cssUrl);
+                            HttpResponse cssResult = httpGet(cssUrl, Zepra::WebCore::ResourceKind::Stylesheet);
                             if (cssResult.success && !cssResult.data.empty()) {
                                 // std::cout << "[CSS] Loaded " << cssResult.data.size() << " bytes of CSS" << std::endl;
                                 g_cssEngine->addStyleSheet(cssResult.data, StyleOrigin::Author);
@@ -1191,6 +1378,31 @@ void parseWithWebCore(const std::string& html) {
         });
     
     g_scriptContext->initialize(g_document.get());
+
+    // fetch()/XMLHttpRequest: the request runs on its own thread and is
+    // recorded in this tab's Network panel; the script context settles the
+    // promise on the main thread (processTimers)
+    g_scriptContext->setFetchHandler(
+        [pageTabId](const Zepra::WebCore::FetchRequest& request, Zepra::WebCore::FetchDone done) {
+            HttpRequestOptions options;
+            options.method = request.method;
+            options.headers = request.headers;
+            options.body = request.body;
+            options.kind = request.xhr ? Zepra::WebCore::ResourceKind::Xhr : Zepra::WebCore::ResourceKind::Fetch;
+            options.tabId = pageTabId;
+            std::string url = resolveUrl(g_currentUrl, request.url);
+            std::thread([url, options, done = std::move(done)]() mutable {
+                HttpResponse http = httpRequest(url, options);
+                Zepra::WebCore::FetchResponse response;
+                response.status = http.statusCode;
+                response.statusText = http.statusText;
+                response.url = http.finalUrl.empty() ? url : http.finalUrl;
+                response.headers = http.headers;
+                response.body = std::move(http.data);
+                response.error = http.statusCode == 0 ? http.error : std::string();
+                done(std::move(response));
+            }).detach();
+        });
     
     // Wire alert/confirm/prompt handlers
     g_scriptContext->setAlertHandler([](const std::string& msg) {
@@ -1232,7 +1444,7 @@ void parseWithWebCore(const std::string& html) {
                         // External script — resolve URL and fetch
                         std::string scriptUrl = resolveUrl(g_currentUrl, src);
                         std::cout << "[JS] Fetching external script: " << scriptUrl << std::endl;
-                        HttpResponse scriptResp = httpGet(scriptUrl);
+                        HttpResponse scriptResp = httpGet(scriptUrl, Zepra::WebCore::ResourceKind::Script);
                         if (scriptResp.success && !scriptResp.data.empty()) {
                             std::cout << "[JS] Executing external script (" 
                                       << scriptResp.data.size() << " bytes)" << std::endl;
@@ -4058,6 +4270,7 @@ void onCloseTab(int tabId) {
         if (it->id == tabId) {
             closedIndex = it - g_tabs.begin();
             g_tabs.erase(it);
+            dropTabMonitor(tabId);
             break;
         }
     }
@@ -4239,7 +4452,7 @@ void onNavigate(const std::string& input) {
         int tabId = g_activeTabId;
         std::thread([url, tabId]() {
             // Fetch in background
-            HttpResponse resp = httpGet(url);
+            HttpResponse resp = httpGet(url, Zepra::WebCore::ResourceKind::Document, tabId);
             
             // Prepare data
             std::string pendingTitle;
@@ -4637,6 +4850,10 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
     } else if (key == KeyCode::F12 || (ctrl && shift && key == KeyCode::I) || (ctrl && key == KeyCode::I)) {
         // F12 / Ctrl+Shift+I (Ctrl+I: legacy) - Toggle DevTools
         g_devTools.toggle();
+    } else if (ctrl && shift && key == KeyCode::E) {
+        // Ctrl+Shift+E - DevTools on the Network panel (as in Firefox)
+        g_devTools.show();
+        g_devTools.setActiveTab(ZepraBrowser::DevTools::PanelTab::Network);
     } else if (ctrl && key == KeyCode::F) {
         // Ctrl+F - Find on page (TODO: implement find bar)
         std::cout << "[Browser] Ctrl+F: Find on page (TODO)" << std::endl;
@@ -5206,6 +5423,7 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
         }
         return 0;
     });
+    Zepra::WebCore::setNetworkRecorder(&g_tabNetworkRecorder);  // before any loader thread runs
     ZepraBrowser::g_lazyImageLoader.start(2); // 2 worker threads
     std::cout << "[LazyImageLoader] Started with 2 workers" << std::endl;
 

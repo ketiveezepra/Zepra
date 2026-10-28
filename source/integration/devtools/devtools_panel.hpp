@@ -146,7 +146,9 @@ private:
 
     // Network
     float networkScroll_ = 0, networkMax_ = 0;
-    int networkSelected_ = -1;
+    int networkSelected_ = -1;          // index into the rows shown (after the type filter)
+    int networkFilter_ = 0;             // index into kNetworkFilters (0 = all)
+    std::vector<Rect> networkFilterButtons_;
 
     void syncWithDocument(const Page& page);
     void rebuildRows(const Page& page);

@@ -335,6 +335,7 @@ void ScriptContext::clearInterval(int id) {
 }
 
 void ScriptContext::processTimers() {
+    processNetworkResponses();
     double now = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     
@@ -799,48 +800,8 @@ void ScriptContext::setupWindowGlobals() {
     vm_->setGlobal("ResizeObserver", Value::object(resObsCtor));
     windowObj->set("ResizeObserver", Value::object(resObsCtor));
     
-    // fetch() — returns a Promise-like object with .then()/.json()/.text()
-    // Real network calls happen synchronously via nxhttp for now
-    auto* fetchFn = createNativeFunction("fetch",
-        [](Context*, const std::vector<Value>& args) -> Value {
-            auto* response = new Object();
-            response->set("ok", Value::boolean(true));
-            response->set("status", Value::number(200));
-            response->set("statusText", Value::string(new String("OK")));
-            response->set("json", Value::object(createNativeFunction("json",
-                [](Context*, const std::vector<Value>&) -> Value {
-                    auto* p = new Object();
-                    p->set("then", Value::object(createNativeFunction("then",
-                        [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-                    return Value::object(p);
-                }, 0)));
-            response->set("text", Value::object(createNativeFunction("text",
-                [](Context*, const std::vector<Value>&) -> Value {
-                    auto* p = new Object();
-                    p->set("then", Value::object(createNativeFunction("then",
-                        [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-                    return Value::object(p);
-                }, 0)));
-            
-            // Return a "thenable" wrapping the response
-            auto* promise = new Object();
-            promise->set("then", Value::object(createNativeFunction("then",
-                [response](Context*, const std::vector<Value>& args) -> Value {
-                    // Call the callback with the response if provided
-                    // For now just return the response directly
-                    auto* nextP = new Object();
-                    nextP->set("then", Value::object(createNativeFunction("then",
-                        [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-                    nextP->set("catch", Value::object(createNativeFunction("catch",
-                        [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-                    return Value::object(nextP);
-                }, 1)));
-            promise->set("catch", Value::object(createNativeFunction("catch",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            return Value::object(promise);
-        }, 1);
-    vm_->setGlobal("fetch", Value::object(fetchFn));
-    windowObj->set("fetch", Value::object(fetchFn));
+    // fetch(), XMLHttpRequest and Headers (fetch_bindings.cpp)
+    setupFetchGlobals(windowObj);
     
     // URL constructor
     auto* urlCtor = createNativeFunction("URL",

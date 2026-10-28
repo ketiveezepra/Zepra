@@ -20,6 +20,7 @@
 #include <cstdlib>
 // HTTP client for fetching images
 #include "http_client.hpp"
+#include "network_recorder.hpp"
 
 // Image decoding (stb_image is already included in main file, just declare here)
 extern "C" {
@@ -510,7 +511,28 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
 
             Zepra::Networking::HttpClient client(config);
             Zepra::Networking::HttpRequest request(Zepra::Networking::HttpMethod::GET, pending.url);
+
+            // The Network panel sees the request from this thread (the recorder locks)
+            Zepra::WebCore::NetworkRecorder* recorder = Zepra::WebCore::networkRecorder();
+            uint64_t recordId = 0;
+            if (recorder) {
+                Zepra::WebCore::ResourceRequestInfo info;
+                info.tabId = pending.tabId;
+                info.url = pending.url;
+                info.kind = Zepra::WebCore::ResourceKind::Image;
+                recordId = recorder->willSendRequest(info);
+            }
             auto response = client.send(request);
+            if (recorder && recordId) {
+                Zepra::WebCore::ResourceResponseInfo info;
+                info.status = response.statusCode();
+                info.statusText = response.statusMessage();
+                info.mimeType = response.header("Content-Type");
+                info.bodySize = response.body().size();
+                info.transferredBytes = response.bytesReceived();
+                info.error = response.error();
+                recorder->didFinishRequest(recordId, info);
+            }
             if (!response.isSuccess()) {
                 std::string error = response.error().empty()
                     ? "HTTP " + std::to_string(response.statusCode()) : response.error();

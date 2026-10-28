@@ -320,3 +320,147 @@ TEST(DomBindings, CppQueriesAndFragmentParsing) {
     EXPECT_EQ(div->querySelectorAll("p").size(), 2u);
     EXPECT_EQ(div->childNodes()[0]->ownerDocument(), doc.get());
 }
+
+// ---------------------------------------------------------------------------
+// fetch() and XMLHttpRequest: requests go to the installed handler, the
+// response settles on the main thread from processTimers()
+// ---------------------------------------------------------------------------
+
+namespace {
+struct FakeNetwork {
+    std::vector<FetchRequest> requests;
+    std::vector<FetchDone> pending;   // answered later, like a worker thread would
+    void install(ScriptContext& script) {
+        script.setFetchHandler([this](const FetchRequest& request, FetchDone done) {
+            requests.push_back(request);
+            pending.push_back(std::move(done));
+        });
+    }
+    void answer(size_t index, int status, const std::string& body,
+                const std::string& contentType = "application/json") {
+        FetchResponse response;
+        response.status = status;
+        response.statusText = status == 200 ? "OK" : "Error";
+        response.url = requests[index].url;
+        response.headers = {{"Content-Type", contentType}, {"X-Test", "1"}};
+        response.body = body;
+        FetchDone done = std::move(pending[index]);
+        done(std::move(response));
+    }
+    void fail(size_t index, const std::string& error) {
+        FetchResponse response;
+        response.error = error;
+        FetchDone done = std::move(pending[index]);
+        done(std::move(response));
+    }
+};
+}  // namespace
+
+TEST(FetchBindings, FetchResolvesWithJsonOnTheTimerPump) {
+    Page page(kPage);
+    FakeNetwork net;
+    net.install(*page.script);
+    page.eval("var out = []; fetch('/api/items?x=1', {method: 'POST', headers: {'Content-Type': 'text/plain'}, body: 'ping'})"
+              ".then(function(r) { out.push(r.ok, r.status, r.headers.get('x-test'), r.url); return r.json(); })"
+              ".then(function(j) { out.push(j.a); console.log('done ' + out.join(',')); })"
+              ".catch(function(e) { console.log('fail ' + e); })");
+    ASSERT_EQ(net.requests.size(), 1u);
+    EXPECT_EQ(net.requests[0].method, "POST");
+    EXPECT_EQ(net.requests[0].url, "/api/items?x=1");
+    EXPECT_EQ(net.requests[0].body, "ping");
+    ASSERT_EQ(net.requests[0].headers.size(), 1u);
+    EXPECT_EQ(net.requests[0].headers[0].second, "text/plain");
+    EXPECT_EQ(page.script->pendingFetchCount(), 1);
+    EXPECT_TRUE(page.console.empty()) << "nothing settles before the response arrives";
+
+    net.answer(0, 200, "{\"a\": 42}");
+    EXPECT_TRUE(page.console.empty()) << "the response is applied on the main thread, not in the callback";
+    page.script->processTimers();
+    ASSERT_EQ(page.console.size(), 1u);
+    EXPECT_EQ(page.console[0], "log: done true,200,1,/api/items?x=1,42");
+    EXPECT_EQ(page.script->pendingFetchCount(), 0);
+}
+
+TEST(FetchBindings, FetchTextErrorsAndFailures) {
+    Page page(kPage);
+    FakeNetwork net;
+    net.install(*page.script);
+    page.eval("fetch('/missing').then(function(r) { return r.text().then(function(t) { console.log(r.ok + ' ' + r.status + ' ' + t); }); });"
+              "fetch('/down').catch(function(e) { console.log('caught ' + (e instanceof TypeError) + ' ' + e.message); });"
+              "fetch('/twice').then(function(r) { r.text(); return r.text(); }).catch(function(e) { console.log('used ' + e.message); });");
+    ASSERT_EQ(net.requests.size(), 3u);
+    net.answer(0, 404, "not here", "text/plain");
+    net.fail(1, "DNS resolution failed");
+    net.answer(2, 200, "x", "text/plain");
+    page.script->processTimers();
+    ASSERT_EQ(page.console.size(), 3u);
+    EXPECT_EQ(page.console[0], "log: false 404 not here");
+    EXPECT_EQ(page.console[1], "log: caught true Failed to fetch: DNS resolution failed");
+    EXPECT_EQ(page.console[2], "log: used Failed to execute 'text' on 'Response': body stream already read");
+}
+
+TEST(FetchBindings, XmlHttpRequestEventsAndHeaders) {
+    Page page(kPage);
+    FakeNetwork net;
+    net.install(*page.script);
+    page.eval("var states = []; var x = new XMLHttpRequest();"
+              "x.onreadystatechange = function() { states.push(x.readyState); };"
+              "x.addEventListener('load', function(e) { console.log('load ' + x.status + ' ' + x.responseText + ' ' + x.getResponseHeader('X-TEST') + ' ' + (e.target === x)); });"
+              "x.onloadend = function() { console.log('end ' + states.join('')); };"
+              "x.open('GET', '/data.txt'); x.setRequestHeader('Accept', 'text/plain'); x.send();");
+    ASSERT_EQ(net.requests.size(), 1u);
+    EXPECT_TRUE(net.requests[0].xhr);
+    EXPECT_EQ(net.requests[0].url, "/data.txt");
+    ASSERT_EQ(net.requests[0].headers.size(), 1u);
+    EXPECT_EQ(net.requests[0].headers[0].first, "Accept");
+    EXPECT_EQ(page.eval("x.readyState"), "1");
+
+    net.answer(0, 200, "payload", "text/plain");
+    page.script->processTimers();
+    ASSERT_EQ(page.console.size(), 2u);
+    EXPECT_EQ(page.console[0], "log: load 200 payload 1 true");
+    EXPECT_EQ(page.console[1], "log: end 14");
+
+    // responseType json, and a network failure fires error with status 0
+    page.console.clear();
+    page.eval("var y = new XMLHttpRequest(); y.responseType = 'json';"
+              "y.onload = function() { console.log('json ' + y.response.k); };"
+              "y.open('GET', '/j'); y.send();"
+              "var z = new XMLHttpRequest(); z.onerror = function() { console.log('error ' + z.status + ' ' + z.readyState); };"
+              "z.open('GET', '/bad'); z.send();");
+    ASSERT_EQ(net.requests.size(), 3u);
+    net.answer(1, 200, "{\"k\": \"v\"}");
+    net.fail(2, "Connection refused");
+    page.script->processTimers();
+    ASSERT_EQ(page.console.size(), 2u);
+    EXPECT_EQ(page.console[0], "log: json v");
+    EXPECT_EQ(page.console[1], "log: error 0 4");
+}
+
+TEST(FetchBindings, AbortedXhrAndClosedPageDropResponses) {
+    Page page(kPage);
+    FakeNetwork net;
+    net.install(*page.script);
+    page.eval("var a = new XMLHttpRequest(); a.onload = function() { console.log('should not run'); };"
+              "a.open('GET', '/slow'); a.send(); a.abort();");
+    ASSERT_EQ(net.requests.size(), 1u);
+    net.answer(0, 200, "late");
+    page.script->processTimers();
+    EXPECT_TRUE(page.console.empty());
+
+    page.eval("fetch('/after-close').then(function() { console.log('should not run'); });");
+    ASSERT_EQ(net.requests.size(), 2u);
+    FetchDone done = std::move(net.pending[1]);
+    page.script.reset();   // the tab closed while the request was in flight
+    FetchResponse response;
+    response.status = 200;
+    done(std::move(response));   // must not touch the destroyed context
+}
+
+TEST(FetchBindings, WithoutAHandlerFetchRejects) {
+    Page page(kPage);
+    page.eval("fetch('/x').catch(function(e) { console.log('no net: ' + e.message); });");
+    page.script->processTimers();
+    ASSERT_EQ(page.console.size(), 1u);
+    EXPECT_EQ(page.console[0], "log: no net: Failed to fetch: No network available to scripts");
+}
