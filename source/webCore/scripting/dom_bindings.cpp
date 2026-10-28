@@ -1643,6 +1643,11 @@ Value DOMBindings::wrap(DOMNode* node) {
     return Value::object(w);
 }
 
+DOMNode* DOMBindings::nodeOf(const Object* object) {
+    const auto* w = dynamic_cast<const NodeWrapper*>(object);
+    return w ? w->node : nullptr;
+}
+
 NodeWrapper* DOMBindings::wrapperOf(DOMNode* node) {
     return static_cast<NodeWrapper*>(wrap(node).asObject());
 }

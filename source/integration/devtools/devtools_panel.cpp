@@ -512,7 +512,7 @@ void DevToolsPanel::drawToolbar(const Painter& p, const Page& page, float mouseX
     // Tabs
     int errorCount = 0;
     if (page.consoleLog) {
-        for (const auto& e : *page.consoleLog) if (e.rfind("[error]", 0) == 0) errorCount++;
+        for (const auto& e : *page.consoleLog) if (e.level == "error") errorCount++;
     }
     const char* names[] = {"Inspector", "Console", "Network"};
     tabButtons_.clear();
@@ -806,20 +806,108 @@ void DevToolsPanel::drawPageOverlay(const Painter& p, const Page& page, float cl
 // ---------------------------------------------------------------------------
 
 namespace {
-enum class Level { Log, Warn, Error, Input, Result };
 
-struct ConsoleLine { Level level; std::string text; };
+using Zepra::WebCore::ConsoleMessage;
+using Zepra::WebCore::ValuePreview;
+using Kind = ValuePreview::Kind;
 
-ConsoleLine parseConsoleLine(const std::string& e) {
-    if (e.rfind("[error]", 0) == 0) return {Level::Error, e.substr(8)};
-    if (e.rfind("[warn]", 0) == 0) return {Level::Warn, e.substr(7)};
-    if (e.rfind("[log]", 0) == 0) return {Level::Log, e.substr(6)};
-    if (e.rfind("[info]", 0) == 0) return {Level::Log, e.substr(7)};
-    if (e.rfind("> ", 0) == 0) return {Level::Input, e.substr(2)};
-    if (e.rfind("< ", 0) == 0) return {Level::Result, e.substr(2)};
-    return {Level::Log, e};
+constexpr uint32_t kKeyText    = 0xFF7DE9;   // property names
+constexpr uint32_t kStringText = 0x86DE74;
+constexpr uint32_t kNumberText = 0x75BFFF;   // numbers, booleans
+constexpr uint32_t kNodeText   = 0x75BFFF;
+constexpr uint32_t kGroupText  = 0xFBFBFE;
+
+uint32_t kindColor(Kind k, uint32_t plain) {
+    switch (k) {
+        case Kind::String: return kStringText;
+        case Kind::Number: case Kind::Boolean: case Kind::BigInt: case Kind::Symbol: return kNumberText;
+        case Kind::Undefined: case Kind::Null: case Kind::Getter: case Kind::More: return kMuted;
+        case Kind::Node: return kNodeText;
+        case Kind::RegExp: return kStringText;
+        default: return plain;
+    }
+}
+
+// The first line of a preview, and the lines after it (an error's stack frames)
+std::string firstLine(const std::string& s) {
+    size_t nl = s.find('\n');
+    return nl == std::string::npos ? s : s.substr(0, nl);
+}
+
+std::vector<std::string> restLines(const std::string& s) {
+    std::vector<std::string> lines;
+    size_t pos = s.find('\n');
+    while (pos != std::string::npos) {
+        size_t next = s.find('\n', pos + 1);
+        lines.push_back(s.substr(pos + 1, next == std::string::npos ? std::string::npos : next - pos - 1));
+        pos = next;
+    }
+    return lines;
+}
+
+// The panel's font has ASCII glyphs only: the ellipsis and arrow of the previews drawn as ASCII
+std::string drawable(std::string s) {
+    for (size_t pos; (pos = s.find("\xE2\x80\xA6")) != std::string::npos;) s.replace(pos, 3, "...");   // …
+    for (size_t pos; (pos = s.find("\xE2\x86\x92")) != std::string::npos;) s.replace(pos, 3, "->");    // →
+    return s;
+}
+
+bool isError(const ConsoleMessage& m) { return m.level == "error"; }
+bool isWarning(const ConsoleMessage& m) { return m.level == "warn"; }
+bool isLog(const ConsoleMessage& m) {
+    return m.level == "log" || m.level == "info" || m.level == "debug" || m.level == "trace";
 }
 } // namespace
+
+// The rows of the console, top to bottom: a message's line, then for each of
+// its values the lines of a multi-line text and, when expanded, its children
+void DevToolsPanel::buildConsoleRows(const Page& page) {
+    consoleRows_.clear();
+    if (!page.consoleLog) return;
+    std::function<void(ConsoleMessage&, ValuePreview&, int)> addChildren = [&](ConsoleMessage& m, ValuePreview& v, int depth) {
+        for (const std::string& line : restLines(v.text)) {
+            ConsoleRow r;
+            r.message = &m;
+            r.messageId = m.id;
+            r.depth = depth + 1;
+            r.line = line;
+            r.continuation = true;
+            consoleRows_.push_back(std::move(r));
+        }
+        if (!v.expanded) return;
+        for (ValuePreview& c : v.children) {
+            ConsoleRow r;
+            r.message = &m;
+            r.messageId = m.id;
+            r.node = &c;
+            r.depth = depth + 1;
+            consoleRows_.push_back(std::move(r));
+            addChildren(m, c, depth + 1);
+        }
+    };
+    for (ConsoleMessage& m : *page.consoleLog) {
+        if (m.id == 0) m.id = nextConsoleId_++;
+        if ((isError(m) && !showErrors_) || (isWarning(m) && !showWarnings_) || (isLog(m) && !showLogs_)) continue;
+        ConsoleRow r;
+        r.message = &m;
+        r.messageId = m.id;
+        r.depth = m.depth;
+        consoleRows_.push_back(std::move(r));
+        if (m.values.empty()) {
+            for (const std::string& line : restLines(m.text)) {
+                ConsoleRow c;
+                c.message = &m;
+                c.messageId = m.id;
+                c.depth = m.depth + 1;
+                c.line = line;
+                c.continuation = true;
+                consoleRows_.push_back(std::move(c));
+            }
+        } else {
+            for (ValuePreview& v : m.values) addChildren(m, v, m.depth);
+        }
+    }
+}
 
 void DevToolsPanel::drawConsole(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY) {
     const float inputH = 28, barH = 26;
@@ -827,19 +915,23 @@ void DevToolsPanel::drawConsole(const Painter& p, const Page& page, const Rect& 
     consoleList_ = {area.x, area.y + barH, area.w, area.h - barH - inputH};
     consoleInputBox_ = {area.x, area.y + area.h - inputH, area.w, inputH};
 
+    // console.clear() / clear(): everything before the last one goes
+    if (page.consoleLog) {
+        auto& log = *page.consoleLog;
+        for (size_t i = log.size(); i-- > 0;) {
+            if (log[i].level == "clear") { log.erase(log.begin(), log.begin() + (long)i + 1); break; }
+        }
+    }
+
     // Toolbar: clear, level filters with counts
     p.rect(consoleToolbar_.x, consoleToolbar_.y, consoleToolbar_.w, consoleToolbar_.h, kToolbar, 255);
     p.rect(consoleToolbar_.x, consoleToolbar_.y + barH - 1, consoleToolbar_.w, 1, kBorder, 255);
     int nErr = 0, nWarn = 0, nLog = 0;
-    std::vector<ConsoleLine> lines;
     if (page.consoleLog) {
-        lines.reserve(page.consoleLog->size());
-        for (const auto& e : *page.consoleLog) {
-            ConsoleLine l = parseConsoleLine(e);
-            if (l.level == Level::Error) nErr++;
-            else if (l.level == Level::Warn) nWarn++;
-            else if (l.level == Level::Log) nLog++;
-            lines.push_back(std::move(l));
+        for (const auto& m : *page.consoleLog) {
+            if (isError(m)) nErr++;
+            else if (isWarning(m)) nWarn++;
+            else if (isLog(m)) nLog++;
         }
     }
     clearButton_ = {area.x + 8, area.y + 4, p.textWidth("Clear", kSmallFont) + 16, barH - 8};
@@ -864,15 +956,10 @@ void DevToolsPanel::drawConsole(const Painter& p, const Page& page, const Rect& 
         fx -= lw + 6;
     }
 
-    // Entries
-    std::vector<const ConsoleLine*> shown;
-    for (const auto& l : lines) {
-        if ((l.level == Level::Error && !showErrors_) || (l.level == Level::Warn && !showWarnings_) ||
-            (l.level == Level::Log && !showLogs_)) continue;
-        shown.push_back(&l);
-    }
+    // Rows
+    buildConsoleRows(page);
     const float lineH = 18;
-    consoleMax_ = shown.size() * lineH - consoleList_.h + 4;
+    consoleMax_ = consoleRows_.size() * lineH - consoleList_.h + 4;
     if (page.consoleLog && page.consoleLog->size() != consoleSeen_) {
         consoleSeen_ = page.consoleLog->size();
         if (consoleStick_) consoleScroll_ = consoleMax_;
@@ -881,32 +968,88 @@ void DevToolsPanel::drawConsole(const Painter& p, const Page& page, const Rect& 
     consoleScroll_ = clampScroll(consoleScroll_, consoleMax_);
 
     p.pushClip(consoleList_.x, consoleList_.y, consoleList_.w, consoleList_.h);
-    if (shown.empty()) {
+    if (consoleRows_.empty()) {
         p.text("Page console output and uncaught errors appear here.", area.x + 12, consoleList_.y + 22, kMuted, kFont);
     }
+    const float textX = consoleList_.x + 24;
     float ly = consoleList_.y + 2 - consoleScroll_;
-    for (const ConsoleLine* l : shown) {
-        if (ly + lineH >= consoleList_.y && ly <= consoleList_.y + consoleList_.h) {
-            uint32_t color = kText, bg = 0; bool hasBg = false;
-            switch (l->level) {
-                case Level::Error: color = kErrorText; bg = kErrorBg; hasBg = true; break;
-                case Level::Warn: color = kWarnText; bg = kWarnBg; hasBg = true; break;
-                case Level::Input: color = kInputText; break;
-                case Level::Result: color = kResultText; break;
-                default: break;
-            }
-            if (hasBg) p.rect(consoleList_.x, ly, consoleList_.w, lineH, bg, 255);
+    bool mouseInList = consoleList_.contains(mouseX, mouseY);
+    for (ConsoleRow& row : consoleRows_) {
+        if (ly + lineH < consoleList_.y || ly > consoleList_.y + consoleList_.h) { ly += lineH; continue; }
+        ConsoleMessage& m = *row.message;
+        uint32_t color = kText, bg = 0;
+        bool hasBg = false;
+        if (m.level == "error") { color = kErrorText; bg = kErrorBg; hasBg = true; }
+        else if (m.level == "warn") { color = kWarnText; bg = kWarnBg; hasBg = true; }
+        else if (m.level == "input") color = kInputText;
+        else if (m.level == "result") color = kResultText;
+        else if (m.level == "group") color = kGroupText;
+        else if (m.level == "debug") color = kMuted;
+        if (hasBg) p.rect(consoleList_.x, ly, consoleList_.w, lineH, bg, 255);
+        bool hovered = mouseInList && mouseY >= ly && mouseY < ly + lineH;
+        if (hovered && row.node && !row.node->children.empty()) p.rect(consoleList_.x, ly, consoleList_.w, lineH, kHover, 255);
+        bool messageRow = !row.node && !row.continuation;
+        if (messageRow) {
+            // the "last row" separator; gutter icon by level
             p.rect(consoleList_.x, ly + lineH - 1, consoleList_.w, 1, kBgAlt, 255);
             float gx = consoleList_.x + 10, gy = ly + lineH / 2;
-            if (l->level == Level::Input) p.triangle(gx, gy - 4, gx, gy + 4, gx + 6, gy, kInputText);
-            else if (l->level == Level::Result) p.triangle(gx + 6, gy - 4, gx + 6, gy + 4, gx, gy, kResultText);
-            else if (l->level == Level::Error) p.rect(consoleList_.x, ly, 3, lineH, kErrorText, 255);
-            else if (l->level == Level::Warn) p.rect(consoleList_.x, ly, 3, lineH, kWarnText, 255);
-            p.text(truncate(l->text, 400), consoleList_.x + 24, ly + 13, color, kFont);
+            if (m.level == "input") p.triangle(gx, gy - 4, gx, gy + 4, gx + 6, gy, kInputText);
+            else if (m.level == "result") p.triangle(gx + 6, gy - 4, gx + 6, gy + 4, gx, gy, kResultText);
+            else if (m.level == "error") p.rect(consoleList_.x, ly, 3, lineH, kErrorText, 255);
+            else if (m.level == "warn") p.rect(consoleList_.x, ly, 3, lineH, kWarnText, 255);
+        }
+        float x = textX + row.depth * kIndent;
+        float baseline = ly + 13;
+        auto put = [&](const std::string& raw, uint32_t c) {
+            std::string s = drawable(raw);
+            p.text(s, x, baseline, c, kFont);
+            x += p.textWidth(s, kFont);
+        };
+        auto arrow = [&](bool open) {
+            float ax = x + 2, ay = ly + lineH / 2;
+            if (open) p.triangle(ax - 1, ay - 2, ax + 7, ay - 2, ax + 3, ay + 3, kMuted);
+            else p.triangle(ax, ay - 4, ax, ay + 4, ax + 5, ay, kMuted);
+            x += 12;
+        };
+        if (row.continuation) {
+            put(truncate(row.line, 400), m.level == "error" ? kErrorText : kMuted);
+        } else if (row.node) {
+            ValuePreview& v = *row.node;
+            if (!v.children.empty()) arrow(v.expanded);
+            else x += 12;
+            if (!v.key.empty()) { put(v.key, kKeyText); put(": ", kText); }
+            put(truncate(firstLine(v.text), 400), kindColor(v.kind, color));
+        } else {
+            row.toggles.clear();
+            if (m.values.empty()) {
+                put(truncate(firstLine(m.text), 400), color);
+            } else {
+                for (size_t i = 0; i < m.values.size(); i++) {
+                    ValuePreview& v = m.values[i];
+                    if (!v.children.empty()) {
+                        row.toggles.push_back({i, x, x + 12});
+                        arrow(v.expanded);
+                    }
+                    put(truncate(firstLine(v.text), 400), kindColor(v.kind, color));
+                    x += 8;
+                }
+            }
+            if (!m.source.empty()) {
+                float sw = p.textWidth(m.source, kSmallFont);
+                p.text(m.source, consoleList_.x + consoleList_.w - 12 - sw, baseline, kMuted, kSmallFont);
+            }
         }
         ly += lineH;
     }
     p.popClip();
+
+    // Scrollbar
+    if (consoleMax_ > 0) {
+        float total = consoleRows_.size() * lineH + 4;
+        float thumbH = std::max(20.0f, consoleList_.h * consoleList_.h / total);
+        float thumbY = consoleList_.y + (consoleList_.h - thumbH) * (consoleScroll_ / consoleMax_);
+        p.rect(consoleList_.x + consoleList_.w - 8, thumbY, 6, thumbH, kBorder, 255);
+    }
 
     // Input line
     const Rect& ib = consoleInputBox_;
@@ -929,23 +1072,26 @@ void DevToolsPanel::drawConsole(const Painter& p, const Page& page, const Rect& 
 void DevToolsPanel::evaluateConsoleInput(const Page& page) {
     std::string expr = consoleInputText_;
     if (expr.empty()) return;
-    auto log = [&](const std::string& line) {
+    auto log = [&](ConsoleMessage m) {
         if (!page.consoleLog) return;
-        page.consoleLog->push_back(line);
+        page.consoleLog->push_back(std::move(m));
         if (page.consoleLog->size() > 500) page.consoleLog->erase(page.consoleLog->begin());
     };
     consoleHistory_.push_back(expr);
     historyIndex_ = -1;
     consoleStick_ = true;
-    log("> " + expr);
-    if (expr == "clear()" || expr == "console.clear()") {
-        if (page.consoleLog) page.consoleLog->clear();
-    } else if (!page.script) {
-        log("[error] No script context for this page");
+    ConsoleMessage input;
+    input.level = "input";
+    input.text = expr;
+    log(std::move(input));
+    if (!page.script) {
+        ConsoleMessage err;
+        err.level = "error";
+        err.text = "No script context for this page";
+        log(std::move(err));
     } else {
-        ScriptResult r = page.script->evaluate(expr, "<devtools>");
-        if (r.success) log("< " + (r.value.empty() ? std::string("undefined") : r.value));
-        else log("[error] " + (r.error.empty() ? std::string("Evaluation failed") : r.error));
+        // $0 is the Inspector's selection; the result (or the thrown value) comes back formatted
+        log(page.script->evaluateConsole(expr, selected_));
     }
     consoleInputText_.clear();
 }
@@ -1136,7 +1282,29 @@ bool DevToolsPanel::onMouseDown(float x, float y, const Page& page) {
         case PanelTab::Console:
             if (consoleInputBox_.contains(x, y)) consoleFocused_ = true;
             else if (clearButton_.contains(x, y)) { if (page.consoleLog) page.consoleLog->clear(); }
-            else {
+            else if (consoleList_.contains(x, y)) {
+                // A triangle (or a property row) opens or closes one level of a value.
+                // The page may have logged since the last draw (the log vector moved), so
+                // the rows are rebuilt and the clicked one is matched by its message id.
+                int idx = (int)std::floor((y - (consoleList_.y + 2) + consoleScroll_) / 18.0f);
+                std::vector<ConsoleRow> drawn = std::move(consoleRows_);
+                buildConsoleRows(page);
+                if (idx >= 0 && idx < (int)drawn.size() && idx < (int)consoleRows_.size() &&
+                    drawn[idx].messageId == consoleRows_[idx].messageId) {
+                    const ConsoleRow& row = consoleRows_[idx];
+                    if (row.node) {
+                        if (!row.node->children.empty()) row.node->expanded = !row.node->expanded;
+                    } else if (!row.continuation) {
+                        for (const auto& t : drawn[idx].toggles) {
+                            if (x >= t.x0 - 4 && x <= t.x1 + 4 && t.value < row.message->values.size()) {
+                                ValuePreview& v = row.message->values[t.value];
+                                v.expanded = !v.expanded;
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else {
                 bool* flags[] = {&showErrors_, &showWarnings_, &showLogs_};
                 for (size_t i = 0; i < levelButtons_.size() && i < 3; i++) {
                     if (levelButtons_[i].contains(x, y)) *flags[i] = !*flags[i];

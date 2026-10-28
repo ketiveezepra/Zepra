@@ -252,8 +252,8 @@ struct Tab {
     bool pendingLoad = false;       // True if tab was created but not loaded
     std::string pendingUrl;         // URL to load when tab becomes active
     
-    // Per-tab console log (production: each tab has its own console)
-    std::vector<std::string> consoleLog;
+    // Per-tab console log: entries with their formatted values (DevTools expands them)
+    std::vector<Zepra::WebCore::ConsoleMessage> consoleLog;
     
     // Per-tab DOM/CSS/Layout isolation
     std::unique_ptr<DOMDocument> document;
@@ -274,8 +274,8 @@ struct Tab {
     Tab& operator=(const Tab&) = delete;
     
     // Helper to add console entry for this tab
-    void logConsole(const std::string& msg) {
-        consoleLog.push_back(msg);
+    void logConsole(Zepra::WebCore::ConsoleMessage msg) {
+        consoleLog.push_back(std::move(msg));
         if (consoleLog.size() > 500) consoleLog.erase(consoleLog.begin());
     }
     
@@ -1370,10 +1370,10 @@ void parseWithWebCore(const std::string& html) {
     
     // Route console output to this page's tab (by id: g_tabs reallocates as tabs open)
     int pageTabId = g_activeTabId;
-    g_scriptContext->setConsoleHandler(
-        [pageTabId](const std::string& level, const std::string& msg) {
+    g_scriptContext->setConsoleMessageHandler(
+        [pageTabId](const Zepra::WebCore::ConsoleMessage& msg) {
             for (Tab& t : g_tabs) {
-                if (t.id == pageTabId) { t.logConsole("[" + level + "] " + msg); break; }
+                if (t.id == pageTabId) { t.logConsole(msg); break; }
             }
         });
     

@@ -37,6 +37,7 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 | Date | PR | What changed |
 | :--- | :--- | :--- |
 | 2026-10-29 | #30 | **Network panel sees every request; keep-alive** (open): every request of a tab in the DevTools Network panel (document, stylesheets, scripts, images from the loader threads, fetch/XHR) with type filter chips and a summary of requests, bytes on the wire and total time; a thread-safe `NetworkMonitor`; real `fetch()` (Promise, `Response.text()/json()`, `Headers`) and `XMLHttpRequest` settled from the timer pump; HTTP/1.1 responses read to their announced end (Content-Length, chunked), a shared keep-alive pool, TLS session resumption, stylesheets and scripts requested in parallel: Hacker News `load` 5.5 s → 3.1–3.5 s here, Wikipedia 18 requests in the panel (`docs/devtools/network-timings.md`) |
+| 2026-10-29 | #29 | **Console values**: `console.log(obj)` shows Firefox-style previews (`Object { a: 1, b: (2) […] }`, `Array(3) [ … ]`, `Map(2) { "a" → 1 }`, `<div id="x">`, `function f()`, errors with their stack, getters shown not run) as expandable rows; `console.info/debug/dir/table/trace/assert/count/time/group`; console helpers `$0` (Inspector selection), `$`, `$$`, `$_`, `clear()`; input errors as `name: message` with their stack, syntax errors with `<console>:line:col` |
 | 2026-10-26 | #27 | **Live DOM for scripts** (open): one JS object per node whose properties change the C++ DOM (appendChild, innerHTML, textContent, classList, style, dataset, cloneNode, fragments); DOM events with capture/bubble, `addEventListener`, on* handlers, DOMContentLoaded/load, page clicks (a canceled click does not navigate); `querySelector` matches through the cascade; the Inspector follows script-built content |
 | 2026-10-25 | #26 | **DevTools** (open): docked Inspector (live DOM tree, page highlight, box model, computed styles, picker), Console (levels, eval in the page), Network panel; F12 keeps the page usable |
 | 2026-10-25 | #20 | **Promises and microtasks** (open): per-VM microtask queue drained after scripts, timers and rAF callbacks; spec Promise (thenables, then/catch/finally, all/allSettled/race/any/withResolvers/try, subclassing); async/await; try/catch and closures across await/yield |
@@ -120,4 +121,4 @@ To ship a Stable Beta, run tests in this exact priority:
 - **Goal:** Verify what state survives. (Currently fails due to stubbed storage).
 
 ---
-> *Generated based on the new Neolyx OS engineering philosophy. Status and timeline last updated 2026-10-25.*
+> *Generated based on the new Neolyx OS engineering philosophy. Status and timeline last updated 2026-10-29.*

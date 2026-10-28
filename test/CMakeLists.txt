@@ -202,6 +202,14 @@ if(TARGET webcore)
     endif()
     add_test(NAME WebCoreDomBindingsTests COMMAND webcore_dom_bindings_tests)
 
+    # The DevTools Console: value previews, console methods, console helpers
+    add_executable(webcore_console_format_tests webcore_console_format_tests.cpp)
+    target_link_libraries(webcore_console_format_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(webcore_console_format_tests pthread)
+    endif()
+    add_test(NAME WebCoreConsoleFormatTests COMMAND webcore_console_format_tests)
+
     # SVG rasterizing (nanosvg + rewrite pass) for <img>, inline <svg> and icons
     add_executable(svg_raster_tests svg_raster_tests.cpp)
     target_link_libraries(svg_raster_tests webcore GTest::gtest GTest::gtest_main)
