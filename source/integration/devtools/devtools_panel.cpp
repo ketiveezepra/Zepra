@@ -7,6 +7,7 @@
  *        and Network (the tab's NetworkMonitor).
  */
 #include "devtools_panel.hpp"
+#include "panel_internal.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -25,44 +26,6 @@
 using namespace Zepra::WebCore;
 
 namespace ZepraBrowser::DevTools {
-
-namespace {
-
-// Firefox-dark-theme palette
-constexpr uint32_t kBg          = 0x1C1B22;
-constexpr uint32_t kBgAlt       = 0x202029;
-constexpr uint32_t kToolbar     = 0x2B2A33;
-constexpr uint32_t kBorder      = 0x3A3944;
-constexpr uint32_t kText        = 0xFBFBFE;
-constexpr uint32_t kMuted       = 0x9A9AA6;
-constexpr uint32_t kAccent      = 0x00B3F4;
-constexpr uint32_t kTag         = 0x75BFFF;
-constexpr uint32_t kAttrName    = 0xFF7DE9;
-constexpr uint32_t kAttrValue   = 0x86DE74;
-constexpr uint32_t kComment     = 0x939393;
-constexpr uint32_t kSelection   = 0x204E8A;
-constexpr uint32_t kHover       = 0x2E2E38;
-constexpr uint32_t kErrorBg     = 0x3B2222;
-constexpr uint32_t kErrorText   = 0xFF8A8A;
-constexpr uint32_t kWarnBg      = 0x3A3118;
-constexpr uint32_t kWarnText    = 0xFFD36A;
-constexpr uint32_t kResultText  = 0xB5CEA8;
-constexpr uint32_t kInputText   = 0x9CDCFE;
-constexpr uint32_t kOk          = 0x86DE74;
-
-// Box-model colours (as Chrome/Firefox paint them over the page)
-constexpr uint32_t kMarginColor  = 0xF6B26B;
-constexpr uint32_t kBorderColor  = 0xFFE599;
-constexpr uint32_t kPaddingColor = 0x93C47D;
-constexpr uint32_t kContentColor = 0x6FA8DC;
-
-constexpr float kToolbarH = 30;
-constexpr float kRowH = 18;
-constexpr float kFont = 12;
-constexpr float kSmallFont = 11;
-constexpr float kIndent = 14;
-constexpr float kResizeGrip = 6;
-constexpr float kMinHeight = 120;
 
 std::string lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
@@ -90,6 +53,70 @@ std::string truncate(const std::string& s, size_t max) {
     if (s.size() <= max) return s;
     return s.substr(0, max - 3) + "...";
 }
+
+LayoutBox* findBoxForElement(LayoutBox* box, const DOMElement* element) {
+    if (!box || !element) return nullptr;
+    if (box->domElement == element && !box->anonymous) return box;
+    for (auto& child : box->children) {
+        if (LayoutBox* found = findBoxForElement(&child, element)) return found;
+    }
+    return nullptr;
+}
+
+// Children the tree shows: elements, comments and non-blank text
+std::vector<DOMNode*> shownChildren(const DOMNode* node) {
+    std::vector<DOMNode*> out;
+    for (const auto& child : node->childNodes()) {
+        DOMNode* c = child.get();
+        if (c->nodeType() == NodeType::Text) {
+            if (collapseText(static_cast<DOMText*>(c)->data()).empty()) continue;
+        } else if (c->nodeType() != NodeType::Element && c->nodeType() != NodeType::Comment) {
+            continue;
+        }
+        out.push_back(c);
+    }
+    return out;
+}
+
+// An element drawn on one row: no shown children, or a single text child
+bool isLeafRow(const DOMNode* element) {
+    auto kids = shownChildren(element);
+    return kids.empty() || (kids.size() == 1 && kids[0]->nodeType() == NodeType::Text);
+}
+
+std::string elementSelector(const DOMElement* el) {
+    std::string s = lower(el->tagName());
+    std::string id = el->getAttribute("id");
+    if (!id.empty()) s += "#" + id;
+    for (const auto& cls : el->classList()) s += "." + cls;
+    return s;
+}
+
+std::vector<std::pair<std::string, std::string>> sortedAttributes(const DOMElement* el) {
+    std::vector<std::pair<std::string, std::string>> attrs(el->attributes().begin(), el->attributes().end());
+    std::sort(attrs.begin(), attrs.end(), [](const auto& a, const auto& b) {
+        auto rank = [](const std::string& n) { return n == "id" ? 0 : n == "class" ? 1 : 2; };
+        int ra = rank(a.first), rb = rank(b.first);
+        return ra != rb ? ra < rb : a.first < b.first;
+    });
+    return attrs;
+}
+
+float clampScroll(float v, float max) { return std::max(0.0f, std::min(v, std::max(0.0f, max))); }
+
+// The longest prefix of `s` that fits in `maxW`, with "..." when cut
+std::string fitText(const Painter& p, const std::string& s, float size, float maxW) {
+    if (p.textWidth(s, size) <= maxW) return s;
+    size_t lo = 0, hi = s.size();
+    while (lo < hi) {
+        size_t mid = (lo + hi + 1) / 2;
+        if (p.textWidth(s.substr(0, mid) + "...", size) <= maxW) lo = mid; else hi = mid - 1;
+    }
+    return s.substr(0, lo) + "...";
+}
+
+namespace {
+
 
 std::string fmtPx(float v) {
     char buf[32];
@@ -285,54 +312,6 @@ std::vector<std::pair<std::string, std::string>> computedProperties(const CSSCom
     return out;
 }
 
-LayoutBox* findBoxForElement(LayoutBox* box, const DOMElement* element) {
-    if (!box || !element) return nullptr;
-    if (box->domElement == element && !box->anonymous) return box;
-    for (auto& child : box->children) {
-        if (LayoutBox* found = findBoxForElement(&child, element)) return found;
-    }
-    return nullptr;
-}
-
-// Children the tree shows: elements, comments and non-blank text
-std::vector<DOMNode*> shownChildren(const DOMNode* node) {
-    std::vector<DOMNode*> out;
-    for (const auto& child : node->childNodes()) {
-        DOMNode* c = child.get();
-        if (c->nodeType() == NodeType::Text) {
-            if (collapseText(static_cast<DOMText*>(c)->data()).empty()) continue;
-        } else if (c->nodeType() != NodeType::Element && c->nodeType() != NodeType::Comment) {
-            continue;
-        }
-        out.push_back(c);
-    }
-    return out;
-}
-
-// An element drawn on one row: no shown children, or a single text child
-bool isLeafRow(const DOMNode* element) {
-    auto kids = shownChildren(element);
-    return kids.empty() || (kids.size() == 1 && kids[0]->nodeType() == NodeType::Text);
-}
-
-std::string elementSelector(const DOMElement* el) {
-    std::string s = lower(el->tagName());
-    std::string id = el->getAttribute("id");
-    if (!id.empty()) s += "#" + id;
-    for (const auto& cls : el->classList()) s += "." + cls;
-    return s;
-}
-
-std::vector<std::pair<std::string, std::string>> sortedAttributes(const DOMElement* el) {
-    std::vector<std::pair<std::string, std::string>> attrs(el->attributes().begin(), el->attributes().end());
-    std::sort(attrs.begin(), attrs.end(), [](const auto& a, const auto& b) {
-        auto rank = [](const std::string& n) { return n == "id" ? 0 : n == "class" ? 1 : 2; };
-        int ra = rank(a.first), rb = rank(b.first);
-        return ra != rb ? ra < rb : a.first < b.first;
-    });
-    return attrs;
-}
-
 std::string urlHost(const std::string& url) {
     size_t p = url.find("://");
     if (p == std::string::npos) return "";
@@ -368,19 +347,6 @@ const char* resourceTypeStr(zepra::NetworkResourceType t) {
     }
 }
 
-float clampScroll(float v, float max) { return std::max(0.0f, std::min(v, std::max(0.0f, max))); }
-
-// The longest prefix of `s` that fits in `maxW`, with "..." when cut
-std::string fitText(const Painter& p, const std::string& s, float size, float maxW) {
-    if (p.textWidth(s, size) <= maxW) return s;
-    size_t lo = 0, hi = s.size();
-    while (lo < hi) {
-        size_t mid = (lo + hi + 1) / 2;
-        if (p.textWidth(s.substr(0, mid) + "...", size) <= maxW) lo = mid; else hi = mid - 1;
-    }
-    return s.substr(0, lo) + "...";
-}
-
 // Every layout box of an element in `elements` (one walk of the box tree)
 void collectBoxes(LayoutBox* box, const std::unordered_set<const DOMElement*>& elements,
                   std::vector<LayoutBox*>& out, size_t limit) {
@@ -388,9 +354,6 @@ void collectBoxes(LayoutBox* box, const std::unordered_set<const DOMElement*>& e
     if (box->domElement && !box->anonymous && elements.count(box->domElement)) out.push_back(box);
     for (auto& child : box->children) collectBoxes(&child, elements, out, limit);
 }
-
-constexpr float kRuleLineH = 16;
-constexpr size_t kMaxHighlighted = 2000;
 
 } // namespace
 
