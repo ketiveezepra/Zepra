@@ -228,6 +228,18 @@ if(TARGET webcore)
     endif()
     add_test(NAME DevToolsStyleRulesTests COMMAND devtools_style_rules_tests)
 
+    # The DevTools text field: caret, selection and editing keys over UTF-8 text
+    add_executable(devtools_text_field_tests devtools_text_field_tests.cpp
+                   ${PROJECT_SOURCE_DIR}/source/integration/devtools/text_field.cpp)
+    target_include_directories(devtools_text_field_tests PRIVATE
+                               ${PROJECT_SOURCE_DIR}/source/integration
+                               ${PROJECT_SOURCE_DIR}/source/nxrender-cpp)
+    target_link_libraries(devtools_text_field_tests GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(devtools_text_field_tests pthread)
+    endif()
+    add_test(NAME DevToolsTextFieldTests COMMAND devtools_text_field_tests)
+
     # SVG rasterizing (nanosvg + rewrite pass) for <img>, inline <svg> and icons
     add_executable(svg_raster_tests svg_raster_tests.cpp)
     target_link_libraries(svg_raster_tests webcore GTest::gtest GTest::gtest_main)
