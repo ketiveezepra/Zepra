@@ -202,6 +202,14 @@ if(TARGET webcore)
     endif()
     add_test(NAME WebCoreDomBindingsTests COMMAND webcore_dom_bindings_tests)
 
+    # :hover / :active / :focus forced by DevTools, alongside the real interaction state
+    add_executable(webcore_forced_pseudo_tests webcore_forced_pseudo_tests.cpp)
+    target_link_libraries(webcore_forced_pseudo_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(webcore_forced_pseudo_tests pthread)
+    endif()
+    add_test(NAME WebCoreForcedPseudoTests COMMAND webcore_forced_pseudo_tests)
+
     # The DevTools Console: value previews, console methods, console helpers
     add_executable(webcore_console_format_tests webcore_console_format_tests.cpp)
     target_link_libraries(webcore_console_format_tests webcore GTest::gtest GTest::gtest_main)

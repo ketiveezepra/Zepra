@@ -24,6 +24,56 @@ InteractionState& interactionState() {
     return state;
 }
 
+bool setForcedPseudoClass(DOMElement* element, ForcedPseudo which, bool on) {
+    if (!element) return false;
+    const unsigned bit = static_cast<unsigned>(which);
+    auto& forced = interactionState().forced;
+    auto it = std::find_if(forced.begin(), forced.end(),
+                           [element](const InteractionState::ForcedEntry& e) { return e.element == element; });
+    const unsigned before = it == forced.end() ? 0u : it->states;
+    const unsigned after = on ? (before | bit) : (before & ~bit);
+    if (after == before) return false;
+    if (it == forced.end()) {
+        InteractionState::ForcedEntry entry;
+        entry.element = element;
+        it = forced.insert(forced.end(), entry);
+    }
+    it->states = after;
+    if (after == 0) forced.erase(it);
+    // Styles change without a DOM change: the browser restyles on a new version
+    noteDomMutation();
+    return true;
+}
+
+unsigned forcedPseudoClasses(const DOMElement* element) {
+    if (!element) return 0;
+    for (const auto& e : interactionState().forced) {
+        if (e.element == element) return e.states;
+    }
+    return 0;
+}
+
+bool clearForcedPseudoClasses() {
+    auto& forced = interactionState().forced;
+    if (forced.empty()) return false;
+    forced.clear();
+    noteDomMutation();
+    return true;
+}
+
+// Whether a forced entry's element is in the tree under `root`. Found by
+// walking down from the root, so a destroyed element is never dereferenced;
+// the answer holds until the DOM next changes.
+static bool forcedEntryInTree(const InteractionState::ForcedEntry& entry, const DOMNode* root) {
+    const uint64_t version = domMutationVersion();
+    if (entry.checkedRoot != root || entry.checkedVersion != version) {
+        entry.checkedRoot = root;
+        entry.checkedVersion = version;
+        entry.inTree = root->contains(entry.element);
+    }
+    return entry.inTree;
+}
+
 // ============================================================================
 // MatchedRule comparison (cascade ordering)
 // ============================================================================
@@ -615,6 +665,25 @@ bool CSSCascade::compoundSelectorMatches(DOMElement* element, const std::string&
                     matches = state.focused && isSelfOrAncestorOf(state.focused);
                 } else {
                     matches = state.focused == element;
+                }
+                // DevTools-forced states: :hover, :active and :focus-within
+                // also match the forced element's ancestors, :focus only it
+                if (!matches && !state.forced.empty()) {
+                    const bool selfOnly = pseudoName == "focus" || pseudoName == "focus-visible";
+                    const unsigned bit = static_cast<unsigned>(
+                        pseudoName == "hover" ? ForcedPseudo::Hover :
+                        pseudoName == "active" ? ForcedPseudo::Active : ForcedPseudo::Focus);
+                    const DOMNode* root = element;
+                    while (root->parentNode()) root = root->parentNode();
+                    for (const auto& entry : state.forced) {
+                        if (!(entry.states & bit)) continue;
+                        if (selfOnly ? entry.element != element
+                                     : !forcedEntryInTree(entry, root) || !isSelfOrAncestorOf(entry.element)) {
+                            continue;
+                        }
+                        matches = true;
+                        break;
+                    }
                 }
                 if (!matches) return false;
                 continue;
