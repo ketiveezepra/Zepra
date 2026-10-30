@@ -14,6 +14,7 @@
 #include "css/css_rule.hpp"
 #include "css/css_selector.hpp"
 #include "css/css_computed_style.hpp"
+#include <cstdint>
 #include <memory>
 #include <vector>
 #include <unordered_map>
@@ -23,6 +24,7 @@ namespace Zepra::WebCore {
 // Forward declarations
 class DOMDocument;
 class DOMElement;
+class DOMNode;
 
 /**
  * @brief Style origin (cascade layer)
@@ -39,6 +41,16 @@ enum class StyleOrigin {
 };
 
 /**
+ * @brief Pseudo-classes DevTools can force on an element (like the ":hov"
+ *        panel), as bits of the mask forcedPseudoClasses() returns.
+ */
+enum class ForcedPseudo : unsigned {
+    Hover  = 1u << 0,   // the element and its ancestors match :hover
+    Active = 1u << 1,   // the element and its ancestors match :active
+    Focus  = 1u << 2,   // the element matches :focus / :focus-visible, it and its ancestors :focus-within
+};
+
+/**
  * @brief Live user-interaction state consulted when matching :hover, :active,
  *        :focus and :focus-within. The browser updates it and restyles.
  */
@@ -46,10 +58,35 @@ struct InteractionState {
     DOMElement* hovered = nullptr;   // deepest element under the pointer
     DOMElement* active = nullptr;    // element under a pressed primary button
     DOMElement* focused = nullptr;   // element with keyboard focus
+
+    /// States DevTools forces on an element, matched in addition to the real
+    /// ones above. `element` is only compared by address until the matcher
+    /// has found it in the tree it is matching (by walking down from the
+    /// root), so an entry whose element was destroyed matches nothing.
+    struct ForcedEntry {
+        DOMElement* element = nullptr;
+        unsigned states = 0;                   // ForcedPseudo bits
+        // Last check that `element` is in the tree under `checkedRoot`, valid
+        // while domMutationVersion() is still `checkedVersion`
+        mutable const DOMNode* checkedRoot = nullptr;
+        mutable uint64_t checkedVersion = 0;
+        mutable bool inTree = false;
+    };
+    std::vector<ForcedEntry> forced;   // cleared with the rest by `interactionState() = {}`
 };
 
 /// Interaction state of the current document (single document per process)
 InteractionState& interactionState();
+
+/// Forces (on = true) or stops forcing one pseudo-class on an element. When
+/// that changes anything it bumps domMutationVersion(), so the browser
+/// restyles and lays out again on its next frame; returns whether it changed.
+bool setForcedPseudoClass(DOMElement* element, ForcedPseudo which, bool on);
+/// ForcedPseudo bits forced on exactly this element (0 when none)
+unsigned forcedPseudoClasses(const DOMElement* element);
+/// Stops forcing every pseudo-class on every element; bumps domMutationVersion()
+/// and returns true when something was forced
+bool clearForcedPseudoClasses();
 
 /**
  * @brief Matched rule with cascade info
