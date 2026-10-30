@@ -5163,7 +5163,9 @@ void handleNXEvent(const NXRender::Event& event) {
                  }
              } else if (event.mouse.button == NXRender::MouseButton::Right) {
                  auto& ctxMenu = g_mouseHandler.getContextMenu();
-                 if (ctxMenu.visible) {
+                 if (g_devTools.onRightMouseDown(x, y, devToolsPage())) {
+                     // The Inspector tree's own context menu
+                 } else if (ctxMenu.visible) {
                      ctxMenu.hide();
                  } else {
                      g_mouseHandler.handleRightClick(x, y);

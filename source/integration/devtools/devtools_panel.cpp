@@ -369,6 +369,9 @@ void DevToolsPanel::hide() {
     pickHover_ = nullptr;
     consoleFocused_ = false;
     resizing_ = false;
+    treeFocused_ = false;
+    menuOpen_ = false;
+    if (field_.kind != FieldKind::Search) closeField(); else field_.kind = FieldKind::None;
 }
 
 void DevToolsPanel::toggle() {
@@ -417,6 +420,12 @@ void DevToolsPanel::syncWithDocument(const Page& page) {
         highlighted_.clear();
         rulesElement_ = nullptr;
         rulesDirty_ = true;
+        closeField();
+        menuOpen_ = false;
+        menuNode_ = nullptr;
+        searchQuery_.clear();
+        searchMatches_.clear();
+        searchIndex_ = -1;
         if (document_) {
             if (DOMElement* html = document_->documentElement()) expanded_.insert(html);
             if (DOMElement* body = document_->body()) expanded_.insert(body);
@@ -428,6 +437,8 @@ void DevToolsPanel::syncWithDocument(const Page& page) {
         if (selected_ && (!document_ || !document_->contains(selected_))) selected_ = nullptr;
         if (hoveredRow_ && (!document_ || !document_->contains(hoveredRow_))) hoveredRow_ = nullptr;
         if (pickHover_ && (!document_ || !document_->contains(pickHover_))) pickHover_ = nullptr;
+        if (field_.node && (!document_ || !document_->contains(field_.node))) closeField();
+        if (menuNode_ && (!document_ || !document_->contains(menuNode_))) { menuNode_ = nullptr; menuOpen_ = false; }
         // An edit is dropped when its element left the page or a script rewrote its style attribute
         styleEdits_.erase(std::remove_if(styleEdits_.begin(), styleEdits_.end(), [&](const auto& e) {
             return !document_ || !document_->contains(e.first) || e.first->getAttribute("style") != e.second.writtenStyle;
@@ -484,6 +495,7 @@ void DevToolsPanel::draw(const Painter& p, const Page& page, float x, float y, f
         case PanelTab::Console: drawConsole(p, page, content, mouseX, mouseY); break;
         case PanelTab::Network: drawNetwork(p, page, content, mouseX, mouseY); break;
     }
+    if (tab_ == PanelTab::Inspector) drawMenu(p, mouseX, mouseY);
     p.popClip();
 }
 
@@ -554,13 +566,15 @@ void DevToolsPanel::drawInspector(const Painter& p, const Page& page, const Rect
     // DOM tree | Rules | Layout and Computed, as Firefox's three-pane Inspector
     float treeW = std::floor(area.w * 0.42f);
     float rulesW = std::floor(area.w * 0.31f);
-    tree_ = {area.x, area.y, treeW, area.h};
+    Rect search{area.x, area.y, treeW, 26};
+    tree_ = {area.x, area.y + search.h, treeW, area.h - search.h};
     rules_ = {area.x + treeW, area.y, rulesW, area.h};
     styles_ = {area.x + treeW + rulesW, area.y, area.w - treeW - rulesW, area.h};
     if (!page.document) {
         p.text("No document", area.x + 12, area.y + 24, kMuted, kFont);
         return;
     }
+    drawSearchBar(p, page, search, mouseX, mouseY);
     drawTree(p, page, tree_, mouseX, mouseY);
     p.rect(rules_.x, rules_.y, 1, rules_.h, kBorder, 255);
     drawRules(p, page, rules_, mouseX, mouseY);
@@ -586,6 +600,8 @@ void DevToolsPanel::drawTree(const Painter& p, const Page& page, const Rect& are
 
     p.pushClip(area.x, area.y, area.w, area.h);
     hoveredRow_ = nullptr;
+    treeHits_.clear();
+    float htmlFieldY = -1, htmlFieldX = 0;
     bool mouseInTree = area.contains(mouseX, mouseY);
     float baseY = area.y + 2 - treeScroll_;
     for (size_t i = 0; i < rows_.size(); i++) {
@@ -604,9 +620,23 @@ void DevToolsPanel::drawTree(const Painter& p, const Page& page, const Rect& are
             p.text(s, x, baseline, c, kFont);
             x += p.textWidth(s, kFont);
         };
+        // An open edit field takes the place of what it edits
+        auto fieldHere = [&](FieldKind kind, DOMNode* node, const std::string& attribute, float minW) {
+            if (field_.kind != kind || field_.node != node || field_.attribute != attribute) return false;
+            float w = std::max(minW, std::min(360.0f, area.x + area.w - x - 12));
+            drawField(p, x - 2, ry, w, kRowH);
+            x += w + 4;
+            return true;
+        };
+        auto textOf = [&](DOMNode* textNode, size_t max) {
+            float x0 = x;
+            if (!fieldHere(FieldKind::Text, textNode, "", 200))
+                put(truncate(collapseText(static_cast<DOMText*>(textNode)->data()), max), kText);
+            treeHits_.push_back({{x0, ry, x - x0, kRowH}, textNode, ""});
+        };
 
         if (row.node->nodeType() == NodeType::Text) {
-            put(truncate(collapseText(static_cast<DOMText*>(row.node)->data()), 120), kText);
+            textOf(row.node, 120);
             continue;
         }
         if (row.node->nodeType() == NodeType::Comment) {
@@ -627,23 +657,38 @@ void DevToolsPanel::drawTree(const Painter& p, const Page& page, const Rect& are
             else p.triangle(ax, ay - 4, ax, ay + 4, ax + 5, ay, kMuted);
         }
         x += 12;
+        if (field_.kind == FieldKind::Html && field_.node == el) { htmlFieldY = ry + kRowH; htmlFieldX = x; }
         put("<" + tag, kTag);
+        if (field_.kind == FieldKind::NewAttribute && field_.node == el) {
+            x += 6;
+            fieldHere(FieldKind::NewAttribute, el, "", 160);
+        }
         for (const auto& [name, value] : sortedAttributes(el)) {
-            put(" " + name, kAttrName);
-            put("=\"", kTag);
-            put(truncate(value, 60), kAttrValue);
-            put("\"", kTag);
+            float x0 = x;
+            x += p.textWidth(" ", kFont);
+            if (!fieldHere(FieldKind::Attribute, el, name, 160)) {
+                x = x0;
+                put(" " + name, kAttrName);
+                put("=\"", kTag);
+                put(truncate(value, 60), kAttrValue);
+                put("\"", kTag);
+            }
+            treeHits_.push_back({{x0, ry, x - x0, kRowH}, el, name});
         }
         put(">", kTag);
         if (leaf) {
             auto kids = shownChildren(el);
-            if (!kids.empty())
-                put(truncate(collapseText(static_cast<DOMText*>(kids[0])->data()), 80), kText);
+            if (!kids.empty()) textOf(kids[0], 80);
             put("</" + tag + ">", kTag);
         } else if (!expanded_.count(el)) {
             put("...", kMuted);
             put("</" + tag + ">", kTag);
         }
+    }
+    // Edit as HTML: a box under the element's row, as tall as its text (up to 12 lines)
+    if (htmlFieldY >= 0) {
+        float lines = (float)std::min<size_t>(12, std::max<size_t>(3, field_.text.lines().size()));
+        drawField(p, htmlFieldX, htmlFieldY, area.x + area.w - htmlFieldX - 14, lines * kRowH + 6);
     }
     p.popClip();
 
@@ -883,17 +928,28 @@ void DevToolsPanel::drawRules(const Painter& p, const Page& page, const Rect& ar
     float x0 = area.x + 12;
     p.rect(area.x + 1, area.y, area.w - 1, 24, kToolbar, 255);
     p.text("Rules", x0, area.y + 16, kText, kFont);
+    // ":hov" opens the forced :hover / :active / :focus checkboxes
+    float hovW = p.textWidth(":hov", kSmallFont) + 12;
+    hovButton_ = {area.x + area.w - hovW - 8, area.y + 4, hovW, 16};
+    if (pseudoBarOpen_ || hovButton_.contains(mouseX, mouseY))
+        p.rect(hovButton_.x, hovButton_.y, hovButton_.w, hovButton_.h, pseudoBarOpen_ ? kSelection : kHover, 255);
+    p.text(":hov", hovButton_.x + 6, area.y + 16, kText, kSmallFont);
+    float headerH = 24;
+    if (pseudoBarOpen_) {
+        drawPseudoBar(p, page, {area.x + 1, area.y + 24, area.w - 1, 22}, mouseX, mouseY);
+        headerH += 22;
+    }
     DOMElement* el = elementForStyles();
     if (!el) {
-        p.text("Select an element to see its rules.", x0, area.y + 44, kMuted, kFont);
+        p.text("Select an element to see its rules.", x0, area.y + headerH + 20, kMuted, kFont);
         return;
     }
     if (!page.css) {
-        p.text("No stylesheets", x0, area.y + 44, kMuted, kFont);
+        p.text("No stylesheets", x0, area.y + headerH + 20, kMuted, kFont);
         return;
     }
     const ElementRules& rules = rulesFor(page, el);
-    Rect body{area.x + 1, area.y + 24, area.w - 1, area.h - 24};
+    Rect body{area.x + 1, area.y + headerH, area.w - 1, area.h - headerH};
     bool mouseIn = body.contains(mouseX, mouseY);
     float y = body.y + 6 - rulesScroll_;
     p.pushClip(body.x, body.y, body.w, body.h);
@@ -922,6 +978,7 @@ void DevToolsPanel::drawRules(const Painter& p, const Page& page, const Rect& ar
         // Declarations: struck through when they lose the cascade or are switched off
         for (size_t i = 0; i < block.declarations.size(); i++) {
             const RuleDeclaration& d = block.declarations[i];
+            float nameX0 = 0, nameX1 = 0;
             Rect row{body.x, y, body.w, kRuleLineH};
             bool hovered = mouseIn && row.contains(mouseX, mouseY);
             if (y + kRuleLineH >= body.y && y <= body.y + body.h) {
@@ -943,19 +1000,46 @@ void DevToolsPanel::drawRules(const Painter& p, const Page& page, const Rect& ar
                     p.text(t, x, y + 12, struck ? kMuted : c, kSmallFont);
                     x += p.textWidth(t, kSmallFont);
                 };
+                auto editing = [&](FieldKind kind) {
+                    return field_.kind == kind && field_.rule.group == group && field_.rule.block == blockIndex &&
+                           field_.rule.declaration == (int)i;
+                };
                 float startX = x;
-                put(d.property, kAttrName);
+                nameX0 = x;
+                if (editing(FieldKind::RuleName)) {
+                    drawField(p, x - 2, y, std::max(120.0f, p.textWidth(d.property, kSmallFont) + 30), kRuleLineH);
+                    x = field_.box.x + field_.box.w + 2;
+                    struck = false;
+                } else {
+                    put(d.property, d.edited || d.added ? kAccent : kAttrName);
+                }
+                nameX1 = x;
                 put(": ", kMuted);
-                std::string value = d.value + (d.important ? " !important" : "");
-                float room = area.x + area.w - 12 - x - p.textWidth(";", kSmallFont);
-                put(fitText(p, value, kSmallFont, std::max(20.0f, room)), kText);
-                put(";", kMuted);
+                if (editing(FieldKind::RuleValue)) {
+                    drawField(p, x - 2, y, std::max(140.0f, area.x + area.w - 16 - x), kRuleLineH);
+                    x = field_.box.x + field_.box.w;
+                    struck = false;
+                } else {
+                    std::string value = d.value + (d.important ? " !important" : "");
+                    float room = area.x + area.w - 12 - x - p.textWidth(";", kSmallFont);
+                    put(fitText(p, value, kSmallFont, std::max(20.0f, room)), kText);
+                    put(";", kMuted);
+                }
                 if (struck) p.rect(startX, y + 8, x - startX, 1, d.disabled ? kMuted : kText, 255);
             }
-            ruleHits_.push_back({row, group, blockIndex, (int)i});
+            RuleHit hit{row, group, blockIndex, (int)i};
+            hit.nameX0 = nameX0;
+            hit.nameX1 = nameX1;
+            ruleHits_.push_back(hit);
+            y += kRuleLineH;
+        }
+        // A new declaration is typed on a line of its own above the "}" ("name: value")
+        if (field_.kind == FieldKind::RuleNew && field_.rule.group == group && field_.rule.block == blockIndex) {
+            drawField(p, x0 + 18, y, std::max(160.0f, area.w - 50), kRuleLineH);
             y += kRuleLineH;
         }
         if (visible) p.text("}", x0, y + 12, kMuted, kFont);
+        ruleHits_.push_back({{body.x, y, body.w, kRuleLineH}, group, blockIndex, -2});
         y += kRuleLineH + 6;
     };
 
@@ -985,16 +1069,29 @@ void DevToolsPanel::drawRules(const Painter& p, const Page& page, const Rect& ar
     }
 }
 
+// A selector highlights what it matches; on a declaration the checkbox switches it
+// off or on, the name or the value opens a field; the "}" line adds a declaration
 void DevToolsPanel::onRulesClick(const Page& page, float x, float y) {
+    if (hovButton_.contains(x, y)) { pseudoBarOpen_ = !pseudoBarOpen_; return; }
+    if (pseudoBarOpen_ && y < rules_.y + 46) { onPseudoBarClick(x, y, page); return; }
+    if (field_.kind != FieldKind::None && field_.box.contains(x, y)) return;
+    if (field_.kind != FieldKind::None && field_.kind != FieldKind::Search) commitField(page);
     DOMElement* el = elementForStyles();
-    if (!el || !page.css || y < rules_.y + 24) return;   // the header, or rows scrolled under it
+    float headerH = pseudoBarOpen_ ? 46 : 24;
+    if (!el || !page.css || y < rules_.y + headerH) return;   // the header, or rows scrolled under it
     for (const RuleHit& hit : ruleHits_) {
         if (!hit.r.contains(x, y)) continue;
-        if (hit.declaration < 0) {
+        if (hit.declaration == -1) {
             const ElementRules& rules = rulesFor(page, el);
             if (const RuleBlock* block = rules.block({hit.group, hit.block, 0})) highlightRule(page, *block);
-        } else {
+        } else if (hit.declaration == -2) {
+            beginRuleEdit(page, hit, FieldKind::RuleNew);
+        } else if (x < hit.nameX0 - 2) {
             toggleDeclaration(page, hit);
+        } else if (x < hit.nameX1) {
+            beginRuleEdit(page, hit, FieldKind::RuleName);
+        } else {
+            beginRuleEdit(page, hit, FieldKind::RuleValue);
         }
         return;
     }
@@ -1041,28 +1138,11 @@ void DevToolsPanel::toggleDeclaration(const Page& page, const RuleHit& hit) {
     DOMElement* owner = block->element;
     DisabledDeclaration key{block->kind == RuleKind::Style ? block->rule : nullptr, decl->property};
 
-    auto it = std::find_if(styleEdits_.begin(), styleEdits_.end(), [&](const auto& e) { return e.first == owner; });
-    if (it == styleEdits_.end()) {
-        StyleEdit edit;
-        edit.hadStyle = owner->hasAttribute("style");
-        edit.originalStyle = owner->getAttribute("style");
-        styleEdits_.push_back({owner, std::move(edit)});
-        it = styleEdits_.end() - 1;
-    }
-    StyleEdit& edit = it->second;
+    StyleEdit& edit = styleEditOf(owner);
     auto found = std::find(edit.disabled.begin(), edit.disabled.end(), key);
     if (found != edit.disabled.end()) edit.disabled.erase(found);
     else edit.disabled.push_back(key);
-
-    if (edit.disabled.empty()) {
-        // Everything is back on: the original attribute, exactly
-        if (edit.hadStyle) owner->setAttribute("style", edit.originalStyle);
-        else owner->removeAttribute("style");
-        styleEdits_.erase(it);
-    } else {
-        edit.writtenStyle = styleAttributeFor(*page.css, owner, edit);
-        owner->setAttribute("style", edit.writtenStyle);
-    }
+    applyStyleEdit(page, owner);
     // The attribute change bumps domMutationVersion(): the browser restyles and lays out again
     rulesDirty_ = true;
 }
@@ -1516,8 +1596,19 @@ void DevToolsPanel::drawNetwork(const Painter& p, const Page& page, const Rect& 
 // ============================================================================
 
 bool DevToolsPanel::onMouseDown(float x, float y, const Page& page) {
-    if (!visible_ || !panel_.contains(x, y)) return false;
+    if (!visible_ || !panel_.contains(x, y)) {
+        menuOpen_ = false;
+        return false;
+    }
     consoleFocused_ = false;
+    if (menuOpen_) {
+        menuOpen_ = false;
+        for (size_t i = 0; i < menuItemRects_.size() && i < menuItems_.size(); i++) {
+            if (!menuItems_[i].separator && menuItemRects_[i].contains(x, y)) runMenuAction(menuItems_[i].action, page);
+        }
+        return true;
+    }
+    if (field_.kind == FieldKind::Search && !searchBox_.contains(x, y)) field_.kind = FieldKind::None;
     if (y < panel_.y + kResizeGrip) {
         resizing_ = true;
         resizeGrabOffset_ = y - panel_.y;
@@ -1530,20 +1621,15 @@ bool DevToolsPanel::onMouseDown(float x, float y, const Page& page) {
     }
     switch (tab_) {
         case PanelTab::Inspector:
-            if (tree_.contains(x, y)) {
-                int idx = (int)std::floor((y - (tree_.y + 2) + treeScroll_) / kRowH);
-                if (idx >= 0 && idx < (int)rows_.size()) {
-                    const Row& row = rows_[idx];
-                    float arrowEnd = tree_.x + 8 + row.depth * kIndent + 12;
-                    bool element = row.node->nodeType() == NodeType::Element;
-                    if (element && !row.closing && x < arrowEnd && !isLeafRow(row.node)) {
-                        if (expanded_.count(row.node)) expanded_.erase(row.node);
-                        else expanded_.insert(row.node);
-                    } else {
-                        selected_ = row.node;
-                    }
+            if (searchBox_.contains(x, y)) {
+                if (field_.kind != FieldKind::Search) {
+                    if (field_.kind != FieldKind::None) commitField(page);
+                    openField(FieldKind::Search, searchQuery_, false);
                 }
+            } else if (tree_.contains(x, y)) {
+                onTreeClick(x, y, page);
             } else if (rules_.contains(x, y)) {
+                treeFocused_ = false;
                 onRulesClick(page, x, y);
             }
             break;
@@ -1626,9 +1712,18 @@ bool DevToolsPanel::onMouseWheel(float x, float y, float delta) {
     return true;
 }
 
-bool DevToolsPanel::onKey(NXRender::KeyCode key, const std::string& text, bool ctrl, bool, const Page& page) {
+bool DevToolsPanel::onKey(NXRender::KeyCode key, const std::string& text, bool ctrl, bool shift, const Page& page) {
     using NXRender::KeyCode;
-    if (!visible_ || !consoleFocused_ || tab_ != PanelTab::Console) return false;
+    if (!visible_) return false;
+    if (field_.kind != FieldKind::None && tab_ == PanelTab::Inspector) {
+        if (key == KeyCode::F12) return false;
+        return onFieldKey(key, text, ctrl, shift, page);
+    }
+    if (treeFocused_ && tab_ == PanelTab::Inspector) {
+        if (key == KeyCode::F12) return false;
+        return onTreeKey(key, ctrl, shift, page);
+    }
+    if (!consoleFocused_ || tab_ != PanelTab::Console) return false;
     if (ctrl || key == KeyCode::F12) return false;   // browser shortcuts (Ctrl+V pastes through insertConsoleText)
     std::string& input = consoleInputText_;
     switch (key) {

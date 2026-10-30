@@ -22,6 +22,7 @@
 #include "input/events.h"
 #include "scripting/console_format.hpp"
 #include "style_rules.hpp"
+#include "text_field.hpp"
 
 namespace Zepra::WebCore {
 class DOMDocument;
@@ -97,11 +98,16 @@ public:
     bool onMouseDown(float x, float y, const Page& page);
     void onMouseUp(float x, float y);
     bool onMouseWheel(float x, float y, float delta);
+    /// Right button: the Inspector tree's context menu. True when the press was inside the panel.
+    bool onRightMouseDown(float x, float y, const Page& page);
     /// Keys while the console input has focus. False when the key is not for the panel.
     bool onKey(NXRender::KeyCode key, const std::string& text, bool ctrl, bool shift, const Page& page);
-    bool consoleFocused() const { return consoleFocused_; }
-    void blurConsole() { consoleFocused_ = false; }
-    void insertConsoleText(const std::string& text) { consoleInputText_ += text; }
+    /// Whether typed text goes to the panel: the console input or an Inspector edit field
+    bool consoleFocused() const { return consoleFocused_ || field_.kind != FieldKind::None; }
+    /// The page was clicked: the panel lets go of the keyboard
+    void blurConsole();
+    /// Pasted text, for the console input or the open edit field
+    void insertConsoleText(const std::string& text);
 
 private:
     struct Row {
@@ -128,7 +134,8 @@ private:
         Rect r;
         int group = -1;          ///< -1: the element's own rules, otherwise ElementRules::inherited[group]
         int block = -1;
-        int declaration = -1;
+        int declaration = -1;    ///< -2: the block's closing line (click: add a declaration)
+        float nameX0 = 0, nameX1 = 0;   ///< where the property name was drawn (value: after nameX1)
     };
     /// A row of the Computed pane as last drawn
     struct ComputedHit {
@@ -197,6 +204,67 @@ private:
     int networkSelected_ = -1;          // index into the rows shown (after the type filter)
     int networkFilter_ = 0;             // index into kNetworkFilters (0 = all)
     std::vector<Rect> networkFilterButtons_;
+
+    // Inspector editing (inspector_edit.cpp): one edit field at a time, tree keys,
+    // the tree's context menu, markup search, forced pseudo-classes
+    enum class FieldKind { None, Search, Attribute, NewAttribute, Text, Html, RuleName, RuleValue, RuleNew };
+    struct EditField {
+        FieldKind kind = FieldKind::None;
+        TextField text;
+        Zepra::WebCore::DOMNode* node = nullptr;   ///< the node edited (tree fields)
+        std::string attribute;                     ///< the attribute edited (Attribute)
+        RuleHit rule;                              ///< the declaration or block edited (Rule*)
+        Rect box;                                  ///< where it was last drawn
+    };
+    /// An attribute (or a text row) of the tree as last drawn: double-click edits it
+    struct TreeHit {
+        Rect r;
+        Zepra::WebCore::DOMNode* node = nullptr;
+        std::string attribute;                     ///< empty: the node's text
+    };
+    struct MenuItem { std::string label; int action; bool checked; bool separator; };
+    EditField field_;
+    bool treeFocused_ = false;
+    std::vector<TreeHit> treeHits_;
+    bool menuOpen_ = false;
+    float menuX_ = 0, menuY_ = 0;
+    Zepra::WebCore::DOMNode* menuNode_ = nullptr;
+    std::vector<MenuItem> menuItems_;
+    std::vector<Rect> menuItemRects_;
+    Rect menuRect_;
+    Rect searchBox_;
+    std::string searchQuery_;
+    std::vector<Zepra::WebCore::DOMNode*> searchMatches_;
+    int searchIndex_ = -1;
+    uint64_t searchDomVersion_ = 0;
+    Rect hovButton_;
+    bool pseudoBarOpen_ = false;
+    std::vector<Rect> pseudoBoxes_;
+    double lastClickTime_ = 0;
+    float lastClickX_ = -1000, lastClickY_ = -1000;
+
+    bool isDoubleClick(float x, float y);
+    void openField(FieldKind kind, std::string text, bool multiline);
+    void closeField();
+    void commitField(const Page& page);
+    bool onFieldKey(NXRender::KeyCode key, const std::string& text, bool ctrl, bool shift, const Page& page);
+    void drawField(const Painter& p, float x, float y, float w, float h);
+    bool onTreeKey(NXRender::KeyCode key, bool ctrl, bool shift, const Page& page);
+    bool onTreeClick(float x, float y, const Page& page);
+    void drawSearchBar(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
+    void runSearch(const Page& page, int step);
+    void openMenu(Zepra::WebCore::DOMNode* node, float x, float y, const Page& page);
+    void drawMenu(const Painter& p, float mouseX, float mouseY);
+    void runMenuAction(int action, const Page& page);
+    void drawPseudoBar(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
+    bool onPseudoBarClick(float x, float y, const Page& page);
+    void beginRuleEdit(const Page& page, const RuleHit& hit, FieldKind kind);
+    void commitRuleField(const Page& page, FieldKind kind, const RuleHit& hit, const std::string& text);
+    /// The element's StyleEdit, created from its current style attribute when it has none
+    StyleEdit& styleEditOf(Zepra::WebCore::DOMElement* owner);
+    /// Writes the element's StyleEdit into its style attribute (the original one when nothing is left)
+    void applyStyleEdit(const Page& page, Zepra::WebCore::DOMElement* owner);
+    void forgetNode(Zepra::WebCore::DOMNode* node);
 
     void syncWithDocument(const Page& page);
     void rebuildRows(const Page& page);
