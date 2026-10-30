@@ -2,11 +2,13 @@
 // Licensed under KPL-2.0. See LICENSE file for details.
 /**
  * @file style_rules.cpp
- * @brief The Rules pane's model: matched rules, cascade winners, inherited rules.
+ * @brief The Rules pane's model: matched rules, cascade winners, inherited
+ *        rules, and the per-element edits of their declarations.
  */
 #include "style_rules.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <tuple>
 #include <unordered_set>
 
@@ -128,6 +130,149 @@ private:
     std::unordered_map<const CSSStyleRule*, std::string> labels_;
 };
 
+/// The declarations of a parsed block, each at its place in the block
+std::vector<EditedDeclaration> declarationsOf(const CSSStyleDeclaration* decl) {
+    std::vector<EditedDeclaration> out;
+    for (size_t i = 0; decl && i < decl->length(); i++) {
+        EditedDeclaration d;
+        d.property = decl->item(i);
+        d.value = decl->getPropertyValue(d.property);
+        d.important = !decl->getPropertyPriority(d.property).empty();
+        d.position = i;
+        if (!d.value.empty()) out.push_back(std::move(d));
+    }
+    return out;
+}
+
+/// A block's declarations as the page has them: the rule's, or the style attribute's
+std::vector<EditedDeclaration> pageDeclarations(const std::string& styleAttribute, const CSSStyleRule* rule) {
+    if (rule) return declarationsOf(rule->style());
+    CSSParser parser;
+    auto decl = parser.parseInlineStyle(styleAttribute);
+    return declarationsOf(decl.get());
+}
+
+bool sameDeclaration(const EditedDeclaration& a, const EditedDeclaration& b) {
+    return a.property == b.property && a.value == b.value && a.important == b.important &&
+           a.position == b.position && a.added == b.added;
+}
+
+/// Whether the page has this declaration, unchanged, at its place
+bool onPage(const EditedDeclaration& d, const std::vector<EditedDeclaration>& page) {
+    if (d.added) return false;
+    return std::any_of(page.begin(), page.end(), [&](const EditedDeclaration& p) { return sameDeclaration(p, d); });
+}
+
+const BlockEdit* blockEditOf(const StyleEdit* edit, const CSSStyleRule* rule) {
+    if (!edit) return nullptr;
+    for (const auto& b : edit->blocks) {
+        if (b.rule == rule) return &b;
+    }
+    return nullptr;
+}
+
+/// A CSS property name: an identifier, or a custom property (--name)
+bool isPropertyName(const std::string& s) {
+    auto nameChar = [](char c) { return std::isalnum((unsigned char)c) || c == '-' || c == '_'; };
+    size_t i = 0;
+    if (s.size() > 2 && s[0] == '-' && s[1] == '-') {
+        i = 2;
+    } else {
+        if (i < s.size() && s[i] == '-') i++;
+        if (i >= s.size() || !(std::isalpha((unsigned char)s[i]) || s[i] == '_')) return false;
+    }
+    for (; i < s.size(); i++) {
+        if (!nameChar(s[i])) return false;
+    }
+    return true;
+}
+
+/// Whether the engine reads the value back as it is when written into a style
+/// attribute: it ends a value at a `;` or `}` outside parentheses, and takes
+/// "!important" from anywhere in it
+bool isWritableValue(const std::string& v) {
+    int depth = 0;
+    for (char c : v) {
+        if (c == '(') depth++;
+        else if (c == ')' && --depth < 0) return false;
+        else if ((c == ';' || c == '}') && depth == 0) return false;
+    }
+    return depth == 0 && !v.empty() && v.find("!important") == std::string::npos;
+}
+
+/// The longhands a declaration sets: none when it cannot apply (an invalid name, or a value the engine would misread)
+std::vector<std::string> appliedLonghands(const std::string& property, const std::string& value) {
+    if (!isPropertyName(property) || !isWritableValue(value)) return {};
+    return longhandsOf(property);
+}
+
+std::string trimmed(const std::string& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace((unsigned char)s[b])) b++;
+    while (e > b && std::isspace((unsigned char)s[e - 1])) e--;
+    return s.substr(b, e - b);
+}
+
+/// A property name as typed: trimmed and lowercase (a custom property keeps its case)
+std::string typedProperty(const std::string& typed) {
+    std::string name = trimmed(typed);
+    if (name.rfind("--", 0) != 0) {
+        for (char& c : name) c = (char)std::tolower((unsigned char)c);
+    }
+    return name;
+}
+
+/// A value as typed: trailing `;` dropped, and a trailing "!important" (any case,
+/// "! important" too) taken off into the importance
+EditedDeclaration typedValue(const std::string& typed) {
+    std::string v = trimmed(typed);
+    while (!v.empty() && (v.back() == ';' || std::isspace((unsigned char)v.back()))) v.pop_back();
+    EditedDeclaration d;
+    size_t bang = v.rfind('!');
+    if (bang != std::string::npos) {
+        std::string tail = trimmed(v.substr(bang + 1));
+        for (char& c : tail) c = (char)std::tolower((unsigned char)c);
+        if (tail == "important") {
+            d.important = true;
+            v = trimmed(v.substr(0, bang));
+        }
+    }
+    d.value = v;
+    return d;
+}
+
+/// The block's edit, started from the page's declarations when there is none yet
+BlockEdit& blockEditFor(StyleEdit& edit, const CSSStyleRule* rule) {
+    for (auto& b : edit.blocks) {
+        if (b.rule == rule) return b;
+    }
+    edit.blocks.push_back({rule, pageDeclarations(edit.originalStyle, rule)});
+    return edit.blocks.back();
+}
+
+/// Drops the block's edit when its declarations are the page's again
+void settle(StyleEdit& edit, const CSSStyleRule* rule) {
+    auto it = std::find_if(edit.blocks.begin(), edit.blocks.end(), [&](const BlockEdit& b) { return b.rule == rule; });
+    if (it == edit.blocks.end()) return;
+    auto page = pageDeclarations(edit.originalStyle, rule);
+    if (page.size() == it->declarations.size() &&
+        std::equal(page.begin(), page.end(), it->declarations.begin(), sameDeclaration)) {
+        edit.blocks.erase(it);
+    }
+}
+
+int indexOf(const BlockEdit& block, const std::string& property) {
+    for (size_t i = 0; i < block.declarations.size(); i++) {
+        if (block.declarations[i].property == property) return (int)i;
+    }
+    return -1;
+}
+
+void forgetDisabled(StyleEdit& edit, const CSSStyleRule* rule, const std::string& property) {
+    DisabledDeclaration d{rule, property};
+    edit.disabled.erase(std::remove(edit.disabled.begin(), edit.disabled.end(), d), edit.disabled.end());
+}
+
 bool isDisabled(const StyleEdit* edit, const CSSStyleRule* rule, const std::string& property) {
     if (!edit) return false;
     DisabledDeclaration d{rule, property};
@@ -139,22 +284,25 @@ bool isDisabled(const StyleEdit* edit, const CSSStyleRule* rule, const std::stri
 Level collectLevel(CSSEngine& css, DOMElement* element, const StyleEdit* edit, bool inheritedOnly,
                    RuleLocator& locator) {
     Level level;
-    auto addBlock = [&](RuleBlock block, const CSSStyleDeclaration* decl, size_t ruleRank) {
+    // `page` is what the page has; the edit's declarations replace them
+    auto addBlock = [&](RuleBlock block, const std::vector<EditedDeclaration>& page, size_t ruleRank) {
         int blockIndex = (int)level.blocks.size();
         const CSSStyleRule* key = block.kind == RuleKind::Style ? block.rule : nullptr;
-        for (size_t i = 0; decl && i < decl->length(); i++) {
+        const BlockEdit* changed = block.kind != RuleKind::Hints ? blockEditOf(edit, key) : nullptr;
+        for (const EditedDeclaration& e : changed ? changed->declarations : page) {
             RuleDeclaration d;
-            d.property = decl->item(i);
-            d.value = decl->getPropertyValue(d.property);
-            d.important = !decl->getPropertyPriority(d.property).empty();
-            if (d.value.empty()) continue;
+            d.property = e.property;
+            d.value = e.value;
+            d.important = e.important;
             if (inheritedOnly && !setsInheritedProperty(d.property)) continue;
             d.disabled = block.kind != RuleKind::Hints && isDisabled(edit, key, d.property);
+            d.added = e.added;
+            d.edited = changed && !e.added && !onPage(e, page);
             RankedDeclaration r;
             r.block = blockIndex;
             r.declaration = (int)block.declarations.size();
-            r.rank = {tierOf(block.kind, block.origin, d.important), ruleRank, i};
-            for (auto& l : longhandsOf(d.property)) {
+            r.rank = {tierOf(block.kind, block.origin, d.important), ruleRank, e.position};
+            for (auto& l : appliedLonghands(d.property, d.value)) {
                 if (!inheritedOnly || isInheritedProperty(l)) r.longhands.push_back(std::move(l));
             }
             block.declarations.push_back(std::move(d));
@@ -172,14 +320,12 @@ Level collectLevel(CSSEngine& css, DOMElement* element, const StyleEdit* edit, b
         }
     };
 
-    CSSParser parser;
     std::string inlineText = edit ? edit->originalStyle : element->getAttribute("style");
-    auto inlineDecl = parser.parseInlineStyle(inlineText);
     RuleBlock inlineBlock;
     inlineBlock.kind = RuleKind::Inline;
     inlineBlock.element = element;
     inlineBlock.selector = "element";
-    addBlock(std::move(inlineBlock), inlineDecl.get(), 0);
+    addBlock(std::move(inlineBlock), pageDeclarations(inlineText, nullptr), 0);
 
     std::vector<MatchedRule> matched = css.matchedRules(element);
     for (size_t i = matched.size(); i-- > 0;) {
@@ -192,7 +338,7 @@ Level collectLevel(CSSEngine& css, DOMElement* element, const StyleEdit* edit, b
         block.selector = m.rule->selectorText();
         block.origin = m.origin;
         block.source = locator.sourceOf(m.rule);
-        addBlock(std::move(block), m.rule->style(), i);
+        addBlock(std::move(block), declarationsOf(m.rule->style()), i);
     }
 
     std::string hints = presentationalHintStyle(element);
@@ -203,7 +349,7 @@ Level collectLevel(CSSEngine& css, DOMElement* element, const StyleEdit* edit, b
         block.kind = RuleKind::Hints;
         block.element = element;
         block.selector = "attributes";
-        addBlock(std::move(block), hintDecl.get(), 0);
+        addBlock(std::move(block), declarationsOf(hintDecl.get()), 0);
     }
     return level;
 }
@@ -342,7 +488,84 @@ ElementRules collectElementRules(CSSEngine& css, DOMElement* element, const Styl
     return out;
 }
 
+bool setDeclarationValue(StyleEdit& edit, const CSSStyleRule* rule, const std::string& property,
+                         const std::string& value) {
+    EditedDeclaration typed = typedValue(value);
+    if (typed.value.empty()) return removeDeclaration(edit, rule, property);
+    BlockEdit& block = blockEditFor(edit, rule);
+    int i = indexOf(block, property);
+    if (i >= 0) {
+        block.declarations[i].value = typed.value;
+        block.declarations[i].important = typed.important;
+    }
+    settle(edit, rule);
+    return i >= 0;
+}
+
+bool renameDeclaration(StyleEdit& edit, const CSSStyleRule* rule, const std::string& property,
+                       const std::string& newProperty) {
+    std::string name = typedProperty(newProperty);
+    if (name.empty()) return removeDeclaration(edit, rule, property);
+    BlockEdit& block = blockEditFor(edit, rule);
+    int i = indexOf(block, property);
+    if (i >= 0 && name != property) {
+        // One declaration per property and block: the renamed one takes the other's place in the cascade
+        int other = indexOf(block, name);
+        if (other >= 0) {
+            block.declarations.erase(block.declarations.begin() + other);
+            forgetDisabled(edit, rule, name);
+            if (other < i) i--;
+        }
+        block.declarations[i].property = name;
+        for (auto& d : edit.disabled) {
+            if (d.rule == rule && d.property == property) d.property = name;
+        }
+    }
+    settle(edit, rule);
+    return i >= 0;
+}
+
+bool addDeclaration(StyleEdit& edit, const CSSStyleRule* rule, const std::string& property,
+                    const std::string& value) {
+    std::string name = typedProperty(property);
+    EditedDeclaration d = typedValue(value);
+    if (name.empty() || d.value.empty()) return false;
+    BlockEdit& block = blockEditFor(edit, rule);
+    int other = indexOf(block, name);
+    if (other >= 0) {
+        block.declarations.erase(block.declarations.begin() + other);
+        forgetDisabled(edit, rule, name);
+    }
+    // After every declaration of the block, the page's included
+    size_t next = 0;
+    for (const auto& e : block.declarations) next = std::max(next, e.position + 1);
+    for (const auto& e : pageDeclarations(edit.originalStyle, rule)) next = std::max(next, e.position + 1);
+    d.property = name;
+    d.position = next;
+    d.added = true;
+    block.declarations.push_back(std::move(d));
+    return true;
+}
+
+bool removeDeclaration(StyleEdit& edit, const CSSStyleRule* rule, const std::string& property) {
+    BlockEdit& block = blockEditFor(edit, rule);
+    int i = indexOf(block, property);
+    if (i >= 0) {
+        block.declarations.erase(block.declarations.begin() + i);
+        forgetDisabled(edit, rule, property);
+    }
+    settle(edit, rule);
+    return i >= 0;
+}
+
+void revertStyleEdit(StyleEdit& edit) {
+    edit.disabled.clear();
+    edit.blocks.clear();
+}
+
 std::string styleAttributeFor(CSSEngine& css, DOMElement* element, const StyleEdit& edit) {
+    // Nothing changed: the attribute as the page had it, byte for byte
+    if (edit.empty()) return edit.originalStyle;
     RuleLocator locator(css);
     Level level = collectLevel(css, element, &edit, false, locator);
     auto decl = [&](const RankedDeclaration& r) -> const RuleDeclaration& {
@@ -350,12 +573,26 @@ std::string styleAttributeFor(CSSEngine& css, DOMElement* element, const StyleEd
     };
     auto kind = [&](const RankedDeclaration& r) { return level.blocks[r.block].kind; };
 
-    // The properties a switched-off rule declaration set, closed over the
-    // declarations left for them (a shorthand brings in its other longhands,
-    // so the overrides cannot beat a rule that set one of those)
+    // The properties a switched-off, edited, added or deleted rule declaration
+    // sets, closed over the declarations left for them (a shorthand brings in
+    // its other longhands, so the overrides cannot beat a rule that set one of
+    // those)
     std::unordered_set<std::string> affected;
     for (const auto& r : level.ranked) {
-        if (decl(r).disabled && kind(r) == RuleKind::Style) affected.insert(r.longhands.begin(), r.longhands.end());
+        const RuleDeclaration& d = decl(r);
+        if (kind(r) == RuleKind::Style && (d.disabled || d.edited || d.added)) {
+            affected.insert(r.longhands.begin(), r.longhands.end());
+        }
+    }
+    // What the shared rule still sets where this element's edit changed or deleted the declaration
+    for (const auto& block : level.blocks) {
+        const BlockEdit* changed = block.kind == RuleKind::Style ? blockEditOf(&edit, block.rule) : nullptr;
+        if (!changed) continue;
+        auto page = declarationsOf(block.rule->style());
+        for (const auto& p : page) {
+            if (onPage(p, changed->declarations)) continue;
+            for (auto& l : appliedLonghands(p.property, p.value)) affected.insert(std::move(l));
+        }
     }
     std::vector<const RankedDeclaration*> chain;
     if (!affected.empty()) {
@@ -398,7 +635,7 @@ std::string styleAttributeFor(CSSEngine& css, DOMElement* element, const StyleEd
     for (const RankedDeclaration* r : chain) put(decl(*r).property, decl(*r).value + " !important");
     for (const auto& r : level.ranked) {
         const RuleDeclaration& d = decl(r);
-        if (kind(r) != RuleKind::Inline || d.disabled) continue;
+        if (kind(r) != RuleKind::Inline || d.disabled || r.longhands.empty()) continue;
         if (std::find(chain.begin(), chain.end(), &r) != chain.end()) continue;
         put(d.property, d.value + (d.important ? " !important" : ""));
     }
