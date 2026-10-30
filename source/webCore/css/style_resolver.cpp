@@ -91,9 +91,10 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
     // Step 3: Sort by cascade order
     cascade_.sortByCascade(matchedRules);
     
-    // Step 4: Apply matched rules in order (lowest priority first). The
-    // element's presentational hints (bgcolor, width, align...) go after the
-    // user-agent and user rules and before the first author rule.
+    // Step 4: Apply the normal declarations of the matched rules in order
+    // (lowest priority first). The element's presentational hints (bgcolor,
+    // width, align...) go after the user-agent and user rules and before the
+    // first author rule.
     bool hintsApplied = false;
     auto applyHints = [&]() {
         hintsApplied = true;
@@ -108,20 +109,37 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
             applyHints();
         }
         if (match.rule && match.rule->style()) {
-            applyDeclarations(computed, match.rule->style(), parentStyle);
+            applyDeclarations(computed, match.rule->style(), parentStyle, Importance::Normal);
         }
     }
     if (!hintsApplied) applyHints();
     
-    // Step 5: Apply inline styles (highest priority)
+    // Step 5: Apply inline styles (above every normal rule)
+    std::unique_ptr<CSSStyleDeclaration> inlineDecl;
     std::string inlineStyle = element->getAttribute("style");
     if (!inlineStyle.empty()) {
         CSSParser parser;
-        auto decl = parser.parseInlineStyle(inlineStyle);
-        if (decl) {
-            applyDeclarations(computed, decl.get(), parentStyle);
+        inlineDecl = parser.parseInlineStyle(inlineStyle);
+        if (inlineDecl) {
+            applyDeclarations(computed, inlineDecl.get(), parentStyle, Importance::Normal);
         }
     }
+
+    // Step 6: !important declarations, in reverse origin order: author rules,
+    // the inline style, user rules, user-agent rules (CSS Cascade 4, 6.4)
+    auto applyImportant = [&](StyleOrigin origin) {
+        for (const auto& match : matchedRules) {
+            if (match.origin == origin && match.rule && match.rule->style() && match.rule->style()->hasImportant()) {
+                applyDeclarations(computed, match.rule->style(), parentStyle, Importance::Important);
+            }
+        }
+    };
+    applyImportant(StyleOrigin::Author);
+    if (inlineDecl && inlineDecl->hasImportant()) {
+        applyDeclarations(computed, inlineDecl.get(), parentStyle, Importance::Important);
+    }
+    applyImportant(StyleOrigin::User);
+    applyImportant(StyleOrigin::UserAgent);
 
     // <center> and align="center" stop at tables: a table doesn't pass the
     // legacy -webkit-* alignment on to its cells (cells use their own align)
@@ -171,6 +189,20 @@ const CSSComputedStyle* StyleResolver::getComputedStyle(DOMElement* element) {
     return &styleCache_[element];
 }
 
+std::vector<MatchedRule> StyleResolver::matchedRules(DOMElement* element) {
+    std::vector<std::pair<CSSStyleSheet*, StyleOrigin>> sheetPairs;
+    for (const auto& entry : stylesheets_) {
+        sheetPairs.push_back({entry.sheet.get(), entry.origin});
+    }
+    auto rules = cascade_.collectMatchingRulesWithOrigins(element, sheetPairs);
+    cascade_.sortByCascade(rules);
+    return rules;
+}
+
+bool isInheritedProperty(const std::string& property) {
+    return INHERITED_PROPERTIES.count(property) > 0;
+}
+
 void StyleResolver::invalidateElement(DOMElement* element) {
     styleCache_.erase(element);
 }
@@ -185,12 +217,17 @@ void StyleResolver::invalidateAll() {
 
 void StyleResolver::applyDeclarations(CSSComputedStyle& style, 
                                        const CSSStyleDeclaration* decl,
-                                       const CSSComputedStyle* parentStyle) {
+                                       const CSSComputedStyle* parentStyle,
+                                       Importance importance) {
     if (!decl) return;
     
     // Apply each property in the declaration
     for (size_t i = 0; i < decl->length(); i++) {
         std::string property = decl->item(i);
+        if (importance != Importance::Any) {
+            bool important = !decl->getPropertyPriority(property).empty();
+            if (important != (importance == Importance::Important)) continue;
+        }
         std::string value = decl->getPropertyValue(property);
         
         if (!value.empty()) {

@@ -419,12 +419,13 @@ void CSSEngine::initialize(DOMDocument* doc) {
     // StyleResolver constructor already adds user-agent stylesheet
 }
 
-void CSSEngine::addStyleSheet(const std::string& css, StyleOrigin origin) {
+void CSSEngine::addStyleSheet(const std::string& css, StyleOrigin origin, const std::string& href) {
     usesHover_  = usesHover_  || css.find(":hover") != std::string::npos;
     usesActive_ = usesActive_ || css.find(":active") != std::string::npos;
     usesFocus_  = usesFocus_  || css.find(":focus") != std::string::npos;
     auto sheet = parser_.parse(css);
     if (sheet) {
+        sheet->setHref(href);
         resolver_.addStyleSheet(std::move(sheet), origin);
     }
 }

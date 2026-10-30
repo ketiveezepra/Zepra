@@ -1,0 +1,5 @@
+/* External sheet for devtools_rules.html */
+body { font-family: sans-serif; color: #333; line-height: 1.5; }
+.card { border: 2px solid #8a7bd8; border-radius: 6px; padding: 12px; margin: 10px 0; background-color: #f6f4ff; }
+.card p { margin: 4px 0; }
+.note { color: #2a6f2a; font-style: italic; }

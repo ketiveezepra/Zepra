@@ -50,6 +50,10 @@ jobs:
       - name: NXAudio tests
         run: ctest --test-dir build/source/media/nxaudio --output-on-failure
 
+      # The DevTools Rules pane model (matched rules, cascade, inherited rules)
+      - name: DevTools tests
+        run: ctest --test-dir build/test -R DevToolsStyleRulesTests --output-on-failure
+
   # ============================================================================
   # Windows — MSYS2 UCRT64 (GCC), Win32/WGL backend
   # ============================================================================
@@ -83,6 +87,10 @@ jobs:
       - name: Build
         run: cmake --build build --parallel -- -k 0
 
+      # The DevTools Rules pane model (matched rules, cascade, inherited rules)
+      - name: DevTools tests
+        run: ctest --test-dir build/test -R DevToolsStyleRulesTests --output-on-failure
+
   # ============================================================================
   # macOS — Apple Silicon, AppleClang, Cocoa/NSOpenGL backend
   # ============================================================================
@@ -104,3 +112,7 @@ jobs:
 
       - name: Build
         run: cmake --build build --parallel $(sysctl -n hw.ncpu) -- -k 0
+
+      # The DevTools Rules pane model (matched rules, cascade, inherited rules)
+      - name: DevTools tests
+        run: ctest --test-dir build/test -R DevToolsStyleRulesTests --output-on-failure

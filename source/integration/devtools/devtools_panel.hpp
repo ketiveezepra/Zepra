@@ -6,8 +6,10 @@
  *
  * The panel owns its state (selection, expansion, scroll positions, console
  * input) and draws itself with primitives the browser lends it, reading the
- * active page's DOM, computed styles, layout boxes, script context, console
- * log and network monitor directly. It never changes the page.
+ * active page's DOM, style rules, computed styles, layout boxes, script
+ * context, console log and network monitor directly. It changes the page only
+ * when a declaration is switched off in the Rules pane, through that element's
+ * style attribute.
  */
 #pragma once
 
@@ -19,6 +21,7 @@
 
 #include "input/events.h"
 #include "scripting/console_format.hpp"
+#include "style_rules.hpp"
 
 namespace Zepra::WebCore {
 class DOMDocument;
@@ -120,8 +123,21 @@ private:
         std::vector<Toggle> toggles;                    ///< set while drawing a message row
     };
 
+    /// A selector (declaration -1) or declaration line of the Rules pane as last drawn
+    struct RuleHit {
+        Rect r;
+        int group = -1;          ///< -1: the element's own rules, otherwise ElementRules::inherited[group]
+        int block = -1;
+        int declaration = -1;
+    };
+    /// A row of the Computed pane as last drawn
+    struct ComputedHit {
+        Rect r;
+        std::string property;
+    };
+
     // Layout of the last draw (for hit testing)
-    Rect panel_, toolbar_, pickerButton_, closeButton_, tree_, styles_, consoleList_, consoleInputBox_,
+    Rect panel_, toolbar_, pickerButton_, closeButton_, tree_, rules_, styles_, consoleList_, consoleInputBox_,
          consoleToolbar_, networkList_, networkToolbar_;
     std::vector<Rect> tabButtons_;
     std::vector<Rect> levelButtons_;
@@ -145,6 +161,23 @@ private:
     float treeScroll_ = 0, treeMax_ = 0;
     float stylesScroll_ = 0, stylesMax_ = 0;
     bool scrollSelectedIntoView_ = false;
+
+    // Rules pane
+    float rulesScroll_ = 0, rulesMax_ = 0;
+    std::vector<RuleHit> ruleHits_;
+    std::vector<ComputedHit> computedHits_;
+    ElementRules rulesModel_;                          // rules of rulesElement_ (cached)
+    Zepra::WebCore::DOMElement* rulesElement_ = nullptr;
+    uint64_t rulesDomVersion_ = 0;
+    size_t rulesSheetCount_ = 0;
+    bool rulesDirty_ = true;
+    /// Declarations switched off per element (applied through its style attribute)
+    std::vector<std::pair<Zepra::WebCore::DOMElement*, StyleEdit>> styleEdits_;
+    /// The rule (or element, for `element { }`) whose selector was clicked, and the
+    /// elements it matches, highlighted on the page
+    const void* highlightKey_ = nullptr;
+    std::string highlightSelector_;                     // empty: highlightKey_ is the element
+    std::vector<Zepra::WebCore::DOMElement*> highlighted_;
 
     // Console
     bool consoleFocused_ = false;
@@ -170,7 +203,14 @@ private:
     void drawToolbar(const Painter& p, const Page& page, float mouseX, float mouseY);
     void drawInspector(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
     void drawTree(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
-    void drawStyles(const Painter& p, const Page& page, const Rect& area);
+    void drawStyles(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
+    void drawRules(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
+    const ElementRules& rulesFor(const Page& page, Zepra::WebCore::DOMElement* element);
+    const StyleEdit* styleEditFor(const Zepra::WebCore::DOMElement* element) const;
+    void onRulesClick(const Page& page, float x, float y);
+    void toggleDeclaration(const Page& page, const RuleHit& hit);
+    void highlightRule(const Page& page, const RuleBlock& block);
+    void refreshHighlight(const Page& page);
     void drawConsole(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
     void drawNetwork(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
     void evaluateConsoleInput(const Page& page);

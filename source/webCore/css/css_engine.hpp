@@ -133,6 +133,9 @@ private:
     std::vector<IndexedRule> indexedRules_;
 };
 
+/// Whether a property inherits by default (color, font-*, line-height, text-align, visibility...)
+bool isInheritedProperty(const std::string& property);
+
 /**
  * @brief Style resolver - computes final styles
  */
@@ -145,6 +148,16 @@ public:
     void addStyleSheet(std::shared_ptr<CSSStyleSheet> sheet, StyleOrigin origin = StyleOrigin::Author);
 
 
+    /// The stylesheets in the order they were added, with their origins
+    struct StyleSheetEntry {
+        std::shared_ptr<CSSStyleSheet> sheet;
+        StyleOrigin origin;
+    };
+    const std::vector<StyleSheetEntry>& styleSheets() const { return stylesheets_; }
+
+    /// The style rules that match an element, sorted by the cascade (lowest priority first)
+    std::vector<MatchedRule> matchedRules(DOMElement* element);
+
     /// Compute style for element
     CSSComputedStyle computeStyle(DOMElement* element, const CSSComputedStyle* parentStyle = nullptr);
 
@@ -156,10 +169,8 @@ public:
     void invalidateAll();
 
 private:
-    struct StyleSheetEntry {
-        std::shared_ptr<CSSStyleSheet> sheet;
-        StyleOrigin origin;
-    };
+    /// Which declarations of a block applyDeclarations applies
+    enum class Importance { Any, Normal, Important };
 
     std::vector<StyleSheetEntry> stylesheets_;
     std::unordered_map<DOMElement*, CSSComputedStyle> styleCache_;
@@ -167,7 +178,7 @@ private:
     SelectorMatcher matcher_;
 
     void applyDeclarations(CSSComputedStyle& style, const CSSStyleDeclaration* decl,
-                           const CSSComputedStyle* parentStyle);
+                           const CSSComputedStyle* parentStyle, Importance importance = Importance::Any);
     void applyProperty(CSSComputedStyle& style, const std::string& property,
                        const std::string& value, const CSSComputedStyle* parentStyle);
     CSSLength parseLength(const std::string& value);
@@ -230,8 +241,15 @@ public:
     /// Initialize with document
     void initialize(DOMDocument* document);
 
-    /// Parse and add stylesheet
-    void addStyleSheet(const std::string& css, StyleOrigin origin = StyleOrigin::Author);
+    /// Parse and add stylesheet; `href` is the URL of a <link> sheet (empty for <style>)
+    void addStyleSheet(const std::string& css, StyleOrigin origin = StyleOrigin::Author,
+                       const std::string& href = "");
+
+    /// The stylesheets in cascade order, with their origins (sheet->href() is set for <link> sheets)
+    const std::vector<StyleResolver::StyleSheetEntry>& styleSheets() const { return resolver_.styleSheets(); }
+
+    /// The style rules that match an element, sorted by the cascade (lowest priority first)
+    std::vector<MatchedRule> matchedRules(DOMElement* element) { return resolver_.matchedRules(element); }
 
     /// Add stylesheet from link
     void addStyleSheetFromUrl(const std::string& url, StyleOrigin origin = StyleOrigin::Author);

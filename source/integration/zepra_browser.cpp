@@ -1300,6 +1300,12 @@ void parseWithWebCore(const std::string& html) {
     }
 
     // Extract <style> elements and load <link rel="stylesheet"> external CSS
+    size_t domStyleSheets = 0;
+    auto addStyleElement = [&](DOMElement* el) {
+        // :root variables expanded as the raw-HTML fallback below does
+        g_cssEngine->addStyleSheet(expandCSSVariables(el->textContent()), StyleOrigin::Author);
+        domStyleSheets++;
+    };
     auto* headEl = g_document->head();
     if (headEl) {
         for (size_t i = 0; i < headEl->childNodes().size(); i++) {
@@ -1309,7 +1315,7 @@ void parseWithWebCore(const std::string& html) {
                 
                 // Inline <style> elements
                 if (tag == "style") {
-                    g_cssEngine->addStyleSheet(el->textContent(), StyleOrigin::Author);
+                    addStyleElement(el);
                 }
                 // External <link rel="stylesheet"> elements
                 else if (tag == "link") {
@@ -1326,7 +1332,7 @@ void parseWithWebCore(const std::string& html) {
                             HttpResponse cssResult = httpGet(cssUrl, Zepra::WebCore::ResourceKind::Stylesheet);
                             if (cssResult.success && !cssResult.data.empty()) {
                                 // std::cout << "[CSS] Loaded " << cssResult.data.size() << " bytes of CSS" << std::endl;
-                                g_cssEngine->addStyleSheet(cssResult.data, StyleOrigin::Author);
+                                g_cssEngine->addStyleSheet(cssResult.data, StyleOrigin::Author, cssUrl);
                             } else {
                                 std::cerr << "[CSS] Failed to load: " << cssResult.error << std::endl;
                             }
@@ -1337,8 +1343,22 @@ void parseWithWebCore(const std::string& html) {
         }
     }
     
-    // FALLBACK: Add CSS extracted from raw HTML (when HTMLParser fails to add style elements to head)
-    if (rawStyles.size() > 0) {
+    // <style> elements in the body, in document order
+    if (g_document->body()) {
+        std::function<void(DOMNode*)> findStyles = [&](DOMNode* node) {
+            if (auto* el = dynamic_cast<DOMElement*>(node)) {
+                std::string tag = el->tagName();
+                std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
+                if (tag == "style") { addStyleElement(el); return; }
+            }
+            for (const auto& child : node->childNodes()) findStyles(child.get());
+        };
+        findStyles(g_document->body());
+    }
+
+    // FALLBACK: Add CSS extracted from raw HTML, only when the parser kept no
+    // <style> element (adding both registered every sheet twice)
+    if (domStyleSheets == 0 && rawStyles.size() > 0) {
         // std::cout << "[CSS] Adding " << rawStyles.size() << " stylesheets from raw HTML extraction" << std::endl;
         for (const auto& css : rawStyles) {
             g_cssEngine->addStyleSheet(css, StyleOrigin::Author);
@@ -1346,7 +1366,7 @@ void parseWithWebCore(const std::string& html) {
     }
     
     // Add extracted body element style
-    if (!bodyStyle.empty()) {
+    if (!bodyStyle.empty() && !(g_document->body() && g_document->body()->hasAttribute("style"))) {
         // std::cout << "[CSS] Adding extracted body inline style: " << bodyStyle << std::endl;
         g_cssEngine->addStyleSheet(bodyStyle, StyleOrigin::Author);
     }
