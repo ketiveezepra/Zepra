@@ -2129,19 +2129,37 @@ Object* VM::createFunctionPrototype() {
     return proto;
 }
 
+std::vector<VM::SourcePosition> VM::callStack(size_t maxFrames) const {
+    std::vector<SourcePosition> frames;
+    // The innermost frame runs at (chunk_, ip_); each frame remembers where
+    // its caller was, so walking outwards hands every frame its position
+    const Bytecode::BytecodeChunk* chunk = chunk_;
+    size_t ip = ip_;
+    auto visit = [&](const VMCallFrame& frame) {
+        if (frames.size() >= maxFrames) return;
+        SourcePosition pos;
+        if (frame.function) pos.function = frame.function->name().empty() ? "<anonymous>" : frame.function->name();
+        if (chunk) {
+            pos.file = chunk->sourceName();
+            pos.line = chunk->lineAt(ip > 0 ? ip - 1 : 0);   // the instruction before the return point
+        }
+        frames.push_back(std::move(pos));
+        chunk = frame.savedChunk;
+        ip = frame.callerIP;
+    };
+    for (size_t i = heapDepth_; i-- > 0;) visit(heapStack_[i]);
+    for (size_t i = nativeDepth_; i-- > 0;) visit(nativeStack_[i]);
+    return frames;
+}
+
 std::string VM::captureStackTrace() const {
     std::string trace;
-    auto appendFrame = [&trace](const VMCallFrame& frame) {
-        trace += "    at ";
-        if (frame.function) {
-            trace += frame.function->name().empty() ? "<anonymous>" : frame.function->name();
-        } else {
-            trace += "<global>";
-        }
-        trace += " (bytecode:" + std::to_string(frame.returnAddress) + ")\n";
-    };
-    for (size_t i = heapDepth_; i-- > 0;) appendFrame(heapStack_[i]);
-    for (size_t i = nativeDepth_; i-- > 0;) appendFrame(nativeStack_[i]);
+    for (const SourcePosition& pos : callStack()) {
+        trace += "    at " + (pos.function.empty() ? std::string("<global>") : pos.function) + " (";
+        trace += pos.file.empty() ? std::string("<script>") : pos.file;
+        if (pos.line) trace += ":" + std::to_string(pos.line);
+        trace += ")\n";
+    }
     return trace;
 }
 
@@ -2472,7 +2490,8 @@ void VM::pushCallFrame(const VMCallFrame& frame) {
     if (!shouldUseHeapStack()) {
         // FAST PATH: Use native C stack (zero allocation)
         if (nativeDepth_ < NATIVE_STACK_SIZE) {
-            nativeStack_[nativeDepth_++] = frame;
+            nativeStack_[nativeDepth_] = frame;
+            nativeStack_[nativeDepth_++].callerIP = ip_;   // callers push before switching chunk_/ip_
             return;
         }
     }
@@ -2487,7 +2506,7 @@ void VM::pushCallFrame(const VMCallFrame& frame) {
     } else {
         heapStack_[heapDepth_] = frame;
     }
-    heapDepth_++;
+    heapStack_[heapDepth_++].callerIP = ip_;
 }
 
 VMCallFrame VM::popCallFrame() {

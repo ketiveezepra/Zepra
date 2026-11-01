@@ -79,6 +79,7 @@ struct VMCallFrame {
     size_t slotBase = 0;
     Value thisValue;
     const Bytecode::BytecodeChunk* savedChunk = nullptr;  // Caller's chunk for iterative calls
+    size_t callerIP = 0;       // Where the caller was in savedChunk (also across a native boundary)
     bool isConstruct = false;  // 'new' / super(): a non-object return yields 'this'
 };
 
@@ -231,6 +232,14 @@ public:
         auto it = globals_.find(name);
         return it != globals_.end() ? it->second : Value::undefined();
     }
+
+    /** The names of every global variable (unordered) */
+    std::vector<std::string> globalNames() const {
+        std::vector<std::string> names;
+        names.reserve(globals_.size());
+        for (const auto& entry : globals_) names.push_back(entry.first);
+        return names;
+    }
     
     /**
      * @brief Set current module path for import resolution
@@ -288,8 +297,22 @@ public:
     /** A new error object of the given type ("TypeError", ...) with its prototype and stack. */
     Value newError(const std::string& type, const std::string& message) { return makeError(type, message); }
 
+    /** Where a frame of the call stack is: its function and the script line it is on. */
+    struct SourcePosition {
+        std::string function;   ///< "" for a script's top-level code
+        std::string file;       ///< the chunk's source name; "" when the host gave none
+        uint32_t line = 0;      ///< 1-based; 0 when unknown
+    };
+
     /**
-     * @brief The current call stack as "    at function (bytecode:offset)" lines,
+     * @brief The frames of the current call stack, innermost first. A native
+     * function (console.log, forEach) has no frame: the first entry is the
+     * script code that called it.
+     */
+    std::vector<SourcePosition> callStack(size_t maxFrames = 64) const;
+
+    /**
+     * @brief The current call stack as "    at function (file:line)" lines,
      * innermost first. Error objects store it as `stack`.
      */
     std::string captureStackTrace() const;

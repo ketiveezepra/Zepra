@@ -97,8 +97,31 @@ public:
     // Initialize with DOM
     void initialize(DOMDocument* document);
     
-    // Script execution
-    ScriptResult evaluate(const std::string& code, const std::string& filename = "<script>");
+    // Script execution. `filename` names the script in stack traces and console
+    // source links; `firstLine` is where the code starts in it (an inline
+    // script's line in its document).
+    ScriptResult evaluate(const std::string& code, const std::string& filename = "<script>", uint32_t firstLine = 1);
+
+    /**
+     * @brief Keeps the text of a script or document, for the DevTools source
+     * view behind a console message's link. The same name replaces the old
+     * text; the oldest texts go once all of them pass kSourceBudget bytes.
+     */
+    void registerSource(const std::string& name, const std::string& text);
+    /// The text registered under `name`, or null
+    std::shared_ptr<const std::string> sourceText(const std::string& name) const;
+    /// The registered names, in the order they were registered
+    std::vector<std::string> sourceNames() const;
+    static constexpr size_t kSourceBudget = 4 * 1024 * 1024;
+
+    /**
+     * @brief Property names for console autocomplete: the globals when `path`
+     * is empty, else the properties (own and inherited) of the value that
+     * `path[0].path[1]...` names. Only data properties and native getters are
+     * read on the way, so no page script runs. Empty when the path does not
+     * resolve to an object or primitive.
+     */
+    std::vector<std::string> completionNames(const std::vector<std::string>& path);
     
     // Console
     void setConsoleHandler(ConsoleHandler handler) { consoleHandler_ = handler; }
@@ -209,7 +232,11 @@ private:
     /// Compiles and runs `code`; `value` (optional) receives its completion
     /// value, `thrown` (optional) the exception that ended it
     ScriptResult run(const std::string& code, const std::string& filename, Zepra::Runtime::Value* value,
-                     Zepra::Runtime::Value* thrown = nullptr);
+                     Zepra::Runtime::Value* thrown = nullptr, uint32_t firstLine = 1);
+    /// Reports a script's error to the console, at the position the engine gives
+    void reportError(const std::string& text, const std::string& file, uint32_t line, uint32_t column = 0);
+    /// The script position the running native function was called from
+    void setCallerSource(ConsoleMessage& message) const;
     /// Hands a console entry to the message handler, else the text handler, else the terminal
     void emitConsole(ConsoleMessage message);
     void emitConsole(const std::string& level, const std::string& text);
@@ -229,6 +256,9 @@ private:
     int consoleGroupDepth_ = 0;
     std::unordered_map<std::string, int> consoleCounts_;
     std::unordered_map<std::string, double> consoleTimers_;
+    /// registerSource texts, oldest first
+    std::vector<std::pair<std::string, std::shared_ptr<const std::string>>> sources_;
+    size_t sourceBytes_ = 0;
     
     // ZepraScript Engine (Per-instance VM — each tab gets its own)
     Zepra::Runtime::VM* vm_ = nullptr;
