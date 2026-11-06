@@ -20,6 +20,7 @@
 
 #include "browser/dom.hpp"
 #include "css/css_engine.hpp"
+#include "css/computed_style_values.hpp"
 #include "scripting/script_context.hpp"
 #include "browser/layout_engine.h"
 #include "browser/network_recorder.hpp"
@@ -92,200 +93,6 @@ std::string collapseText(const std::string& in) {
 std::string truncate(const std::string& s, size_t max) {
     if (s.size() <= max) return s;
     return s.substr(0, max - 3) + "...";
-}
-
-std::string fmtPx(float v) {
-    char buf[32];
-    if (std::fabs(v - std::round(v)) < 0.05f) std::snprintf(buf, sizeof buf, "%d", (int)std::lround(v));
-    else std::snprintf(buf, sizeof buf, "%.1f", v);
-    return buf;
-}
-
-std::string lengthStr(const CSSLength& l) {
-    if (l.isAuto()) return "auto";
-    std::string n = fmtPx(l.value);
-    switch (l.unit) {
-        case CSSLength::Unit::Px: return n + "px";
-        case CSSLength::Unit::Em: return n + "em";
-        case CSSLength::Unit::Rem: return n + "rem";
-        case CSSLength::Unit::Ex: return n + "ex";
-        case CSSLength::Unit::Ch: return n + "ch";
-        case CSSLength::Unit::Vw: return n + "vw";
-        case CSSLength::Unit::Vh: return n + "vh";
-        case CSSLength::Unit::Vmin: return n + "vmin";
-        case CSSLength::Unit::Vmax: return n + "vmax";
-        case CSSLength::Unit::Percent: return n + "%";
-        case CSSLength::Unit::Fr: return n + "fr";
-        case CSSLength::Unit::Cm: return n + "cm";
-        case CSSLength::Unit::Mm: return n + "mm";
-        case CSSLength::Unit::In: return n + "in";
-        case CSSLength::Unit::Pt: return n + "pt";
-        case CSSLength::Unit::Pc: return n + "pc";
-        default: return n;
-    }
-}
-
-std::string colorStr(const CSSColor& c) {
-    if (c.a == 0) return "transparent";
-    char buf[48];
-    if (c.a == 255) std::snprintf(buf, sizeof buf, "rgb(%d, %d, %d)", c.r, c.g, c.b);
-    else std::snprintf(buf, sizeof buf, "rgba(%d, %d, %d, %.2f)", c.r, c.g, c.b, c.a / 255.0);
-    return buf;
-}
-
-const char* displayStr(DisplayValue d) {
-    switch (d) {
-        case DisplayValue::None: return "none";
-        case DisplayValue::Block: return "block";
-        case DisplayValue::Inline: return "inline";
-        case DisplayValue::InlineBlock: return "inline-block";
-        case DisplayValue::Flex: return "flex";
-        case DisplayValue::InlineFlex: return "inline-flex";
-        case DisplayValue::Grid: return "grid";
-        case DisplayValue::InlineGrid: return "inline-grid";
-        case DisplayValue::Table: return "table";
-        case DisplayValue::TableRow: return "table-row";
-        case DisplayValue::TableCell: return "table-cell";
-        case DisplayValue::ListItem: return "list-item";
-        case DisplayValue::Contents: return "contents";
-        case DisplayValue::TableRowGroup: return "table-row-group";
-        case DisplayValue::TableHeaderGroup: return "table-header-group";
-        case DisplayValue::TableFooterGroup: return "table-footer-group";
-        case DisplayValue::TableColumn: return "table-column";
-        case DisplayValue::TableColumnGroup: return "table-column-group";
-        case DisplayValue::TableCaption: return "table-caption";
-        case DisplayValue::InlineTable: return "inline-table";
-    }
-    return "block";
-}
-
-const char* positionStr(PositionValue p) {
-    switch (p) {
-        case PositionValue::Static: return "static";
-        case PositionValue::Relative: return "relative";
-        case PositionValue::Absolute: return "absolute";
-        case PositionValue::Fixed: return "fixed";
-        case PositionValue::Sticky: return "sticky";
-    }
-    return "static";
-}
-
-const char* justifyStr(JustifyAlign j) {
-    switch (j) {
-        case JustifyAlign::Start: return "start";
-        case JustifyAlign::End: return "end";
-        case JustifyAlign::Center: return "center";
-        case JustifyAlign::SpaceBetween: return "space-between";
-        case JustifyAlign::SpaceAround: return "space-around";
-        case JustifyAlign::SpaceEvenly: return "space-evenly";
-        case JustifyAlign::Stretch: return "stretch";
-        case JustifyAlign::FlexStart: return "flex-start";
-        case JustifyAlign::FlexEnd: return "flex-end";
-        case JustifyAlign::Baseline: return "baseline";
-        case JustifyAlign::Auto: return "auto";
-    }
-    return "auto";
-}
-
-const char* overflowStr(OverflowValue o) {
-    switch (o) {
-        case OverflowValue::Visible: return "visible";
-        case OverflowValue::Hidden: return "hidden";
-        case OverflowValue::Scroll: return "scroll";
-        case OverflowValue::Auto: return "auto";
-        case OverflowValue::Clip: return "clip";
-    }
-    return "visible";
-}
-
-const char* textAlignStr(TextAlign t) {
-    switch (t) {
-        case TextAlign::Left: return "left";
-        case TextAlign::Right: return "right";
-        case TextAlign::Center: return "center";
-        case TextAlign::Justify: return "justify";
-        case TextAlign::Start: return "start";
-        case TextAlign::End: return "end";
-    }
-    return "start";
-}
-
-std::vector<std::pair<std::string, std::string>> computedProperties(const CSSComputedStyle& s) {
-    std::vector<std::pair<std::string, std::string>> out;
-    auto add = [&](const char* n, const std::string& v) { out.emplace_back(n, v); };
-    add("display", displayStr(s.display));
-    add("position", positionStr(s.position));
-    add("visibility", s.visibility == Visibility::Visible ? "visible" :
-                      s.visibility == Visibility::Hidden ? "hidden" : "collapse");
-    add("box-sizing", s.boxSizing == BoxSizing::BorderBox ? "border-box" : "content-box");
-    add("opacity", fmtPx(s.opacity));
-    add("float", s.cssFloat == 1 ? "left" : s.cssFloat == 2 ? "right" : "none");
-    add("width", lengthStr(s.width));
-    add("height", lengthStr(s.height));
-    add("min-width", lengthStr(s.minWidth));
-    add("min-height", lengthStr(s.minHeight));
-    add("max-width", lengthStr(s.maxWidth));
-    add("max-height", lengthStr(s.maxHeight));
-    add("margin-top", lengthStr(s.marginTop));
-    add("margin-right", lengthStr(s.marginRight));
-    add("margin-bottom", lengthStr(s.marginBottom));
-    add("margin-left", lengthStr(s.marginLeft));
-    add("padding-top", lengthStr(s.paddingTop));
-    add("padding-right", lengthStr(s.paddingRight));
-    add("padding-bottom", lengthStr(s.paddingBottom));
-    add("padding-left", lengthStr(s.paddingLeft));
-    add("border-top-width", fmtPx(s.borderTopWidth) + "px");
-    add("border-right-width", fmtPx(s.borderRightWidth) + "px");
-    add("border-bottom-width", fmtPx(s.borderBottomWidth) + "px");
-    add("border-left-width", fmtPx(s.borderLeftWidth) + "px");
-    add("border-top-color", colorStr(s.borderTopColor));
-    add("border-radius", fmtPx(s.borderTopLeftRadius) + "px");
-    add("overflow-x", overflowStr(s.overflowX));
-    add("overflow-y", overflowStr(s.overflowY));
-    add("top", lengthStr(s.top));
-    add("right", lengthStr(s.right));
-    add("bottom", lengthStr(s.bottom));
-    add("left", lengthStr(s.left));
-    add("z-index", s.zIndexAuto ? "auto" : std::to_string(s.zIndex));
-    if (s.display == DisplayValue::Flex || s.display == DisplayValue::InlineFlex) {
-        const char* dir = s.flexDirection == FlexDirection::Row ? "row" :
-                          s.flexDirection == FlexDirection::RowReverse ? "row-reverse" :
-                          s.flexDirection == FlexDirection::Column ? "column" : "column-reverse";
-        add("flex-direction", dir);
-        add("flex-wrap", s.flexWrap ? (s.wrapReverse ? "wrap-reverse" : "wrap") : "nowrap");
-        add("justify-content", justifyStr(s.justifyContent));
-        add("align-items", justifyStr(s.alignItems));
-        add("align-content", justifyStr(s.alignContent));
-        add("gap", lengthStr(s.gap));
-    }
-    add("align-self", justifyStr(s.alignSelf));
-    add("flex-grow", fmtPx(s.flexGrow));
-    add("flex-shrink", fmtPx(s.flexShrink));
-    add("flex-basis", lengthStr(s.flexBasis));
-    if (s.order) add("order", std::to_string(s.order));
-    if (!s.gridTemplateColumns.empty()) add("grid-template-columns", s.gridTemplateColumns);
-    if (!s.gridTemplateRows.empty()) add("grid-template-rows", s.gridTemplateRows);
-    add("color", colorStr(s.color));
-    add("background-color", colorStr(s.backgroundColor));
-    if (!s.backgroundImage.empty()) add("background-image", s.backgroundImage);
-    add("font-family", s.fontFamily);
-    add("font-size", fmtPx(s.fontSize) + "px");
-    add("font-weight", std::to_string((int)s.fontWeight));
-    add("font-style", s.fontStyle == FontStyle::Normal ? "normal" :
-                      s.fontStyle == FontStyle::Italic ? "italic" : "oblique");
-    add("line-height", s.lineHeight > 4 ? fmtPx(s.lineHeight) + "px" : fmtPx(s.lineHeight));
-    add("text-align", textAlignStr(s.textAlign));
-    if (!s.textDecoration.empty()) add("text-decoration", s.textDecoration);
-    if (!s.textTransform.empty()) add("text-transform", s.textTransform);
-    if (s.letterSpacing != 0) add("letter-spacing", fmtPx(s.letterSpacing) + "px");
-    add("white-space", s.whiteSpace);
-    add("vertical-align", s.verticalAlign);
-    add("cursor", s.cursor);
-    add("pointer-events", s.pointerEvents);
-    if (!s.boxShadow.empty()) add("box-shadow", s.boxShadow);
-    if (!s.transform.empty()) add("transform", s.transform);
-    if (!s.transition.empty()) add("transition", s.transition);
-    return out;
 }
 
 LayoutBox* findBoxForElement(LayoutBox* box, const DOMElement* element) {
@@ -714,7 +521,7 @@ void DevToolsPanel::drawStyles(const Painter& p, const Page& page, const Rect& a
     p.text(elementSelector(el), x0, area.y + 16, kTag, kFont);
     LayoutBox* box = page.layoutRoot ? findBoxForElement(page.layoutRoot, el) : nullptr;
     if (box) {
-        std::string size = fmtPx(box->width) + " x " + fmtPx(box->height);
+        std::string size = formatComputedNumber(box->width) + " x " + formatComputedNumber(box->height);
         p.text(size, area.x + area.w - 12 - p.textWidth(size, kSmallFont), area.y + 16, kMuted, kSmallFont);
     }
 
@@ -744,10 +551,10 @@ void DevToolsPanel::drawStyles(const Painter& p, const Page& page, const Rect& a
         };
         auto edgeLabels = [&](float inset, float t, float r, float b, float l) {
             float cx = dx + dw / 2, cy = dy + diagramH / 2;
-            centered(fmtPx(t), cx, dy + inset + 14, kText);
-            centered(fmtPx(b), cx, dy + diagramH - inset - 6, kText);
-            centered(fmtPx(l), dx + inset + band / 2, cy + 4, kText);
-            centered(fmtPx(r), dx + dw - inset - band / 2, cy + 4, kText);
+            centered(formatComputedNumber(t), cx, dy + inset + 14, kText);
+            centered(formatComputedNumber(b), cx, dy + diagramH - inset - 6, kText);
+            centered(formatComputedNumber(l), dx + inset + band / 2, cy + 4, kText);
+            centered(formatComputedNumber(r), dx + dw - inset - band / 2, cy + 4, kText);
         };
         p.text("margin", dx + 4, dy + 12, 0x2B1D0B, 9);
         p.text("border", dx + band + 4, dy + band + 12, 0x2B1D0B, 9);
@@ -757,7 +564,7 @@ void DevToolsPanel::drawStyles(const Painter& p, const Page& page, const Rect& a
         edgeLabels(band * 2, box->paddingTop, box->paddingRight, box->paddingBottom, box->paddingLeft);
         float contentW = box->width - box->borderLeft - box->borderRight - box->paddingLeft - box->paddingRight;
         float contentH = box->height - box->borderTop - box->borderBottom - box->paddingTop - box->paddingBottom;
-        centered(fmtPx(contentW) + " x " + fmtPx(contentH), dx + dw / 2, dy + diagramH / 2 + 4, kBg);
+        centered(formatComputedNumber(contentW) + " x " + formatComputedNumber(contentH), dx + dw / 2, dy + diagramH / 2 + 4, kBg);
         y += diagramH + 12;
     }
 
@@ -771,7 +578,7 @@ void DevToolsPanel::drawStyles(const Painter& p, const Page& page, const Rect& a
         p.text("No computed style", x0, y + 12, kMuted, kSmallFont);
         y += kRowH;
     } else {
-        auto props = computedProperties(*style);
+        auto props = computedStyleProperties(*style);
         float nameW = 0;
         for (const auto& pr : props) nameW = std::max(nameW, p.textWidth(pr.first, kSmallFont));
         nameW = std::min(nameW + 16, area.w * 0.45f);
@@ -880,7 +687,7 @@ void DevToolsPanel::drawPageOverlay(const Painter& p, const Page& page, float cl
         }
         if (picker_ && el == hover) {
             std::string label = elementSelector(el);
-            std::string size = fmtPx(w) + " x " + fmtPx(h);
+            std::string size = formatComputedNumber(w) + " x " + formatComputedNumber(h);
             float lw = p.textWidth(label, kFont), sw = p.textWidth(size, kSmallFont);
             float tw = lw + sw + 24, th = 22;
             float tx = std::max(clipX, std::min(x, clipX + clipW - tw));

@@ -612,12 +612,18 @@ std::string ScriptContext::prompt(const std::string& message, const std::string&
     return defaultValue;
 }
 
+void ScriptContext::setComputedStyleSource(std::function<const CSSComputedStyle*(DOMElement*)> source) {
+    computedStyleSource_ = std::move(source);
+    if (domBindings_) domBindings_->setComputedStyleSource(computedStyleSource_);
+}
+
 void ScriptContext::setupGlobals() {
     if (vm_) {
         // The window object and the DOM interfaces (EventTarget, Node, Event, ...)
         domBindings_ = std::make_unique<DOMBindings>(vm_, [this](const std::string& message) {
             emitConsole("error", message);
         });
+        domBindings_->setComputedStyleSource(computedStyleSource_);
         domBindings_->setSubmitHandler([this](const FormSubmission& submission) {
             if (submitHandler_) submitHandler_(submission);
         });
@@ -744,19 +750,7 @@ void ScriptContext::setupWindowGlobals() {
     windowObj->set("clearTimeout", Value::object(clearTimeoutFn));
     windowObj->set("clearInterval", Value::object(clearTimeoutFn));
     
-    // window.getComputedStyle (stub — returns empty style object)
-    auto* getComputedStyleFn = createNativeFunction("getComputedStyle",
-        [](Context*, const std::vector<Value>&) -> Value {
-            auto* styleObj = new Object();
-            auto* getPropertyFn = createNativeFunction("getPropertyValue",
-                [](Context*, const std::vector<Value>&) -> Value {
-                    return Value::string(new String(""));
-                }, 1);
-            styleObj->set("getPropertyValue", Value::object(getPropertyFn));
-            return Value::object(styleObj);
-        }, 1);
-    windowObj->set("getComputedStyle", Value::object(getComputedStyleFn));
-    vm_->setGlobal("getComputedStyle", Value::object(getComputedStyleFn));
+    // window.getComputedStyle comes with the DOM bindings (setComputedStyleSource)
     
     // window.requestAnimationFrame(callback) — runs before the next paint
     auto* rafFn = createNativeFunction("requestAnimationFrame",

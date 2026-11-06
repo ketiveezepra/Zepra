@@ -33,6 +33,7 @@ namespace Zepra::Runtime { class Object; class Value; class VM; class FunctionCa
 namespace Zepra::WebCore {
 
 class CanvasRegistry;
+class CSSComputedStyle;
 class NodeWrapper;
 class EventObject;
 
@@ -54,6 +55,8 @@ public:
     using ErrorReporter = std::function<void(const std::string& message)>;
     /// Compiles `source` (a function expression) to a function value
     using FunctionCompiler = std::function<bool(const std::string& source, Zepra::Runtime::Value& out)>;
+    /// An element's computed style, current with the DOM; null when it has none
+    using ComputedStyleSource = std::function<const CSSComputedStyle*(DOMElement* element)>;
 
     /// Makes the window object and the DOM interfaces (Node, Element,
     /// Event, ...), and puts the interfaces on the global object and window
@@ -78,6 +81,13 @@ public:
     void refreshWindowGlobals();
     /// document.readyState: "loading", "interactive" or "complete"
     void setReadyState(const std::string& state) { readyState_ = state; }
+    /// Where getComputedStyle() reads styles (the browser's CSS engine).
+    /// Without one every computed value is "".
+    void setComputedStyleSource(ComputedStyleSource source) { computedStyleSource_ = std::move(source); }
+
+    /// The values getComputedStyle(element) reads, by CSS property name;
+    /// empty for an element outside the document or without a style
+    std::vector<std::pair<std::string, std::string>> computedValues(DOMElement* element) const;
 
     /// The JS object of a node: made on first use, the same one afterwards
     Zepra::Runtime::Value wrap(DOMNode* node);
@@ -138,6 +148,7 @@ private:
     FunctionCompiler compileFunction_;
     DOMDocument* document_ = nullptr;
     CanvasRegistry* canvases_ = nullptr;
+    ComputedStyleSource computedStyleSource_;
     PageGeometry* geometry_ = nullptr;
     std::string readyState_ = "loading";
     SubmitHandler submitHandler_;
@@ -159,6 +170,7 @@ private:
     Zepra::Runtime::Object* tokenListProto_ = nullptr;
     Zepra::Runtime::Object* eventProto_ = nullptr;
     Zepra::Runtime::Object* mouseEventProto_ = nullptr;
+    Zepra::Runtime::Object* styleDeclarationProto_ = nullptr;   // CSSStyleDeclaration
     Zepra::Runtime::Object* domRectProto_ = nullptr;
     Zepra::Runtime::Object* keyboardEventProto_ = nullptr;
     Zepra::Runtime::Object* inputEventProto_ = nullptr;
@@ -180,6 +192,7 @@ private:
     void installCharacterData();
     void installDocumentInterface();
     void installEvents();
+    void installComputedStyle();
     void installGeometry();
 
     // Layout geometry

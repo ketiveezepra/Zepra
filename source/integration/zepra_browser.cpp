@@ -1451,6 +1451,19 @@ void parseWithWebCore(const std::string& html) {
     g_scriptContext->initialize(g_document.get());
     g_scriptContext->setPageGeometry(pageGeometry());
 
+    // getComputedStyle(): this page's styles, recomputed (not relaid out)
+    // when scripts changed the DOM since they were computed
+    CSSEngine* pageCss = g_cssEngine.get();
+    g_scriptContext->setComputedStyleSource(
+        [pageCss, styledVersion = g_layoutDomVersion](DOMElement* element) mutable -> const CSSComputedStyle* {
+            uint64_t version = Zepra::WebCore::domMutationVersion();
+            if (version != g_layoutDomVersion && version != styledVersion) {
+                pageCss->computeStyles();
+                styledVersion = version;
+            }
+            return pageCss->getComputedStyle(element);
+        });
+
     // fetch()/XMLHttpRequest: the request runs on its own thread and is
     // recorded in this tab's Network panel; the script context settles the
     // promise on the main thread (processTimers)

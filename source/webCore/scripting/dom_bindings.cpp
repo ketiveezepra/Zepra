@@ -7,6 +7,7 @@
 
 #include "scripting/dom_bindings.hpp"
 #include "scripting/canvas_bindings.hpp"
+#include "css/computed_style_values.hpp"
 #include "css/css_engine.hpp"
 #include "css/css_style_declaration.hpp"
 #include "html/html_parser.hpp"
@@ -129,6 +130,13 @@ std::string argString(const FunctionCallInfo& info, size_t index) {
 }
 
 bool isFunction(const Value& v) { return v.isObject() && v.asObject()->isFunction(); }
+
+/// Throws a DOMException-like error: an Error whose name is `name`
+[[noreturn]] void throwDOMError(VM* vm, const std::string& name, const std::string& message) {
+    Value error = vm->newError("Error", message);
+    if (error.isObject()) error.asObject()->set("name", str(name));
+    throw ThrownException(error);
+}
 
 [[noreturn]] void illegalInvocation(const char* name) {
     throw JSError("TypeError", std::string("Illegal invocation: '") + name + "' called on an object that does not implement it");
@@ -371,6 +379,109 @@ StyleObject* thisStyle(const FunctionCallInfo& info, const char* name) {
 }
 
 // ----------------------------------------------------------------------------
+// getComputedStyle(): an element's resolved style, read-only and live
+// ----------------------------------------------------------------------------
+
+/// "0", "12", ...: an array index (no sign, no leading zeros)
+bool arrayIndex(const std::string& key, uint32_t& index) {
+    if (key.empty() || key.size() > 9 || (key.size() > 1 && key[0] == '0')) return false;
+    uint32_t n = 0;
+    for (char c : key) {
+        if (c < '0' || c > '9') return false;
+        n = n * 10 + static_cast<uint32_t>(c - '0');
+    }
+    index = n;
+    return true;
+}
+
+/// A property getComputedStyle() can answer (by camelCase or CSS name)
+bool isComputedProperty(const std::string& key) {
+    static const std::unordered_set<std::string> names(computedStylePropertyNames().begin(),
+                                                       computedStylePropertyNames().end());
+    return looksLikeCssProperty(key) && names.count(cssPropertyName(key)) > 0;
+}
+
+[[noreturn]] void throwComputedReadOnly(VM* vm, const std::string& what, const std::string& property) {
+    throwDOMError(vm, "NoModificationAllowedError", what + " on 'CSSStyleDeclaration': These styles are computed, "
+                  "and therefore the '" + property + "' property is read-only.");
+}
+
+class ComputedStyleObject final : public Object {
+public:
+    ComputedStyleObject(VM* vm, const DOMBindings* bindings, NodeWrapper* owner, bool pseudoElement, Object* methods)
+        : Object(ObjectType::Proxy), vm_(vm), bindings_(bindings), owner_(owner),
+          pseudoElement_(pseudoElement), methods_(methods) {}
+
+    using Object::get;
+    using Object::set;
+    using Object::has;
+
+    /// Read again on every access, so the object follows style changes.
+    /// Pseudo-elements have no computed style here: they read as empty.
+    std::vector<std::pair<std::string, std::string>> values() const {
+        DOMElement* el = asElement(owner_->node);
+        if (!el || pseudoElement_) return {};
+        return bindings_->computedValues(el);
+    }
+
+    std::string value(const std::string& property) const {
+        for (const auto& [name, v] : values()) {
+            if (name == property) return v;
+        }
+        return "";
+    }
+
+    Value get(const std::string& key) const override {
+        Value m = methods_->get(key);
+        if (!m.isUndefined()) return m;
+        uint32_t index;
+        if (arrayIndex(key, index)) return get(index);   // the VM passes cs[0] by name
+        if (key == "cssText") return str("");   // as browsers give it for computed styles
+        if (key == "length") return Value::number(static_cast<double>(values().size()));
+        if (key == "parentRule") return Value::null();
+        if (isComputedProperty(key)) return str(value(cssPropertyName(key)));
+        return Object::get(key);
+    }
+
+    Value get(uint32_t index) const override {
+        auto v = values();
+        return index < v.size() ? str(v[index].first) : Value::undefined();
+    }
+
+    bool set(const std::string& key, Value value) override {
+        if (key == "cssText") {
+            throwDOMError(vm_, "NoModificationAllowedError", "Failed to set the 'cssText' property on "
+                          "'CSSStyleDeclaration': These styles are computed, and therefore can't be modified.");
+        }
+        if (isComputedProperty(key)) throwComputedReadOnly(vm_, "Failed to set the '" + key + "' property", cssPropertyName(key));
+        return Object::set(key, value);
+    }
+
+    bool has(const std::string& key) const override {
+        uint32_t index;
+        if (arrayIndex(key, index)) return has(index);
+        return methods_->has(key) || key == "cssText" || key == "length" || key == "parentRule" ||
+               isComputedProperty(key) || Object::has(key);
+    }
+
+    bool has(uint32_t index) const override { return index < values().size(); }
+
+private:
+    VM* vm_;
+    const DOMBindings* bindings_;
+    NodeWrapper* owner_;
+    bool pseudoElement_;
+    Object* methods_;
+};
+
+ComputedStyleObject* thisComputedStyle(const FunctionCallInfo& info, const char* name) {
+    Value t = info.thisValue();
+    auto* s = t.isObject() ? dynamic_cast<ComputedStyleObject*>(t.asObject()) : nullptr;
+    if (!s) illegalInvocation(name);
+    return s;
+}
+
+// ----------------------------------------------------------------------------
 // element.dataset: the data-* attributes by camelCase name
 // ----------------------------------------------------------------------------
 
@@ -506,6 +617,7 @@ DOMBindings::DOMBindings(VM* vm, ErrorReporter reportError) : vm_(vm), reportErr
     installGeometry();
     installDocumentInterface();
     installEvents();
+    installComputedStyle();
     installForms();
 
     // Bare addEventListener(...) and friends act on the window
@@ -1194,9 +1306,12 @@ void DOMBindings::installElement() {
         return str(parseInlineStyle(*el)->item(static_cast<size_t>(info.argument(0).toNumber())));
     });
     method(styleMethods, "toString", 0, [](const FunctionCallInfo&) -> Value { return str("[object CSSStyleDeclaration]"); });
-    accessor(h, "style", on<DOMElement>("style", [styleMethods](DOMElement&, const Info& info) {
+    accessor(h, "style", on<DOMElement>("style", [this, styleMethods](DOMElement&, const Info& info) {
         NodeWrapper* w = thisWrapper(info, "style");
-        if (!w->style) w->style = new StyleObject(w, styleMethods);
+        if (!w->style) {
+            w->style = new StyleObject(w, styleMethods);
+            w->style->setPrototype(styleDeclarationProto_);
+        }
         return Value::object(w->style);
     }), on<DOMElement>("style", [](DOMElement& e, const Info& info) {
         e.setAttribute("style", info.argument(0).toString());
@@ -1970,6 +2085,63 @@ EventObject* DOMBindings::newEvent(Object* proto, const std::string& type, const
     return e;
 }
 
+// ----------------------------------------------------------------------------
+// CSSStyleDeclaration and getComputedStyle()
+// ----------------------------------------------------------------------------
+
+void DOMBindings::installComputedStyle() {
+    // The interface of element.style and of computed styles
+    styleDeclarationProto_ = makeInterface("CSSStyleDeclaration", nullptr);
+
+    Object* methods = new Object();
+    method(methods, "getPropertyValue", 1, [](const FunctionCallInfo& info) -> Value {
+        ComputedStyleObject* s = thisComputedStyle(info, "getPropertyValue");
+        std::string name = argString(info, 0);
+        return str(s->value(name.rfind("--", 0) == 0 ? name : lower(name)));
+    });
+    method(methods, "getPropertyPriority", 1, [](const FunctionCallInfo& info) -> Value {
+        thisComputedStyle(info, "getPropertyPriority");
+        return str("");
+    });
+    method(methods, "item", 1, [](const FunctionCallInfo& info) -> Value {
+        auto v = thisComputedStyle(info, "item")->values();
+        double i = info.argument(0).toNumber();
+        return str(i >= 0 && i < static_cast<double>(v.size()) ? v[static_cast<size_t>(i)].first : "");
+    });
+    auto readOnly = [this](const char* name) {
+        return [this, name](const FunctionCallInfo& info) -> Value {
+            thisComputedStyle(info, name);
+            throwComputedReadOnly(vm_, std::string("Failed to execute '") + name + "'", argString(info, 0));
+        };
+    };
+    method(methods, "setProperty", 2, readOnly("setProperty"));
+    method(methods, "removeProperty", 1, readOnly("removeProperty"));
+    method(methods, "toString", 0, [](const FunctionCallInfo&) -> Value { return str("[object CSSStyleDeclaration]"); });
+
+    // getComputedStyle(element[, pseudoElement]), on the window and bare
+    auto* fn = new Function("getComputedStyle", [this, methods](const FunctionCallInfo& info) -> Value {
+        Value target = info.argument(0);
+        auto* w = target.isObject() ? dynamic_cast<NodeWrapper*>(target.asObject()) : nullptr;
+        if (!w || !asElement(w->node)) {
+            throw JSError("TypeError", "Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
+        }
+        Value pseudo = info.argument(1);
+        bool pseudoElement = !pseudo.isNullOrUndefined() && !pseudo.toString().empty();
+        auto* style = new ComputedStyleObject(vm_, this, w, pseudoElement, methods);
+        style->setPrototype(styleDeclarationProto_);
+        return Value::object(style);
+    }, 1);
+    global_->set("getComputedStyle", Value::object(fn));
+    vm_->setGlobal("getComputedStyle", Value::object(fn));
+}
+
+std::vector<std::pair<std::string, std::string>> DOMBindings::computedValues(DOMElement* element) const {
+    if (!element || !computedStyleSource_ || !isConnectedTo(element, document_)) return {};
+    const CSSComputedStyle* style = computedStyleSource_(element);
+    if (!style) return {};
+    return computedStyleProperties(*style);
+}
+
 // ============================================================================
 // Wrappers and node ownership
 // ============================================================================
@@ -2165,9 +2337,7 @@ Value DOMBindings::elementList(const std::vector<DOMElement*>& elements) {
 }
 
 void DOMBindings::throwDOMException(const std::string& name, const std::string& message) {
-    Value error = vm_->newError("Error", message);
-    if (error.isObject()) error.asObject()->set("name", str(name));
-    throw ThrownException(error);
+    throwDOMError(vm_, name, message);
 }
 
 void DOMBindings::releaseDetachedNodes() {

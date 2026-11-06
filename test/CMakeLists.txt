@@ -232,6 +232,14 @@ if(TARGET webcore)
     endif()
     add_test(NAME DevToolsStyleRulesTests COMMAND devtools_style_rules_tests)
 
+    # window.getComputedStyle(): resolved values from the CSS engine, read-only declarations
+    add_executable(computed_style_tests computed_style_tests.cpp)
+    target_link_libraries(computed_style_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(computed_style_tests pthread)
+    endif()
+    add_test(NAME ComputedStyleTests COMMAND computed_style_tests)
+
     # Layout geometry for page scripts: element boxes, getBoundingClientRect, offset*, client*, scrolling
     add_executable(layout_geometry_tests layout_geometry_tests.cpp
                    ${PROJECT_SOURCE_DIR}/source/webCore/browser/layout_geometry.cpp)

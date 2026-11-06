@@ -64,6 +64,10 @@ jobs:
       - name: Script geometry tests
         run: ctest --test-dir build/test -R LayoutGeometryTests --output-on-failure
 
+      # window.getComputedStyle() for page scripts
+      - name: Computed style tests
+        run: ctest --test-dir build/test -R ComputedStyleTests --output-on-failure
+
   # ============================================================================
   # Windows — MSYS2 UCRT64 (GCC), Win32/WGL backend
   # ============================================================================
@@ -111,6 +115,10 @@ jobs:
       - name: Script geometry tests
         run: ctest --test-dir build/test -R LayoutGeometryTests --output-on-failure
 
+      # window.getComputedStyle() for page scripts
+      - name: Computed style tests
+        run: ctest --test-dir build/test -R ComputedStyleTests --output-on-failure
+
   # ============================================================================
   # macOS — Apple Silicon, AppleClang, Cocoa/NSOpenGL backend
   # ============================================================================
@@ -146,3 +154,7 @@ jobs:
       # Layout geometry page scripts read (getBoundingClientRect, offset*, scrolling)
       - name: Script geometry tests
         run: ctest --test-dir build/test -R LayoutGeometryTests --output-on-failure
+
+      # window.getComputedStyle() for page scripts
+      - name: Computed style tests
+        run: ctest --test-dir build/test -R ComputedStyleTests --output-on-failure
