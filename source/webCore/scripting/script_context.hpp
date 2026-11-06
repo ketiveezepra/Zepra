@@ -49,6 +49,7 @@ struct TimerCallback {
  * @brief Alert dialog handler callback
  */
 class CanvasRegistry;
+class CSSComputedStyle;
 class DOMBindings;
 
 /**
@@ -179,6 +180,13 @@ public:
 
     /// The live DOM wrappers of this page
     DOMBindings* domBindings() { return domBindings_.get(); }
+
+    /**
+     * @brief Where getComputedStyle() reads an element's style. The browser
+     * passes its CSS engine, restyling first when the DOM changed since the
+     * styles were computed. Without one every computed value is "".
+     */
+    void setComputedStyleSource(std::function<const CSSComputedStyle*(DOMElement*)> source);
     
     // ====== NEW: Dialog Handlers ======
     
@@ -268,6 +276,8 @@ private:
     std::unordered_map<int, std::shared_ptr<XhrState>> xhrInFlight_;   // by request id, while sent
     Zepra::Runtime::Object* makeFetchResponse(const std::shared_ptr<const FetchResponse>& response);
     Zepra::Runtime::Value makeScriptError(const std::string& type, const std::string& message);
+
+    std::function<const CSSComputedStyle*(DOMElement*)> computedStyleSource_;
 
     // Dialog handlers
     AlertHandler alertHandler_;

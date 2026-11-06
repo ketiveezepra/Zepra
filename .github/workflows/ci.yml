@@ -54,6 +54,10 @@ jobs:
       - name: DevTools tests
         run: ctest --test-dir build/test -R DevToolsStyleRulesTests --output-on-failure
 
+      # window.getComputedStyle() for page scripts
+      - name: Computed style tests
+        run: ctest --test-dir build/test -R ComputedStyleTests --output-on-failure
+
   # ============================================================================
   # Windows — MSYS2 UCRT64 (GCC), Win32/WGL backend
   # ============================================================================
@@ -91,6 +95,10 @@ jobs:
       - name: DevTools tests
         run: ctest --test-dir build/test -R DevToolsStyleRulesTests --output-on-failure
 
+      # window.getComputedStyle() for page scripts
+      - name: Computed style tests
+        run: ctest --test-dir build/test -R ComputedStyleTests --output-on-failure
+
   # ============================================================================
   # macOS — Apple Silicon, AppleClang, Cocoa/NSOpenGL backend
   # ============================================================================
@@ -116,3 +124,7 @@ jobs:
       # The DevTools Rules pane model (matched rules, cascade, inherited rules)
       - name: DevTools tests
         run: ctest --test-dir build/test -R DevToolsStyleRulesTests --output-on-failure
+
+      # window.getComputedStyle() for page scripts
+      - name: Computed style tests
+        run: ctest --test-dir build/test -R ComputedStyleTests --output-on-failure
