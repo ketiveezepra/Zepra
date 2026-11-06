@@ -13,6 +13,7 @@
 
 #include "css/css_engine.hpp"
 #include "browser/dom.hpp"
+#include "dom/form_controls.hpp"
 #include <algorithm>
 #include <iostream>
 #include <sstream>
@@ -640,11 +641,11 @@ bool CSSCascade::compoundSelectorMatches(DOMElement* element, const std::string&
                 } else if (pseudoName == "enabled") {
                     matches = isFormControl && !element->hasAttribute("disabled");
                 } else if (pseudoName == "checked") {
-                    matches = (tagLower == "input" && element->hasAttribute("checked")) ||
+                    matches = (tagLower == "input" && formControlChecked(element)) ||
                               (tagLower == "option" && element->hasAttribute("selected"));
                 } else if (pseudoName == "placeholder-shown") {
                     matches = isTextField && element->hasAttribute("placeholder") &&
-                              element->getAttribute("value").empty();
+                              formControlValue(element).empty();
                 } else if (pseudoName == "read-write") {
                     matches = isTextField && !element->hasAttribute("readonly") &&
                               !element->hasAttribute("disabled");

@@ -50,6 +50,16 @@ struct TimerCallback {
  */
 class CanvasRegistry;
 class DOMBindings;
+struct KeyEventInit;
+struct FormSubmission;
+
+/// What a key press did on the page (ScriptContext::keyDown)
+struct KeyResult {
+    bool canceled = false;   ///< a listener called preventDefault(): no default action
+    bool consumed = false;   ///< the focused control used the key (typing, Backspace, Enter, arrows)
+};
+/// Receives a form submission no listener canceled (the browser navigates)
+using SubmitHandler = std::function<void(const FormSubmission& submission)>;
 
 /**
  * @brief A request made by fetch() or XMLHttpRequest
@@ -171,6 +181,41 @@ public:
      */
     bool dispatchMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY);
 
+    // ====== User input (user_input.cpp) ======
+
+    /**
+     * @brief A press of the primary button on a page element: focus moves to
+     * it or its nearest focusable ancestor (elsewhere the page takes focus),
+     * then the click and its default action (a checkbox toggles, a submit
+     * button submits its form, ...)
+     * @return false when a click listener canceled it (links stay put)
+     */
+    bool pressElement(DOMElement* target, double clientX, double clientY);
+    /**
+     * @brief A key going down: keydown at the focused element (else the body),
+     * keypress for keys that make a character, then, unless canceled, the
+     * key's action in the focused control: `text` is typed (beforeinput,
+     * input), Backspace deletes, Enter submits a single-line field's form or
+     * starts a line in a textarea, Enter or Space click a focused button
+     */
+    KeyResult keyDown(const KeyEventInit& key, const std::string& text);
+    /// A key going up: keyup at the focused element (else the body)
+    void keyUp(const KeyEventInit& key);
+    /**
+     * @brief Text that comes without a key (pasted, IME): typed into the
+     * focused text control with beforeinput and input
+     * @return false when there is no such control or a listener canceled it
+     */
+    bool insertText(const std::string& text, const std::string& inputType = "insertText");
+    /// The element with keyboard focus; null when the page itself has it
+    DOMElement* focusedElement() const;
+    /// Moves focus as focus() does (blur/focusout, focus/focusin; change when
+    /// the user changed the value); null gives it to the page
+    void focusElement(DOMElement* element);
+    /// Where submissions go once no listener canceled them (form.submit(),
+    /// requestSubmit(), Enter, submit buttons)
+    void setSubmitHandler(SubmitHandler handler);
+
     /**
      * @brief Free the DOM nodes scripts removed and can no longer reach.
      * Call after the layout tree was rebuilt, when nothing points at them.
@@ -268,6 +313,8 @@ private:
     std::unordered_map<int, std::shared_ptr<XhrState>> xhrInFlight_;   // by request id, while sent
     Zepra::Runtime::Object* makeFetchResponse(const std::shared_ptr<const FetchResponse>& response);
     Zepra::Runtime::Value makeScriptError(const std::string& type, const std::string& message);
+
+    SubmitHandler submitHandler_;
 
     // Dialog handlers
     AlertHandler alertHandler_;
