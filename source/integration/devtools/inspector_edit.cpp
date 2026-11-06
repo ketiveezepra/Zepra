@@ -13,8 +13,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
-#include "browser/clipboard.h"
 #include "browser/dom.hpp"
 #include "css/css_engine.hpp"
 #include "dom_edit.hpp"
@@ -55,12 +55,12 @@ void DevToolsPanel::blurConsole() {
     treeFocused_ = false;
     menuOpen_ = false;
     // A click on the page ends an edit, as in Firefox; the search keeps its text
-    if (field_.kind != FieldKind::None && field_.kind != FieldKind::Search) closeField();
-    else if (field_.kind == FieldKind::Search) field_.kind = FieldKind::None;
+    if (field_.kind != FieldKind::Closed && field_.kind != FieldKind::Search) closeField();
+    else if (field_.kind == FieldKind::Search) field_.kind = FieldKind::Closed;
 }
 
 void DevToolsPanel::insertConsoleText(const std::string& text) {
-    if (field_.kind != FieldKind::None) field_.text.insert(text);
+    if (field_.kind != FieldKind::Closed) field_.text.insert(text);
     else consoleInputText_ += text;
 }
 
@@ -132,7 +132,7 @@ void DevToolsPanel::commitField(const Page& page) {
         case FieldKind::RuleNew:
             commitRuleField(page, kind, field_.rule, text);
             break;
-        case FieldKind::None:
+        case FieldKind::Closed:
             break;
     }
     rulesDirty_ = true;
@@ -145,24 +145,24 @@ bool DevToolsPanel::onFieldKey(KeyCode key, const std::string& text, bool ctrl, 
         return true;
     }
     switch (field_.text.onKey(key, text, ctrl, shift)) {
-        case TextField::Result::None:
+        case TextField::Result::Ignored:
             // Not a key for the field: the tree keeps its arrows, the browser its shortcuts
             return field_.kind != FieldKind::Search && !ctrl;
         case TextField::Result::Copy:
-            if (field_.text.hasSelection()) ZepraBrowser::Clipboard::instance().copy(field_.text.selectedText());
+            if (field_.text.hasSelection()) copyToClipboard(field_.text.selectedText());
             return true;
         case TextField::Result::Cut:
-            if (!field_.text.lastCut().empty()) ZepraBrowser::Clipboard::instance().copy(field_.text.lastCut());
+            if (!field_.text.lastCut().empty()) copyToClipboard(field_.text.lastCut());
             break;
         case TextField::Result::Paste:
-            field_.text.insert(ZepraBrowser::Clipboard::instance().paste());
+            field_.text.insert(clipboardText());
             break;
         case TextField::Result::Commit:
             if (field_.kind == FieldKind::Search) runSearch(page, +1);
             else commitField(page);
             return true;
         case TextField::Result::Cancel:
-            if (field_.kind == FieldKind::Search) { field_.kind = FieldKind::None; treeFocused_ = true; }
+            if (field_.kind == FieldKind::Search) { field_.kind = FieldKind::Closed; treeFocused_ = true; }
             else closeField();
             return true;
         case TextField::Result::Next:
@@ -239,9 +239,9 @@ void DevToolsPanel::drawField(const Painter& p, float x, float y, float w, float
 // click on an attribute or a text edits it, a double click on a tag edits it as HTML
 bool DevToolsPanel::onTreeClick(float x, float y, const Page& page) {
     treeFocused_ = true;
-    if (field_.kind != FieldKind::None && field_.box.contains(x, y)) return true;
-    if (field_.kind != FieldKind::None && field_.kind != FieldKind::Search) commitField(page);
-    else if (field_.kind == FieldKind::Search) field_.kind = FieldKind::None;
+    if (field_.kind != FieldKind::Closed && field_.box.contains(x, y)) return true;
+    if (field_.kind != FieldKind::Closed && field_.kind != FieldKind::Search) commitField(page);
+    else if (field_.kind == FieldKind::Search) field_.kind = FieldKind::Closed;
 
     int idx = (int)std::floor((y - (tree_.y + 2) + treeScroll_) / kRowH);
     if (idx < 0 || idx >= (int)rows_.size()) return true;
@@ -284,7 +284,7 @@ bool DevToolsPanel::onTreeKey(KeyCode key, bool ctrl, bool shift, const Page& pa
     if (ctrl) {
         if (key == KeyCode::F) { openField(FieldKind::Search, searchQuery_, false); return true; }
         if (key == KeyCode::C && selected_) {
-            ZepraBrowser::Clipboard::instance().copy(outerHtmlOf(selected_));
+            copyToClipboard(outerHtmlOf(selected_));
             return true;
         }
         if (key == KeyCode::Z) {
@@ -379,6 +379,11 @@ void DevToolsPanel::runSearch(const Page& page, int step) {
         DOMNode* current = searchIndex_ >= 0 && searchIndex_ < (int)searchMatches_.size() ? searchMatches_[searchIndex_] : nullptr;
         searchMatches_ = page.document && !searchQuery_.empty()
             ? searchMarkup(page.document, searchQuery_) : std::vector<DOMNode*>{};
+        // A text drawn inside its element's row is found as that element
+        for (DOMNode*& n : searchMatches_) {
+            if (n->nodeType() == NodeType::Text && n->parentNode() && isLeafRow(n->parentNode())) n = n->parentNode();
+        }
+        searchMatches_.erase(std::unique(searchMatches_.begin(), searchMatches_.end()), searchMatches_.end());
         searchDomVersion_ = page.domVersion;
         auto it = std::find(searchMatches_.begin(), searchMatches_.end(), current);
         searchIndex_ = it != searchMatches_.end() ? (int)(it - searchMatches_.begin()) : (searchMatches_.empty() ? -1 : 0);
@@ -479,10 +484,10 @@ void DevToolsPanel::runMenuAction(int action, const Page& page) {
             field_.node = node;
             break;
         case kCopyOuterHtml:
-            ZepraBrowser::Clipboard::instance().copy(outerHtmlOf(node));
+            copyToClipboard(outerHtmlOf(node));
             break;
         case kCopySelector:
-            if (el) ZepraBrowser::Clipboard::instance().copy(uniqueSelector(el));
+            if (el) copyToClipboard(uniqueSelector(el));
             break;
         case kDuplicate:
             if (DOMNode* copy = duplicateNode(node)) selectNode(copy);
@@ -516,7 +521,7 @@ bool DevToolsPanel::onRightMouseDown(float x, float y, const Page& page) {
     if (tab_ != PanelTab::Inspector || !tree_.contains(x, y)) return true;
     int idx = (int)std::floor((y - (tree_.y + 2) + treeScroll_) / kRowH);
     if (idx < 0 || idx >= (int)rows_.size()) return true;
-    if (field_.kind != FieldKind::None && field_.kind != FieldKind::Search) commitField(page);
+    if (field_.kind != FieldKind::Closed && field_.kind != FieldKind::Search) commitField(page);
     selected_ = rows_[idx].node;
     treeFocused_ = true;
     openMenu(selected_, x, y, page);

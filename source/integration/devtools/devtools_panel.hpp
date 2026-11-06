@@ -103,7 +103,7 @@ public:
     /// Keys while the console input has focus. False when the key is not for the panel.
     bool onKey(NXRender::KeyCode key, const std::string& text, bool ctrl, bool shift, const Page& page);
     /// Whether typed text goes to the panel: the console input or an Inspector edit field
-    bool consoleFocused() const { return consoleFocused_ || field_.kind != FieldKind::None; }
+    bool consoleFocused() const { return consoleFocused_ || field_.kind != FieldKind::Closed; }
     /// The page was clicked: the panel lets go of the keyboard
     void blurConsole();
     /// Pasted text, for the console input or the open edit field
@@ -207,9 +207,9 @@ private:
 
     // Inspector editing (inspector_edit.cpp): one edit field at a time, tree keys,
     // the tree's context menu, markup search, forced pseudo-classes
-    enum class FieldKind { None, Search, Attribute, NewAttribute, Text, Html, RuleName, RuleValue, RuleNew };
+    enum class FieldKind { Closed, Search, Attribute, NewAttribute, Text, Html, RuleName, RuleValue, RuleNew };
     struct EditField {
-        FieldKind kind = FieldKind::None;
+        FieldKind kind = FieldKind::Closed;
         TextField text;
         Zepra::WebCore::DOMNode* node = nullptr;   ///< the node edited (tree fields)
         std::string attribute;                     ///< the attribute edited (Attribute)

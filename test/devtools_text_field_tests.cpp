@@ -298,8 +298,8 @@ TEST(DevToolsTextField, ShiftUpDownSelectLines) {
 
 TEST(DevToolsTextField, UpDownInSingleLineAreThePanels) {
     TextField f = field("10px");
-    EXPECT_EQ(key(f, KeyCode::Up), R::None);
-    EXPECT_EQ(key(f, KeyCode::Down), R::None);
+    EXPECT_EQ(key(f, KeyCode::Up), R::Ignored);
+    EXPECT_EQ(key(f, KeyCode::Down), R::Ignored);
     EXPECT_EQ(f.caret(), 4u);
 }
 
@@ -399,16 +399,16 @@ TEST(DevToolsTextField, TypingReplacesTheSelection) {
 
 TEST(DevToolsTextField, TextIsIgnoredWithCtrl) {
     TextField f = field("abc");
-    EXPECT_EQ(f.onKey(KeyCode::B, "b", true, false), R::None);
+    EXPECT_EQ(f.onKey(KeyCode::B, "b", true, false), R::Ignored);
     EXPECT_EQ(f.text(), "abc");
 }
 
 TEST(DevToolsTextField, UnusedKeysAreNone) {
     TextField f = field("abc");
-    EXPECT_EQ(key(f, KeyCode::F5), R::None);
-    EXPECT_EQ(key(f, KeyCode::PageUp), R::None);
-    EXPECT_EQ(key(f, KeyCode::Shift), R::None);
-    EXPECT_EQ(key(f, KeyCode::Tab, true), R::None);
+    EXPECT_EQ(key(f, KeyCode::F5), R::Ignored);
+    EXPECT_EQ(key(f, KeyCode::PageUp), R::Ignored);
+    EXPECT_EQ(key(f, KeyCode::Shift), R::Ignored);
+    EXPECT_EQ(key(f, KeyCode::Tab, true), R::Ignored);
     EXPECT_EQ(f.text(), "abc");
 }
 
@@ -433,7 +433,7 @@ TEST(DevToolsTextField, InsertDropsControlCharacters) {
     EXPECT_EQ(f.text(), "xabc");
     // Only control characters: nothing changes, the selection stays
     f.selectAll();
-    EXPECT_EQ(type(f, "\x08"), R::None);
+    EXPECT_EQ(type(f, "\x08"), R::Ignored);
     EXPECT_EQ(f.text(), "xabc");
     EXPECT_TRUE(f.hasSelection());
     f.insert("");

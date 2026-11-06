@@ -25,7 +25,7 @@ class TextField {
 public:
     /// What a key did, for the panel to act on
     enum class Result {
-        None,       ///< the key is not the field's: the panel may use it (Up/Down in a single-line field, Ctrl+B...)
+        Ignored,    ///< the key is not the field's: the panel may use it (Up/Down in a single-line field, Ctrl+B...)
         Changed,    ///< the text changed
         Commit,     ///< Enter (Ctrl+Enter in a multiline field): apply the text and stop editing
         Cancel,     ///< Escape: drop the edit

@@ -70,6 +70,9 @@ std::vector<Zepra::WebCore::DOMNode*> shownChildren(const Zepra::WebCore::DOMNod
 /// An element drawn on one row: no shown children, or a single text child
 bool isLeafRow(const Zepra::WebCore::DOMNode* element);
 std::string elementSelector(const Zepra::WebCore::DOMElement* el);
+/// The system clipboard (panel_clipboard.cpp)
+void copyToClipboard(const std::string& text);
+std::string clipboardText();
 /// Attributes in the order the tree shows them: id, class, then by name
 std::vector<std::pair<std::string, std::string>> sortedAttributes(const Zepra::WebCore::DOMElement* el);
 

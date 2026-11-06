@@ -3784,9 +3784,10 @@ void render() {
     if (g_scriptContext) {
         g_scriptContext->processTimers();
         g_scriptContext->runAnimationFrames();
-        if (g_layoutRoot && Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
-            relayoutDocument();
-        }
+    }
+    // Script and DevTools DOM changes (DevTools edits pages without scripts too)
+    if (g_layoutRoot && Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
+        relayoutDocument();
     }
 
     // === LAZY IMAGE LOADER POLL ===

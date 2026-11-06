@@ -22,6 +22,8 @@
 #include "scripting/script_context.hpp"
 #include "browser/layout_engine.h"
 #include "network_monitor.h"
+#include "scripting/dom_bindings.hpp"
+#include "dom_edit.hpp"
 
 using namespace Zepra::WebCore;
 
@@ -371,7 +373,7 @@ void DevToolsPanel::hide() {
     resizing_ = false;
     treeFocused_ = false;
     menuOpen_ = false;
-    if (field_.kind != FieldKind::Search) closeField(); else field_.kind = FieldKind::None;
+    if (field_.kind != FieldKind::Search) closeField(); else field_.kind = FieldKind::Closed;
 }
 
 void DevToolsPanel::toggle() {
@@ -423,6 +425,15 @@ void DevToolsPanel::syncWithDocument(const Page& page) {
         closeField();
         menuOpen_ = false;
         menuNode_ = nullptr;
+        // Nodes the Inspector removed go to the page's bindings once they cannot be
+        // undone, so a script that still holds one keeps it alive
+        EditHistory::DetachedSink sink;
+        if (page.script && page.script->domBindings()) {
+            sink = [bindings = page.script->domBindings()](std::unique_ptr<DOMNode> node) {
+                bindings->adoptDetachedNode(std::move(node));
+            };
+        }
+        resetEditHistory(page.document, std::move(sink));
         searchQuery_.clear();
         searchMatches_.clear();
         searchIndex_ = -1;
@@ -1074,8 +1085,8 @@ void DevToolsPanel::drawRules(const Painter& p, const Page& page, const Rect& ar
 void DevToolsPanel::onRulesClick(const Page& page, float x, float y) {
     if (hovButton_.contains(x, y)) { pseudoBarOpen_ = !pseudoBarOpen_; return; }
     if (pseudoBarOpen_ && y < rules_.y + 46) { onPseudoBarClick(x, y, page); return; }
-    if (field_.kind != FieldKind::None && field_.box.contains(x, y)) return;
-    if (field_.kind != FieldKind::None && field_.kind != FieldKind::Search) commitField(page);
+    if (field_.kind != FieldKind::Closed && field_.box.contains(x, y)) return;
+    if (field_.kind != FieldKind::Closed && field_.kind != FieldKind::Search) commitField(page);
     DOMElement* el = elementForStyles();
     float headerH = pseudoBarOpen_ ? 46 : 24;
     if (!el || !page.css || y < rules_.y + headerH) return;   // the header, or rows scrolled under it
@@ -1608,7 +1619,7 @@ bool DevToolsPanel::onMouseDown(float x, float y, const Page& page) {
         }
         return true;
     }
-    if (field_.kind == FieldKind::Search && !searchBox_.contains(x, y)) field_.kind = FieldKind::None;
+    if (field_.kind == FieldKind::Search && !searchBox_.contains(x, y)) field_.kind = FieldKind::Closed;
     if (y < panel_.y + kResizeGrip) {
         resizing_ = true;
         resizeGrabOffset_ = y - panel_.y;
@@ -1623,7 +1634,7 @@ bool DevToolsPanel::onMouseDown(float x, float y, const Page& page) {
         case PanelTab::Inspector:
             if (searchBox_.contains(x, y)) {
                 if (field_.kind != FieldKind::Search) {
-                    if (field_.kind != FieldKind::None) commitField(page);
+                    if (field_.kind != FieldKind::Closed) commitField(page);
                     openField(FieldKind::Search, searchQuery_, false);
                 }
             } else if (tree_.contains(x, y)) {
@@ -1715,7 +1726,7 @@ bool DevToolsPanel::onMouseWheel(float x, float y, float delta) {
 bool DevToolsPanel::onKey(NXRender::KeyCode key, const std::string& text, bool ctrl, bool shift, const Page& page) {
     using NXRender::KeyCode;
     if (!visible_) return false;
-    if (field_.kind != FieldKind::None && tab_ == PanelTab::Inspector) {
+    if (field_.kind != FieldKind::Closed && tab_ == PanelTab::Inspector) {
         if (key == KeyCode::F12) return false;
         return onFieldKey(key, text, ctrl, shift, page);
     }

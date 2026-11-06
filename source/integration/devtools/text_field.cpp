@@ -318,7 +318,7 @@ TextField::Result TextField::onKey(KeyCode key, const std::string& text, bool ct
     case KeyCode::Escape:
         return Result::Cancel;
     case KeyCode::Tab:
-        if (ctrl) return Result::None;   // Ctrl+Tab belongs to the browser
+        if (ctrl) return Result::Ignored;   // Ctrl+Tab belongs to the browser
         return shift ? Result::Previous : Result::Next;
     case KeyCode::Enter:
         if (!multiline_ || ctrl) return Result::Commit;
@@ -346,7 +346,7 @@ TextField::Result TextField::onKey(KeyCode key, const std::string& text, bool ct
         return Result::Moved;
     case KeyCode::Up:
     case KeyCode::Down:
-        if (!multiline_) return Result::None;   // the panel may step a CSS number, walk history...
+        if (!multiline_) return Result::Ignored;   // the panel may step a CSS number, walk history...
         moveVertically(key == KeyCode::Up ? -1 : 1, shift);
         return Result::Moved;
 
@@ -374,7 +374,7 @@ TextField::Result TextField::onKey(KeyCode key, const std::string& text, bool ct
     case KeyCode::Insert:
         if (ctrl && !shift) return Result::Copy;
         if (shift && !ctrl) return Result::Paste;
-        return Result::None;
+        return Result::Ignored;
     default:
         break;
     }
@@ -393,13 +393,13 @@ TextField::Result TextField::onKey(KeyCode key, const std::string& text, bool ct
         case KeyCode::V:
             return Result::Paste;
         default:
-            return Result::None;                 // other shortcuts are the panel's or the browser's
+            return Result::Ignored;                 // other shortcuts are the panel's or the browser's
         }
     }
 
-    if (!text.empty()) return insertText(text) ? Result::Changed : Result::None;
-    if (key == KeyCode::Space) return insertText(" ") ? Result::Changed : Result::None;
-    return Result::None;
+    if (!text.empty()) return insertText(text) ? Result::Changed : Result::Ignored;
+    if (key == KeyCode::Space) return insertText(" ") ? Result::Changed : Result::Ignored;
+    return Result::Ignored;
 }
 
 } // namespace ZepraBrowser::DevTools

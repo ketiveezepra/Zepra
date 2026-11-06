@@ -201,6 +201,7 @@ if(USE_NXRENDER)
         source/integration/devtools/style_rules.cpp
         source/integration/devtools/text_field.cpp
         source/integration/devtools/inspector_edit.cpp
+        source/integration/devtools/panel_clipboard.cpp
         source/integration/devtools/dom_edit.cpp
         source/zepraEngine/engine/dev_tools.cpp
         source/zepraEngine/engine/html_parser_stub.cpp
@@ -279,6 +280,7 @@ else()
         source/integration/devtools/style_rules.cpp
         source/integration/devtools/text_field.cpp
         source/integration/devtools/inspector_edit.cpp
+        source/integration/devtools/panel_clipboard.cpp
         source/integration/devtools/dom_edit.cpp
         source/zepraEngine/engine/dev_tools.cpp
         source/zepraEngine/media/audio_equalizer.cpp
