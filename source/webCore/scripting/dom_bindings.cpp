@@ -2348,6 +2348,10 @@ void DOMBindings::releaseDetachedNodes() {
         for (DOMElement** p : {&state.hovered, &state.active, &state.focused}) {
             if (*p && root->contains(*p)) *p = nullptr;
         }
+        auto& forced = state.forced;
+        forced.erase(std::remove_if(forced.begin(), forced.end(),
+                                    [&](const InteractionState::ForcedEntry& e) { return root->contains(e.element); }),
+                     forced.end());
     }
     graveyard_.clear();
 }

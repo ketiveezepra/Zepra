@@ -17,6 +17,7 @@ If we hit these numbers, Zepra becomes the most memory-efficient full-featured b
 
 | Condition | Target RSS | Measured (Windows, Release, 2026-10-25) |
 | :--- | :--- | :--- |
+| 2026-11-07 | `feat/devtools-inspector-editing` | **Inspector editing** (open): double-click an attribute or a text to edit it, Edit as HTML (F2 or the context menu), Add Attribute, Delete and Duplicate Node, Copy outerHTML and Copy CSS Selector, Ctrl+Z undo; tree keys (arrows fold and move, Delete, Ctrl+F, Ctrl+C); a markup search box (text, tag, attribute or CSS selector, Enter / Shift+Enter step through matches); Rules values and names edited in place and new declarations on a block's last line, for the selected element only (through its style attribute, never the shared sheet); forced :hover / :active / :focus from the `:hov` bar or the context menu. The comment tokenizer no longer drops a comment's first character, and the browser relayouts after DOM changes on pages without scripts |
 | **Idle, 1 tab** | `< 80MB` | 77–79 MB (small local page) ✅ |
 | **10 tabs, moderate sites** | `< 300MB` | not measured yet |
 | **50 tabs** | `< 800MB` | not measured yet |

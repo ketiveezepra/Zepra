@@ -202,6 +202,14 @@ if(TARGET webcore)
     endif()
     add_test(NAME WebCoreDomBindingsTests COMMAND webcore_dom_bindings_tests)
 
+    # :hover / :active / :focus forced by DevTools, alongside the real interaction state
+    add_executable(webcore_forced_pseudo_tests webcore_forced_pseudo_tests.cpp)
+    target_link_libraries(webcore_forced_pseudo_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(webcore_forced_pseudo_tests pthread)
+    endif()
+    add_test(NAME WebCoreForcedPseudoTests COMMAND webcore_forced_pseudo_tests)
+
     # Keys, typing, focus and forms: control values, key/input/focus/change/submit
     # events, click activation, and the browser's platform-key to DOM-key mapping
     add_executable(webcore_user_input_tests webcore_user_input_tests.cpp
@@ -231,6 +239,29 @@ if(TARGET webcore)
         target_link_libraries(devtools_style_rules_tests pthread)
     endif()
     add_test(NAME DevToolsStyleRulesTests COMMAND devtools_style_rules_tests)
+
+    # The DevTools text field: caret, selection and editing keys over UTF-8 text
+    add_executable(devtools_text_field_tests devtools_text_field_tests.cpp
+                   ${PROJECT_SOURCE_DIR}/source/integration/devtools/text_field.cpp)
+    target_include_directories(devtools_text_field_tests PRIVATE
+                               ${PROJECT_SOURCE_DIR}/source/integration
+                               ${PROJECT_SOURCE_DIR}/source/nxrender-cpp)
+    target_link_libraries(devtools_text_field_tests GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(devtools_text_field_tests pthread)
+    endif()
+    add_test(NAME DevToolsTextFieldTests COMMAND devtools_text_field_tests)
+
+    # The DevTools markup view: attribute, text and HTML edits with undo, delete, duplicate,
+    # Copy CSS Selector, Copy outerHTML, markup search, and the lifetime of removed nodes
+    add_executable(devtools_dom_edit_tests devtools_dom_edit_tests.cpp
+                   ${PROJECT_SOURCE_DIR}/source/integration/devtools/dom_edit.cpp)
+    target_include_directories(devtools_dom_edit_tests PRIVATE ${PROJECT_SOURCE_DIR}/source/integration)
+    target_link_libraries(devtools_dom_edit_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(devtools_dom_edit_tests pthread)
+    endif()
+    add_test(NAME DevToolsDomEditTests COMMAND devtools_dom_edit_tests)
 
     # window.getComputedStyle(): resolved values from the CSS engine, read-only declarations
     add_executable(computed_style_tests computed_style_tests.cpp)
