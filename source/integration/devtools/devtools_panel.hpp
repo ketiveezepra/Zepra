@@ -9,7 +9,8 @@
  * active page's DOM, style rules, computed styles, layout boxes, script
  * context, console log and network monitor directly. It changes the page only
  * when a declaration is switched off in the Rules pane, through that element's
- * style attribute.
+ * style attribute. The Network panel's "Disable cache" holds while the panel
+ * is open (Zepra::WebCore::setCacheDisabled).
  */
 #pragma once
 
@@ -21,6 +22,7 @@
 
 #include "input/events.h"
 #include "scripting/console_format.hpp"
+#include "network_details.hpp"
 #include "style_rules.hpp"
 
 namespace Zepra::WebCore {
@@ -97,11 +99,16 @@ public:
     bool onMouseDown(float x, float y, const Page& page);
     void onMouseUp(float x, float y);
     bool onMouseWheel(float x, float y, float delta);
-    /// Keys while the console input has focus. False when the key is not for the panel.
+    /// Keys while the console input or the Network filter box has focus. False when the key is not for the panel.
     bool onKey(NXRender::KeyCode key, const std::string& text, bool ctrl, bool shift, const Page& page);
     bool consoleFocused() const { return consoleFocused_; }
     void blurConsole() { consoleFocused_ = false; }
     void insertConsoleText(const std::string& text) { consoleInputText_ += text; }
+    /// A text field of the panel (console input, Network filter) has the keyboard
+    bool textInputFocused() const { return consoleFocused_ || networkFilterFocused_; }
+    /// Pastes into the focused text field
+    void insertText(const std::string& text);
+    void blurInputs() { consoleFocused_ = false; networkFilterFocused_ = false; }
 
 private:
     struct Row {
@@ -193,10 +200,23 @@ private:
     uint64_t nextConsoleId_ = 1;
 
     // Network
+    enum class NetworkDetailTab { Headers, Response, Timings };
     float networkScroll_ = 0, networkMax_ = 0;
-    int networkSelected_ = -1;          // index into the rows shown (after the type filter)
+    uint64_t networkSelectedId_ = 0;    // request id shown in the details pane (0: none)
+    std::vector<uint64_t> networkRowIds_;   // the rows shown, in order (for hit testing)
     int networkFilter_ = 0;             // index into kNetworkFilters (0 = all)
     std::vector<Rect> networkFilterButtons_;
+    std::string networkFilterText_;
+    bool networkFilterFocused_ = false;
+    bool disableCache_ = false;
+    Rect networkFilterBox_, disableCacheBox_, networkDetail_, networkDetailBody_, networkDetailClose_;
+    std::vector<Rect> networkDetailTabs_;
+    NetworkDetailTab networkDetailTab_ = NetworkDetailTab::Headers;
+    float networkDetailScroll_ = 0, networkDetailMax_ = 0;
+    // The Response tab's lines for one request at one width (rebuilt when either changes)
+    uint64_t responseLinesId_ = 0;
+    size_t responseLinesColumns_ = 0;
+    std::vector<std::string> responseLines_;
 
     void syncWithDocument(const Page& page);
     void rebuildRows(const Page& page);
@@ -213,6 +233,9 @@ private:
     void refreshHighlight(const Page& page);
     void drawConsole(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
     void drawNetwork(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
+    void drawNetworkDetails(const Painter& p, const zepra::NetworkEntry& entry, const Rect& area,
+                            float mouseX, float mouseY);
+    void selectNetworkRequest(uint64_t id);
     void evaluateConsoleInput(const Page& page);
     void buildConsoleRows(const Page& page);
     Zepra::WebCore::DOMElement* elementForStyles() const;
