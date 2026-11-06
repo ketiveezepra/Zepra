@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DevTools Inspector editing</title>
+<style>
+  body { font-family: sans-serif; color: #222; }
+  .card { border: 2px solid #8a7bd8; padding: 10px; margin: 8px 0; background-color: #f6f4ff; }
+  .card:hover { background-color: #ffe9c7; border-color: #d0662b; }
+  a { color: #1d4ed8; }
+  a:hover { color: #b0185c; text-decoration: underline; }
+  input:focus { outline: 2px solid #00b3f4; }
+  form:focus-within { background-color: #e8f7ee; }
+  .note { color: #555; font-style: italic; }
+</style>
+</head>
+<body>
+  <h1>Inspector editing test</h1>
+  <div class="card" id="first" data-role="demo">
+    <p class="note">Double-click an attribute or this text to edit it.</p>
+    <a href="#top">A link that turns pink on :hover</a>
+  </div>
+  <div class="card" id="second">
+    <p>Right-click a node for Edit As HTML, Duplicate, Delete and :hover.</p>
+    <ul><li>one</li><li>two</li><li>three</li></ul>
+  </div>
+  <form><input type="text" placeholder="Force :focus here"></form>
+</body>
+</html>
