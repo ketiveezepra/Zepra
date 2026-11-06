@@ -232,6 +232,14 @@ if(TARGET webcore)
     endif()
     add_test(NAME DevToolsStyleRulesTests COMMAND devtools_style_rules_tests)
 
+    # Layout geometry for page scripts: element boxes, getBoundingClientRect, offset*, client*, scrolling
+    add_executable(layout_geometry_tests layout_geometry_tests.cpp
+                   ${PROJECT_SOURCE_DIR}/source/webCore/browser/layout_geometry.cpp)
+    target_link_libraries(layout_geometry_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(layout_geometry_tests pthread)
+    endif()
+    add_test(NAME LayoutGeometryTests COMMAND layout_geometry_tests)
     # The DevTools Network panel: filter terms, Headers, Response lines, Timings, text bodies kept
     add_executable(devtools_network_tests devtools_network_tests.cpp
                    ${PROJECT_SOURCE_DIR}/source/integration/devtools/network_details.cpp)

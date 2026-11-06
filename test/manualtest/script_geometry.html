@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Script geometry manual test</title>
+<style>
+  body { font-family: sans-serif; padding: 16px; background: #fafafa; color: #222; }
+  #box { width: 300px; height: 60px; padding: 10px; border: 4px solid #4a7; background: #eef8f0; }
+  #frame { position: relative; width: 400px; height: 90px; border: 6px solid #47a; margin-top: 12px; background: #eef2fa; }
+  #inner { position: absolute; left: 30px; top: 20px; width: 120px; height: 40px; background: #fbe; }
+  #grow { height: 20px; background: #fd8; margin-top: 12px; width: 200px; }
+  table { border-collapse: collapse; margin-top: 12px; }
+  td, th { border: 1px solid #bbb; padding: 2px 8px; font-size: 13px; }
+  .pass { color: #186b2e; font-weight: bold; }
+  .fail { color: #b00020; font-weight: bold; }
+  #spacer { height: 1500px; }
+</style>
+</head>
+<body>
+  <p id="status">scripts did not run</p>
+  <div id="box">#box: 300 x 60, padding 10, border 4</div>
+  <div id="frame"><div id="inner">#inner</div></div>
+  <div id="grow">#grow</div>
+  <table id="results"><tr><th>expression</th><th>value</th><th>expected</th><th></th></tr></table>
+  <div id="spacer"></div>
+  <p id="end">end of page</p>
+  <script>
+    var results = document.getElementById("results");
+    var passed = 0, failed = 0;
+    function row(label, value, expected) {
+      var tr = document.createElement("tr");
+      var ok = expected === undefined || String(value) === String(expected);
+      [label, String(value), expected === undefined ? "(any)" : String(expected), ok ? "PASS" : "FAIL"].forEach(function (t, i) {
+        var td = document.createElement("td");
+        td.textContent = t;
+        if (i === 3) td.className = ok ? "pass" : "fail";
+        tr.appendChild(td);
+      });
+      results.appendChild(tr);
+      if (ok) passed++; else failed++;
+    }
+    var box = document.getElementById("box");
+    var frame = document.getElementById("frame");
+    var inner = document.getElementById("inner");
+    var grow = document.getElementById("grow");
+
+    row("box.offsetWidth", box.offsetWidth, 328);
+    row("box.offsetHeight", box.offsetHeight, 88);
+    row("box.clientWidth", box.clientWidth, 320);
+    row("box.clientTop", box.clientTop, 4);
+    row("box.offsetParent", box.offsetParent && box.offsetParent.tagName.toLowerCase(), "body");
+    var r = box.getBoundingClientRect();
+    row("box rect width/height", r.width + "x" + r.height, "328x88");
+    row("box rect left == offsetLeft", r.left === box.offsetLeft, true);
+    row("inner.offsetParent", inner.offsetParent && inner.offsetParent.id, "frame");
+    row("inner.offsetLeft/Top", inner.offsetLeft + "," + inner.offsetTop, "30,20");
+    var fr = frame.getBoundingClientRect(), ir = inner.getBoundingClientRect();
+    row("inner rect - frame rect", (ir.left - fr.left) + "," + (ir.top - fr.top), "36,26");
+    // A read right after a style change sees the new layout
+    grow.style.height = "45px";
+    row("grow.offsetHeight after style change", grow.offsetHeight, 45);
+    grow.style.width = "250px";
+    row("grow.offsetWidth after style change", grow.offsetWidth, 250);
+    row("innerWidth == html.clientWidth", innerWidth === document.documentElement.clientWidth, true);
+    row("html.scrollHeight > innerHeight", document.documentElement.scrollHeight > innerHeight, true);
+    var before = box.getBoundingClientRect().top;
+    window.scrollTo(0, 40);
+    row("scrollY after scrollTo(0, 40)", window.scrollY, 40);
+    row("box moved up by the scroll", before - box.getBoundingClientRect().top, 40);
+    window.scrollTo(0, 0);
+    row("scrollY back at 0", document.documentElement.scrollTop, 0);
+    document.getElementById("status").textContent = "geometry: " + passed + " passed, " + failed + " failed";
+    document.getElementById("status").className = failed ? "fail" : "pass";
+    console.log("geometry: " + passed + " passed, " + failed + " failed");
+    // Click 5px inside #box's top-left corner: the click lands where the rect says
+    box.addEventListener("click", function (e) {
+      var b = box.getBoundingClientRect();
+      row("click clientX/Y - rect left/top", Math.round(e.clientX - b.left) + "," + Math.round(e.clientY - b.top), "5,5");
+      // The next click (here) may hit-test the tree this read rebuilt
+      grow.style.height = "30px";
+      row("grow.offsetHeight in a click listener", grow.offsetHeight, 30);
+    });
+  </script>
+</body>
+</html>

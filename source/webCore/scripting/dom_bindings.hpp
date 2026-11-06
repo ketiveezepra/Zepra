@@ -20,6 +20,7 @@
 #pragma once
 
 #include "browser/dom.hpp"
+#include "scripting/page_geometry.hpp"
 #include "dom/form_controls.hpp"
 #include <functional>
 #include <memory>
@@ -68,6 +69,13 @@ public:
     void installDocument(DOMDocument* document);
     void setCanvases(CanvasRegistry* canvases) { canvases_ = canvases; }
     void setFunctionCompiler(FunctionCompiler compiler) { compileFunction_ = std::move(compiler); }
+    /// Where getBoundingClientRect, offset*, client*, scroll* and the
+    /// window's size and scroll position come from (the browser's layout).
+    /// Without one, elements have no boxes and the page does not scroll.
+    void setPageGeometry(PageGeometry* geometry) { geometry_ = geometry; refreshWindowGlobals(); }
+    /// Copies the viewport size and scroll position to the bare globals
+    /// (innerWidth, scrollY, ...), which are not the window's accessors
+    void refreshWindowGlobals();
     /// document.readyState: "loading", "interactive" or "complete"
     void setReadyState(const std::string& state) { readyState_ = state; }
 
@@ -130,6 +138,7 @@ private:
     FunctionCompiler compileFunction_;
     DOMDocument* document_ = nullptr;
     CanvasRegistry* canvases_ = nullptr;
+    PageGeometry* geometry_ = nullptr;
     std::string readyState_ = "loading";
     SubmitHandler submitHandler_;
     /// The focused control's value when it got focus (or last committed);
@@ -150,6 +159,7 @@ private:
     Zepra::Runtime::Object* tokenListProto_ = nullptr;
     Zepra::Runtime::Object* eventProto_ = nullptr;
     Zepra::Runtime::Object* mouseEventProto_ = nullptr;
+    Zepra::Runtime::Object* domRectProto_ = nullptr;
     Zepra::Runtime::Object* keyboardEventProto_ = nullptr;
     Zepra::Runtime::Object* inputEventProto_ = nullptr;
     Zepra::Runtime::Object* focusEventProto_ = nullptr;
@@ -170,6 +180,22 @@ private:
     void installCharacterData();
     void installDocumentInterface();
     void installEvents();
+    void installGeometry();
+
+    // Layout geometry
+    static constexpr double kDefaultViewportWidth = 1280, kDefaultViewportHeight = 720;
+    ElementGeometry geometryOf(const DOMElement* element, bool withScrollSize = false);
+    /// Bare globals mirroring the window's (refreshWindowGlobals), and the
+    /// values last written to them
+    static constexpr size_t kWindowGlobals = 6;
+    static constexpr const char* kWindowGlobalNames[kWindowGlobals] = {
+        "innerWidth", "innerHeight", "scrollX", "scrollY", "pageXOffset", "pageYOffset"};
+    double windowGlobals_[kWindowGlobals] = {};
+    bool windowGlobalsSet_ = false;
+    bool isScrollingElement(const DOMElement* element) const;
+    Zepra::Runtime::Value rectObject(const GeometryRect& rect);
+    DOMElement* offsetParentOf(DOMElement* element);
+    void scrollPage(double x, double y);
     void installForms();
 
     // Wrappers and node ownership

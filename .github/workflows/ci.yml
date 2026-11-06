@@ -60,6 +60,10 @@ jobs:
       - name: User input tests
         run: ctest --test-dir build/test -R WebCoreUserInputTests --output-on-failure
 
+      # Layout geometry page scripts read (getBoundingClientRect, offset*, scrolling)
+      - name: Script geometry tests
+        run: ctest --test-dir build/test -R LayoutGeometryTests --output-on-failure
+
   # ============================================================================
   # Windows — MSYS2 UCRT64 (GCC), Win32/WGL backend
   # ============================================================================
@@ -103,6 +107,10 @@ jobs:
       - name: User input tests
         run: ctest --test-dir build/test -R WebCoreUserInputTests --output-on-failure
 
+      # Layout geometry page scripts read (getBoundingClientRect, offset*, scrolling)
+      - name: Script geometry tests
+        run: ctest --test-dir build/test -R LayoutGeometryTests --output-on-failure
+
   # ============================================================================
   # macOS — Apple Silicon, AppleClang, Cocoa/NSOpenGL backend
   # ============================================================================
@@ -134,3 +142,7 @@ jobs:
       # Keys, typing, focus and forms on the live DOM
       - name: User input tests
         run: ctest --test-dir build/test -R WebCoreUserInputTests --output-on-failure
+
+      # Layout geometry page scripts read (getBoundingClientRect, offset*, scrolling)
+      - name: Script geometry tests
+        run: ctest --test-dir build/test -R LayoutGeometryTests --output-on-failure
