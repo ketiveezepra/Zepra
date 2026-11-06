@@ -738,8 +738,8 @@ void HTML5Tokenizer::processMarkupDeclarationOpen(char32_t c) {
 
     // Check "--"
     if (peeked.size() >= 2 && peeked[0] == '-' && peeked[1] == '-') {
-        // Consume the two dashes
-        nextChar(); nextChar();
+        // Consume the second dash (the first is c)
+        nextChar();
         current_ = {};
         current_.type = HTML5TokenType::Comment;
         state_ = TokenizerState::CommentStart;
@@ -756,7 +756,7 @@ void HTML5Tokenizer::processMarkupDeclarationOpen(char32_t c) {
     };
 
     if (matchStr("doctype")) {
-        for (int i = 0; i < 7; ++i) nextChar();
+        for (int i = 0; i < 6; ++i) nextChar();   // the rest of "DOCTYPE" (c is its first letter)
         current_ = {};
         current_.type = HTML5TokenType::DOCTYPE;
         state_ = TokenizerState::DOCTYPE;
@@ -764,7 +764,7 @@ void HTML5Tokenizer::processMarkupDeclarationOpen(char32_t c) {
     }
 
     if (matchStr("[cdata[")) {
-        for (int i = 0; i < 7; ++i) nextChar();
+        for (int i = 0; i < 6; ++i) nextChar();   // the rest of "[CDATA[" (c is its first character)
         // If in foreign content (SVG/MathML) — emit CDATA section
         // For now, treat as bogus comment
         current_ = {};

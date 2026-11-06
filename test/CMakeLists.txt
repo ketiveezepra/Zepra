@@ -220,6 +220,17 @@ if(TARGET webcore)
     endif()
     add_test(NAME DevToolsStyleRulesTests COMMAND devtools_style_rules_tests)
 
+    # The DevTools markup view: attribute, text and HTML edits with undo, delete, duplicate,
+    # Copy CSS Selector, Copy outerHTML, markup search, and the lifetime of removed nodes
+    add_executable(devtools_dom_edit_tests devtools_dom_edit_tests.cpp
+                   ${PROJECT_SOURCE_DIR}/source/integration/devtools/dom_edit.cpp)
+    target_include_directories(devtools_dom_edit_tests PRIVATE ${PROJECT_SOURCE_DIR}/source/integration)
+    target_link_libraries(devtools_dom_edit_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(devtools_dom_edit_tests pthread)
+    endif()
+    add_test(NAME DevToolsDomEditTests COMMAND devtools_dom_edit_tests)
+
     # SVG rasterizing (nanosvg + rewrite pass) for <img>, inline <svg> and icons
     add_executable(svg_raster_tests svg_raster_tests.cpp)
     target_link_libraries(svg_raster_tests webcore GTest::gtest GTest::gtest_main)
