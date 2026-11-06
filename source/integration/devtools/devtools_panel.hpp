@@ -2,7 +2,7 @@
 // Licensed under KPL-2.0. See LICENSE file for details.
 /**
  * @file devtools_panel.hpp
- * @brief The browser's docked developer tools: Inspector, Console, Network.
+ * @brief The browser's docked developer tools: Inspector, Console, Network, Sources.
  *
  * The panel owns its state (selection, expansion, scroll positions, console
  * input) and draws itself with primitives the browser lends it, reading the
@@ -16,10 +16,12 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
+#include "console_input.hpp"
 #include "input/events.h"
 #include "scripting/console_format.hpp"
 #include "network_details.hpp"
@@ -60,7 +62,7 @@ struct Page {
     uint64_t domVersion = 0;                           ///< Zepra::WebCore::domMutationVersion()
 };
 
-enum class PanelTab { Inspector, Console, Network };
+enum class PanelTab { Inspector, Console, Network, Sources };
 
 class DevToolsPanel {
 public:
@@ -73,7 +75,11 @@ public:
     float height() const { return height_; }
     PanelTab activeTab() const { return tab_; }
     /// Showing the Console focuses its input, as Firefox does
-    void setActiveTab(PanelTab tab) { tab_ = tab; consoleFocused_ = (tab == PanelTab::Console); }
+    void setActiveTab(PanelTab tab) {
+        tab_ = tab;
+        consoleFocused_ = (tab == PanelTab::Console);
+        filterFocused_ = false;
+    }
 
     /// Draws the panel in the rectangle (x, y, w, h). Call every frame it is visible.
     void draw(const Painter& p, const Page& page, float x, float y, float w, float h,
@@ -102,18 +108,27 @@ public:
     bool onMouseWheel(float x, float y, float delta);
     /// Right button: the Inspector tree's context menu. True when the press was inside the panel.
     bool onRightMouseDown(float x, float y, const Page& page);
-    /// Keys while a text field of the panel or the Inspector tree has focus. False when the key is not for the panel.
+    /// Keys while a text field of the panel (console input, console filter, Network
+    /// filter, an Inspector edit field) or the Inspector tree has focus. False when
+    /// the key is not for the panel.
     bool onKey(NXRender::KeyCode key, const std::string& text, bool ctrl, bool shift, const Page& page);
-    bool consoleFocused() const { return consoleFocused_; }
-    void insertConsoleText(const std::string& text) { consoleInputText_ += text; }
-    /// A text field of the panel (console input, Network filter, an Inspector edit field) has the keyboard
+    /// Whether the console input or the console filter takes the keys
+    bool consoleFocused() const { return consoleFocused_ || filterFocused_; }
+    void blurConsole() { consoleFocused_ = false; filterFocused_ = false; completionOpen_ = false; }
+    /// Pastes into the focused console field (the filter takes one line)
+    void insertConsoleText(const std::string& text);
+    /// A text field of the panel (console input or filter, Network filter, an Inspector
+    /// edit field) has the keyboard
     bool textInputFocused() const {
-        return consoleFocused_ || networkFilterFocused_ || field_.kind != FieldKind::Closed;
+        return consoleFocused() || networkFilterFocused_ || field_.kind != FieldKind::Closed;
     }
     /// Pastes into the focused text field
     void insertText(const std::string& text);
     /// The page was clicked: the panel lets go of the keyboard
     void blurInputs();
+
+    /// Opens the Sources view on a script (or document) at a line, as a console link does
+    void openSource(const std::string& url, uint32_t line);
 
 private:
     struct Row {
@@ -133,6 +148,7 @@ private:
         bool continuation = false;
         struct Toggle { size_t value; float x0, x1; };  ///< the triangle of message->values[value]
         std::vector<Toggle> toggles;                    ///< set while drawing a message row
+        float linkX0 = 0, linkX1 = 0;                   ///< the source link, when it opens a source
     };
 
     /// A selector (declaration -1) or declaration line of the Rules pane as last drawn
@@ -154,7 +170,7 @@ private:
          consoleToolbar_, networkList_, networkToolbar_;
     std::vector<Rect> tabButtons_;
     std::vector<Rect> levelButtons_;
-    Rect clearButton_;
+    Rect clearButton_, filterBox_, completionBox_, sourceList_, sourceView_;
 
     bool visible_ = false;
     float height_ = 320;
@@ -194,16 +210,43 @@ private:
 
     // Console
     bool consoleFocused_ = false;
-    std::string consoleInputText_;
+    ConsoleEditor input_;
     std::vector<std::string> consoleHistory_;
     int historyIndex_ = -1;
+    std::string historyDraft_;              // what was typed before walking the history
+    float inputScroll_ = 0;                 // first input line shown (in lines) when it has more than fit
     float consoleScroll_ = 0, consoleMax_ = 0;
     bool consoleStick_ = true;
     size_t consoleSeen_ = 0;
-    bool showErrors_ = true, showWarnings_ = true, showLogs_ = true;
     int caretBlink_ = 0;
     std::vector<ConsoleRow> consoleRows_;   // the rows of the last draw (for hit testing)
     uint64_t nextConsoleId_ = 1;
+    size_t consoleHidden_ = 0;              // messages the filter hid in the last draw
+
+    // Console filter
+    ConsoleFilter filter_;
+    ConsoleFilterMatcher filterMatcher_;
+    bool filterFocused_ = false;
+
+    // Console autocomplete
+    bool completionOpen_ = false;
+    CompletionQuery completionQuery_;
+    std::vector<std::string> completions_;  // ranked candidates for completionQuery_
+    int completionIndex_ = 0;
+    int completionTop_ = 0;                 // first candidate shown in the popup
+    std::string completionPathKey_;         // the path completionNames_ belongs to
+    std::vector<std::string> completionNames_;
+    Zepra::WebCore::ScriptContext* completionScript_ = nullptr;
+
+    // Sources
+    std::string sourceUrl_;
+    uint32_t sourceLine_ = 0;               // the line a link pointed at (highlighted)
+    bool sourceScrollToLine_ = false;
+    std::shared_ptr<const std::string> sourceText_;
+    std::vector<size_t> sourceLineStarts_;
+    float sourceScroll_ = 0, sourceMax_ = 0, sourceListScroll_ = 0;
+    std::vector<std::pair<Rect, std::string>> sourceListHits_;
+    std::function<float(const std::string&, float)> textWidth_;   // the painter's, for placing the caret on a click
 
     // Network
     enum class NetworkDetailTab { Headers, Response, Timings };
@@ -303,8 +346,16 @@ private:
     void drawNetworkDetails(const Painter& p, const zepra::NetworkEntry& entry, const Rect& area,
                             float mouseX, float mouseY);
     void selectNetworkRequest(uint64_t id);
+    void drawSources(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
     void evaluateConsoleInput(const Page& page);
     void buildConsoleRows(const Page& page);
+    bool onConsoleInputKey(NXRender::KeyCode key, const std::string& text, bool ctrl, bool shift, const Page& page);
+    bool onFilterKey(NXRender::KeyCode key, const std::string& text);
+    /// Recomputes the autocomplete candidates at the caret; `force` opens the
+    /// popup with nothing typed (Ctrl+Space)
+    void updateCompletions(const Page& page, bool force = false);
+    void acceptCompletion();
+    void setFilterText(std::string text);
     Zepra::WebCore::DOMElement* elementForStyles() const;
 };
 

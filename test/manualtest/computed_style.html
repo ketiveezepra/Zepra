@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>getComputedStyle manual test</title>
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 16px; background-color: #fafafa; color: #222222; }
+  #box { width: 300px; padding-left: 10px; color: rgb(20, 90, 160); font-size: 18px; background-color: #eef8f0; }
+  #note { margin-top: 6px; }
+  .faded { opacity: 0.5; }
+  .row { display: flex; flex-direction: column; }
+  table { border-collapse: collapse; margin-top: 12px; }
+  td, th { border: 1px solid #bbb; padding: 2px 8px; font-size: 13px; }
+  .pass { color: #186b2e; font-weight: bold; }
+  .fail { color: #b00020; font-weight: bold; }
+</style>
+</head>
+<body>
+  <p id="status">scripts did not run</p>
+  <div id="box" style="width: 240px; margin-top: 8px">#box <span id="note">inherits color and font-size</span></div>
+  <table id="results"><tr><th>expression</th><th>value</th><th>expected</th><th></th></tr></table>
+  <script>
+    var results = document.getElementById("results");
+    var passed = 0, failed = 0;
+    function row(label, value, expected) {
+      var tr = document.createElement("tr");
+      var ok = String(value) === String(expected);
+      [label, String(value), String(expected), ok ? "PASS" : "FAIL"].forEach(function (t, i) {
+        var td = document.createElement("td");
+        td.textContent = t;
+        if (i === 3) td.className = ok ? "pass" : "fail";
+        tr.appendChild(td);
+      });
+      results.appendChild(tr);
+      if (ok) passed++; else failed++;
+    }
+    function attempt(f) {
+      try { f(); return "no error"; } catch (e) { return e.name; }
+    }
+    var box = document.getElementById("box");
+    var note = document.getElementById("note");
+    var cs = getComputedStyle(box);
+    var ns = window.getComputedStyle(note);
+
+    row("cs instanceof CSSStyleDeclaration", cs instanceof CSSStyleDeclaration, true);
+    row("cs.width (inline beats #box rule)", cs.width, "240px");
+    row("cs.getPropertyValue('padding-left')", cs.getPropertyValue("padding-left"), "10px");
+    row("cs.marginTop", cs.marginTop, "8px");
+    row("cs.backgroundColor", cs.backgroundColor, "rgb(238, 248, 240)");
+    row("cs['background-color']", cs["background-color"], "rgb(238, 248, 240)");
+    row("ns.color (inherited)", ns.color, "rgb(20, 90, 160)");
+    row("ns.fontSize (inherited)", ns.fontSize, "18px");
+    row("ns.display", ns.display, "inline");
+    row("cs.length > 0 && cs.item(0) === cs[0]", cs.length > 0 && cs.item(0) === cs[0], true);
+    row("cs.item(0)", cs.item(0), "display");
+    row("JSON.stringify(cs.cssText)", JSON.stringify(cs.cssText), '""');
+    row("cs.getPropertyPriority('width')", JSON.stringify(cs.getPropertyPriority("width")), '""');
+    row("cs.setProperty('color', 'red')", attempt(function () { cs.setProperty("color", "red"); }), "NoModificationAllowedError");
+    row("cs.removeProperty('width')", attempt(function () { cs.removeProperty("width"); }), "NoModificationAllowedError");
+    row("cs.color = 'red'", attempt(function () { cs.color = "red"; }), "NoModificationAllowedError");
+    row("getComputedStyle(document)", attempt(function () { getComputedStyle(document); }), "TypeError");
+    var detached = document.createElement("div");
+    detached.style.width = "50px";
+    row("detached element: width / length", JSON.stringify(getComputedStyle(detached).width) + " / " + getComputedStyle(detached).length, '"" / 0');
+    // A read right after a style change sees the new style (same object)
+    box.style.width = "180px";
+    row("cs.width after style.width = 180px", cs.width, "180px");
+    note.className = "faded";
+    row("ns.opacity after class change", ns.opacity, "0.5");
+    box.style.color = "rgb(1, 2, 3)";
+    row("ns.color after parent color change", ns.color, "rgb(1, 2, 3)");
+    box.className = "row";
+    row("cs.display / flexDirection after class", cs.display + " / " + cs.flexDirection, "flex / column");
+    document.getElementById("status").textContent = "getComputedStyle: " + passed + " passed, " + failed + " failed";
+    document.getElementById("status").className = failed ? "fail" : "pass";
+    console.log("getComputedStyle: " + passed + " passed, " + failed + " failed");
+  </script>
+</body>
+</html>

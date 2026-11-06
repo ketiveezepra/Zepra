@@ -90,6 +90,11 @@ uint32_t BytecodeChunk::lineAt(size_t offset) const {
     return 0;
 }
 
+const std::string& BytecodeChunk::sourceName() const {
+    static const std::string none;
+    return sourceName_ ? *sourceName_ : none;
+}
+
 void BytecodeChunk::disassemble(const std::string& name) const {
     std::cout << "== " << name << " ==\n";
     for (size_t offset = 0; offset < code_.size();) {
@@ -195,6 +200,11 @@ bool hasSpread(const std::vector<Frontend::ExprPtr>& items) {
 BytecodeGenerator::BytecodeGenerator() {
 }
 
+void BytecodeGenerator::setSource(const std::string& name, uint32_t firstLine) {
+    sourceName_ = name.empty() ? nullptr : std::make_shared<const std::string>(name);
+    lineOffset_ = firstLine > 0 ? firstLine - 1 : 0;
+}
+
 std::unique_ptr<BytecodeChunk> BytecodeGenerator::compile(const Frontend::Program* program) {
     CompilerState mainState;
     mainState.functionName = "<script>";
@@ -226,6 +236,7 @@ std::unique_ptr<BytecodeChunk> BytecodeGenerator::compile(const Frontend::Progra
     if (hasErrors()) {
         return nullptr;
     }
+    stampSource(mainState.chunk);
     return std::make_unique<BytecodeChunk>(std::move(mainState.chunk));
 }
 
@@ -235,15 +246,15 @@ BytecodeChunk* BytecodeGenerator::currentChunk() {
 
 // Emit helpers
 void BytecodeGenerator::emit(uint8_t byte) {
-    currentChunk()->write(byte, currentLine_);
+    currentChunk()->write(byte, recordedLine());
 }
 
 void BytecodeGenerator::emit(Opcode op) {
-    currentChunk()->write(op, currentLine_);
+    currentChunk()->write(op, recordedLine());
 }
 
 void BytecodeGenerator::emitShort(uint16_t value) {
-    currentChunk()->writeShort(value, currentLine_);
+    currentChunk()->writeShort(value, recordedLine());
 }
 
 size_t BytecodeGenerator::emitJump(Opcode op) {
@@ -1214,6 +1225,7 @@ void BytecodeGenerator::compileFunction(const FunctionSource& source, Runtime::F
     for (const auto& local : fnState.locals) localNames.push_back(local.name);
     fn->setDebugNames(std::move(paramNames), std::move(localNames));
 
+    stampSource(fnState.chunk);
     auto chunk = std::make_unique<BytecodeChunk>(std::move(fnState.chunk));
     fn->setBytecodeChunk(chunk.get());
     retainChunk(std::move(chunk));

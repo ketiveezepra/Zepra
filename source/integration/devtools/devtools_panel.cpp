@@ -3,9 +3,10 @@
 /**
  * @file devtools_panel.cpp
  * @brief Docked developer tools: Inspector (DOM tree, style rules, box model,
- *        computed styles, element picker), Console (page output, JS input)
- *        and Network (the tab's NetworkMonitor: request list with a waterfall,
- *        filter box, Disable cache, and a request's Headers, Response and Timings).
+ *        computed styles, element picker), Console (page output, JS input
+ *        with autocomplete, filter), Network (the tab's NetworkMonitor: request
+ *        list with a waterfall, filter box, Disable cache, and a request's Headers,
+ *        Response and Timings) and Sources (the scripts the Console links to).
  */
 #include "devtools_panel.hpp"
 #include "panel_internal.hpp"
@@ -20,6 +21,7 @@
 
 #include "browser/dom.hpp"
 #include "css/css_engine.hpp"
+#include "css/computed_style_values.hpp"
 #include "scripting/script_context.hpp"
 #include "browser/layout_engine.h"
 #include "browser/network_recorder.hpp"
@@ -122,200 +124,6 @@ std::string fitText(const Painter& p, const std::string& s, float size, float ma
 namespace {
 
 
-std::string fmtPx(float v) {
-    char buf[32];
-    if (std::fabs(v - std::round(v)) < 0.05f) std::snprintf(buf, sizeof buf, "%d", (int)std::lround(v));
-    else std::snprintf(buf, sizeof buf, "%.1f", v);
-    return buf;
-}
-
-std::string lengthStr(const CSSLength& l) {
-    if (l.isAuto()) return "auto";
-    std::string n = fmtPx(l.value);
-    switch (l.unit) {
-        case CSSLength::Unit::Px: return n + "px";
-        case CSSLength::Unit::Em: return n + "em";
-        case CSSLength::Unit::Rem: return n + "rem";
-        case CSSLength::Unit::Ex: return n + "ex";
-        case CSSLength::Unit::Ch: return n + "ch";
-        case CSSLength::Unit::Vw: return n + "vw";
-        case CSSLength::Unit::Vh: return n + "vh";
-        case CSSLength::Unit::Vmin: return n + "vmin";
-        case CSSLength::Unit::Vmax: return n + "vmax";
-        case CSSLength::Unit::Percent: return n + "%";
-        case CSSLength::Unit::Fr: return n + "fr";
-        case CSSLength::Unit::Cm: return n + "cm";
-        case CSSLength::Unit::Mm: return n + "mm";
-        case CSSLength::Unit::In: return n + "in";
-        case CSSLength::Unit::Pt: return n + "pt";
-        case CSSLength::Unit::Pc: return n + "pc";
-        default: return n;
-    }
-}
-
-std::string colorStr(const CSSColor& c) {
-    if (c.a == 0) return "transparent";
-    char buf[48];
-    if (c.a == 255) std::snprintf(buf, sizeof buf, "rgb(%d, %d, %d)", c.r, c.g, c.b);
-    else std::snprintf(buf, sizeof buf, "rgba(%d, %d, %d, %.2f)", c.r, c.g, c.b, c.a / 255.0);
-    return buf;
-}
-
-const char* displayStr(DisplayValue d) {
-    switch (d) {
-        case DisplayValue::None: return "none";
-        case DisplayValue::Block: return "block";
-        case DisplayValue::Inline: return "inline";
-        case DisplayValue::InlineBlock: return "inline-block";
-        case DisplayValue::Flex: return "flex";
-        case DisplayValue::InlineFlex: return "inline-flex";
-        case DisplayValue::Grid: return "grid";
-        case DisplayValue::InlineGrid: return "inline-grid";
-        case DisplayValue::Table: return "table";
-        case DisplayValue::TableRow: return "table-row";
-        case DisplayValue::TableCell: return "table-cell";
-        case DisplayValue::ListItem: return "list-item";
-        case DisplayValue::Contents: return "contents";
-        case DisplayValue::TableRowGroup: return "table-row-group";
-        case DisplayValue::TableHeaderGroup: return "table-header-group";
-        case DisplayValue::TableFooterGroup: return "table-footer-group";
-        case DisplayValue::TableColumn: return "table-column";
-        case DisplayValue::TableColumnGroup: return "table-column-group";
-        case DisplayValue::TableCaption: return "table-caption";
-        case DisplayValue::InlineTable: return "inline-table";
-    }
-    return "block";
-}
-
-const char* positionStr(PositionValue p) {
-    switch (p) {
-        case PositionValue::Static: return "static";
-        case PositionValue::Relative: return "relative";
-        case PositionValue::Absolute: return "absolute";
-        case PositionValue::Fixed: return "fixed";
-        case PositionValue::Sticky: return "sticky";
-    }
-    return "static";
-}
-
-const char* justifyStr(JustifyAlign j) {
-    switch (j) {
-        case JustifyAlign::Start: return "start";
-        case JustifyAlign::End: return "end";
-        case JustifyAlign::Center: return "center";
-        case JustifyAlign::SpaceBetween: return "space-between";
-        case JustifyAlign::SpaceAround: return "space-around";
-        case JustifyAlign::SpaceEvenly: return "space-evenly";
-        case JustifyAlign::Stretch: return "stretch";
-        case JustifyAlign::FlexStart: return "flex-start";
-        case JustifyAlign::FlexEnd: return "flex-end";
-        case JustifyAlign::Baseline: return "baseline";
-        case JustifyAlign::Auto: return "auto";
-    }
-    return "auto";
-}
-
-const char* overflowStr(OverflowValue o) {
-    switch (o) {
-        case OverflowValue::Visible: return "visible";
-        case OverflowValue::Hidden: return "hidden";
-        case OverflowValue::Scroll: return "scroll";
-        case OverflowValue::Auto: return "auto";
-        case OverflowValue::Clip: return "clip";
-    }
-    return "visible";
-}
-
-const char* textAlignStr(TextAlign t) {
-    switch (t) {
-        case TextAlign::Left: return "left";
-        case TextAlign::Right: return "right";
-        case TextAlign::Center: return "center";
-        case TextAlign::Justify: return "justify";
-        case TextAlign::Start: return "start";
-        case TextAlign::End: return "end";
-    }
-    return "start";
-}
-
-std::vector<std::pair<std::string, std::string>> computedProperties(const CSSComputedStyle& s) {
-    std::vector<std::pair<std::string, std::string>> out;
-    auto add = [&](const char* n, const std::string& v) { out.emplace_back(n, v); };
-    add("display", displayStr(s.display));
-    add("position", positionStr(s.position));
-    add("visibility", s.visibility == Visibility::Visible ? "visible" :
-                      s.visibility == Visibility::Hidden ? "hidden" : "collapse");
-    add("box-sizing", s.boxSizing == BoxSizing::BorderBox ? "border-box" : "content-box");
-    add("opacity", fmtPx(s.opacity));
-    add("float", s.cssFloat == 1 ? "left" : s.cssFloat == 2 ? "right" : "none");
-    add("width", lengthStr(s.width));
-    add("height", lengthStr(s.height));
-    add("min-width", lengthStr(s.minWidth));
-    add("min-height", lengthStr(s.minHeight));
-    add("max-width", lengthStr(s.maxWidth));
-    add("max-height", lengthStr(s.maxHeight));
-    add("margin-top", lengthStr(s.marginTop));
-    add("margin-right", lengthStr(s.marginRight));
-    add("margin-bottom", lengthStr(s.marginBottom));
-    add("margin-left", lengthStr(s.marginLeft));
-    add("padding-top", lengthStr(s.paddingTop));
-    add("padding-right", lengthStr(s.paddingRight));
-    add("padding-bottom", lengthStr(s.paddingBottom));
-    add("padding-left", lengthStr(s.paddingLeft));
-    add("border-top-width", fmtPx(s.borderTopWidth) + "px");
-    add("border-right-width", fmtPx(s.borderRightWidth) + "px");
-    add("border-bottom-width", fmtPx(s.borderBottomWidth) + "px");
-    add("border-left-width", fmtPx(s.borderLeftWidth) + "px");
-    add("border-top-color", colorStr(s.borderTopColor));
-    add("border-radius", fmtPx(s.borderTopLeftRadius) + "px");
-    add("overflow-x", overflowStr(s.overflowX));
-    add("overflow-y", overflowStr(s.overflowY));
-    add("top", lengthStr(s.top));
-    add("right", lengthStr(s.right));
-    add("bottom", lengthStr(s.bottom));
-    add("left", lengthStr(s.left));
-    add("z-index", s.zIndexAuto ? "auto" : std::to_string(s.zIndex));
-    if (s.display == DisplayValue::Flex || s.display == DisplayValue::InlineFlex) {
-        const char* dir = s.flexDirection == FlexDirection::Row ? "row" :
-                          s.flexDirection == FlexDirection::RowReverse ? "row-reverse" :
-                          s.flexDirection == FlexDirection::Column ? "column" : "column-reverse";
-        add("flex-direction", dir);
-        add("flex-wrap", s.flexWrap ? (s.wrapReverse ? "wrap-reverse" : "wrap") : "nowrap");
-        add("justify-content", justifyStr(s.justifyContent));
-        add("align-items", justifyStr(s.alignItems));
-        add("align-content", justifyStr(s.alignContent));
-        add("gap", lengthStr(s.gap));
-    }
-    add("align-self", justifyStr(s.alignSelf));
-    add("flex-grow", fmtPx(s.flexGrow));
-    add("flex-shrink", fmtPx(s.flexShrink));
-    add("flex-basis", lengthStr(s.flexBasis));
-    if (s.order) add("order", std::to_string(s.order));
-    if (!s.gridTemplateColumns.empty()) add("grid-template-columns", s.gridTemplateColumns);
-    if (!s.gridTemplateRows.empty()) add("grid-template-rows", s.gridTemplateRows);
-    add("color", colorStr(s.color));
-    add("background-color", colorStr(s.backgroundColor));
-    if (!s.backgroundImage.empty()) add("background-image", s.backgroundImage);
-    add("font-family", s.fontFamily);
-    add("font-size", fmtPx(s.fontSize) + "px");
-    add("font-weight", std::to_string((int)s.fontWeight));
-    add("font-style", s.fontStyle == FontStyle::Normal ? "normal" :
-                      s.fontStyle == FontStyle::Italic ? "italic" : "oblique");
-    add("line-height", s.lineHeight > 4 ? fmtPx(s.lineHeight) + "px" : fmtPx(s.lineHeight));
-    add("text-align", textAlignStr(s.textAlign));
-    if (!s.textDecoration.empty()) add("text-decoration", s.textDecoration);
-    if (!s.textTransform.empty()) add("text-transform", s.textTransform);
-    if (s.letterSpacing != 0) add("letter-spacing", fmtPx(s.letterSpacing) + "px");
-    add("white-space", s.whiteSpace);
-    add("vertical-align", s.verticalAlign);
-    add("cursor", s.cursor);
-    add("pointer-events", s.pointerEvents);
-    if (!s.boxShadow.empty()) add("box-shadow", s.boxShadow);
-    if (!s.transform.empty()) add("transform", s.transform);
-    if (!s.transition.empty()) add("transition", s.transition);
-    return out;
-}
-
 std::string urlHost(const std::string& url) {
     size_t p = url.find("://");
     if (p == std::string::npos) return "";
@@ -371,8 +179,7 @@ void DevToolsPanel::hide() {
     visible_ = false;
     picker_ = false;
     pickHover_ = nullptr;
-    consoleFocused_ = false;
-    networkFilterFocused_ = false;
+    blurInputs();
     resizing_ = false;
     Zepra::WebCore::setCacheDisabled(false);   // "Disable cache" holds while the panel is open
     treeFocused_ = false;
@@ -498,6 +305,7 @@ void DevToolsPanel::draw(const Painter& p, const Page& page, float x, float y, f
     }
 
     panel_ = {x, y, w, h};
+    textWidth_ = p.textWidth;
     p.rect(x, y, w, h, kBg, 255);
     bool gripHover = mouseX >= x && mouseX < x + w && mouseY >= y && mouseY < y + kResizeGrip;
     p.rect(x, y, w, 1, (gripHover || resizing_) ? kAccent : kBorder, 255);
@@ -510,6 +318,7 @@ void DevToolsPanel::draw(const Painter& p, const Page& page, float x, float y, f
         case PanelTab::Inspector: drawInspector(p, page, content, mouseX, mouseY); break;
         case PanelTab::Console: drawConsole(p, page, content, mouseX, mouseY); break;
         case PanelTab::Network: drawNetwork(p, page, content, mouseX, mouseY); break;
+        case PanelTab::Sources: drawSources(p, page, content, mouseX, mouseY); break;
     }
     if (tab_ == PanelTab::Inspector) drawMenu(p, mouseX, mouseY);
     p.popClip();
@@ -540,10 +349,10 @@ void DevToolsPanel::drawToolbar(const Painter& p, const Page& page, float mouseX
     if (page.consoleLog) {
         for (const auto& e : *page.consoleLog) if (e.level == "error") errorCount++;
     }
-    const char* names[] = {"Inspector", "Console", "Network"};
+    const char* names[] = {"Inspector", "Console", "Network", "Sources"};
     tabButtons_.clear();
     float tx = pickerButton_.x + pickerButton_.w + 14;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         bool active = (int)tab_ == i;
         float labelW = p.textWidth(names[i], kFont);
         std::string badge;
@@ -731,7 +540,7 @@ void DevToolsPanel::drawStyles(const Painter& p, const Page& page, const Rect& a
     p.text(elementSelector(el), x0, area.y + 16, kTag, kFont);
     LayoutBox* box = page.layoutRoot ? findBoxForElement(page.layoutRoot, el) : nullptr;
     if (box) {
-        std::string size = fmtPx(box->width) + " x " + fmtPx(box->height);
+        std::string size = formatComputedNumber(box->width) + " x " + formatComputedNumber(box->height);
         p.text(size, area.x + area.w - 12 - p.textWidth(size, kSmallFont), area.y + 16, kMuted, kSmallFont);
     }
 
@@ -761,10 +570,10 @@ void DevToolsPanel::drawStyles(const Painter& p, const Page& page, const Rect& a
         };
         auto edgeLabels = [&](float inset, float t, float r, float b, float l) {
             float cx = dx + dw / 2, cy = dy + diagramH / 2;
-            centered(fmtPx(t), cx, dy + inset + 14, kText);
-            centered(fmtPx(b), cx, dy + diagramH - inset - 6, kText);
-            centered(fmtPx(l), dx + inset + band / 2, cy + 4, kText);
-            centered(fmtPx(r), dx + dw - inset - band / 2, cy + 4, kText);
+            centered(formatComputedNumber(t), cx, dy + inset + 14, kText);
+            centered(formatComputedNumber(b), cx, dy + diagramH - inset - 6, kText);
+            centered(formatComputedNumber(l), dx + inset + band / 2, cy + 4, kText);
+            centered(formatComputedNumber(r), dx + dw - inset - band / 2, cy + 4, kText);
         };
         p.text("margin", dx + 4, dy + 12, 0x2B1D0B, 9);
         p.text("border", dx + band + 4, dy + band + 12, 0x2B1D0B, 9);
@@ -774,7 +583,7 @@ void DevToolsPanel::drawStyles(const Painter& p, const Page& page, const Rect& a
         edgeLabels(band * 2, box->paddingTop, box->paddingRight, box->paddingBottom, box->paddingLeft);
         float contentW = box->width - box->borderLeft - box->borderRight - box->paddingLeft - box->paddingRight;
         float contentH = box->height - box->borderTop - box->borderBottom - box->paddingTop - box->paddingBottom;
-        centered(fmtPx(contentW) + " x " + fmtPx(contentH), dx + dw / 2, dy + diagramH / 2 + 4, kBg);
+        centered(formatComputedNumber(contentW) + " x " + formatComputedNumber(contentH), dx + dw / 2, dy + diagramH / 2 + 4, kBg);
         y += diagramH + 12;
     }
 
@@ -788,7 +597,7 @@ void DevToolsPanel::drawStyles(const Painter& p, const Page& page, const Rect& a
         p.text("No computed style", x0, y + 12, kMuted, kSmallFont);
         y += kRowH;
     } else {
-        auto props = computedProperties(*style);
+        auto props = computedStyleProperties(*style);
         float nameW = 0;
         for (const auto& pr : props) nameW = std::max(nameW, p.textWidth(pr.first, kSmallFont));
         nameW = std::min(nameW + 16, area.w * 0.45f);
@@ -897,7 +706,7 @@ void DevToolsPanel::drawPageOverlay(const Painter& p, const Page& page, float cl
         }
         if (picker_ && el == hover) {
             std::string label = elementSelector(el);
-            std::string size = fmtPx(w) + " x " + fmtPx(h);
+            std::string size = formatComputedNumber(w) + " x " + formatComputedNumber(h);
             float lw = p.textWidth(label, kFont), sw = p.textWidth(size, kSmallFont);
             float tw = lw + sw + 24, th = 22;
             float tx = std::max(clipX, std::min(x, clipX + clipW - tw));
@@ -1178,6 +987,11 @@ constexpr uint32_t kStringText = 0x86DE74;
 constexpr uint32_t kNumberText = 0x75BFFF;   // numbers, booleans
 constexpr uint32_t kNodeText   = 0x75BFFF;
 constexpr uint32_t kGroupText  = 0xFBFBFE;
+constexpr uint32_t kLinkLine   = 0x3A3118;   // the line a source link points at
+
+constexpr float kLineH = 18;           // console rows, input lines, popup rows, source lines
+constexpr size_t kMaxInputLines = 8;   // the input grows to this many lines, then scrolls
+constexpr int kPopupRows = 8;          // autocomplete candidates shown at once
 
 uint32_t kindColor(Kind k, uint32_t plain) {
     switch (k) {
@@ -1214,17 +1028,50 @@ std::string drawable(std::string s) {
     return s;
 }
 
-bool isError(const ConsoleMessage& m) { return m.level == "error"; }
-bool isWarning(const ConsoleMessage& m) { return m.level == "warn"; }
-bool isLog(const ConsoleMessage& m) {
-    return m.level == "log" || m.level == "info" || m.level == "debug" || m.level == "trace";
+// Typed or loaded text as the font can draw it: a tab as four spaces, other
+// code points past ASCII as one '?', at most `max` characters
+std::string typedText(const std::string& s, size_t max = 1000) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (out.size() >= max) { out += "..."; break; }
+        if (c == '\t') out += "    ";
+        else if (c == '\r') continue;
+        else if (c < 0x20) out += ' ';
+        else if (c < 0x80) out += (char)c;
+        else if ((c & 0xC0) == 0xC0) out += '?';   // a lead byte; its continuation bytes are dropped
+    }
+    return out;
 }
+
+// "app.js:12" for a link, the full text when the message names no script
+std::string sourceLabel(const ConsoleMessage& m) {
+    if (m.sourceUrl.empty() || m.source.rfind(m.sourceUrl, 0) != 0) return m.source;
+    return sourceDisplayName(m.sourceUrl) + m.source.substr(m.sourceUrl.size());
+}
+
 } // namespace
 
+void DevToolsPanel::setFilterText(std::string text) {
+    filter_.text = std::move(text);
+    filterMatcher_ = ConsoleFilterMatcher(filter_);
+}
+
+void DevToolsPanel::insertConsoleText(const std::string& text) {
+    if (filterFocused_) {
+        setFilterText(filter_.text + text.substr(0, text.find_first_of("\r\n")));
+    } else {
+        input_.insert(text);
+        completionOpen_ = false;
+    }
+}
+
 // The rows of the console, top to bottom: a message's line, then for each of
-// its values the lines of a multi-line text and, when expanded, its children
+// its values the lines of a multi-line text and, when expanded, its children.
+// Messages the filter hides are counted, not shown.
 void DevToolsPanel::buildConsoleRows(const Page& page) {
     consoleRows_.clear();
+    consoleHidden_ = 0;
     if (!page.consoleLog) return;
     std::function<void(ConsoleMessage&, ValuePreview&, int)> addChildren = [&](ConsoleMessage& m, ValuePreview& v, int depth) {
         for (const std::string& line : restLines(v.text)) {
@@ -1249,7 +1096,10 @@ void DevToolsPanel::buildConsoleRows(const Page& page) {
     };
     for (ConsoleMessage& m : *page.consoleLog) {
         if (m.id == 0) m.id = nextConsoleId_++;
-        if ((isError(m) && !showErrors_) || (isWarning(m) && !showWarnings_) || (isLog(m) && !showLogs_)) continue;
+        if (!filterMatcher_.passes(m)) {
+            consoleHidden_++;
+            continue;
+        }
         ConsoleRow r;
         r.message = &m;
         r.messageId = m.id;
@@ -1260,7 +1110,7 @@ void DevToolsPanel::buildConsoleRows(const Page& page) {
                 ConsoleRow c;
                 c.message = &m;
                 c.messageId = m.id;
-                c.depth = m.depth + 1;
+                c.depth = m.level == "input" ? m.depth : m.depth + 1;   // typed lines stay aligned
                 c.line = line;
                 c.continuation = true;
                 consoleRows_.push_back(std::move(c));
@@ -1272,7 +1122,9 @@ void DevToolsPanel::buildConsoleRows(const Page& page) {
 }
 
 void DevToolsPanel::drawConsole(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY) {
-    const float inputH = 28, barH = 26;
+    const float barH = 26;
+    const size_t inputLines = std::min(input_.lineCount(), kMaxInputLines);
+    const float inputH = 10 + inputLines * kLineH;
     consoleToolbar_ = {area.x, area.y, area.w, barH};
     consoleList_ = {area.x, area.y + barH, area.w, area.h - barH - inputH};
     consoleInputBox_ = {area.x, area.y + area.h - inputH, area.w, inputH};
@@ -1285,15 +1137,18 @@ void DevToolsPanel::drawConsole(const Painter& p, const Page& page, const Rect& 
         }
     }
 
-    // Toolbar: clear, level filters with counts
+    // Toolbar: clear, the text filter, level buttons with counts
     p.rect(consoleToolbar_.x, consoleToolbar_.y, consoleToolbar_.w, consoleToolbar_.h, kToolbar, 255);
     p.rect(consoleToolbar_.x, consoleToolbar_.y + barH - 1, consoleToolbar_.w, 1, kBorder, 255);
-    int nErr = 0, nWarn = 0, nLog = 0;
+    int nErr = 0, nWarn = 0, nLog = 0, nInfo = 0, nDebug = 0;
     if (page.consoleLog) {
         for (const auto& m : *page.consoleLog) {
-            if (isError(m)) nErr++;
-            else if (isWarning(m)) nWarn++;
-            else if (isLog(m)) nLog++;
+            std::string level = filterLevel(m);
+            if (level == "error") nErr++;
+            else if (level == "warn") nWarn++;
+            else if (level == "log") nLog++;
+            else if (level == "info") nInfo++;
+            else if (level == "debug") nDebug++;
         }
     }
     clearButton_ = {area.x + 8, area.y + 4, p.textWidth("Clear", kSmallFont) + 16, barH - 8};
@@ -1302,26 +1157,55 @@ void DevToolsPanel::drawConsole(const Painter& p, const Page& page, const Rect& 
     p.text("Clear", clearButton_.x + 8, clearButton_.y + 14, kText, kSmallFont);
 
     levelButtons_.clear();
-    struct Filter { const char* name; int count; bool* on; uint32_t color; };
-    Filter filters[] = {{"Errors", nErr, &showErrors_, kErrorText},
-                        {"Warnings", nWarn, &showWarnings_, kWarnText},
-                        {"Logs", nLog, &showLogs_, kText}};
+    struct Filter { const char* name; int count; bool on; uint32_t color; };
+    Filter filters[] = {{"Errors", nErr, filter_.errors, kErrorText},
+                        {"Warnings", nWarn, filter_.warnings, kWarnText},
+                        {"Logs", nLog, filter_.logs, kText},
+                        {"Info", nInfo, filter_.info, kText},
+                        {"Debug", nDebug, filter_.debug, kText}};
     float fx = area.x + area.w - 8;
-    for (int i = 2; i >= 0; i--) {
+    for (int i = 4; i >= 0; i--) {
         std::string label = std::string(filters[i].name) + " " + std::to_string(filters[i].count);
         float lw = p.textWidth(label, kSmallFont) + 16;
         Rect r{fx - lw, area.y + 4, lw, barH - 8};
-        p.rect(r.x, r.y, r.w, r.h, *filters[i].on ? kBg : kToolbar, 255);
+        p.rect(r.x, r.y, r.w, r.h, filters[i].on ? kBg : kToolbar, 255);
         if (r.contains(mouseX, mouseY)) p.rect(r.x, r.y, r.w, r.h, kHover, 255);
-        p.text(label, r.x + 8, r.y + 14, *filters[i].on ? filters[i].color : kMuted, kSmallFont);
+        p.text(label, r.x + 8, r.y + 14, filters[i].on ? filters[i].color : kMuted, kSmallFont);
         levelButtons_.insert(levelButtons_.begin(), r);
         fx -= lw + 6;
     }
 
-    // Rows
+    // Rows (built before the filter box, which shows how many the filter hid)
     buildConsoleRows(page);
-    const float lineH = 18;
-    consoleMax_ = consoleRows_.size() * lineH - consoleList_.h + 4;
+
+    float filterX = clearButton_.x + clearButton_.w + 8;
+    filterBox_ = {filterX, area.y + 4, std::max(60.0f, std::min(320.0f, fx - 6 - filterX)), barH - 8};
+    {
+        const Rect& fb = filterBox_;
+        p.rect(fb.x, fb.y, fb.w, fb.h, kBg, 255);
+        uint32_t edge = filterFocused_ ? kAccent : kBorder;
+        p.rect(fb.x, fb.y, fb.w, 1, edge, 255);
+        p.rect(fb.x, fb.y + fb.h - 1, fb.w, 1, edge, 255);
+        p.rect(fb.x, fb.y, 1, fb.h, edge, 255);
+        p.rect(fb.x + fb.w - 1, fb.y, 1, fb.h, edge, 255);
+        std::string hidden = consoleHidden_ ? std::to_string(consoleHidden_) + " hidden" : "";
+        float hiddenW = hidden.empty() ? 0 : p.textWidth(hidden, kSmallFont) + 8;
+        p.pushClip(fb.x + 1, fb.y, fb.w - 2 - hiddenW, fb.h);
+        std::string shown = typedText(filter_.text, 200);
+        if (shown.empty() && !filterFocused_) {
+            p.text("Filter output", fb.x + 6, fb.y + 14, kMuted, kSmallFont);
+        } else {
+            // the end of a long filter stays in view
+            float tw = p.textWidth(shown, kSmallFont);
+            float tx = std::min(fb.x + 6, fb.x + fb.w - hiddenW - 8 - tw);
+            p.text(shown, tx, fb.y + 14, kText, kSmallFont);
+            if (filterFocused_ && (caretBlink_ / 30) % 2 == 0) p.rect(tx + tw + 1, fb.y + 4, 1, fb.h - 8, kText, 255);
+        }
+        p.popClip();
+        if (!hidden.empty()) p.text(hidden, fb.x + fb.w - hiddenW, fb.y + 14, kMuted, kSmallFont);
+    }
+
+    consoleMax_ = consoleRows_.size() * kLineH - consoleList_.h + 4;
     if (page.consoleLog && page.consoleLog->size() != consoleSeen_) {
         consoleSeen_ = page.consoleLog->size();
         if (consoleStick_) consoleScroll_ = consoleMax_;
@@ -1331,13 +1215,15 @@ void DevToolsPanel::drawConsole(const Painter& p, const Page& page, const Rect& 
 
     p.pushClip(consoleList_.x, consoleList_.y, consoleList_.w, consoleList_.h);
     if (consoleRows_.empty()) {
-        p.text("Page console output and uncaught errors appear here.", area.x + 12, consoleList_.y + 22, kMuted, kFont);
+        const char* empty = consoleHidden_ ? "No messages match the filter."
+                                           : "Page console output and uncaught errors appear here.";
+        p.text(empty, area.x + 12, consoleList_.y + 22, kMuted, kFont);
     }
     const float textX = consoleList_.x + 24;
     float ly = consoleList_.y + 2 - consoleScroll_;
-    bool mouseInList = consoleList_.contains(mouseX, mouseY);
+    bool mouseInList = consoleList_.contains(mouseX, mouseY) && !(completionOpen_ && completionBox_.contains(mouseX, mouseY));
     for (ConsoleRow& row : consoleRows_) {
-        if (ly + lineH < consoleList_.y || ly > consoleList_.y + consoleList_.h) { ly += lineH; continue; }
+        if (ly + kLineH < consoleList_.y || ly > consoleList_.y + consoleList_.h) { ly += kLineH; continue; }
         ConsoleMessage& m = *row.message;
         uint32_t color = kText, bg = 0;
         bool hasBg = false;
@@ -1347,18 +1233,18 @@ void DevToolsPanel::drawConsole(const Painter& p, const Page& page, const Rect& 
         else if (m.level == "result") color = kResultText;
         else if (m.level == "group") color = kGroupText;
         else if (m.level == "debug") color = kMuted;
-        if (hasBg) p.rect(consoleList_.x, ly, consoleList_.w, lineH, bg, 255);
-        bool hovered = mouseInList && mouseY >= ly && mouseY < ly + lineH;
-        if (hovered && row.node && !row.node->children.empty()) p.rect(consoleList_.x, ly, consoleList_.w, lineH, kHover, 255);
+        if (hasBg) p.rect(consoleList_.x, ly, consoleList_.w, kLineH, bg, 255);
+        bool hovered = mouseInList && mouseY >= ly && mouseY < ly + kLineH;
+        if (hovered && row.node && !row.node->children.empty()) p.rect(consoleList_.x, ly, consoleList_.w, kLineH, kHover, 255);
         bool messageRow = !row.node && !row.continuation;
         if (messageRow) {
             // the "last row" separator; gutter icon by level
-            p.rect(consoleList_.x, ly + lineH - 1, consoleList_.w, 1, kBgAlt, 255);
-            float gx = consoleList_.x + 10, gy = ly + lineH / 2;
+            p.rect(consoleList_.x, ly + kLineH - 1, consoleList_.w, 1, kBgAlt, 255);
+            float gx = consoleList_.x + 10, gy = ly + kLineH / 2;
             if (m.level == "input") p.triangle(gx, gy - 4, gx, gy + 4, gx + 6, gy, kInputText);
             else if (m.level == "result") p.triangle(gx + 6, gy - 4, gx + 6, gy + 4, gx, gy, kResultText);
-            else if (m.level == "error") p.rect(consoleList_.x, ly, 3, lineH, kErrorText, 255);
-            else if (m.level == "warn") p.rect(consoleList_.x, ly, 3, lineH, kWarnText, 255);
+            else if (m.level == "error") p.rect(consoleList_.x, ly, 3, kLineH, kErrorText, 255);
+            else if (m.level == "warn") p.rect(consoleList_.x, ly, 3, kLineH, kWarnText, 255);
         }
         float x = textX + row.depth * kIndent;
         float baseline = ly + 13;
@@ -1368,13 +1254,14 @@ void DevToolsPanel::drawConsole(const Painter& p, const Page& page, const Rect& 
             x += p.textWidth(s, kFont);
         };
         auto arrow = [&](bool open) {
-            float ax = x + 2, ay = ly + lineH / 2;
+            float ax = x + 2, ay = ly + kLineH / 2;
             if (open) p.triangle(ax - 1, ay - 2, ax + 7, ay - 2, ax + 3, ay + 3, kMuted);
             else p.triangle(ax, ay - 4, ax, ay + 4, ax + 5, ay, kMuted);
             x += 12;
         };
         if (row.continuation) {
-            put(truncate(row.line, 400), m.level == "error" ? kErrorText : kMuted);
+            uint32_t c = m.level == "error" ? kErrorText : m.level == "input" ? kInputText : kMuted;
+            put(truncate(typedText(row.line), 400), c);
         } else if (row.node) {
             ValuePreview& v = *row.node;
             if (!v.children.empty()) arrow(v.expanded);
@@ -1383,8 +1270,9 @@ void DevToolsPanel::drawConsole(const Painter& p, const Page& page, const Rect& 
             put(truncate(firstLine(v.text), 400), kindColor(v.kind, color));
         } else {
             row.toggles.clear();
+            row.linkX0 = row.linkX1 = 0;
             if (m.values.empty()) {
-                put(truncate(firstLine(m.text), 400), color);
+                put(truncate(typedText(firstLine(m.text)), 400), color);
             } else {
                 for (size_t i = 0; i < m.values.size(); i++) {
                     ValuePreview& v = m.values[i];
@@ -1397,50 +1285,124 @@ void DevToolsPanel::drawConsole(const Painter& p, const Page& page, const Rect& 
                 }
             }
             if (!m.source.empty()) {
-                float sw = p.textWidth(m.source, kSmallFont);
-                p.text(m.source, consoleList_.x + consoleList_.w - 12 - sw, baseline, kMuted, kSmallFont);
+                // file:line on the right; a link to the Sources view when the text is kept
+                std::string label = typedText(sourceLabel(m), 120);
+                float sw = p.textWidth(label, kSmallFont);
+                float sx = consoleList_.x + consoleList_.w - 12 - sw;
+                bool linkable = page.script && m.sourceLine && page.script->sourceText(m.sourceUrl);
+                bool linkHover = linkable && hovered && mouseX >= sx && mouseX < sx + sw;
+                if (hasBg || x > sx - 8) p.rect(sx - 8, ly, sw + 20, kLineH - 1, hasBg ? bg : kBg, 255);
+                p.text(label, sx, baseline, linkHover ? kAccent : kMuted, kSmallFont);
+                if (linkHover) p.rect(sx, baseline + 2, sw, 1, kAccent, 255);
+                if (linkable) { row.linkX0 = sx; row.linkX1 = sx + sw; }
             }
         }
-        ly += lineH;
+        ly += kLineH;
     }
     p.popClip();
 
     // Scrollbar
     if (consoleMax_ > 0) {
-        float total = consoleRows_.size() * lineH + 4;
+        float total = consoleRows_.size() * kLineH + 4;
         float thumbH = std::max(20.0f, consoleList_.h * consoleList_.h / total);
         float thumbY = consoleList_.y + (consoleList_.h - thumbH) * (consoleScroll_ / consoleMax_);
         p.rect(consoleList_.x + consoleList_.w - 8, thumbY, 6, thumbH, kBorder, 255);
     }
 
-    // Input line
+    // Input: one line per line typed (Shift+Enter), scrolling past kMaxInputLines
     const Rect& ib = consoleInputBox_;
     p.rect(ib.x, ib.y, ib.w, ib.h, kBg, 255);
     p.rect(ib.x, ib.y, ib.w, 1, consoleFocused_ ? kAccent : kBorder, 255);
-    float ix = ib.x + 10, iy = ib.y + ib.h / 2;
-    p.triangle(ix, iy - 4, ix, iy + 4, ix + 6, iy, kAccent);
-    float baseline = ib.y + 18;
-    if (consoleInputText_.empty() && !consoleFocused_) {
-        p.text("Evaluate JavaScript in the page", ib.x + 24, baseline, kMuted, kFont);
+    const float inputX = ib.x + 24, firstRowY = ib.y + 5;
+    {
+        float ix = ib.x + 10, iy = firstRowY + kLineH / 2;
+        p.triangle(ix, iy - 4, ix, iy + 4, ix + 6, iy, kAccent);
+    }
+    const size_t caretLine = input_.caretLine();
+    if (caretLine < inputScroll_) inputScroll_ = (float)caretLine;
+    if (caretLine >= inputScroll_ + inputLines) inputScroll_ = (float)(caretLine - inputLines + 1);
+    const size_t top = (size_t)inputScroll_;
+    p.pushClip(ib.x, ib.y + 1, ib.w, ib.h - 1);
+    if (input_.empty() && !consoleFocused_) {
+        p.text("Evaluate JavaScript in the page", inputX, firstRowY + 13, kMuted, kFont);
     } else {
-        p.text(consoleInputText_, ib.x + 24, baseline, kText, kFont);
-        if (consoleFocused_ && (caretBlink_ / 30) % 2 == 0) {
-            float cx = ib.x + 24 + p.textWidth(consoleInputText_, kFont) + 1;
-            p.rect(cx, ib.y + 7, 1, ib.h - 14, kText, 255);
+        std::vector<std::string> lines = input_.lines();
+        for (size_t i = top; i < lines.size() && i < top + inputLines; i++) {
+            p.text(typedText(lines[i]), inputX, firstRowY + (i - top) * kLineH + 13, kText, kFont);
+        }
+        float caretX = inputX + p.textWidth(typedText(input_.caretLinePrefix()), kFont);
+        float caretY = firstRowY + (caretLine - top) * kLineH;
+        // The rest of the selected candidate, greyed after the caret
+        bool atLineEnd = input_.caret() == input_.text().size() || input_.text()[input_.caret()] == '\n';
+        if (completionOpen_ && atLineEnd && completionIndex_ < (int)completions_.size()) {
+            const std::string& pick = completions_[completionIndex_];
+            if (pick.rfind(completionQuery_.prefix, 0) == 0)
+                p.text(typedText(pick.substr(completionQuery_.prefix.size())), caretX + 1, caretY + 13, kMuted, kFont);
+        }
+        if (consoleFocused_ && (caretBlink_ / 30) % 2 == 0) p.rect(caretX + 1, caretY + 2, 1, kLineH - 4, kText, 255);
+    }
+    p.popClip();
+
+    // Autocomplete popup, above the line being typed
+    completionBox_ = {};
+    if (completionOpen_ && consoleFocused_ && !completions_.empty()) {
+        int rows = std::min(kPopupRows, (int)completions_.size());
+        completionIndex_ = std::max(0, std::min(completionIndex_, (int)completions_.size() - 1));
+        if (completionIndex_ < completionTop_) completionTop_ = completionIndex_;
+        if (completionIndex_ >= completionTop_ + rows) completionTop_ = completionIndex_ - rows + 1;
+        float widest = 120;
+        for (int i = 0; i < rows; i++)
+            widest = std::max(widest, p.textWidth(typedText(completions_[completionTop_ + i], 80), kFont) + 24);
+        std::string before = input_.caretLinePrefix();
+        before = before.substr(0, before.size() - std::min(before.size(), completionQuery_.prefix.size()));
+        float bx = std::min(inputX + p.textWidth(typedText(before), kFont) - 8, area.x + area.w - widest - 4);
+        float rowTop = firstRowY + (caretLine - top) * kLineH;
+        float bh = rows * kLineH + 4;
+        completionBox_ = {std::max(area.x + 4, bx), std::max(area.y, rowTop - bh), widest, bh};
+        const Rect& cb = completionBox_;
+        p.rect(cb.x, cb.y, cb.w, cb.h, kToolbar, 255);
+        p.rect(cb.x, cb.y, cb.w, 1, kBorder, 255);
+        p.rect(cb.x, cb.y + cb.h - 1, cb.w, 1, kBorder, 255);
+        p.rect(cb.x, cb.y, 1, cb.h, kBorder, 255);
+        p.rect(cb.x + cb.w - 1, cb.y, 1, cb.h, kBorder, 255);
+        for (int i = 0; i < rows; i++) {
+            int idx = completionTop_ + i;
+            float ry = cb.y + 2 + i * kLineH;
+            if (idx == completionIndex_) p.rect(cb.x + 1, ry, cb.w - 2, kLineH, kSelection, 255);
+            else if (mouseX >= cb.x && mouseX < cb.x + cb.w && mouseY >= ry && mouseY < ry + kLineH)
+                p.rect(cb.x + 1, ry, cb.w - 2, kLineH, kHover, 255);
+            std::string name = typedText(completions_[idx], 80);
+            float tx = cb.x + 12;
+            size_t typed = std::min(completionQuery_.prefix.size(), name.size());
+            if (typed && completions_[idx].rfind(completionQuery_.prefix, 0) == 0) {
+                // the typed part in the accent colour, as Firefox marks it
+                std::string head = name.substr(0, typed);
+                p.text(head, tx, ry + 13, kAccent, kFont);
+                tx += p.textWidth(head, kFont);
+                name = name.substr(typed);
+            }
+            p.text(name, tx, ry + 13, kText, kFont);
+        }
+        if ((int)completions_.size() > rows) {
+            // a thin bar shows where the visible candidates sit in the list
+            float th = std::max(10.0f, (cb.h - 4) * rows / completions_.size());
+            float ty = cb.y + 2 + (cb.h - 4 - th) * completionTop_ / std::max(1, (int)completions_.size() - rows);
+            p.rect(cb.x + cb.w - 4, ty, 2, th, kBorder, 255);
         }
     }
 }
 
 void DevToolsPanel::evaluateConsoleInput(const Page& page) {
-    std::string expr = consoleInputText_;
-    if (expr.empty()) return;
+    std::string expr = input_.text();
+    if (expr.find_first_not_of(" \t\n") == std::string::npos) return;
     auto log = [&](ConsoleMessage m) {
         if (!page.consoleLog) return;
         page.consoleLog->push_back(std::move(m));
         if (page.consoleLog->size() > 500) page.consoleLog->erase(page.consoleLog->begin());
     };
-    consoleHistory_.push_back(expr);
+    if (consoleHistory_.empty() || consoleHistory_.back() != expr) consoleHistory_.push_back(expr);
     historyIndex_ = -1;
+    historyDraft_.clear();
     consoleStick_ = true;
     ConsoleMessage input;
     input.level = "input";
@@ -1455,7 +1417,139 @@ void DevToolsPanel::evaluateConsoleInput(const Page& page) {
         // $0 is the Inspector's selection; the result (or the thrown value) comes back formatted
         log(page.script->evaluateConsole(expr, selected_));
     }
-    consoleInputText_.clear();
+    input_.clear();
+    inputScroll_ = 0;
+    completionOpen_ = false;
+    completionPathKey_.clear();   // the input may have defined globals
+}
+
+void DevToolsPanel::updateCompletions(const Page& page, bool force) {
+    // Typing on keeps the highlighted name while it still matches
+    std::string selected = completionOpen_ && completionIndex_ >= 0 && completionIndex_ < (int)completions_.size()
+                         ? completions_[completionIndex_] : std::string();
+    completionOpen_ = false;
+    if (!page.script) return;
+    CompletionQuery q = completionQuery(input_.text(), input_.caret());
+    if (!q.valid || (!force && q.prefix.empty() && q.path.empty())) return;
+    std::string key = "#";
+    for (const std::string& part : q.path) key += part + ".";
+    // The names of one object are listed once while its name is typed; a new
+    // word lists them again (scripts may have added globals since)
+    if (key != completionPathKey_ || page.script != completionScript_ || q.prefix.size() <= 1) {
+        completionNames_ = page.script->completionNames(q.path);
+        completionPathKey_ = key;
+        completionScript_ = page.script;
+    }
+    completions_ = rankCompletions(completionNames_, q.prefix);
+    if (completions_.empty() || (completions_.size() == 1 && completions_[0] == q.prefix)) return;
+    auto again = std::find(completions_.begin(), completions_.end(), selected);
+    completionIndex_ = again != completions_.end() ? (int)(again - completions_.begin()) : 0;
+    completionQuery_ = q;
+    completionOpen_ = true;
+}
+
+void DevToolsPanel::acceptCompletion() {
+    if (!completionOpen_ || completionIndex_ < 0 || completionIndex_ >= (int)completions_.size()) return;
+    input_.replaceBeforeCaret(completionQuery_.replaceFrom, completions_[completionIndex_]);
+    completionOpen_ = false;
+}
+
+// ---------------------------------------------------------------------------
+// Sources
+// ---------------------------------------------------------------------------
+
+void DevToolsPanel::openSource(const std::string& url, uint32_t line) {
+    tab_ = PanelTab::Sources;
+    sourceUrl_ = url;
+    sourceLine_ = line;
+    sourceScrollToLine_ = true;
+    blurConsole();
+}
+
+void DevToolsPanel::drawSources(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY) {
+    // The scripts the page ran (and its document, which holds the inline ones) | the selected text
+    float listW = std::min(260.0f, std::floor(area.w * 0.25f));
+    sourceList_ = {area.x, area.y, listW, area.h};
+    sourceView_ = {area.x + listW, area.y, area.w - listW, area.h};
+    std::vector<std::string> names = page.script ? page.script->sourceNames() : std::vector<std::string>{};
+    if (sourceUrl_.empty() && !names.empty()) sourceUrl_ = names.front();
+
+    p.rect(sourceList_.x, sourceList_.y, sourceList_.w, sourceList_.h, kBgAlt, 255);
+    p.rect(sourceList_.x + sourceList_.w - 1, sourceList_.y, 1, sourceList_.h, kBorder, 255);
+    sourceListHits_.clear();
+    p.pushClip(sourceList_.x, sourceList_.y, sourceList_.w - 1, sourceList_.h);
+    if (names.empty()) p.text("No scripts on this page", sourceList_.x + 10, sourceList_.y + 20, kMuted, kSmallFont);
+    float maxListScroll = names.size() * kLineH + 8 - sourceList_.h;
+    sourceListScroll_ = clampScroll(sourceListScroll_, maxListScroll);
+    float ly = sourceList_.y + 4 - sourceListScroll_;
+    for (const std::string& name : names) {
+        Rect r{sourceList_.x, ly, sourceList_.w - 1, kLineH};
+        if (name == sourceUrl_) p.rect(r.x, r.y, r.w, r.h, kSelection, 255);
+        else if (r.contains(mouseX, mouseY)) p.rect(r.x, r.y, r.w, r.h, kHover, 255);
+        p.text(truncate(typedText(sourceDisplayName(name), 60), 40), r.x + 10, r.y + 13, kText, kSmallFont);
+        sourceListHits_.push_back({r, name});
+        ly += kLineH;
+    }
+    p.popClip();
+
+    // Header: the full name and the line a link pointed at
+    const float headH = 22;
+    p.rect(sourceView_.x, sourceView_.y, sourceView_.w, headH, kToolbar, 255);
+    p.rect(sourceView_.x, sourceView_.y + headH - 1, sourceView_.w, 1, kBorder, 255);
+    std::string head = sourceUrl_.empty() ? "Sources" : typedText(sourceUrl_, 200);
+    if (sourceLine_) head += "   line " + std::to_string(sourceLine_);
+    p.text(head, sourceView_.x + 10, sourceView_.y + 15, kText, kSmallFont);
+
+    auto text = page.script && !sourceUrl_.empty() ? page.script->sourceText(sourceUrl_) : nullptr;
+    if (text != sourceText_) {
+        sourceText_ = text;
+        sourceLineStarts_.clear();
+        if (sourceText_) {
+            sourceLineStarts_.push_back(0);
+            for (size_t i = 0; i < sourceText_->size(); i++)
+                if ((*sourceText_)[i] == '\n') sourceLineStarts_.push_back(i + 1);
+        }
+    }
+    Rect body{sourceView_.x, sourceView_.y + headH, sourceView_.w, sourceView_.h - headH};
+    if (!sourceText_) {
+        const char* why = sourceUrl_.empty() ? "Click a file:line link in the Console to open its source here."
+                                             : "This source is not kept for the page.";
+        p.text(why, body.x + 12, body.y + 22, kMuted, kFont);
+        return;
+    }
+    size_t lineCount = sourceLineStarts_.size();
+    float gutterW = p.textWidth(std::to_string(lineCount), kSmallFont) + 20;
+    sourceMax_ = lineCount * kLineH + 4 - body.h;
+    if (sourceScrollToLine_) {
+        // the linked line a third of the way down
+        sourceScroll_ = sourceLine_ ? (sourceLine_ - 1) * kLineH - body.h / 3 : 0;
+        sourceScrollToLine_ = false;
+    }
+    sourceScroll_ = clampScroll(sourceScroll_, sourceMax_);
+
+    p.pushClip(body.x, body.y, body.w, body.h);
+    p.rect(body.x, body.y, gutterW, body.h, kBgAlt, 255);
+    size_t first = (size_t)std::max(0.0f, std::floor(sourceScroll_ / kLineH));
+    for (size_t i = first; i < lineCount; i++) {
+        float y = body.y + 2 + i * kLineH - sourceScroll_;
+        if (y > body.y + body.h) break;
+        if (i + 1 == sourceLine_) p.rect(body.x, y, body.w, kLineH, kLinkLine, 255);
+        std::string number = std::to_string(i + 1);
+        p.text(number, body.x + gutterW - 10 - p.textWidth(number, kSmallFont), y + 13,
+               i + 1 == sourceLine_ ? kWarnText : kMuted, kSmallFont);
+        size_t start = sourceLineStarts_[i];
+        size_t end = i + 1 < lineCount ? sourceLineStarts_[i + 1] - 1 : sourceText_->size();
+        // a minified bundle's line can be megabytes: only its start is drawn
+        std::string line = sourceText_->substr(start, std::min<size_t>(end - start, 2000));
+        p.text(typedText(line, 400), body.x + gutterW + 8, y + 13, kText, kFont);
+    }
+    p.popClip();
+    if (sourceMax_ > 0) {
+        float total = lineCount * kLineH + 4;
+        float thumbH = std::max(20.0f, body.h * body.h / total);
+        float thumbY = body.y + (body.h - thumbH) * (sourceScroll_ / sourceMax_);
+        p.rect(body.x + body.w - 8, thumbY, 6, thumbH, kBorder, 255);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1545,7 +1639,7 @@ void DevToolsPanel::selectNetworkRequest(uint64_t id) {
 void DevToolsPanel::insertText(const std::string& text) {
     if (field_.kind != FieldKind::Closed) field_.text.insert(text);
     else if (networkFilterFocused_) networkFilterText_ += text;
-    else if (consoleFocused_) consoleInputText_ += text;
+    else if (consoleFocused()) insertConsoleText(text);
 }
 
 void DevToolsPanel::drawNetwork(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY) {
@@ -1916,7 +2010,10 @@ bool DevToolsPanel::onMouseDown(float x, float y, const Page& page) {
         menuOpen_ = false;
         return false;
     }
+    bool popupClick = completionOpen_ && completionBox_.contains(x, y);
     consoleFocused_ = false;
+    filterFocused_ = false;
+    if (!popupClick) completionOpen_ = false;
     networkFilterFocused_ = false;
     if (menuOpen_) {
         menuOpen_ = false;
@@ -1951,13 +2048,41 @@ bool DevToolsPanel::onMouseDown(float x, float y, const Page& page) {
             }
             break;
         case PanelTab::Console:
-            if (consoleInputBox_.contains(x, y)) consoleFocused_ = true;
-            else if (clearButton_.contains(x, y)) { if (page.consoleLog) page.consoleLog->clear(); }
-            else if (consoleList_.contains(x, y)) {
-                // A triangle (or a property row) opens or closes one level of a value.
-                // The page may have logged since the last draw (the log vector moved), so
-                // the rows are rebuilt and the clicked one is matched by its message id.
-                int idx = (int)std::floor((y - (consoleList_.y + 2) + consoleScroll_) / 18.0f);
+            if (popupClick) {
+                int idx = (int)std::floor((y - completionBox_.y - 2) / kLineH);
+                if (idx >= 0) {
+                    completionIndex_ = completionTop_ + idx;
+                    acceptCompletion();
+                }
+                consoleFocused_ = true;
+            } else if (consoleInputBox_.contains(x, y)) {
+                consoleFocused_ = true;
+                // The caret goes where the click is
+                size_t line = (size_t)inputScroll_ + (size_t)std::max(0.0f, std::floor((y - consoleInputBox_.y - 5) / kLineH));
+                std::vector<std::string> lines = input_.lines();
+                line = std::min(line, lines.size() - 1);
+                const std::string& l = lines[line];
+                size_t column = 0;
+                float target = x - (consoleInputBox_.x + 24);
+                while (column < l.size() && textWidth_) {
+                    size_t next = column + 1;
+                    while (next < l.size() && ((unsigned char)l[next] & 0xC0) == 0x80) next++;
+                    float mid = (textWidth_(typedText(l.substr(0, column)), kFont) +
+                                 textWidth_(typedText(l.substr(0, next)), kFont)) / 2;
+                    if (mid > target) break;
+                    column = next;
+                }
+                input_.moveTo(line, column);
+            } else if (filterBox_.contains(x, y)) {
+                filterFocused_ = true;
+            } else if (clearButton_.contains(x, y)) {
+                if (page.consoleLog) page.consoleLog->clear();
+            } else if (consoleList_.contains(x, y)) {
+                // A triangle (or a property row) opens or closes one level of a value; a
+                // source link opens the Sources view. The page may have logged since the
+                // last draw (the log vector moved), so the rows are rebuilt and the
+                // clicked one is matched by its message id.
+                int idx = (int)std::floor((y - (consoleList_.y + 2) + consoleScroll_) / kLineH);
                 std::vector<ConsoleRow> drawn = std::move(consoleRows_);
                 buildConsoleRows(page);
                 if (idx >= 0 && idx < (int)drawn.size() && idx < (int)consoleRows_.size() &&
@@ -1966,6 +2091,10 @@ bool DevToolsPanel::onMouseDown(float x, float y, const Page& page) {
                     if (row.node) {
                         if (!row.node->children.empty()) row.node->expanded = !row.node->expanded;
                     } else if (!row.continuation) {
+                        if (drawn[idx].linkX1 > drawn[idx].linkX0 && x >= drawn[idx].linkX0 && x < drawn[idx].linkX1) {
+                            openSource(row.message->sourceUrl, row.message->sourceLine);
+                            return true;
+                        }
                         for (const auto& t : drawn[idx].toggles) {
                             if (x >= t.x0 - 4 && x <= t.x1 + 4 && t.value < row.message->values.size()) {
                                 ValuePreview& v = row.message->values[t.value];
@@ -1976,9 +2105,19 @@ bool DevToolsPanel::onMouseDown(float x, float y, const Page& page) {
                     }
                 }
             } else {
-                bool* flags[] = {&showErrors_, &showWarnings_, &showLogs_};
-                for (size_t i = 0; i < levelButtons_.size() && i < 3; i++) {
+                bool* flags[] = {&filter_.errors, &filter_.warnings, &filter_.logs, &filter_.info, &filter_.debug};
+                for (size_t i = 0; i < levelButtons_.size() && i < 5; i++) {
                     if (levelButtons_[i].contains(x, y)) *flags[i] = !*flags[i];
+                }
+                setFilterText(filter_.text);
+            }
+            break;
+        case PanelTab::Sources:
+            for (const auto& [r, name] : sourceListHits_) {
+                if (sourceList_.contains(x, y) && r.contains(x, y)) {
+                    sourceUrl_ = name;
+                    sourceLine_ = 0;
+                    sourceScroll_ = 0;
                 }
             }
             break;
@@ -2050,6 +2189,10 @@ bool DevToolsPanel::onMouseWheel(float x, float y, float delta) {
                 networkScroll_ = clampScroll(networkScroll_ + step, networkMax_);
             }
             break;
+        case PanelTab::Sources:
+            if (sourceList_.contains(x, y)) sourceListScroll_ = std::max(0.0f, sourceListScroll_ + step);
+            else sourceScroll_ = clampScroll(sourceScroll_ + step, sourceMax_);
+            break;
     }
     return true;
 }
@@ -2093,41 +2236,119 @@ bool DevToolsPanel::onKey(NXRender::KeyCode key, const std::string& text, bool c
                 return true;
         }
     }
-    if (!consoleFocused_ || tab_ != PanelTab::Console) return false;
-    if (ctrl || key == KeyCode::F12) return false;   // browser shortcuts (Ctrl+V pastes through insertConsoleText)
-    std::string& input = consoleInputText_;
+    if (!visible_ || tab_ != PanelTab::Console) return false;
+    if (filterFocused_) return !ctrl && onFilterKey(key, text);
+    if (!consoleFocused_) return false;
+    return onConsoleInputKey(key, text, ctrl, shift, page);
+}
+
+bool DevToolsPanel::onFilterKey(NXRender::KeyCode key, const std::string& text) {
+    using NXRender::KeyCode;
+    if (key == KeyCode::F12) return false;
+    std::string t = filter_.text;
+    switch (key) {
+        case KeyCode::Escape:
+            if (t.empty()) filterFocused_ = false;
+            else setFilterText("");
+            return true;
+        case KeyCode::Backspace:
+            if (!t.empty()) {
+                do { t.pop_back(); } while (!t.empty() && ((unsigned char)t.back() & 0xC0) == 0x80);
+                setFilterText(t);
+            }
+            return true;
+        case KeyCode::Tab:
+            filterFocused_ = false;
+            consoleFocused_ = true;
+            return true;
+        case KeyCode::Enter: case KeyCode::Up: case KeyCode::Down: case KeyCode::Left: case KeyCode::Right:
+            return true;
+        default:
+            if (!text.empty() && (unsigned char)text[0] >= 0x20) setFilterText(t + text);
+            else if (key == KeyCode::Space) setFilterText(t + " ");
+            return true;
+    }
+}
+
+bool DevToolsPanel::onConsoleInputKey(NXRender::KeyCode key, const std::string& text, bool ctrl, bool shift,
+                                      const Page& page) {
+    using NXRender::KeyCode;
+    if (ctrl) {
+        if (key == KeyCode::Space) { updateCompletions(page, true); return true; }
+        return false;   // browser shortcuts (Ctrl+V pastes through insertConsoleText)
+    }
+    if (key == KeyCode::F12) return false;
+    if (completionOpen_) {
+        int n = (int)completions_.size();
+        switch (key) {
+            case KeyCode::Tab:
+            case KeyCode::Enter:
+                if (key == KeyCode::Enter && shift) break;
+                acceptCompletion();
+                return true;
+            case KeyCode::Up: completionIndex_ = (completionIndex_ + n - 1) % n; return true;
+            case KeyCode::Down: completionIndex_ = (completionIndex_ + 1) % n; return true;
+            case KeyCode::PageUp: completionIndex_ = std::max(0, completionIndex_ - kPopupRows); return true;
+            case KeyCode::PageDown: completionIndex_ = std::min(n - 1, completionIndex_ + kPopupRows); return true;
+            case KeyCode::Escape: completionOpen_ = false; return true;
+            default: break;
+        }
+    }
     switch (key) {
         case KeyCode::Enter:
-            evaluateConsoleInput(page);
+            // Shift+Enter, or an unfinished expression (an open bracket, string or comment), adds a line
+            if (shift || isIncompleteInput(input_.text())) {
+                input_.insert("\n");
+                completionOpen_ = false;
+            } else {
+                evaluateConsoleInput(page);
+            }
             return true;
         case KeyCode::Escape:
             consoleFocused_ = false;
             return true;
         case KeyCode::Backspace:
-            if (!input.empty()) {
-                // drop one UTF-8 code point
-                do { input.pop_back(); } while (!input.empty() && ((unsigned char)input.back() & 0xC0) == 0x80);
-            }
+            input_.backspace();
+            if (completionOpen_) updateCompletions(page);
             return true;
+        case KeyCode::Delete: input_.deleteForward(); completionOpen_ = false; return true;
+        case KeyCode::Left: input_.left(); completionOpen_ = false; return true;
+        case KeyCode::Right: input_.right(); completionOpen_ = false; return true;
+        case KeyCode::Home: input_.home(); completionOpen_ = false; return true;
+        case KeyCode::End: input_.end(); completionOpen_ = false; return true;
         case KeyCode::Up:
-            if (!consoleHistory_.empty()) {
-                if (historyIndex_ < 0) historyIndex_ = (int)consoleHistory_.size() - 1;
-                else if (historyIndex_ > 0) historyIndex_--;
-                input = consoleHistory_[historyIndex_];
+            // Within a multi-line input first; the history from its first line
+            if (!input_.up() && !consoleHistory_.empty()) {
+                if (historyIndex_ < 0) {
+                    historyDraft_ = input_.text();
+                    historyIndex_ = (int)consoleHistory_.size() - 1;
+                } else if (historyIndex_ > 0) {
+                    historyIndex_--;
+                }
+                input_.setText(consoleHistory_[historyIndex_]);
             }
             return true;
         case KeyCode::Down:
-            if (historyIndex_ >= 0) {
+            if (!input_.down() && historyIndex_ >= 0) {
                 historyIndex_++;
-                if (historyIndex_ >= (int)consoleHistory_.size()) { historyIndex_ = -1; input.clear(); }
-                else input = consoleHistory_[historyIndex_];
+                if (historyIndex_ >= (int)consoleHistory_.size()) {
+                    historyIndex_ = -1;
+                    input_.setText(historyDraft_);
+                } else {
+                    input_.setText(consoleHistory_[historyIndex_]);
+                }
             }
             return true;
         case KeyCode::Tab:
+            // Tab completes: one candidate goes in at once, several open the list
+            updateCompletions(page, true);
+            if (completionOpen_ && completions_.size() == 1) acceptCompletion();
             return true;
         default:
-            if (!text.empty()) input += text;
-            else if (key == KeyCode::Space) input += ' ';
+            if (!text.empty() && (unsigned char)text[0] >= 0x20) input_.insert(text);
+            else if (key == KeyCode::Space) input_.insert(" ");
+            else return true;
+            updateCompletions(page);
             return true;
     }
 }
