@@ -14,6 +14,7 @@
 #include "scripting/console_format.hpp"
 #include "scripting/script_context.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -474,4 +475,134 @@ TEST(ConsoleFormat, InputErrors) {
     page.script->evaluate("undefinedFunction()", "test.js");
     ASSERT_GT(page.console.size(), before);
     EXPECT_EQ(page.console.back().level, "error");
+}
+
+// ---------------------------------------------------------------------------
+// Source positions (the Console's file:line links)
+// ---------------------------------------------------------------------------
+
+TEST(ConsoleSource, ConsoleCallsCarryTheirLine) {
+    Page page;
+    page.script->evaluate("var a = 1;\n\nconsole.log('three');\nconsole.warn('four');", "test.js");
+    ASSERT_GE(page.console.size(), 2u);
+    const ConsoleMessage& log = page.console[page.console.size() - 2];
+    EXPECT_EQ(log.sourceUrl, "test.js");
+    EXPECT_EQ(log.sourceLine, 3u);
+    EXPECT_EQ(log.source, "test.js:3");
+    EXPECT_EQ(page.console.back().sourceLine, 4u);
+}
+
+TEST(ConsoleSource, FunctionsAndCallbacksReportTheirOwnLine) {
+    Page page;
+    page.script->evaluate("function f() {\n  console.log('in f');\n}\nf();\n[1].forEach(function () {\n  console.info('cb');\n});",
+                          "app.js");
+    ASSERT_GE(page.console.size(), 2u);
+    EXPECT_EQ(page.console[page.console.size() - 2].sourceLine, 2u);
+    EXPECT_EQ(page.console.back().sourceLine, 6u);
+    EXPECT_EQ(page.console.back().sourceUrl, "app.js");
+}
+
+TEST(ConsoleSource, InlineScriptsCountFromTheirDocument) {
+    Page page;
+    page.script->evaluate("\nconsole.log('x');", "page.html", 10);
+    ASSERT_FALSE(page.console.empty());
+    EXPECT_EQ(page.console.back().sourceLine, 11u);
+    EXPECT_EQ(page.console.back().sourceUrl, "page.html");
+}
+
+TEST(ConsoleSource, UncaughtErrorsPointAtTheThrow) {
+    Page page;
+    page.script->evaluate("function g() {\n  var y = 2;\n  throw new Error('boom');\n}\ng();", "err.js");
+    ASSERT_FALSE(page.console.empty());
+    const ConsoleMessage& m = page.console.back();
+    EXPECT_EQ(m.level, "error");
+    EXPECT_NE(m.text.find("boom"), std::string::npos) << m.text;
+    EXPECT_EQ(m.sourceUrl, "err.js");
+    EXPECT_EQ(m.sourceLine, 3u);
+}
+
+TEST(ConsoleSource, SyntaxErrorsHaveLineAndColumn) {
+    Page page;
+    page.script->evaluate("var ok = 1;\nvar x = ;", "bad.js", 5);
+    ASSERT_FALSE(page.console.empty());
+    const ConsoleMessage& m = page.console.back();
+    EXPECT_EQ(m.text.rfind("SyntaxError: ", 0), 0u) << m.text;
+    EXPECT_EQ(m.sourceUrl, "bad.js");
+    EXPECT_EQ(m.sourceLine, 6u);
+    EXPECT_EQ(m.source.rfind("bad.js:6:", 0), 0u) << m.source;
+}
+
+TEST(ConsoleSource, StacksNameFileAndLine) {
+    Page page;
+    ConsoleMessage m = page.script->evaluateConsole("function h() { return new Error('e').stack; }\nh()");
+    ASSERT_EQ(m.level, "result") << m.text;
+    EXPECT_NE(m.text.find("at h (<console>:1)"), std::string::npos) << m.text;
+    EXPECT_EQ(m.text.find("bytecode:"), std::string::npos) << m.text;
+}
+
+TEST(ConsoleSource, RegisteredSources) {
+    Page page;
+    page.script->registerSource("a.js", "one");
+    page.script->registerSource("b.js", "two");
+    page.script->registerSource("a.js", "three");
+    std::vector<std::string> expected = {"b.js", "a.js"};
+    EXPECT_EQ(page.script->sourceNames(), expected);
+    ASSERT_TRUE(page.script->sourceText("a.js"));
+    EXPECT_EQ(*page.script->sourceText("a.js"), "three");
+    EXPECT_FALSE(page.script->sourceText("missing.js"));
+
+    // Past the budget the oldest texts go
+    std::string big(ScriptContext::kSourceBudget / 2 + 1, 'x');
+    page.script->registerSource("big1.js", big);
+    page.script->registerSource("big2.js", big);
+    EXPECT_FALSE(page.script->sourceText("big1.js"));
+    EXPECT_FALSE(page.script->sourceText("a.js"));
+    EXPECT_TRUE(page.script->sourceText("big2.js"));
+}
+
+// ---------------------------------------------------------------------------
+// Autocomplete names
+// ---------------------------------------------------------------------------
+
+namespace {
+bool hasName(const std::vector<std::string>& names, const std::string& n) {
+    return std::find(names.begin(), names.end(), n) != names.end();
+}
+}  // namespace
+
+TEST(ConsoleCompletionNames, GlobalsAndObjects) {
+    Page page;
+    page.script->evaluate("var demoConfig = { alpha: 1, beta: [1, 2] }; var label = 'hi';", "test.js");
+    auto globals = page.script->completionNames({});
+    EXPECT_TRUE(hasName(globals, "document"));
+    EXPECT_TRUE(hasName(globals, "console"));
+    EXPECT_TRUE(hasName(globals, "window"));
+    EXPECT_TRUE(hasName(globals, "demoConfig"));
+
+    auto config = page.script->completionNames({"demoConfig"});
+    EXPECT_TRUE(hasName(config, "alpha"));
+    EXPECT_TRUE(hasName(config, "beta"));
+    EXPECT_TRUE(hasName(config, "hasOwnProperty"));   // inherited
+    EXPECT_TRUE(hasName(page.script->completionNames({"demoConfig", "beta"}), "push"));
+
+    auto label = page.script->completionNames({"label"});
+    EXPECT_TRUE(hasName(label, "length"));
+    EXPECT_TRUE(hasName(label, "toUpperCase"));
+    EXPECT_TRUE(page.script->completionNames({"nothingHere"}).empty());
+}
+
+TEST(ConsoleCompletionNames, DomThroughNativeGetters) {
+    Page page;
+    auto doc = page.script->completionNames({"document"});
+    EXPECT_TRUE(hasName(doc, "body"));
+    EXPECT_TRUE(hasName(doc, "querySelector"));
+    EXPECT_FALSE(page.script->completionNames({"document", "body"}).empty());
+}
+
+TEST(ConsoleCompletionNames, ScriptGettersNeverRun) {
+    Page page;
+    page.script->evaluate("var ran = 0; var o = { get boom() { ran = 1; return { x: 1 }; } };", "test.js");
+    EXPECT_TRUE(hasName(page.script->completionNames({"o"}), "boom"));
+    EXPECT_TRUE(page.script->completionNames({"o", "boom"}).empty());
+    EXPECT_EQ(page.text("ran"), "0");
 }

@@ -1172,16 +1172,17 @@ std::vector<std::string> ScriptContext::completionNames(const std::vector<std::s
     auto read = [&](const Value& base, const std::string& key, Value& out) -> bool {
         Object* o = holder(base);
         if (!o) return false;
-        const PropertyDescriptor* accessor = nullptr;
-        Value value;
         try {
-            if (o->lookupProperty(key, value, accessor)) {
-                if (!accessor) {
-                    out = base.isObject() ? value : vm_->getMember(base, key);
+            // Arrays and functions reach their prototype through the VM, not a stored link
+            for (Object* h = o; h; h = vm_->prototypeOf(h)) {
+                auto desc = h->getOwnPropertyDescriptor(key);
+                if (!desc) continue;
+                if (!desc->isAccessorDescriptor()) {
+                    out = base.isObject() ? desc->value : vm_->getMember(base, key);
                     return true;
                 }
-                if (!accessor->getter.isObject()) return false;
-                auto* getter = dynamic_cast<Function*>(accessor->getter.asObject());
+                if (!desc->getter.isObject()) return false;
+                auto* getter = dynamic_cast<Function*>(desc->getter.asObject());
                 if (!getter || !getter->isNative()) return false;
                 out = vm_->call(getter, base, {});
                 return true;
@@ -1202,7 +1203,7 @@ std::vector<std::string> ScriptContext::completionNames(const std::vector<std::s
         if (seen.emplace(name, true).second) names.push_back(name);
     };
     auto addChain = [&](Object* o) {
-        for (int depth = 0; o && depth < 32; o = o->prototype(), depth++) {
+        for (int depth = 0; o && depth < 32; o = vm_->prototypeOf(o), depth++) {
             for (const std::string& n : o->getOwnPropertyNames()) add(n);
         }
     };
