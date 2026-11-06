@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>DevTools Network details</title>
+<link rel="stylesheet" href="devtools_rules.css">
+<style>body { font-family: sans-serif; margin: 24px; } pre { background: #f4f4f4; padding: 8px; }</style>
+</head>
+<body>
+<h1>Network panel details</h1>
+<p>Open DevTools (F12), switch to Network and click a request: Headers, Response
+(this page's JSON is re-indented) and Timings. Type in "Filter URLs" (for
+example <code>json</code>, <code>-css</code> or <code>is:failed</code>) and tick
+"Disable cache", then reload.</p>
+<pre id="out">fetching...</pre>
+<script>
+fetch("devtools_network.json")
+  .then(function (r) { return r.json(); })
+  .then(function (data) { document.getElementById("out").textContent = "fetched " + data.requests.length + " entries"; });
+fetch("missing.json").catch(function () {});
+</script>
+</body>
+</html>

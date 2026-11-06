@@ -422,7 +422,12 @@ std::unique_ptr<DOMNode> DOMElement::cloneNode(bool deep) const {
     clone->document_ = document_;
     clone->attributes_ = attributes_;
     clone->styleMap_ = styleMap_;
-    
+    // A cloned form control keeps what was typed and checked
+    clone->dirtyValue_ = dirtyValue_;
+    clone->valueDirty_ = valueDirty_;
+    clone->checkedDirty_ = checkedDirty_;
+    clone->checked_ = checked_;
+
     if (deep) {
         for (const auto& child : children_) {
             clone->appendChild(child->cloneNode(true));

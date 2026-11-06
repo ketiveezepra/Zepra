@@ -51,6 +51,16 @@ struct TimerCallback {
 class CanvasRegistry;
 class DOMBindings;
 class PageGeometry;
+struct KeyEventInit;
+struct FormSubmission;
+
+/// What a key press did on the page (ScriptContext::keyDown)
+struct KeyResult {
+    bool canceled = false;   ///< a listener called preventDefault(): no default action
+    bool consumed = false;   ///< the focused control used the key (typing, Backspace, Enter, arrows)
+};
+/// Receives a form submission no listener canceled (the browser navigates)
+using SubmitHandler = std::function<void(const FormSubmission& submission)>;
 
 /**
  * @brief A request made by fetch() or XMLHttpRequest
@@ -98,8 +108,31 @@ public:
     // Initialize with DOM
     void initialize(DOMDocument* document);
     
-    // Script execution
-    ScriptResult evaluate(const std::string& code, const std::string& filename = "<script>");
+    // Script execution. `filename` names the script in stack traces and console
+    // source links; `firstLine` is where the code starts in it (an inline
+    // script's line in its document).
+    ScriptResult evaluate(const std::string& code, const std::string& filename = "<script>", uint32_t firstLine = 1);
+
+    /**
+     * @brief Keeps the text of a script or document, for the DevTools source
+     * view behind a console message's link. The same name replaces the old
+     * text; the oldest texts go once all of them pass kSourceBudget bytes.
+     */
+    void registerSource(const std::string& name, const std::string& text);
+    /// The text registered under `name`, or null
+    std::shared_ptr<const std::string> sourceText(const std::string& name) const;
+    /// The registered names, in the order they were registered
+    std::vector<std::string> sourceNames() const;
+    static constexpr size_t kSourceBudget = 4 * 1024 * 1024;
+
+    /**
+     * @brief Property names for console autocomplete: the globals when `path`
+     * is empty, else the properties (own and inherited) of the value that
+     * `path[0].path[1]...` names. Only data properties and native getters are
+     * read on the way, so no page script runs. Empty when the path does not
+     * resolve to an object or primitive.
+     */
+    std::vector<std::string> completionNames(const std::vector<std::string>& path);
     
     // Console
     void setConsoleHandler(ConsoleHandler handler) { consoleHandler_ = handler; }
@@ -172,6 +205,41 @@ public:
      */
     bool dispatchMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY);
 
+    // ====== User input (user_input.cpp) ======
+
+    /**
+     * @brief A press of the primary button on a page element: focus moves to
+     * it or its nearest focusable ancestor (elsewhere the page takes focus),
+     * then the click and its default action (a checkbox toggles, a submit
+     * button submits its form, ...)
+     * @return false when a click listener canceled it (links stay put)
+     */
+    bool pressElement(DOMElement* target, double clientX, double clientY);
+    /**
+     * @brief A key going down: keydown at the focused element (else the body),
+     * keypress for keys that make a character, then, unless canceled, the
+     * key's action in the focused control: `text` is typed (beforeinput,
+     * input), Backspace deletes, Enter submits a single-line field's form or
+     * starts a line in a textarea, Enter or Space click a focused button
+     */
+    KeyResult keyDown(const KeyEventInit& key, const std::string& text);
+    /// A key going up: keyup at the focused element (else the body)
+    void keyUp(const KeyEventInit& key);
+    /**
+     * @brief Text that comes without a key (pasted, IME): typed into the
+     * focused text control with beforeinput and input
+     * @return false when there is no such control or a listener canceled it
+     */
+    bool insertText(const std::string& text, const std::string& inputType = "insertText");
+    /// The element with keyboard focus; null when the page itself has it
+    DOMElement* focusedElement() const;
+    /// Moves focus as focus() does (blur/focusout, focus/focusin; change when
+    /// the user changed the value); null gives it to the page
+    void focusElement(DOMElement* element);
+    /// Where submissions go once no listener canceled them (form.submit(),
+    /// requestSubmit(), Enter, submit buttons)
+    void setSubmitHandler(SubmitHandler handler);
+
     /**
      * @brief Free the DOM nodes scripts removed and can no longer reach.
      * Call after the layout tree was rebuilt, when nothing points at them.
@@ -214,7 +282,13 @@ private:
     /// Compiles and runs `code`; `value` (optional) receives its completion
     /// value, `thrown` (optional) the exception that ended it
     ScriptResult run(const std::string& code, const std::string& filename, Zepra::Runtime::Value* value,
-                     Zepra::Runtime::Value* thrown = nullptr);
+                     Zepra::Runtime::Value* thrown = nullptr, uint32_t firstLine = 1);
+    /// Reports a script's error to the console, at the position the engine gives
+    void reportError(const std::string& text, const std::string& file, uint32_t line, uint32_t column = 0);
+    /// Reports an uncaught value: an Error links to the first frame of its stack
+    void reportThrown(const std::string& text, const Zepra::Runtime::Value& thrown);
+    /// The script position the running native function was called from
+    void setCallerSource(ConsoleMessage& message) const;
     /// Hands a console entry to the message handler, else the text handler, else the terminal
     void emitConsole(ConsoleMessage message);
     void emitConsole(const std::string& level, const std::string& text);
@@ -234,6 +308,9 @@ private:
     int consoleGroupDepth_ = 0;
     std::unordered_map<std::string, int> consoleCounts_;
     std::unordered_map<std::string, double> consoleTimers_;
+    /// registerSource texts, oldest first
+    std::vector<std::pair<std::string, std::shared_ptr<const std::string>>> sources_;
+    size_t sourceBytes_ = 0;
     
     // ZepraScript Engine (Per-instance VM — each tab gets its own)
     Zepra::Runtime::VM* vm_ = nullptr;
@@ -273,6 +350,8 @@ private:
     std::unordered_map<int, std::shared_ptr<XhrState>> xhrInFlight_;   // by request id, while sent
     Zepra::Runtime::Object* makeFetchResponse(const std::shared_ptr<const FetchResponse>& response);
     Zepra::Runtime::Value makeScriptError(const std::string& type, const std::string& message);
+
+    SubmitHandler submitHandler_;
 
     // Dialog handlers
     AlertHandler alertHandler_;

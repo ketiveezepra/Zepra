@@ -65,6 +65,9 @@
 #include "css/ua_stylesheet.h"
 #include "scripting/script_context.hpp"
 #include "scripting/canvas_bindings.hpp"
+#include "scripting/dom_bindings.hpp"
+#include "dom/form_controls.hpp"
+#include "page_keys.hpp"
 #include "nxgfx/canvas2d/canvas_context.h"
 #include "nxgfx/webgl/webgl_context.h"
 using namespace Zepra::WebCore;
@@ -85,6 +88,7 @@ extern "C" {
 #include "nxhttp.h"
 #include "http_client.hpp"
 #include "browser/network_recorder.hpp"
+#include "browser/network_recorder_http.hpp"
 #include "network_monitor.h"
 
 // ===========================================================================
@@ -370,6 +374,12 @@ zepra::DownloadManager g_downloadManager;
 // Focus state
 using ZepraBrowser::LayoutBox;
 static LayoutBox* g_focusedBox = nullptr;
+// The focus the current styles were computed with (:focus restyles on change)
+static DOMElement* g_styledFocus = nullptr;
+// A GET form submission waiting for the end of the script task that made it
+static struct PendingSubmission { std::string url; bool newTab = false; int tabId = -1; } g_pendingSubmission;
+static void syncPageFocus();
+void openNewTab(const std::string& url);
 
 // Input cursor position (for visual feedback)
 static int g_cursorBlink = 0;
@@ -480,6 +490,7 @@ struct HttpResponse {
     std::string finalUrl;                                          // after redirects
     std::vector<std::pair<std::string, std::string>> headers;      // response headers
     size_t transferred = 0;                                        // bytes off the wire
+    Zepra::WebCore::ResourceResponseInfo details;                  // headers, timings, body preview (Network panel)
 };
 
 /// What a request is for and who asked (the Network panel shows it)
@@ -533,11 +544,21 @@ public:
             entry = std::move(it->second);
             inFlight_.erase(it);
         }
+        if (!response.requestHeaders.empty()) {
+            std::vector<zepra::NetworkHeader> sent;
+            for (const auto& [name, value] : response.requestHeaders) sent.push_back({name, value});
+            entry.monitor->recordRequestHeaders(entry.id, std::move(sent));
+        }
         if (response.status == 0 && !response.error.empty()) {
             entry.monitor->recordError(entry.id, response.error);
             return;
         }
         zepra::NetworkResponse res;
+        for (const auto& [name, value] : response.responseHeaders) res.headers.push_back({name, value});
+        res.body_preview = response.bodyPreview;
+        res.body_truncated = response.bodyTruncated;
+        const auto& t = response.timings;
+        res.timings = {t.known, t.redirect, t.dns, t.connect, t.tls, t.send, t.wait, t.receive};
         res.status_code = response.status;
         res.status_text = response.statusText;
         res.content_type = response.mimeType;
@@ -608,13 +629,17 @@ HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& optio
         } else {
             std::cerr << "[Browser] FAILED " << url << ": " << response.error << " (" << (int)elapsedMs << " ms)" << std::endl;
         }
-        Zepra::WebCore::ResourceResponseInfo done;
+        Zepra::WebCore::ResourceResponseInfo done = std::move(response.details);
         done.status = response.statusCode;
         done.statusText = response.statusText;
         done.mimeType = response.contentType;
         done.bodySize = response.data.size();
         done.transferredBytes = response.transferred;
         done.error = response.error;
+        if (done.bodyPreview.empty() && response.error.empty()) {
+            done.bodyPreview = Zepra::WebCore::textBodyPreview(done.mimeType, response.data.data(), response.data.size(),
+                                                               Zepra::WebCore::kBodyPreviewLimit, done.bodyTruncated);
+        }
         g_tabNetworkRecorder.didFinishRequest(recordId, done);
         return response;
     };
@@ -658,6 +683,10 @@ HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& optio
         Zepra::Networking::HttpClient client(config);
         Zepra::Networking::HttpRequest request(httpMethodFromString(options.method), url);
         for (const auto& [name, value] : options.headers) request.setHeader(name, value);
+        if (Zepra::WebCore::cacheDisabled()) {   // DevTools "Disable cache"
+            request.setHeader("Cache-Control", "no-cache");
+            request.setHeader("Pragma", "no-cache");
+        }
         if (!options.body.empty()) request.setBody(options.body);
         
         auto netResponse = client.send(request);
@@ -669,6 +698,8 @@ HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& optio
         response.finalUrl = netResponse.url().empty() ? url : netResponse.url();
         response.transferred = netResponse.bytesReceived();
         for (const auto& [name, value] : netResponse.headers()) response.headers.emplace_back(name, value);
+        response.details.mimeType = response.contentType;
+        Zepra::WebCore::fillResponseDetails(response.details, netResponse);
         
         if (netResponse.hasError()) {
             response.success = false;
@@ -1253,6 +1284,7 @@ void parseWithWebCore(const std::string& html) {
     // Prevents use-after-free when worker threads hold stale pointers; other
     // tabs keep their boxes (and their loads) in Tab::layoutRoot
     ZepraBrowser::g_lazyImageLoader.cancelTab(g_activeTabId);
+    ZepraBrowser::g_lazyImageLoader.newPageLoad();
     
     g_styledLines.clear();
     
@@ -1444,6 +1476,17 @@ void parseWithWebCore(const std::string& html) {
             }).detach();
         });
     
+    // Form submissions no listener canceled navigate this tab (or open a new
+    // one for target=_blank) once the script task that made them is over
+    g_scriptContext->setSubmitHandler([pageTabId, pageUrl = g_currentUrl](const Zepra::WebCore::FormSubmission& form) {
+        std::string action = resolveUrl(pageUrl, form.action.empty() ? pageUrl : form.action);
+        if (form.method != "get") {
+            std::cout << "[Form] " << form.method << " submissions are not supported yet: " << action << std::endl;
+            return;
+        }
+        g_pendingSubmission = {Zepra::WebCore::formSubmissionUrl(action, form.body), form.target == "_blank", pageTabId};
+    });
+
     // Wire alert/confirm/prompt handlers
     g_scriptContext->setAlertHandler([](const std::string& msg) {
         g_alertMessage = msg;
@@ -1454,7 +1497,9 @@ void parseWithWebCore(const std::string& html) {
     // Set location globals from current URL
     g_scriptContext->setGlobal("__pageUrl__", g_currentUrl);
     
-    // Execute page scripts (inline + external)
+    // Execute page scripts (inline + external). The document's text is kept
+    // for the DevTools source view (inline scripts point into it).
+    g_scriptContext->registerSource(g_currentUrl, html);
     std::function<void(DOMElement*)> executePageScripts = [&](DOMElement* el) {
         if (!el) return;
         for (size_t i = 0; i < el->childNodes().size(); i++) {
@@ -1475,7 +1520,11 @@ void parseWithWebCore(const std::string& html) {
                         std::string code = child->textContent();
                         if (!code.empty()) {
                             std::cout << "[JS] Executing inline script (" << code.size() << " bytes)" << std::endl;
-                            auto result = g_scriptContext->evaluate(code, g_currentUrl);
+                            // Lines count from the document, so console links land on the page source
+                            size_t at = html.find(code);
+                            uint32_t firstLine = at == std::string::npos ? 1 :
+                                1 + (uint32_t)std::count(html.begin(), html.begin() + (long)at, '\n');
+                            auto result = g_scriptContext->evaluate(code, g_currentUrl, firstLine);
                             if (!result.success) {
                                 std::cerr << "[JS] Uncaught error in inline script: " << result.error << std::endl;
                             }
@@ -1488,6 +1537,7 @@ void parseWithWebCore(const std::string& html) {
                         if (scriptResp.success && !scriptResp.data.empty()) {
                             std::cout << "[JS] Executing external script (" 
                                       << scriptResp.data.size() << " bytes)" << std::endl;
+                            g_scriptContext->registerSource(scriptUrl, scriptResp.data);
                             auto result = g_scriptContext->evaluate(scriptResp.data, scriptUrl);
                             if (!result.success) {
                                 std::cerr << "[JS] Uncaught error in " << scriptUrl << ": " << result.error << std::endl;
@@ -1855,7 +1905,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 else if (inputType == "checkbox") {
                     LayoutBox* cbBox = addChild(parentBox);
                     cbBox->type = LayoutType::InlineBlock;
-                    bool checked = childElement->hasAttribute("checked");
+                    bool checked = Zepra::WebCore::formControlChecked(childElement);
                     cbBox->text = checked ? "\xe2\x98\x91" : "\xe2\x98\x90"; // ☑ or ☐
                     
                     const CSSComputedStyle* style = g_cssEngine->getComputedStyle(childElement);
@@ -1878,7 +1928,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 else if (inputType == "radio") {
                     LayoutBox* rbBox = addChild(parentBox);
                     rbBox->type = LayoutType::InlineBlock;
-                    bool checked = childElement->hasAttribute("checked");
+                    bool checked = Zepra::WebCore::formControlChecked(childElement);
                     rbBox->text = checked ? "\xe2\x97\x89" : "\xe2\x97\x8b"; // ◉ or ○
                     
                     const CSSComputedStyle* style = g_cssEngine->getComputedStyle(childElement);
@@ -1957,7 +2007,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     inputBox->type = LayoutType::InlineBlock;
                     
                     // Display value or placeholder
-                    std::string value = childElement->getAttribute("value");
+                    std::string value = Zepra::WebCore::formControlValue(childElement);
                     if (inputType == "password" && !value.empty()) {
                         value = std::string(value.size(), '\xe2\x80\xa2'); // bullet dots
                     }
@@ -2221,7 +2271,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 taBox->type = LayoutType::Block;
                 taBox->isInput = true;
                 taBox->inputType = "textarea";
-                taBox->text = childElement->textContent();
+                taBox->text = Zepra::WebCore::formControlValue(childElement);
                 taBox->placeholder = childElement->getAttribute("placeholder");
                 if (taBox->text.empty() && !taBox->placeholder.empty())
                     taBox->text = taBox->placeholder;
@@ -3911,6 +3961,14 @@ void render() {
             g_scriptContext->releaseDetachedNodes();
             g_releaseDetachedPending = false;
         }
+        syncPageFocus();
+    }
+    // A form submitted during the last script task
+    if (!g_pendingSubmission.url.empty()) {
+        PendingSubmission submission = std::move(g_pendingSubmission);
+        g_pendingSubmission = {};
+        if (submission.newTab) openNewTab(submission.url);
+        else if (submission.tabId == g_activeTabId) onNavigate(submission.url);
     }
 
     // === LAZY IMAGE LOADER POLL ===
@@ -4209,7 +4267,7 @@ void render() {
         }
     }
     // Cursor switching based on UI state
-    if (g_addressFocused || g_searchFocused || g_devTools.consoleFocused()) {
+    if (g_addressFocused || g_searchFocused || g_devTools.textInputFocused()) {
         NXRender::setCursor(NXRender::CursorType::Text);
     } else if (g_currentCursorIsHand || isOverLink || g_cursorIsPointer || g_uiHoverHand) {
         NXRender::setCursor(NXRender::CursorType::Hand);
@@ -4765,19 +4823,25 @@ void handleClick(float mx, float my) {
     g_searchFocused = false;
     g_focusedBox = nullptr;
 
-    // Page scripts see the click first (on press); preventDefault() keeps
-    // links from navigating and inputs from taking focus. Nodes a listener
-    // removes stay alive until the next relayout, so the boxes below are safe.
+    // The page gets the press: focus moves to what was pressed (blur, focus,
+    // change), then the click and its default action (a checkbox toggles, a
+    // submit button submits). preventDefault() on the click keeps links from
+    // navigating. Nodes a listener removes stay alive until the next
+    // relayout, so the boxes below are safe.
     if (my > TOPBAR_HEIGHT && g_layoutRoot && g_scriptContext) {
-        if (DOMElement* target = findElementAt(g_layoutRoot.get(), mx, my)) {
-            if (!g_scriptContext->dispatchMouseEvent(target, "click", mx - getSidebarOffset(), my - TOPBAR_HEIGHT)) return;
-            placeUnpaintedBoxes();
-        }
+        DOMElement* target = findElementAt(g_layoutRoot.get(), mx, my);
+        bool notCanceled = target ? g_scriptContext->pressElement(target, mx - getSidebarOffset(), my - TOPBAR_HEIGHT)
+                                  : (g_scriptContext->focusElement(nullptr), true);
+        // A listener that read geometry after changing the DOM left a box
+        // tree that was never painted: place it for the hit-tests below
+        placeUnpaintedBoxes();
+        syncPageFocus();
+        if (!notCanceled) return;
     }
     
     // Check web content layout tree for inputs (HTML-rendered search box)
     if (my > TOPBAR_HEIGHT && g_layoutRoot) {
-        LayoutBox* clicked = findBoxAt(g_layoutRoot.get(), mx, my);
+        LayoutBox* clicked = g_scriptContext ? g_focusedBox : findBoxAt(g_layoutRoot.get(), mx, my);
         if (clicked && clicked->isInput) {
             g_focusedBox = clicked;
             // The HTML start page acts as the main search driver (zepra://start)
@@ -4830,7 +4894,8 @@ void handleClick(float mx, float my) {
 // NXRender KeyCode
 using NXRender::KeyCode;
 
-void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, bool shift) {
+void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, bool shift,
+                    bool alt = false, bool meta = false, bool repeat = false) {
     
     // Alert dialog intercepts keyboard
     if (g_alertVisible) {
@@ -4840,8 +4905,29 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
         return;
     }
     
-    // DevTools console input takes the keys while it has focus
+    // DevTools text fields (console input, Network filter) take the keys while focused
     if (g_devTools.onKey(key, text, ctrl, shift, devToolsPage())) return;
+
+    // Then the page, while nothing in the browser's own UI has focus:
+    // keydown/keypress, then typing into its focused field. A key the page
+    // canceled or its field used goes no further, except the shortcuts the
+    // browser keeps (new/close/switch tab, DevTools).
+    if (!g_addressFocused && !g_searchFocused && g_scriptContext && g_layoutRoot) {
+        Zepra::WebCore::KeyResult result;
+        if (key == NXRender::KeyCode::Unknown) {
+            // Text without a key (IME, characters outside ASCII)
+            result.consumed = g_scriptContext->insertText(text);
+        } else {
+            NXRender::Modifiers mods;
+            mods.ctrl = ctrl; mods.shift = shift; mods.alt = alt; mods.meta = meta;
+            result = g_scriptContext->keyDown(ZepraBrowser::domKeyFor(key, text, mods, repeat), text);
+        }
+        syncPageFocus();
+        bool reserved = (ctrl && (key == NXRender::KeyCode::T || key == NXRender::KeyCode::W ||
+                                  key == NXRender::KeyCode::Tab)) ||
+                        key == NXRender::KeyCode::F12 || (ctrl && shift && key == NXRender::KeyCode::I);
+        if ((result.canceled || result.consumed) && !reserved) return;
+    }
 
     // Keyboard shortcuts (Ctrl+...)
     if (ctrl) {
@@ -4870,8 +4956,11 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
                     g_addressInput += clipboardText;
                 } else if (g_searchFocused) {
                     (g_focusedBox ? g_focusedBox->text : g_searchQuery) += clipboardText;
-                } else if (g_devTools.consoleFocused()) {
-                    g_devTools.insertConsoleText(clipboardText);
+                } else if (g_devTools.textInputFocused()) {
+                    g_devTools.insertText(clipboardText);
+                } else if (g_scriptContext) {
+                    g_scriptContext->insertText(clipboardText, "insertFromPaste");
+                    syncPageFocus();
                 } else if (g_focusedBox) {
                     g_focusedBox->text += clipboardText;
                 }
@@ -4901,7 +4990,8 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
     } else if (g_searchFocused) {
         // The start page's <input> shows its box's text, so type into that
         activeInput = g_focusedBox ? &g_focusedBox->text : &g_searchQuery;
-    } else if (g_focusedBox) { // Keep existing logic for web content inputs
+    } else if (g_focusedBox && !g_scriptContext) {
+        // A page without scripts: its field keeps the text itself
         activeInput = &g_focusedBox->text;
     }
     
@@ -5181,15 +5271,41 @@ static DOMElement* findElementAt(LayoutBox* box, float x, float y) {
 // rebuilds the box tree. The DOM, scripts and scroll position are kept.
 static void setInteractionState(DOMElement* hovered, DOMElement* active, DOMElement* focused) {
     auto& state = Zepra::WebCore::interactionState();
+    // Page scripts move focus themselves, so compare with the focus the
+    // styles were last computed with
     bool restyle = g_cssEngine && g_document && g_layoutRoot &&
         ((state.hovered != hovered && g_cssEngine->usesHoverSelectors()) ||
          (state.active != active && g_cssEngine->usesActiveSelectors()) ||
-         (state.focused != focused && g_cssEngine->usesFocusSelectors()));
+         (g_styledFocus != focused && g_cssEngine->usesFocusSelectors()));
     state.hovered = hovered;
     state.active = active;
     state.focused = focused;
+    g_styledFocus = focused;
     if (!restyle) return;
     relayoutDocument();
+}
+
+// The element with keyboard focus: the page's (its scripts move it too), or
+// the focused input's when the page runs no scripts
+static DOMElement* pageFocusedElement() {
+    if (g_scriptContext) return g_scriptContext->focusedElement();
+    return g_focusedBox ? g_focusedBox->domElement : nullptr;
+}
+
+// Follows the page's focus: restyles for :focus, points g_focusedBox (where
+// the caret is drawn) at the focused field's box and shows its value there
+static void syncPageFocus() {
+    if (!g_layoutRoot || !g_scriptContext || g_searchFocused) return;
+    DOMElement* focused = g_scriptContext->focusedElement();
+    if (focused != g_styledFocus || (g_focusedBox ? g_focusedBox->domElement : nullptr) != focused) {
+        const auto& state = Zepra::WebCore::interactionState();
+        setInteractionState(state.hovered, state.active, focused);
+        LayoutBox* box = findBoxForElement(g_layoutRoot.get(), focused);
+        g_focusedBox = box && box->isInput ? box : nullptr;
+    }
+    if (g_focusedBox && Zepra::WebCore::isTextControl(focused)) {
+        g_focusedBox->text = Zepra::WebCore::formControlValue(focused);
+    }
 }
 
 void handleNXEvent(const NXRender::Event& event) {
@@ -5207,10 +5323,14 @@ void handleNXEvent(const NXRender::Event& event) {
         if (down) {
             std::string text = event.textInput;
             handleKeyPress((NXRender::KeyCode)event.key.key, text, 
-                          event.key.modifiers.ctrl, event.key.modifiers.shift);
+                          event.key.modifiers.ctrl, event.key.modifiers.shift,
+                          event.key.modifiers.alt, event.key.modifiers.meta, event.key.repeat);
         } else if (event.type == NXRender::EventType::TextInput && !event.textInput.empty()) {
             // Text that came without a key (IME commits, characters outside ASCII)
             handleKeyPress(NXRender::KeyCode::Unknown, event.textInput, false, false);
+        } else if (event.type == NXRender::EventType::KeyUp && g_scriptContext && g_layoutRoot &&
+                   !g_addressFocused && !g_searchFocused && !g_devTools.textInputFocused()) {
+            g_scriptContext->keyUp(ZepraBrowser::domKeyFor((NXRender::KeyCode)event.key.key, "", event.key.modifiers));
         }
     } else if (event.type == NXRender::EventType::FileDrop) {
         // File dropped on browser - navigate to first file
@@ -5264,7 +5384,7 @@ void handleNXEvent(const NXRender::Event& event) {
                      g_devTools.pickerSelect(g_layoutRoot ? findElementAt(g_layoutRoot.get(), x, y) : nullptr);
                      g_mouseDown = true;
                  } else {
-                 g_devTools.blurConsole();
+                 g_devTools.blurInputs();
                  // Call main click handler (handles address bar, search, tabs, etc.)
                  extern void handleClick(float, float);
                  handleClick(x, y);
@@ -5276,8 +5396,7 @@ void handleNXEvent(const NXRender::Event& event) {
                  if (g_layoutRoot && g_layoutPainted) {
                      const auto& state = Zepra::WebCore::interactionState();
                      DOMElement* pressed = (y > TOPBAR_HEIGHT) ? findElementAt(g_layoutRoot.get(), x, y) : nullptr;
-                     DOMElement* focused = g_focusedBox ? g_focusedBox->domElement : nullptr;
-                     setInteractionState(state.hovered, pressed, focused);
+                     setInteractionState(state.hovered, pressed, pageFocusedElement());
                  }
                  }
              } else if (event.mouse.button == NXRender::MouseButton::Right) {
@@ -5561,6 +5680,9 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
             return NXRender::gpu()->createTexture(w, h, pixels);
         }
         return 0;
+    });
+    ZepraBrowser::g_lazyImageLoader.setTextureUpdater([](uint32_t texture, int w, int h, const uint8_t* pixels) {
+        if (NXRender::gpu()) NXRender::gpu()->updateTexture(texture, w, h, pixels);
     });
     Zepra::WebCore::setNetworkRecorder(&g_tabNetworkRecorder);  // before any loader thread runs
     ZepraBrowser::g_lazyImageLoader.start(2); // 2 worker threads

@@ -148,8 +148,8 @@ ScriptContext::ScriptContext() : vm_(nullptr), vmReady_(false) {
         vmReady_ = true;
         // Uncaught errors from microtasks and unhandled promise rejections
         // reach the page console
-        vm_->setErrorReporter([this](const std::string& message) {
-            emitConsole("error", message);
+        vm_->setErrorReporter([this](const std::string& message, const Zepra::Runtime::Value& thrown) {
+            reportThrown(message, thrown);
         });
         std::cout << "[ScriptContext] Per-tab VM initialized" << std::endl;
     } catch (const std::exception& e) {
@@ -168,12 +168,123 @@ void ScriptContext::initialize(DOMDocument* document) {
     setupGlobals();
 }
 
-ScriptResult ScriptContext::evaluate(const std::string& code, const std::string& filename) {
-    return run(code, filename, nullptr);
+ScriptResult ScriptContext::evaluate(const std::string& code, const std::string& filename, uint32_t firstLine) {
+    return run(code, filename, nullptr, nullptr, firstLine);
+}
+
+namespace {
+
+// "12:5: message" (the parser's form) -> line 12, column 5, "message"
+bool splitPosition(const std::string& text, uint32_t& line, uint32_t& column, std::string& message) {
+    size_t a = text.find(':'), b = a == std::string::npos ? a : text.find(':', a + 1);
+    if (b == std::string::npos || a == 0) return false;
+    auto digits = [&](size_t from, size_t to) {
+        return to > from && std::all_of(text.begin() + (long)from, text.begin() + (long)to,
+                                         [](unsigned char c) { return std::isdigit(c); });
+    };
+    if (!digits(0, a) || !digits(a + 1, b)) return false;
+    line = (uint32_t)std::stoul(text.substr(0, a));
+    column = (uint32_t)std::stoul(text.substr(a + 1, b - a - 1));
+    size_t msg = b + 1;
+    while (msg < text.size() && text[msg] == ' ') msg++;
+    message = text.substr(msg);
+    return true;
+}
+
+// The first frame of an error's stack, "    at f (file:line)" -> file, line
+bool firstStackFrame(const std::string& stack, std::string& file, uint32_t& line) {
+    for (size_t pos = 0; pos < stack.size();) {
+        size_t end = stack.find('\n', pos);
+        std::string l = stack.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+        pos = end == std::string::npos ? stack.size() : end + 1;
+        if (l.find("    at ") != 0 || l.empty() || l.back() != ')') continue;
+        size_t open = l.rfind(" (");
+        size_t colon = l.rfind(':');
+        if (open == std::string::npos || colon == std::string::npos || colon < open) return false;
+        std::string number = l.substr(colon + 1, l.size() - colon - 2);
+        if (number.empty() || !std::all_of(number.begin(), number.end(), [](unsigned char c) { return std::isdigit(c); }))
+            return false;
+        file = l.substr(open + 2, colon - open - 2);
+        line = (uint32_t)std::stoul(number);
+        return true;
+    }
+    return false;
+}
+
+std::string positionText(const std::string& file, uint32_t line, uint32_t column) {
+    std::string s = file + ":" + std::to_string(line);
+    if (column) s += ":" + std::to_string(column);
+    return s;
+}
+
+} // namespace
+
+void ScriptContext::reportError(const std::string& text, const std::string& file, uint32_t line, uint32_t column) {
+    if (quietErrors_) return;
+    ConsoleMessage m;
+    m.level = "error";
+    m.text = text;
+    m.depth = consoleGroupDepth_;
+    if (line && !file.empty()) {
+        m.source = positionText(file, line, column);
+        m.sourceUrl = file;
+        m.sourceLine = line;
+    }
+    emitConsole(std::move(m));
+}
+
+void ScriptContext::reportThrown(const std::string& text, const Zepra::Runtime::Value& thrown) {
+    // An Error carries the stack of where it was made: its first frame is the link
+    std::string file;
+    uint32_t line = 0;
+    if (thrown.isObject()) {
+        Zepra::Runtime::Value stack = thrown.asObject()->get("stack");
+        if (stack.isString()) firstStackFrame(stack.toString(), file, line);
+    }
+    reportError(text, file, line);
+}
+
+void ScriptContext::setCallerSource(ConsoleMessage& message) const {
+    if (!vm_) return;
+    auto frames = vm_->callStack(1);
+    if (frames.empty() || !frames[0].line || frames[0].file.empty()) return;
+    message.sourceUrl = frames[0].file;
+    message.sourceLine = frames[0].line;
+    message.source = positionText(message.sourceUrl, message.sourceLine, 0);
+}
+
+void ScriptContext::registerSource(const std::string& name, const std::string& text) {
+    if (name.empty() || text.size() > kSourceBudget) return;
+    for (auto it = sources_.begin(); it != sources_.end(); ++it) {
+        if (it->first == name) {
+            sourceBytes_ -= it->second->size();
+            sources_.erase(it);
+            break;
+        }
+    }
+    while (!sources_.empty() && sourceBytes_ + text.size() > kSourceBudget) {
+        sourceBytes_ -= sources_.front().second->size();
+        sources_.erase(sources_.begin());
+    }
+    sources_.emplace_back(name, std::make_shared<const std::string>(text));
+    sourceBytes_ += text.size();
+}
+
+std::shared_ptr<const std::string> ScriptContext::sourceText(const std::string& name) const {
+    for (const auto& [n, text] : sources_) if (n == name) return text;
+    return nullptr;
+}
+
+std::vector<std::string> ScriptContext::sourceNames() const {
+    std::vector<std::string> names;
+    for (const auto& entry : sources_) names.push_back(entry.first);
+    return names;
 }
 
 ScriptResult ScriptContext::run(const std::string& code, const std::string& filename, Zepra::Runtime::Value* value,
-                                Zepra::Runtime::Value* thrown) {
+                                Zepra::Runtime::Value* thrown, uint32_t firstLine) {
+    const std::string name = filename.empty() ? "<script>" : filename;
+    if (firstLine == 0) firstLine = 1;
     ScriptResult result;
     
     if (code.empty()) {
@@ -205,8 +316,7 @@ ScriptResult ScriptContext::run(const std::string& code, const std::string& file
     
     try {
         // Full compile pipeline: source → AST → bytecode → execute
-        auto sourceCode = Zepra::Frontend::SourceCode::fromString(
-            code, filename.empty() ? "<script>" : filename);
+        auto sourceCode = Zepra::Frontend::SourceCode::fromString(code, name);
         
         Zepra::Frontend::Parser parser(sourceCode.get());
         auto ast = parser.parseProgram();
@@ -226,7 +336,13 @@ ScriptResult ScriptContext::run(const std::string& code, const std::string& file
         if (parser.hasErrors()) {
             result.success = false;
             result.error = "SyntaxError: " + parser.errors().front();
-            if (!quietErrors_) emitConsole("error", result.error);
+            uint32_t line = 0, column = 0;
+            std::string message;
+            if (splitPosition(parser.errors().front(), line, column, message)) {
+                reportError("SyntaxError: " + message, name, line + firstLine - 1, column);
+            } else {
+                reportError(result.error, "", 0);
+            }
             return result;
         }
         
@@ -245,6 +361,7 @@ ScriptResult ScriptContext::run(const std::string& code, const std::string& file
         }
         
         Zepra::Bytecode::BytecodeGenerator generator;
+        generator.setSource(name, firstLine);
         auto chunk = generator.compile(ast.get());
         
         if (generator.hasErrors() || !chunk) {
@@ -281,8 +398,9 @@ ScriptResult ScriptContext::run(const std::string& code, const std::string& file
         } else {
             result.success = false;
             result.error = execResult.error;
-            if (thrown && execResult.status == Zepra::Runtime::ExecutionResult::Status::Exception) *thrown = execResult.value;
-            if (!quietErrors_) emitConsole("error", execResult.error);
+            bool exception = execResult.status == Zepra::Runtime::ExecutionResult::Status::Exception;
+            if (thrown && exception) *thrown = execResult.value;
+            reportThrown(execResult.error, exception ? execResult.value : Zepra::Runtime::Value::undefined());
         }
     } catch (const std::exception& e) {
         result.success = false;
@@ -406,6 +524,8 @@ void ScriptContext::runTask(const std::function<void()>& task, const char* what)
     if (domBindings_) domBindings_->refreshWindowGlobals();
     try {
         task();
+    } catch (const Zepra::Runtime::ThrownException& e) {
+        reportThrown(std::string("Uncaught exception in ") + what + ": " + e.what(), e.value());
     } catch (const std::exception& e) {
         emitConsole("error", std::string("Uncaught exception in ") + what + ": " + e.what());
         if (vm_->isTerminationRequested()) {
@@ -497,6 +617,9 @@ void ScriptContext::setupGlobals() {
         // The window object and the DOM interfaces (EventTarget, Node, Event, ...)
         domBindings_ = std::make_unique<DOMBindings>(vm_, [this](const std::string& message) {
             emitConsole("error", message);
+        });
+        domBindings_->setSubmitHandler([this](const FormSubmission& submission) {
+            if (submitHandler_) submitHandler_(submission);
         });
     }
     setupWindowGlobals();
@@ -882,7 +1005,17 @@ void ScriptContext::setupConsole(Zepra::Runtime::Object* consoleObj) {
         m.values = formatArguments(args);
         m.text = previewText(m.values);
         m.depth = consoleGroupDepth_;
+        setCallerSource(m);
         return m;
+    };
+    // A text-only entry, at the line that called the console method
+    auto emitAt = [this](const std::string& level, const std::string& text) {
+        ConsoleMessage m;
+        m.level = level;
+        m.text = text;
+        m.depth = consoleGroupDepth_;
+        setCallerSource(m);
+        emitConsole(std::move(m));
     };
     // log/info/debug/warn/error: the arguments, formatted
     for (const char* level : {"log", "info", "debug", "warn", "error"}) {
@@ -931,22 +1064,22 @@ void ScriptContext::setupConsole(Zepra::Runtime::Object* consoleObj) {
     auto label = [](const std::vector<Value>& args) {
         return args.empty() || args[0].isUndefined() ? std::string("default") : args[0].toString();
     };
-    method("count", [this, label](Context*, const std::vector<Value>& args) -> Value {
+    method("count", [this, label, emitAt](Context*, const std::vector<Value>& args) -> Value {
         std::string l = label(args);
-        emitConsole("log", l + ": " + std::to_string(++consoleCounts_[l]));
+        emitAt("log", l + ": " + std::to_string(++consoleCounts_[l]));
         return Value::undefined();
     });
-    method("countReset", [this, label](Context*, const std::vector<Value>& args) -> Value {
+    method("countReset", [this, label, emitAt](Context*, const std::vector<Value>& args) -> Value {
         std::string l = label(args);
-        if (consoleCounts_.erase(l) == 0) emitConsole("warn", "Counter \"" + l + "\" doesn't exist.");
+        if (consoleCounts_.erase(l) == 0) emitAt("warn", "Counter \"" + l + "\" doesn't exist.");
         return Value::undefined();
     });
     auto nowMs = [] {
         return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
     };
-    method("time", [this, label, nowMs](Context*, const std::vector<Value>& args) -> Value {
+    method("time", [this, label, nowMs, emitAt](Context*, const std::vector<Value>& args) -> Value {
         std::string l = label(args);
-        if (consoleTimers_.count(l)) emitConsole("warn", "Timer \"" + l + "\" already exists.");
+        if (consoleTimers_.count(l)) emitAt("warn", "Timer \"" + l + "\" already exists.");
         else consoleTimers_[l] = nowMs();
         return Value::undefined();
     });
@@ -958,16 +1091,16 @@ void ScriptContext::setupConsole(Zepra::Runtime::Object* consoleObj) {
         if (end) consoleTimers_.erase(it);
         return l + ": " + buf + (end ? " - timer ended" : "");
     };
-    method("timeEnd", [this, label, timerText](Context*, const std::vector<Value>& args) -> Value {
+    method("timeEnd", [label, timerText, emitAt](Context*, const std::vector<Value>& args) -> Value {
         std::string l = label(args), t = timerText(l, true);
-        if (t.empty()) emitConsole("warn", "Timer \"" + l + "\" doesn't exist.");
-        else emitConsole("log", t);
+        if (t.empty()) emitAt("warn", "Timer \"" + l + "\" doesn't exist.");
+        else emitAt("log", t);
         return Value::undefined();
     });
-    method("timeLog", [this, label, timerText](Context*, const std::vector<Value>& args) -> Value {
+    method("timeLog", [label, timerText, emitAt](Context*, const std::vector<Value>& args) -> Value {
         std::string l = label(args), t = timerText(l, false);
-        if (t.empty()) emitConsole("warn", "Timer \"" + l + "\" doesn't exist.");
-        else emitConsole("log", t);
+        if (t.empty()) emitAt("warn", "Timer \"" + l + "\" doesn't exist.");
+        else emitAt("log", t);
         return Value::undefined();
     });
     // group / groupCollapsed / groupEnd: the entries that follow are indented
@@ -1027,6 +1160,77 @@ void ScriptContext::installConsoleHelpers() {
 void ScriptContext::setInspectedNode(DOMNode* node) {
     if (!vm_ || !domBindings_) return;
     vm_->setGlobal("$0", node ? domBindings_->wrap(node) : Zepra::Runtime::Value::undefined());
+}
+
+// Console autocomplete reads values without running page code: data
+// properties, and getters only when they are native (the DOM's)
+std::vector<std::string> ScriptContext::completionNames(const std::vector<std::string>& path) {
+    using namespace Zepra::Runtime;
+    std::vector<std::string> names;
+    if (!vm_ || !vmReady_) return names;
+    installConsoleHelpers();
+    Value window = vm_->getGlobal("window");
+
+    // The object whose properties are listed, or a primitive's prototype
+    auto holder = [this](const Value& v) -> Object* {
+        if (v.isObject()) return v.asObject()->objectType() == ObjectType::Proxy ? nullptr : v.asObject();
+        if (v.isString()) return vm_->intrinsic(VM::Intrinsic::String);
+        if (v.isNumber()) return vm_->intrinsic(VM::Intrinsic::Number);
+        if (v.isBoolean()) return vm_->intrinsic(VM::Intrinsic::Boolean);
+        return nullptr;
+    };
+    auto read = [&](const Value& base, const std::string& key, Value& out) -> bool {
+        Object* o = holder(base);
+        if (!o) return false;
+        try {
+            // Arrays and functions reach their prototype through the VM, not a stored link
+            for (Object* h = o; h; h = vm_->prototypeOf(h)) {
+                auto desc = h->getOwnPropertyDescriptor(key);
+                if (!desc) continue;
+                if (!desc->isAccessorDescriptor()) {
+                    out = base.isObject() ? desc->value : vm_->getMember(base, key);
+                    return true;
+                }
+                if (!desc->getter.isObject()) return false;
+                auto* getter = dynamic_cast<Function*>(desc->getter.asObject());
+                if (!getter || !getter->isNative()) return false;
+                out = vm_->call(getter, base, {});
+                return true;
+            }
+            // Exotic objects answer some keys themselves (array length, string length)
+            if (base.isObject() ? o->has(key) : key == "length") {
+                out = vm_->getMember(base, key);
+                return true;
+            }
+        } catch (...) {
+        }
+        return false;
+    };
+
+    std::unordered_map<std::string, bool> seen;
+    auto add = [&](const std::string& name) {
+        if (name.empty() || std::isdigit((unsigned char)name[0])) return;   // array indices
+        if (seen.emplace(name, true).second) names.push_back(name);
+    };
+    auto addChain = [&](Object* o) {
+        for (int depth = 0; o && depth < 32; o = vm_->prototypeOf(o), depth++) {
+            for (const std::string& n : o->getOwnPropertyNames()) add(n);
+        }
+    };
+
+    if (path.empty()) {
+        for (const std::string& n : vm_->globalNames()) add(n);
+        if (window.isObject()) addChain(window.asObject());
+        return names;
+    }
+    Value v = vm_->getGlobal(path[0]);
+    if (v.isUndefined() && !(window.isObject() && read(window, path[0], v))) return names;
+    for (size_t i = 1; i < path.size(); i++) {
+        if (!read(v, path[i], v)) return names;
+    }
+    if (v.isString()) add("length");
+    addChain(holder(v));
+    return names;
 }
 
 ConsoleMessage ScriptContext::evaluateConsole(const std::string& code, DOMNode* inspected) {
