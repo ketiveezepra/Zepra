@@ -21,6 +21,8 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
+#include <cstring>
 #include <unordered_set>
 
 namespace Zepra::WebCore {
@@ -612,9 +614,11 @@ DOMBindings::DOMBindings(VM* vm, ErrorReporter reportError) : vm_(vm), reportErr
     installNode();
     installCharacterData();
     installElement();
+    installGeometry();
     installDocumentInterface();
     installEvents();
     installComputedStyle();
+    installForms();
 
     // Bare addEventListener(...) and friends act on the window
     // (the engine's global object is not the window yet)
@@ -1187,27 +1191,6 @@ void DOMBindings::installElement() {
         return Value::undefined();
     }));
 
-    // Geometry: the layout is not visible to scripts yet, so boxes are empty
-    method(p, "getBoundingClientRect", 0, on<DOMElement>("getBoundingClientRect", [this](DOMElement&, const Info&) {
-        auto* rect = new Object();
-        rect->setPrototype(vm_->intrinsic(VM::Intrinsic::Object));
-        for (const char* k : {"x", "y", "width", "height", "top", "left", "right", "bottom"}) rect->set(k, Value::number(0));
-        return Value::object(rect);
-    }));
-    method(p, "getClientRects", 0, on<DOMElement>("getClientRects", [](DOMElement&, const Info&) {
-        return Value::object(new Array());
-    }));
-    for (const char* name : {"clientWidth", "clientHeight", "clientTop", "clientLeft", "scrollWidth", "scrollHeight"}) {
-        accessor(p, name, on<DOMElement>(name, [](DOMElement&, const Info&) { return Value::number(0); }));
-    }
-    for (const char* name : {"scrollTop", "scrollLeft"}) {
-        accessor(p, name, on<DOMElement>(name, [](DOMElement&, const Info&) { return Value::number(0); }),
-                 on<DOMElement>(name, [](DOMElement&, const Info&) { return Value::undefined(); }));
-    }
-    for (const char* name : {"scrollIntoView", "scrollTo", "scrollBy", "scroll"}) {
-        method(p, name, 0, on<DOMElement>(name, [](DOMElement&, const Info&) { return Value::undefined(); }));
-    }
-
     // HTMLElement
     htmlElementProto_ = makeInterface("HTMLElement", elementProto_);
     Object* h = htmlElementProto_;
@@ -1222,7 +1205,7 @@ void DOMBindings::installElement() {
     }
     // Reflected boolean attributes: present or absent
     for (const auto& [property, attribute] : std::initializer_list<std::pair<const char*, const char*>>{
-             {"hidden", "hidden"}, {"disabled", "disabled"}, {"checked", "checked"}, {"selected", "selected"},
+             {"hidden", "hidden"}, {"disabled", "disabled"}, {"defaultChecked", "checked"}, {"selected", "selected"},
              {"readOnly", "readonly"}, {"required", "required"}, {"multiple", "multiple"},
              {"autofocus", "autofocus"}, {"defer", "defer"}, {"async", "async"}, {"open", "open"},
              {"noValidate", "novalidate"}, {"controls", "controls"}, {"loop", "loop"}, {"muted", "muted"},
@@ -1248,15 +1231,38 @@ void DOMBindings::installElement() {
             e.setAttribute("tabindex", std::to_string(static_cast<long long>(info.argument(0).toNumber())));
             return Value::undefined();
         }));
-    // value: a textarea's text, otherwise the value attribute
+    // value: what the control holds (typed or set), not the attribute;
+    // defaultValue is the attribute (a textarea's text)
     accessor(h, "value",
-        on<DOMElement>("value", [](DOMElement& e, const Info&) {
+        on<DOMElement>("value", [](DOMElement& e, const Info&) { return str(formControlValue(&e)); }),
+        on<DOMElement>("value", [this](DOMElement& e, const Info& info) {
+            std::string v = info.argument(0).isNull() ? "" : info.argument(0).toString();
+            std::string tag = lower(e.tagName());
+            if (tag == "input" || tag == "textarea" || tag == "select") {
+                setFormControlValue(&e, v);
+                // A script's change is not the user's: no change event for it
+                if (focusedElement() == &e) valueAtFocus_ = v;
+                noteDomMutation();
+            } else {
+                e.setAttribute("value", v);
+            }
+            return Value::undefined();
+        }));
+    accessor(h, "defaultValue",
+        on<DOMElement>("defaultValue", [](DOMElement& e, const Info&) {
             return str(lower(e.tagName()) == "textarea" ? textOf(e) : e.getAttribute("value"));
         }),
-        on<DOMElement>("value", [this](DOMElement& e, const Info& info) {
+        on<DOMElement>("defaultValue", [this](DOMElement& e, const Info& info) {
             std::string v = info.argument(0).isNull() ? "" : info.argument(0).toString();
             if (lower(e.tagName()) == "textarea") setText(&e, v);
             else e.setAttribute("value", v);
+            return Value::undefined();
+        }));
+    accessor(h, "checked",
+        on<DOMElement>("checked", [](DOMElement& e, const Info&) { return Value::boolean(formControlChecked(&e)); }),
+        on<DOMElement>("checked", [](DOMElement& e, const Info& info) {
+            setFormControlChecked(&e, info.argument(0).toBoolean());
+            noteDomMutation();
             return Value::undefined();
         }));
 
@@ -1318,16 +1324,17 @@ void DOMBindings::installElement() {
     }));
 
     method(h, "click", 0, on<DOMElement>("click", [this](DOMElement& e, const Info&) {
-        if (!e.hasAttribute("disabled")) fireMouseEvent(&e, "click", 0, 0);
+        click(&e, 0, 0);
         return Value::undefined();
     }));
-    for (const char* name : {"focus", "blur"}) {
-        method(h, name, 0, on<DOMElement>(name, [](DOMElement&, const Info&) { return Value::undefined(); }));
-    }
-    for (const char* name : {"offsetWidth", "offsetHeight", "offsetTop", "offsetLeft"}) {
-        accessor(h, name, on<DOMElement>(name, [](DOMElement&, const Info&) { return Value::number(0); }));
-    }
-    accessor(h, "offsetParent", on<DOMElement>("offsetParent", [](DOMElement&, const Info&) { return Value::null(); }));
+    method(h, "focus", 0, on<DOMElement>("focus", [this](DOMElement& e, const Info&) {
+        setFocus(&e);
+        return Value::undefined();
+    }));
+    method(h, "blur", 0, on<DOMElement>("blur", [this](DOMElement& e, const Info&) {
+        if (focusedElement() == &e) setFocus(nullptr);
+        return Value::undefined();
+    }));
 
     // Per-tag interfaces below HTMLElement (HTMLMediaElement between it and audio/video)
     Object* mediaProto = makeInterface("HTMLMediaElement", htmlElementProto_);
@@ -1431,6 +1438,274 @@ void DOMBindings::installElement() {
 }
 
 // ----------------------------------------------------------------------------
+// Layout geometry: element boxes, the viewport and the page's scroll position
+// ----------------------------------------------------------------------------
+
+namespace {
+
+long roundPx(double v) { return std::lround(v); }
+
+bool isTag(const DOMElement* e, const char* tag) {
+    if (!e) return false;
+    const std::string& name = e->tagName();
+    size_t n = std::strlen(tag);
+    if (name.size() != n) return false;
+    for (size_t i = 0; i < n; i++) {
+        if (std::tolower(static_cast<unsigned char>(name[i])) != tag[i]) return false;
+    }
+    return true;
+}
+
+// x and y of scrollTo(x, y) / scrollTo({left, top}); a missing one keeps `x`/`y`
+void scrollArguments(const FunctionCallInfo& info, double& x, double& y) {
+    Value first = info.argument(0);
+    if (info.argumentCount() == 1 && first.isObject()) {
+        Value left = first.asObject()->get("left"), top = first.asObject()->get("top");
+        if (!left.isUndefined()) x = left.toNumber();
+        if (!top.isUndefined()) y = top.toNumber();
+    } else if (info.argumentCount() >= 2) {
+        x = first.toNumber();
+        y = info.argument(1).toNumber();
+    }
+    // CSSOM View: non-finite coordinates are 0
+    if (!std::isfinite(x)) x = 0;
+    if (!std::isfinite(y)) y = 0;
+}
+
+double finiteOrZero(double v) { return std::isfinite(v) ? v : 0; }
+
+}  // namespace
+
+ElementGeometry DOMBindings::geometryOf(const DOMElement* element, bool withScrollSize) {
+    if (!geometry_ || !element || !isConnectedTo(element, document_)) return {};
+    return geometry_->elementGeometry(element, withScrollSize);
+}
+
+bool DOMBindings::isScrollingElement(const DOMElement* element) const {
+    return document_ && element == document_->documentElement();
+}
+
+Value DOMBindings::rectObject(const GeometryRect& r) {
+    auto* rect = new Object();
+    rect->setPrototype(domRectProto_);
+    const std::pair<const char*, double> fields[] = {
+        {"x", r.x}, {"y", r.y}, {"width", r.width}, {"height", r.height},
+        {"top", r.y}, {"right", r.x + r.width}, {"bottom", r.y + r.height}, {"left", r.x}};
+    for (const auto& [name, value] : fields) rect->set(name, Value::number(value));
+    return Value::object(rect);
+}
+
+// CSSOM View §7: the nearest positioned ancestor, else a table cell or table
+// around a static element, else <body>; none for <html>, <body>, fixed
+// elements and elements without a box
+DOMElement* DOMBindings::offsetParentOf(DOMElement* element) {
+    if (isTag(element, "html") || isTag(element, "body")) return nullptr;
+    ElementGeometry g = geometryOf(element);
+    if (!g.hasBox || g.position == 3) return nullptr;
+    for (DOMElement* a = asElement(element->parentNode()); a; a = asElement(a->parentNode())) {
+        if (isTag(a, "body")) return a;
+        ElementGeometry ag = geometryOf(a);
+        if (ag.hasBox && ag.position != 0) return a;
+        if (g.position == 0 && (isTag(a, "td") || isTag(a, "th") || isTag(a, "table"))) return a;
+    }
+    return nullptr;
+}
+
+void DOMBindings::scrollPage(double x, double y) {
+    if (!geometry_) return;
+    geometry_->scrollTo(x, y);
+    refreshWindowGlobals();
+}
+
+void DOMBindings::refreshWindowGlobals() {
+    double width = geometry_ ? geometry_->viewportWidth() : kDefaultViewportWidth;
+    double height = geometry_ ? geometry_->viewportHeight() : kDefaultViewportHeight;
+    double sx = geometry_ ? geometry_->scrollX() : 0, sy = geometry_ ? geometry_->scrollY() : 0;
+    const double values[kWindowGlobals] = {width, height, sx, sy, sx, sy};
+    for (size_t i = 0; i < kWindowGlobals; i++) {
+        // A page may replace these with its own (var scrollY = ...): leave those alone
+        Value current = vm_->getGlobal(kWindowGlobalNames[i]);
+        bool ours = !windowGlobalsSet_ || (current.isNumber() && current.asNumber() == windowGlobals_[i]);
+        if (!ours) continue;
+        windowGlobals_[i] = values[i];
+        vm_->setGlobal(kWindowGlobalNames[i], Value::number(values[i]));
+    }
+    windowGlobalsSet_ = true;
+}
+
+void DOMBindings::installGeometry() {
+    domRectProto_ = makeInterface("DOMRect", nullptr);
+    method(domRectProto_, "toJSON", 0, [](const FunctionCallInfo& info) -> Value {
+        Value self = info.thisValue();
+        auto* json = new Object();
+        if (self.isObject()) {
+            for (const char* k : {"x", "y", "width", "height", "top", "right", "bottom", "left"}) {
+                json->set(k, self.asObject()->get(k));
+            }
+        }
+        return Value::object(json);
+    });
+
+    // Element: border boxes in viewport coordinates
+    Object* p = elementProto_;
+    method(p, "getBoundingClientRect", 0, on<DOMElement>("getBoundingClientRect", [this](DOMElement& e, const Info&) {
+        return rectObject(geometryOf(&e).bounds());
+    }));
+    method(p, "getClientRects", 0, on<DOMElement>("getClientRects", [this](DOMElement& e, const Info&) {
+        auto* list = new Array();
+        ElementGeometry g = geometryOf(&e);
+        for (const GeometryRect& r : g.rects) list->push(rectObject(r));
+        return Value::object(list);
+    }));
+    // client*: the padding box (no scrollbars here); the viewport for <html>
+    accessor(p, "clientWidth", on<DOMElement>("clientWidth", [this](DOMElement& e, const Info&) {
+        if (isScrollingElement(&e)) return Value::number(roundPx(geometry_ ? geometry_->viewportWidth() : 0));
+        ElementGeometry g = geometryOf(&e);
+        if (!g.hasBox || g.inlineBox) return Value::number(0);
+        return Value::number(roundPx(std::max(0.0, g.rects[0].width - g.borderLeft - g.borderRight)));
+    }));
+    accessor(p, "clientHeight", on<DOMElement>("clientHeight", [this](DOMElement& e, const Info&) {
+        if (isScrollingElement(&e)) return Value::number(roundPx(geometry_ ? geometry_->viewportHeight() : 0));
+        ElementGeometry g = geometryOf(&e);
+        if (!g.hasBox || g.inlineBox) return Value::number(0);
+        return Value::number(roundPx(std::max(0.0, g.rects[0].height - g.borderTop - g.borderBottom)));
+    }));
+    accessor(p, "clientTop", on<DOMElement>("clientTop", [this](DOMElement& e, const Info&) {
+        ElementGeometry g = geometryOf(&e);
+        return Value::number(g.hasBox && !g.inlineBox ? roundPx(g.borderTop) : 0);
+    }));
+    accessor(p, "clientLeft", on<DOMElement>("clientLeft", [this](DOMElement& e, const Info&) {
+        ElementGeometry g = geometryOf(&e);
+        return Value::number(g.hasBox && !g.inlineBox ? roundPx(g.borderLeft) : 0);
+    }));
+    accessor(p, "scrollWidth", on<DOMElement>("scrollWidth", [this](DOMElement& e, const Info&) {
+        return Value::number(roundPx(geometryOf(&e, true).scrollWidth));
+    }));
+    accessor(p, "scrollHeight", on<DOMElement>("scrollHeight", [this](DOMElement& e, const Info&) {
+        return Value::number(roundPx(geometryOf(&e, true).scrollHeight));
+    }));
+    // Only the page scrolls (no element is a scroll container yet): <html>
+    // reads and moves the page's scroll position, other elements stay at 0
+    accessor(p, "scrollTop",
+        on<DOMElement>("scrollTop", [this](DOMElement& e, const Info&) {
+            return Value::number(isScrollingElement(&e) && geometry_ ? geometry_->scrollY() : 0);
+        }),
+        on<DOMElement>("scrollTop", [this](DOMElement& e, const Info& info) {
+            if (isScrollingElement(&e) && geometry_) scrollPage(geometry_->scrollX(), finiteOrZero(info.argument(0).toNumber()));
+            return Value::undefined();
+        }));
+    accessor(p, "scrollLeft",
+        on<DOMElement>("scrollLeft", [this](DOMElement& e, const Info&) {
+            return Value::number(isScrollingElement(&e) && geometry_ ? geometry_->scrollX() : 0);
+        }),
+        on<DOMElement>("scrollLeft", [this](DOMElement& e, const Info& info) {
+            if (isScrollingElement(&e) && geometry_) scrollPage(finiteOrZero(info.argument(0).toNumber()), geometry_->scrollY());
+            return Value::undefined();
+        }));
+    for (const char* name : {"scrollTo", "scroll", "scrollBy"}) {
+        bool relative = std::strcmp(name, "scrollBy") == 0;
+        method(p, name, 0, on<DOMElement>(name, [this, relative](DOMElement& e, const Info& info) {
+            if (!isScrollingElement(&e) || !geometry_) return Value::undefined();
+            double x = relative ? 0 : geometry_->scrollX(), y = relative ? 0 : geometry_->scrollY();
+            scrollArguments(info, x, y);
+            if (relative) { x += geometry_->scrollX(); y += geometry_->scrollY(); }
+            scrollPage(x, y);
+            return Value::undefined();
+        }));
+    }
+    // scrollIntoView(alignToTop) / scrollIntoView({block}): start (default),
+    // end, center, or nearest (the closer edge, and only when the box is
+    // partly out of view without covering the whole viewport)
+    method(p, "scrollIntoView", 0, on<DOMElement>("scrollIntoView", [this](DOMElement& e, const Info& info) {
+        ElementGeometry g = geometryOf(&e);
+        if (!g.hasBox || !geometry_) return Value::undefined();
+        std::string block = "start";
+        Value arg = info.argument(0);
+        if (arg.isObject()) {
+            Value b = arg.asObject()->get("block");
+            if (!b.isUndefined()) block = b.toString();
+        } else if (arg.isBoolean() && !arg.asBoolean()) {
+            block = "end";
+        }
+        GeometryRect r = g.bounds();
+        double viewH = geometry_->viewportHeight(), sy = geometry_->scrollY();
+        double target = sy + r.y;
+        if (block == "end") target = sy + r.y + r.height - viewH;
+        else if (block == "center") target = sy + r.y + r.height / 2 - viewH / 2;
+        else if (block == "nearest") {
+            bool aboveTop = r.y < 0, belowBottom = r.y + r.height > viewH;
+            if (aboveTop == belowBottom) return Value::undefined();  // in view, or covering it
+            bool alignEnd = (aboveTop && r.height > viewH) || (belowBottom && r.height <= viewH);
+            if (alignEnd) target = sy + r.y + r.height - viewH;
+        }
+        scrollPage(geometry_->scrollX(), target);
+        return Value::undefined();
+    }));
+
+    // HTMLElement: offset* against the offsetParent's padding edge, or the
+    // page origin when that is <body> or there is none
+    Object* h = htmlElementProto_;
+    accessor(h, "offsetParent", on<DOMElement>("offsetParent", [this](DOMElement& e, const Info&) {
+        return wrap(offsetParentOf(&e));
+    }));
+    auto offsetOrigin = [this](DOMElement& e, bool vertical) -> double {
+        ElementGeometry g = geometryOf(&e);
+        // <body> sits at the page origin as far as offset* go (CSSOM View §7)
+        if (!g.hasBox || isTag(&e, "body")) return 0;
+        double edge = vertical ? g.rects[0].y : g.rects[0].x;
+        DOMElement* parent = offsetParentOf(&e);
+        if (!parent || isTag(parent, "body")) {
+            return edge + (vertical ? geometry_->scrollY() : geometry_->scrollX());
+        }
+        ElementGeometry pg = geometryOf(parent);
+        if (!pg.hasBox) return edge;
+        return vertical ? edge - (pg.rects[0].y + pg.borderTop) : edge - (pg.rects[0].x + pg.borderLeft);
+    };
+    accessor(h, "offsetTop", on<DOMElement>("offsetTop", [offsetOrigin](DOMElement& e, const Info&) {
+        return Value::number(roundPx(offsetOrigin(e, true)));
+    }));
+    accessor(h, "offsetLeft", on<DOMElement>("offsetLeft", [offsetOrigin](DOMElement& e, const Info&) {
+        return Value::number(roundPx(offsetOrigin(e, false)));
+    }));
+    accessor(h, "offsetWidth", on<DOMElement>("offsetWidth", [this](DOMElement& e, const Info&) {
+        return Value::number(roundPx(geometryOf(&e).bounds().width));
+    }));
+    accessor(h, "offsetHeight", on<DOMElement>("offsetHeight", [this](DOMElement& e, const Info&) {
+        return Value::number(roundPx(geometryOf(&e).bounds().height));
+    }));
+
+    // Window: viewport size and the page's scroll position
+    Object* w = global_;
+    accessor(w, "innerWidth", [this](const Info&) -> Value {
+        return Value::number(geometry_ ? geometry_->viewportWidth() : kDefaultViewportWidth);
+    });
+    accessor(w, "innerHeight", [this](const Info&) -> Value {
+        return Value::number(geometry_ ? geometry_->viewportHeight() : kDefaultViewportHeight);
+    });
+    for (const char* name : {"scrollX", "pageXOffset"}) {
+        accessor(w, name, [this](const Info&) -> Value { return Value::number(geometry_ ? geometry_->scrollX() : 0); });
+    }
+    for (const char* name : {"scrollY", "pageYOffset"}) {
+        accessor(w, name, [this](const Info&) -> Value { return Value::number(geometry_ ? geometry_->scrollY() : 0); });
+    }
+    for (const char* name : {"scrollTo", "scroll", "scrollBy"}) {
+        bool relative = std::strcmp(name, "scrollBy") == 0;
+        auto scroll = [this, relative](const Info& info) -> Value {
+            if (!geometry_) return Value::undefined();
+            double x = relative ? 0 : geometry_->scrollX(), y = relative ? 0 : geometry_->scrollY();
+            scrollArguments(info, x, y);
+            if (relative) { x += geometry_->scrollX(); y += geometry_->scrollY(); }
+            scrollPage(x, y);
+            return Value::undefined();
+        };
+        method(w, name, 2, scroll);
+        // Bare scrollTo(...) acts on the window (the global object is not the window yet)
+        vm_->setGlobal(name, Value::object(new Function(name, scroll, 2)));
+    }
+    refreshWindowGlobals();
+}
+
+// ----------------------------------------------------------------------------
 // Document
 // ----------------------------------------------------------------------------
 
@@ -1447,8 +1722,10 @@ void DOMBindings::installDocumentInterface() {
         return wrap(d.documentElement());
     }));
     accessor(p, "activeElement", on<DOMDocument>("activeElement", [this](DOMDocument& d, const Info&) {
-        return wrap(d.body());
+        DOMElement* focused = focusedElement();
+        return wrap(focused ? focused : d.body());
     }));
+    method(p, "hasFocus", 0, on<DOMDocument>("hasFocus", [](DOMDocument&, const Info&) { return Value::boolean(true); }));
     accessor(p, "title",
         on<DOMDocument>("title", [](DOMDocument& d, const Info&) {
             std::string title = d.title();
@@ -1573,6 +1850,66 @@ void DOMBindings::installDocument(DOMDocument* document) {
 }
 
 // ----------------------------------------------------------------------------
+// Forms: form.submit(), requestSubmit(), reset(), elements; control.form
+// ----------------------------------------------------------------------------
+
+void DOMBindings::installForms() {
+    Object* form = tagInterfaces_["form"].second;
+    method(form, "submit", 0, on<DOMElement>("submit", [this](DOMElement& f, const Info&) {
+        submit(&f, nullptr);
+        return Value::undefined();
+    }));
+    method(form, "requestSubmit", 0, on<DOMElement>("requestSubmit", [this](DOMElement& f, const Info& info) {
+        DOMElement* submitter = nullptr;
+        if (!info.argument(0).isNullOrUndefined()) {
+            submitter = asElement(nodeOf(info.argument(0).isObject() ? info.argument(0).asObject() : nullptr));
+            if (!submitter || !isSubmitButton(submitter)) {
+                throw JSError("TypeError", "Failed to execute 'requestSubmit' on 'HTMLFormElement': The specified element is not a submit button.");
+            }
+            if (formOwner(submitter) != &f) {
+                throwDOMException("NotFoundError", "Failed to execute 'requestSubmit' on 'HTMLFormElement': The specified element is not owned by this form element.");
+            }
+        }
+        requestSubmit(&f, submitter);
+        return Value::undefined();
+    }));
+    method(form, "reset", 0, on<DOMElement>("reset", [this](DOMElement& f, const Info&) {
+        resetForm(&f);
+        return Value::undefined();
+    }));
+    method(form, "checkValidity", 0, on<DOMElement>("checkValidity", [](DOMElement&, const Info&) { return Value::boolean(true); }));
+    method(form, "reportValidity", 0, on<DOMElement>("reportValidity", [](DOMElement&, const Info&) { return Value::boolean(true); }));
+    accessor(form, "elements", on<DOMElement>("elements", [this](DOMElement& f, const Info&) {
+        return elementList(formControls(&f));
+    }));
+    accessor(form, "length", on<DOMElement>("length", [](DOMElement& f, const Info&) {
+        return Value::number(static_cast<double>(formControls(&f).size()));
+    }));
+
+    // control.form: the form owner (form attribute, else the <form> around it)
+    for (const char* tag : {"input", "button", "select", "textarea", "fieldset", "output", "object"}) {
+        auto it = tagInterfaces_.find(tag);
+        if (it == tagInterfaces_.end() || it->second.second->getOwnPropertyDescriptor("form")) continue;
+        accessor(it->second.second, "form", on<DOMElement>("form", [this](DOMElement& e, const Info&) {
+            DOMElement* owner = formOwner(&e);
+            return owner ? wrap(owner) : Value::null();
+        }));
+    }
+    // The text selection is the end of the value (no caret position yet)
+    for (const char* tag : {"input", "textarea"}) {
+        Object* proto = tagInterfaces_[tag].second;
+        for (const char* name : {"selectionStart", "selectionEnd"}) {
+            accessor(proto, name, on<DOMElement>(name, [](DOMElement& e, const Info&) {
+                return Value::number(static_cast<double>(formControlValue(&e).size()));
+            }), on<DOMElement>(name, [](DOMElement&, const Info&) { return Value::undefined(); }));
+        }
+        for (const char* name : {"select", "setSelectionRange", "setRangeText"}) {
+            method(proto, name, 0, on<DOMElement>(name, [](DOMElement&, const Info&) { return Value::undefined(); }));
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Event, CustomEvent, UIEvent, MouseEvent, KeyboardEvent, ...
 // ----------------------------------------------------------------------------
 
@@ -1673,9 +2010,9 @@ void DOMBindings::installEvents() {
     mouseEventProto_ = eventInterface("MouseEvent", ui);
     Object* pointer = eventInterface("PointerEvent", mouseEventProto_);
     eventInterface("WheelEvent", mouseEventProto_);
-    eventInterface("KeyboardEvent", ui);
-    eventInterface("FocusEvent", ui);
-    eventInterface("InputEvent", ui);
+    keyboardEventProto_ = eventInterface("KeyboardEvent", ui);
+    focusEventProto_ = eventInterface("FocusEvent", ui);
+    inputEventProto_ = eventInterface("InputEvent", ui);
     eventInterface("CompositionEvent", ui);
     eventInterface("TouchEvent", ui);
     eventInterface("ProgressEvent", eventProto_);
@@ -1685,8 +2022,28 @@ void DOMBindings::installEvents() {
     eventInterface("MessageEvent", eventProto_);
     eventInterface("AnimationEvent", eventProto_);
     eventInterface("TransitionEvent", eventProto_);
-    eventInterface("SubmitEvent", eventProto_);
+    submitEventProto_ = eventInterface("SubmitEvent", eventProto_);
     (void)pointer;
+
+    const std::pair<const char*, double> kLocations[] = {{"DOM_KEY_LOCATION_STANDARD", 0}, {"DOM_KEY_LOCATION_LEFT", 1},
+                                                         {"DOM_KEY_LOCATION_RIGHT", 2}, {"DOM_KEY_LOCATION_NUMPAD", 3}};
+    for (const auto& [name, value] : kLocations) {
+        constant(keyboardEventProto_, name, value);
+        if (Value ctor = vm_->getGlobal("KeyboardEvent"); ctor.isObject()) constant(ctor.asObject(), name, value);
+    }
+    // getModifierState("Shift") reads the event's shiftKey, ...
+    auto getModifierState = [this](const FunctionCallInfo& info) -> Value {
+        thisEvent(info, "getModifierState");
+        static const std::pair<const char*, const char*> kModifiers[] = {
+            {"Alt", "altKey"}, {"Control", "ctrlKey"}, {"Shift", "shiftKey"}, {"Meta", "metaKey"}};
+        std::string key = argString(info, 0);
+        for (const auto& [name, member] : kModifiers) {
+            if (key == name) return Value::boolean(vm_->getMember(info.thisValue(), member).toBoolean());
+        }
+        return Value::boolean(false);
+    };
+    method(keyboardEventProto_, "getModifierState", 1, getModifierState);
+    method(mouseEventProto_, "getModifierState", 1, getModifierState);
 }
 
 EventObject* DOMBindings::newEvent(Object* proto, const std::string& type, const Value& init) {
@@ -1698,6 +2055,22 @@ EventObject* DOMBindings::newEvent(Object* proto, const std::string& type, const
     // Defaults of the subclass members a page may read
     if (proto != eventProto_) {
         e->set("detail", proto == mouseEventProto_ ? Value::number(0) : Value::null());
+    }
+    if (proto == keyboardEventProto_) {
+        for (const char* k : {"key", "code"}) e->set(k, str(""));
+        for (const char* k : {"keyCode", "which", "charCode", "location"}) e->set(k, Value::number(0));
+        for (const char* k : {"repeat", "isComposing", "altKey", "ctrlKey", "shiftKey", "metaKey"}) e->set(k, Value::boolean(false));
+        e->set("detail", Value::number(0));
+    } else if (proto == inputEventProto_) {
+        e->set("data", Value::null());
+        e->set("inputType", str(""));
+        e->set("isComposing", Value::boolean(false));
+        e->set("detail", Value::number(0));
+    } else if (proto == focusEventProto_) {
+        e->set("relatedTarget", Value::null());
+        e->set("detail", Value::number(0));
+    } else if (proto == submitEventProto_) {
+        e->set("submitter", Value::null());
     }
     if (init.isObject()) {
         Object* o = init.asObject();
@@ -2005,6 +2378,172 @@ bool DOMBindings::fireMouseEvent(DOMElement* target, const std::string& type, do
     for (const char* k : {"altKey", "ctrlKey", "shiftKey", "metaKey"}) e->set(k, Value::boolean(false));
     e->set("relatedTarget", Value::null());
     return dispatch(wrap(target).asObject(), e);
+}
+
+bool DOMBindings::click(DOMElement* target, double clientX, double clientY) {
+    if (!target || !isConnectedTo(target, document_)) return true;
+    if (isDisabledControl(target)) return true;   // disabled controls get no click
+    // The element whose activation behavior runs: the target or the
+    // nearest ancestor with one
+    DOMElement* activator = nullptr;
+    for (DOMNode* n = target; n && !activator; n = n->parentNode()) {
+        DOMElement* e = asElement(n);
+        if (e && (isCheckable(e) || isSubmitButton(e) || isResetButton(e) || lower(e->tagName()) == "label")) activator = e;
+    }
+    if (activator && isDisabledControl(activator)) activator = nullptr;
+
+    // Checkbox / radio: the new state is visible to click listeners
+    bool checkable = activator && isCheckable(activator);
+    bool radio = checkable && inputType(activator) == "radio";
+    bool wasChecked = checkable && formControlChecked(activator);
+    DOMElement* previousRadio = nullptr;
+    if (radio) {
+        for (DOMElement* r : radioGroup(activator)) if (r != activator && formControlChecked(r)) previousRadio = r;
+    }
+    if (checkable) setFormControlChecked(activator, radio ? true : !wasChecked);
+
+    bool notCanceled = fireMouseEvent(target, "click", clientX, clientY);
+    if (!activator) return notCanceled;
+    if (checkable) {
+        if (!notCanceled) {
+            setFormControlChecked(activator, wasChecked);
+            if (previousRadio) setFormControlChecked(previousRadio, true);
+        } else if (formControlChecked(activator) != wasChecked) {
+            fireEvent(activator, "input", true, false);
+            fireEvent(activator, "change", true, false);
+        }
+        noteDomMutation();
+        return notCanceled;
+    }
+    if (!notCanceled) return false;
+    if (lower(activator->tagName()) == "label") {
+        // The labeled control: for="id", else the first one inside
+        DOMElement* control = nullptr;
+        if (activator->hasAttribute("for")) {
+            control = document_ ? document_->getElementById(activator->getAttribute("for")) : nullptr;
+        } else {
+            for (DOMElement* e : selectDescendants(activator, "input, button, select, textarea", true)) control = e;
+        }
+        if (control && control != target && !control->contains(target)) {
+            setFocus(control);
+            click(control, clientX, clientY);
+        }
+        return true;
+    }
+    if (DOMElement* form = formOwner(activator)) {
+        if (isSubmitButton(activator)) requestSubmit(form, activator);
+        else resetForm(form);
+    }
+    return true;
+}
+
+bool DOMBindings::fireKeyboardEvent(DOMElement* target, const std::string& type, const KeyEventInit& key) {
+    if (!target || !isConnectedTo(target, document_)) return true;
+    EventObject* e = newEvent(keyboardEventProto_, type, Value::undefined());
+    e->bubbles = e->cancelable = e->composed = true;
+    e->trusted = true;
+    e->set("key", str(key.key));
+    e->set("code", str(key.code));
+    e->set("location", Value::number(key.location));
+    e->set("repeat", Value::boolean(key.repeat));
+    e->set("altKey", Value::boolean(key.altKey));
+    e->set("ctrlKey", Value::boolean(key.ctrlKey));
+    e->set("shiftKey", Value::boolean(key.shiftKey));
+    e->set("metaKey", Value::boolean(key.metaKey));
+    // keypress carries the character code in all three legacy members;
+    // keydown/keyup carry the key code and no charCode
+    int charCode = 0;
+    if (type == "keypress") {
+        charCode = key.key == "Enter" ? 13 : (key.key.size() == 1 ? static_cast<unsigned char>(key.key[0]) : 0);
+    }
+    e->set("keyCode", Value::number(type == "keypress" ? charCode : key.keyCode));
+    e->set("which", Value::number(type == "keypress" ? charCode : key.keyCode));
+    e->set("charCode", Value::number(charCode));
+    return dispatch(wrap(target).asObject(), e);
+}
+
+bool DOMBindings::fireInputEvent(DOMElement* target, const std::string& type, const std::string& inputType,
+                                 const std::string& data) {
+    if (!target || !isConnectedTo(target, document_)) return true;
+    EventObject* e = newEvent(inputEventProto_, type, Value::undefined());
+    e->bubbles = e->composed = true;
+    e->cancelable = type == "beforeinput";
+    e->trusted = true;
+    e->set("inputType", str(inputType));
+    e->set("data", data.empty() ? Value::null() : str(data));
+    return dispatch(wrap(target).asObject(), e);
+}
+
+bool DOMBindings::fireFocusEvent(DOMElement* target, const std::string& type, DOMElement* related) {
+    if (!target || !isConnectedTo(target, document_)) return true;
+    EventObject* e = newEvent(focusEventProto_, type, Value::undefined());
+    // focus and blur stay on the element; focusin and focusout bubble
+    e->bubbles = type == "focusin" || type == "focusout";
+    e->composed = true;
+    e->trusted = true;
+    e->set("relatedTarget", related ? wrap(related) : Value::null());
+    return dispatch(wrap(target).asObject(), e);
+}
+
+DOMElement* DOMBindings::focusedElement() const {
+    DOMElement* focused = interactionState().focused;
+    return focused && isConnectedTo(focused, document_) ? focused : nullptr;
+}
+
+void DOMBindings::setFocus(DOMElement* element) {
+    if (element && (!isFocusable(element) || !isConnectedTo(element, document_))) return;
+    DOMElement* old = focusedElement();
+    if (old == element) return;
+    if (old) {
+        // The page has focus while the old element hears that it lost it
+        interactionState().focused = nullptr;
+        if (isTextControl(old) && formControlValue(old) != valueAtFocus_) fireEvent(old, "change", true, false);
+        fireFocusEvent(old, "blur", element);
+        fireFocusEvent(old, "focusout", element);
+        // A listener moved focus somewhere else: that move wins
+        if (interactionState().focused) return;
+    }
+    if (!element || !isConnectedTo(element, document_)) return;
+    interactionState().focused = element;
+    valueAtFocus_ = formControlValue(element);
+    fireFocusEvent(element, "focus", old);
+    if (interactionState().focused == element) fireFocusEvent(element, "focusin", old);
+}
+
+void DOMBindings::commitFocusedValue() {
+    DOMElement* focused = focusedElement();
+    if (!focused || !isTextControl(focused) || formControlValue(focused) == valueAtFocus_) return;
+    valueAtFocus_ = formControlValue(focused);
+    fireEvent(focused, "change", true, false);
+}
+
+bool DOMBindings::requestSubmit(DOMElement* form, DOMElement* submitter) {
+    if (!form || !isConnectedTo(form, document_)) return false;
+    EventObject* e = newEvent(submitEventProto_, "submit", Value::undefined());
+    e->bubbles = e->cancelable = true;
+    e->trusted = true;
+    e->set("submitter", submitter ? wrap(submitter) : Value::null());
+    if (!dispatch(wrap(form).asObject(), e)) return false;
+    submit(form, submitter);
+    return true;
+}
+
+void DOMBindings::submit(DOMElement* form, DOMElement* submitter) {
+    if (!form || !isConnectedTo(form, document_)) return;
+    FormSubmission plan = planFormSubmission(form, submitter);
+    if (plan.method == "dialog") return;   // closes a <dialog>: there are none yet
+    if (submitHandler_) submitHandler_(plan);
+}
+
+bool DOMBindings::resetForm(DOMElement* form) {
+    if (!form || !isConnectedTo(form, document_)) return false;
+    if (!fireEvent(form, "reset", true, true)) return false;
+    resetFormControls(form);
+    if (DOMElement* focused = focusedElement(); focused && formOwner(focused) == form) {
+        valueAtFocus_ = formControlValue(focused);
+    }
+    noteDomMutation();
+    return true;
 }
 
 bool DOMBindings::dispatch(Object* target, EventObject* e) {

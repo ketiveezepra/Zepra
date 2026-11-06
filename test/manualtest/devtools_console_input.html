@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Console input manual test</title>
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 24px; background: #fafafa; color: #222; }
+  code { background: #eee; padding: 0 3px; }
+</style>
+</head>
+<body>
+  <h1 id="title">Console input manual test</h1>
+  <p>Open DevTools with F12 and pick the Console. Every message names its file and
+     line on the right: inline ones come from this file (lines 23-41), the rest from
+     js/console_input.js. Try typing <code>doc</code>, <code>document.bo</code> or
+     <code>demo</code> (autocomplete), Shift+Enter for a new line, the Filter box
+     (<code>alpha</code>, <code>-tick</code>, <code>/l(o|i)g/</code>) and the level buttons.
+     Click a file:line link to open it in the Sources tab.</p>
+  <ul id="list"><li>one</li><li>two</li></ul>
+  <script>
+    var demoConfig = { alpha: 1, beta: [1, 2], gamma: "three" };
+    var demoCount = 3;
+    console.log("inline log at line 23");
+    console.info("inline info at line 24");
+    console.debug("inline debug at line 25");
+    console.warn("inline warn at line 26");
+    console.error("inline error at line 27");
+    function demoGreet(name) {
+      console.log("demoGreet says hello to " + name + " (line 29)");
+      return "hello " + name;
+    }
+    demoGreet("console");
+    [1, 2].forEach(function (n) {
+      console.log("forEach callback item " + n + " (line 34)");
+    });
+    console.log("config", demoConfig);
+    function demoThrow() {
+      throw new Error("uncaught from demoThrow (line 38)");
+    }
+    setTimeout(function () { console.info("timer callback (line 40)"); }, 50);
+    setTimeout(function () { demoThrow(); }, 100);
+  </script>
+  <script src="js/console_input.js"></script>
+</body>
+</html>

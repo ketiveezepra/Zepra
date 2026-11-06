@@ -50,6 +50,11 @@ public:
     uint8_t at(size_t offset) const { return code_[offset]; }
     Runtime::Value constant(size_t index) const { return constants_[index]; }
     uint32_t lineAt(size_t offset) const;
+
+    // The script this chunk was compiled from (its URL or "<console>"), shared
+    // by every chunk of one compile; "" when the host gave none
+    const std::string& sourceName() const;
+    void setSourceName(std::shared_ptr<const std::string> name) { sourceName_ = std::move(name); }
     
     // Debug
     void disassemble(const std::string& name) const;
@@ -59,6 +64,7 @@ private:
     std::vector<uint8_t> code_;
     std::vector<Runtime::Value> constants_;
     std::vector<uint32_t> lines_;
+    std::shared_ptr<const std::string> sourceName_;
 
     // Constant de-duplication
     std::unordered_map<std::string, size_t> stringConstants_;
@@ -138,6 +144,13 @@ public:
      */
     const std::vector<std::string>& errors() const { return errors_; }
     bool hasErrors() const { return !errors_.empty(); }
+
+    /**
+     * @brief Names the source every chunk of the next compile comes from, and
+     *        where its first line sits in that source (an inline script's
+     *        line in its document): lines are recorded as firstLine + n - 1
+     */
+    void setSource(const std::string& name, uint32_t firstLine = 1);
     
 private:
     // Statement compilation
@@ -299,6 +312,11 @@ private:
     CompilerState* current_ = nullptr;
     std::vector<std::string> errors_;
     uint32_t currentLine_ = 0;
+    uint32_t lineOffset_ = 0;                        // firstLine - 1
+    std::shared_ptr<const std::string> sourceName_;
+
+    uint32_t recordedLine() const { return currentLine_ ? currentLine_ + lineOffset_ : 0; }
+    void stampSource(BytecodeChunk& chunk) const { if (sourceName_) chunk.setSourceName(sourceName_); }
 };
 
 } // namespace Zepra::Bytecode

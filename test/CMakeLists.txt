@@ -202,6 +202,18 @@ if(TARGET webcore)
     endif()
     add_test(NAME WebCoreDomBindingsTests COMMAND webcore_dom_bindings_tests)
 
+    # Keys, typing, focus and forms: control values, key/input/focus/change/submit
+    # events, click activation, and the browser's platform-key to DOM-key mapping
+    add_executable(webcore_user_input_tests webcore_user_input_tests.cpp
+                   ${PROJECT_SOURCE_DIR}/source/integration/page_keys.cpp)
+    target_include_directories(webcore_user_input_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/source/integration ${PROJECT_SOURCE_DIR}/source/nxrender-cpp)
+    target_link_libraries(webcore_user_input_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(webcore_user_input_tests pthread)
+    endif()
+    add_test(NAME WebCoreUserInputTests COMMAND webcore_user_input_tests)
+
     # The DevTools Console: value previews, console methods, console helpers
     add_executable(webcore_console_format_tests webcore_console_format_tests.cpp)
     target_link_libraries(webcore_console_format_tests webcore GTest::gtest GTest::gtest_main)
@@ -227,6 +239,36 @@ if(TARGET webcore)
         target_link_libraries(computed_style_tests pthread)
     endif()
     add_test(NAME ComputedStyleTests COMMAND computed_style_tests)
+
+    # Layout geometry for page scripts: element boxes, getBoundingClientRect, offset*, client*, scrolling
+    add_executable(layout_geometry_tests layout_geometry_tests.cpp
+                   ${PROJECT_SOURCE_DIR}/source/webCore/browser/layout_geometry.cpp)
+    target_link_libraries(layout_geometry_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(layout_geometry_tests pthread)
+    endif()
+    add_test(NAME LayoutGeometryTests COMMAND layout_geometry_tests)
+    # The DevTools Network panel: filter terms, Headers, Response lines, Timings, text bodies kept
+    add_executable(devtools_network_tests devtools_network_tests.cpp
+                   ${PROJECT_SOURCE_DIR}/source/integration/devtools/network_details.cpp)
+    target_include_directories(devtools_network_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/source/integration
+        ${PROJECT_SOURCE_DIR}/source/webCore)
+    target_link_libraries(devtools_network_tests networking GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(devtools_network_tests pthread)
+    endif()
+    add_test(NAME DevToolsNetworkTests COMMAND devtools_network_tests)
+
+    # The DevTools Console input: editor, unfinished input, autocomplete query and ranking, output filter
+    add_executable(devtools_console_input_tests devtools_console_input_tests.cpp
+                   ${PROJECT_SOURCE_DIR}/source/integration/devtools/console_input.cpp)
+    target_include_directories(devtools_console_input_tests PRIVATE ${PROJECT_SOURCE_DIR}/source/integration)
+    target_link_libraries(devtools_console_input_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(devtools_console_input_tests pthread)
+    endif()
+    add_test(NAME DevToolsConsoleInputTests COMMAND devtools_console_input_tests)
 
     # SVG rasterizing (nanosvg + rewrite pass) for <img>, inline <svg> and icons
     add_executable(svg_raster_tests svg_raster_tests.cpp)

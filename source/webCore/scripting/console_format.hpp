@@ -69,7 +69,9 @@ struct ConsoleMessage {
     std::string text;                  ///< the terminal form
     std::vector<ValuePreview> values;  ///< structured arguments (may be empty: text only)
     int depth = 0;                     ///< console.group nesting
-    std::string source;                ///< "file:line:column" when the engine knows it
+    std::string source;                ///< "file:line" or "file:line:column" when the engine knows it
+    std::string sourceUrl;             ///< the script (or document) of `source`
+    uint32_t sourceLine = 0;           ///< 1-based line in sourceUrl; 0 when unknown
     uint64_t id = 0;                   ///< numbered by the panel once drawn (0 until then)
 };
 

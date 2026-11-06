@@ -79,6 +79,7 @@ struct VMCallFrame {
     size_t slotBase = 0;
     Value thisValue;
     const Bytecode::BytecodeChunk* savedChunk = nullptr;  // Caller's chunk for iterative calls
+    size_t callerIP = 0;       // Where the caller was in savedChunk (also across a native boundary)
     bool isConstruct = false;  // 'new' / super(): a non-object return yields 'this'
 };
 
@@ -185,8 +186,9 @@ public:
      * @brief Where uncaught errors from jobs and unhandled promise rejections
      * are reported ("Uncaught (in promise) ..."); stderr by default
      */
-    void setErrorReporter(std::function<void(const std::string&)> reporter) { errorReporter_ = std::move(reporter); }
-    void reportError(const std::string& message);
+    /// Receives uncaught errors of jobs and unhandled rejections, with the thrown value (undefined when none)
+    void setErrorReporter(std::function<void(const std::string&, const Value&)> reporter) { errorReporter_ = std::move(reporter); }
+    void reportError(const std::string& message, const Value& thrown = Value::undefined());
 
     /// HostPromiseRejectionTracker: a promise was rejected unhandled, or got its first handler
     void trackPromiseRejection(Promise* promise, bool handled);
@@ -230,6 +232,14 @@ public:
     Value getGlobal(const std::string& name) const {
         auto it = globals_.find(name);
         return it != globals_.end() ? it->second : Value::undefined();
+    }
+
+    /** The names of every global variable (unordered) */
+    std::vector<std::string> globalNames() const {
+        std::vector<std::string> names;
+        names.reserve(globals_.size());
+        for (const auto& entry : globals_) names.push_back(entry.first);
+        return names;
     }
     
     /**
@@ -288,8 +298,22 @@ public:
     /** A new error object of the given type ("TypeError", ...) with its prototype and stack. */
     Value newError(const std::string& type, const std::string& message) { return makeError(type, message); }
 
+    /** Where a frame of the call stack is: its function and the script line it is on. */
+    struct SourcePosition {
+        std::string function;   ///< "" for a script's top-level code
+        std::string file;       ///< the chunk's source name; "" when the host gave none
+        uint32_t line = 0;      ///< 1-based; 0 when unknown
+    };
+
     /**
-     * @brief The current call stack as "    at function (bytecode:offset)" lines,
+     * @brief The frames of the current call stack, innermost first. A native
+     * function (console.log, forEach) has no frame: the first entry is the
+     * script code that called it.
+     */
+    std::vector<SourcePosition> callStack(size_t maxFrames = 64) const;
+
+    /**
+     * @brief The current call stack as "    at function (file:line)" lines,
      * innermost first. Error objects store it as `stack`.
      */
     std::string captureStackTrace() const;
@@ -519,7 +543,7 @@ private:
     std::deque<std::function<void()>> jobs_;
     bool drainingJobs_ = false;
     std::vector<Promise*> pendingRejections_;     // Rejected with no handler yet
-    std::function<void(const std::string&)> errorReporter_;
+    std::function<void(const std::string&, const Value&)> errorReporter_;
     
     // Sandbox/Security support
     ResourceMonitor* resourceMonitor_ = nullptr;  // Resource limit tracking
