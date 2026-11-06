@@ -85,6 +85,7 @@ extern "C" {
 #include "nxhttp.h"
 #include "http_client.hpp"
 #include "browser/network_recorder.hpp"
+#include "browser/network_recorder_http.hpp"
 #include "network_monitor.h"
 
 // ===========================================================================
@@ -479,6 +480,7 @@ struct HttpResponse {
     std::string finalUrl;                                          // after redirects
     std::vector<std::pair<std::string, std::string>> headers;      // response headers
     size_t transferred = 0;                                        // bytes off the wire
+    Zepra::WebCore::ResourceResponseInfo details;                  // headers, timings, body preview (Network panel)
 };
 
 /// What a request is for and who asked (the Network panel shows it)
@@ -532,11 +534,21 @@ public:
             entry = std::move(it->second);
             inFlight_.erase(it);
         }
+        if (!response.requestHeaders.empty()) {
+            std::vector<zepra::NetworkHeader> sent;
+            for (const auto& [name, value] : response.requestHeaders) sent.push_back({name, value});
+            entry.monitor->recordRequestHeaders(entry.id, std::move(sent));
+        }
         if (response.status == 0 && !response.error.empty()) {
             entry.monitor->recordError(entry.id, response.error);
             return;
         }
         zepra::NetworkResponse res;
+        for (const auto& [name, value] : response.responseHeaders) res.headers.push_back({name, value});
+        res.body_preview = response.bodyPreview;
+        res.body_truncated = response.bodyTruncated;
+        const auto& t = response.timings;
+        res.timings = {t.known, t.redirect, t.dns, t.connect, t.tls, t.send, t.wait, t.receive};
         res.status_code = response.status;
         res.status_text = response.statusText;
         res.content_type = response.mimeType;
@@ -607,13 +619,17 @@ HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& optio
         } else {
             std::cerr << "[Browser] FAILED " << url << ": " << response.error << " (" << (int)elapsedMs << " ms)" << std::endl;
         }
-        Zepra::WebCore::ResourceResponseInfo done;
+        Zepra::WebCore::ResourceResponseInfo done = std::move(response.details);
         done.status = response.statusCode;
         done.statusText = response.statusText;
         done.mimeType = response.contentType;
         done.bodySize = response.data.size();
         done.transferredBytes = response.transferred;
         done.error = response.error;
+        if (done.bodyPreview.empty() && response.error.empty()) {
+            done.bodyPreview = Zepra::WebCore::textBodyPreview(done.mimeType, response.data.data(), response.data.size(),
+                                                               Zepra::WebCore::kBodyPreviewLimit, done.bodyTruncated);
+        }
         g_tabNetworkRecorder.didFinishRequest(recordId, done);
         return response;
     };
@@ -657,6 +673,10 @@ HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& optio
         Zepra::Networking::HttpClient client(config);
         Zepra::Networking::HttpRequest request(httpMethodFromString(options.method), url);
         for (const auto& [name, value] : options.headers) request.setHeader(name, value);
+        if (Zepra::WebCore::cacheDisabled()) {   // DevTools "Disable cache"
+            request.setHeader("Cache-Control", "no-cache");
+            request.setHeader("Pragma", "no-cache");
+        }
         if (!options.body.empty()) request.setBody(options.body);
         
         auto netResponse = client.send(request);
@@ -668,6 +688,8 @@ HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& optio
         response.finalUrl = netResponse.url().empty() ? url : netResponse.url();
         response.transferred = netResponse.bytesReceived();
         for (const auto& [name, value] : netResponse.headers()) response.headers.emplace_back(name, value);
+        response.details.mimeType = response.contentType;
+        Zepra::WebCore::fillResponseDetails(response.details, netResponse);
         
         if (netResponse.hasError()) {
             response.success = false;
@@ -1234,6 +1256,7 @@ void parseWithWebCore(const std::string& html) {
     // Prevents use-after-free when worker threads hold stale pointers; other
     // tabs keep their boxes (and their loads) in Tab::layoutRoot
     ZepraBrowser::g_lazyImageLoader.cancelTab(g_activeTabId);
+    ZepraBrowser::g_lazyImageLoader.newPageLoad();
     
     g_styledLines.clear();
     
@@ -4094,7 +4117,7 @@ void render() {
         }
     }
     // Cursor switching based on UI state
-    if (g_addressFocused || g_searchFocused || g_devTools.consoleFocused()) {
+    if (g_addressFocused || g_searchFocused || g_devTools.textInputFocused()) {
         NXRender::setCursor(NXRender::CursorType::Text);
     } else if (g_currentCursorIsHand || isOverLink || g_cursorIsPointer || g_uiHoverHand) {
         NXRender::setCursor(NXRender::CursorType::Hand);
@@ -4728,7 +4751,7 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
         return;
     }
     
-    // DevTools console input takes the keys while it has focus
+    // DevTools text fields (console input, Network filter) take the keys while focused
     if (g_devTools.onKey(key, text, ctrl, shift, devToolsPage())) return;
 
     // Keyboard shortcuts (Ctrl+...)
@@ -4758,8 +4781,8 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
                     g_addressInput += clipboardText;
                 } else if (g_searchFocused) {
                     (g_focusedBox ? g_focusedBox->text : g_searchQuery) += clipboardText;
-                } else if (g_devTools.consoleFocused()) {
-                    g_devTools.insertConsoleText(clipboardText);
+                } else if (g_devTools.textInputFocused()) {
+                    g_devTools.insertText(clipboardText);
                 } else if (g_focusedBox) {
                     g_focusedBox->text += clipboardText;
                 }
@@ -5152,7 +5175,7 @@ void handleNXEvent(const NXRender::Event& event) {
                      g_devTools.pickerSelect(g_layoutRoot ? findElementAt(g_layoutRoot.get(), x, y) : nullptr);
                      g_mouseDown = true;
                  } else {
-                 g_devTools.blurConsole();
+                 g_devTools.blurInputs();
                  // Call main click handler (handles address bar, search, tabs, etc.)
                  extern void handleClick(float, float);
                  handleClick(x, y);
@@ -5449,6 +5472,9 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
             return NXRender::gpu()->createTexture(w, h, pixels);
         }
         return 0;
+    });
+    ZepraBrowser::g_lazyImageLoader.setTextureUpdater([](uint32_t texture, int w, int h, const uint8_t* pixels) {
+        if (NXRender::gpu()) NXRender::gpu()->updateTexture(texture, w, h, pixels);
     });
     Zepra::WebCore::setNetworkRecorder(&g_tabNetworkRecorder);  // before any loader thread runs
     ZepraBrowser::g_lazyImageLoader.start(2); // 2 worker threads

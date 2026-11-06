@@ -21,6 +21,7 @@
 // HTTP client for fetching images
 #include "http_client.hpp"
 #include "network_recorder.hpp"
+#include "network_recorder_http.hpp"
 
 // Image decoding (stb_image is already included in main file, just declare here)
 extern "C" {
@@ -100,15 +101,25 @@ static void applyImage(LayoutBox* box, bool background, uint32_t textureId, cons
     box->isImage = true;
 }
 
+bool LazyImageLoader::findCached(const std::string& url, CachedTexture& out, bool& refetch) {
+    std::lock_guard<std::mutex> lock(cacheMutex_);
+    auto it = textureCache_.find(url);
+    if (it == textureCache_.end()) return false;
+    // An animated GIF's frames can't be replaced in place; it stays cached
+    uint64_t epoch = loadEpoch_.load();
+    refetch = Zepra::WebCore::cacheDisabled() && it->second.loadEpoch != epoch && !it->second.animated;
+    if (refetch) it->second.loadEpoch = epoch;   // later layouts of this load use it as is
+    out = it->second;
+    return true;
+}
+
 void LazyImageLoader::queueBackground(LayoutBox* box, const std::string& url, int tabId) {
     if (!box || url.empty()) return;
-    {
-        std::lock_guard<std::mutex> lock(cacheMutex_);
-        auto it = textureCache_.find(url);
-        if (it != textureCache_.end()) {
-            applyImage(box, true, it->second.textureId, it->second.svgData, it->second.width, it->second.height);
-            return;
-        }
+    CachedTexture cached;
+    bool refetch = false;
+    if (findCached(url, cached, refetch)) {
+        applyImage(box, true, cached.textureId, cached.svgData, cached.width, cached.height);
+        if (!refetch) return;
     }
     PendingImage pending;
     pending.box = box;
@@ -129,16 +140,13 @@ void LazyImageLoader::queueImage(LayoutBox* box, const std::string& url,
     if (!box || url.empty()) return;
     
     // Check cache first
-    {
-        std::lock_guard<std::mutex> lock(cacheMutex_);
-        auto it = textureCache_.find(url);
-        if (it != textureCache_.end()) {
-            // Already loaded - update box directly
-            applyImage(box, false, it->second.textureId, it->second.svgData, it->second.width, it->second.height);
-            invalidateIntrinsicWidths();
-            // std::cout << "[LazyImageLoader] Cache hit: " << url.substr(url.rfind('/') + 1) << std::endl;
-            return;
-        }
+    CachedTexture cached;
+    bool refetch = false;
+    if (findCached(url, cached, refetch)) {
+        // Already loaded - update box directly
+        applyImage(box, false, cached.textureId, cached.svgData, cached.width, cached.height);
+        invalidateIntrinsicWidths();
+        if (!refetch) return;
     }
     
     PendingImage pending;
@@ -223,7 +231,22 @@ void LazyImageLoader::pollCompleted(std::vector<ImageResult>& results, int maxRe
             }
 
             CachedTexture entry;
-            if (raw.width < 0) {
+            entry.loadEpoch = loadEpoch_.load();
+            CachedTexture previous;
+            bool hadPrevious = false;
+            if (!raw.url.empty()) {
+                std::lock_guard<std::mutex> cacheLock(cacheMutex_);
+                auto it = textureCache_.find(raw.url);
+                if (it != textureCache_.end()) { previous = it->second; hadPrevious = true; }
+            }
+            if (raw.width >= 0 && hadPrevious && previous.textureId && !previous.animated &&
+                raw.delaysMs.size() <= 1 && textureUpdater_ && !raw.pixels.empty()) {
+                // Fetched again (or twice at once): the same texture gets the new pixels
+                textureUpdater_(previous.textureId, raw.width, raw.height, raw.pixels.data());
+                entry.textureId = previous.textureId;
+                entry.width = raw.width;
+                entry.height = raw.height;
+            } else if (raw.width < 0) {
                 // SVG data (tagged with negative width); painted by the main thread at box size
                 entry.svgData = std::string(raw.pixels.begin(), raw.pixels.end());
                 entry.width = -raw.width;
@@ -247,7 +270,10 @@ void LazyImageLoader::pollCompleted(std::vector<ImageResult>& results, int maxRe
                     }
                     anim.startMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count();
-                    if (anim.frames.size() > 1) animations_[entry.textureId] = std::move(anim);
+                    if (anim.frames.size() > 1) {
+                        animations_[entry.textureId] = std::move(anim);
+                        entry.animated = true;
+                    }
                 }
                 if (!entry.textureId) {
                     if (boxAlive && !raw.background) {
@@ -511,6 +537,10 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
 
             Zepra::Networking::HttpClient client(config);
             Zepra::Networking::HttpRequest request(Zepra::Networking::HttpMethod::GET, pending.url);
+            if (Zepra::WebCore::cacheDisabled()) {
+                request.setHeader("Cache-Control", "no-cache");
+                request.setHeader("Pragma", "no-cache");
+            }
 
             // The Network panel sees the request from this thread (the recorder locks)
             Zepra::WebCore::NetworkRecorder* recorder = Zepra::WebCore::networkRecorder();
@@ -531,6 +561,7 @@ ImageResult LazyImageLoader::loadImage(const PendingImage& pending) {
                 info.bodySize = response.body().size();
                 info.transferredBytes = response.bytesReceived();
                 info.error = response.error();
+                Zepra::WebCore::fillResponseDetails(info, response);
                 recorder->didFinishRequest(recordId, info);
             }
             if (!response.isSuccess()) {

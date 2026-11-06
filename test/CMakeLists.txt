@@ -220,6 +220,18 @@ if(TARGET webcore)
     endif()
     add_test(NAME DevToolsStyleRulesTests COMMAND devtools_style_rules_tests)
 
+    # The DevTools Network panel: filter terms, Headers, Response lines, Timings, text bodies kept
+    add_executable(devtools_network_tests devtools_network_tests.cpp
+                   ${PROJECT_SOURCE_DIR}/source/integration/devtools/network_details.cpp)
+    target_include_directories(devtools_network_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/source/integration
+        ${PROJECT_SOURCE_DIR}/source/webCore)
+    target_link_libraries(devtools_network_tests networking GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(devtools_network_tests pthread)
+    endif()
+    add_test(NAME DevToolsNetworkTests COMMAND devtools_network_tests)
+
     # The DevTools Console input: editor, unfinished input, autocomplete query and ranking, output filter
     add_executable(devtools_console_input_tests devtools_console_input_tests.cpp
                    ${PROJECT_SOURCE_DIR}/source/integration/devtools/console_input.cpp)
