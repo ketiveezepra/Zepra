@@ -93,6 +93,7 @@ extern "C" {
 // Location: src/browser/
 // ===========================================================================
 #include "browser/layout_engine.h"
+#include "browser/layout_geometry.h"
 #include "browser/tab_suspender.h"
 #include "browser/mouse_handler.h"
 #include "browser/lazy_image_loader.h"
@@ -1080,9 +1081,13 @@ static void setBackgroundImage(LayoutBox* box, const CSSComputedStyle& style) {
 // scripts and scroll position are left untouched.
 // DOM version (Zepra::WebCore::domMutationVersion) the layout tree reflects
 static uint64_t g_layoutDomVersion = 0;
+// Bumped by every layout pass over g_layoutRoot: positions may have moved
+static uint64_t g_layoutPass = 0;
+static bool g_layoutPending = true;  // the tree was rebuilt and not laid out since
 
 static void rebuildLayoutTree() {
     g_layoutPainted = false;
+    g_layoutPending = true;
     // Compute styles
     g_cssEngine->computeStyles();
     // std::cout << "[CSS] Styles computed" << std::endl;
@@ -1215,9 +1220,15 @@ static LayoutBox* findBoxForElement(LayoutBox* box, DOMElement* element) {
     return nullptr;
 }
 
+// Script reads of geometry lay the page out again while scripts are running
+// (see BrowserPageGeometry); they leave the removed nodes for the next frame
+static bool g_releaseDetachedPending = false;
+
 // Restyles and rebuilds the box tree of the current document (after script
 // DOM changes or a :hover/:active/:focus change), keeping input focus.
-static void relayoutDocument() {
+// `releaseNodes` false: a script is running, which may still hold the nodes
+// it removed; they are freed at the end of the frame's script work.
+static void relayoutDocument(bool releaseNodes = true) {
     if (!g_document || !g_cssEngine) return;
     DOMElement* focusedElement = g_focusedBox ? g_focusedBox->domElement : nullptr;
     // Queued image loads point at boxes of the tree being replaced
@@ -1226,8 +1237,16 @@ static void relayoutDocument() {
     rebuildLayoutTree();
     g_focusedBox = findBoxForElement(g_layoutRoot.get(), focusedElement);
     // No box points at the nodes scripts removed any more
-    if (g_scriptContext) g_scriptContext->releaseDetachedNodes();
+    if (!releaseNodes) {
+        g_releaseDetachedPending = true;
+    } else if (g_scriptContext) {
+        g_scriptContext->releaseDetachedNodes();
+        g_releaseDetachedPending = false;
+    }
 }
+
+// Element geometry, viewport and scrolling for page scripts (defined below)
+static Zepra::WebCore::PageGeometry* pageGeometry();
 
 void parseWithWebCore(const std::string& html) {
     // CRITICAL: Cancel this tab's pending image loads before clearing its layout boxes
@@ -1398,6 +1417,7 @@ void parseWithWebCore(const std::string& html) {
         });
     
     g_scriptContext->initialize(g_document.get());
+    g_scriptContext->setPageGeometry(pageGeometry());
 
     // fetch()/XMLHttpRequest: the request runs on its own thread and is
     // recorded in this tab's Network panel; the script context settles the
@@ -3030,6 +3050,94 @@ static float pageViewportHeight() {
     return (float)g_height - TOPBAR_HEIGHT - (g_devTools.visible() ? g_devTools.height() : 0.0f);
 }
 
+// Where the root box goes in the content area and the width it is laid out
+// at: the start page fills the area, web pages keep a 20px gutter
+struct PageFrame {
+    float originX, originY, layoutWidth;
+};
+static PageFrame pageFrame() {
+    float contentW = g_width - getSidebarOffset();
+    bool isStart = g_currentUrl == "zepra://start" || g_currentUrl.empty();
+    return isStart ? PageFrame{0, 0, contentW} : PageFrame{20, 20, contentW - 40};
+}
+
+static void layoutPage() {
+    ZepraBrowser::setLayoutViewport(g_width - getSidebarOffset(), pageViewportHeight());
+    ZepraBrowser::layoutBlock(*g_layoutRoot, pageFrame().layoutWidth, 0);
+    g_layoutPending = false;
+    g_layoutPass++;
+}
+
+static Tab* activeTab() {
+    for (Tab& tab : g_tabs) {
+        if (tab.id == g_activeTabId) return &tab;
+    }
+    return nullptr;
+}
+
+// The active page's layout as page scripts see it. A query after a DOM
+// change restyles and lays the page out first, as other browsers do.
+class BrowserPageGeometry : public Zepra::WebCore::PageGeometry {
+public:
+    Zepra::WebCore::ElementGeometry elementGeometry(const DOMElement* element) override {
+        if (!updateLayout()) return {};
+        ZepraBrowser::PageLayout page = currentPage();
+        if (indexedRoot_ != g_layoutRoot.get() || indexedPass_ != g_layoutPass) {
+            index_.build(page);
+            indexedRoot_ = g_layoutRoot.get();
+            indexedPass_ = g_layoutPass;
+        }
+        return index_.geometryOf(page, element);
+    }
+    double viewportWidth() override { return g_width - getSidebarOffset(); }
+    double viewportHeight() override { return pageViewportHeight(); }
+    double scrollX() override { return 0; }
+    double scrollY() override {
+        Tab* tab = activeTab();
+        return tab ? tab->scrollY : 0;
+    }
+    void scrollTo(double, double y) override {
+        Tab* tab = activeTab();
+        if (!tab || std::isnan(y)) return;
+        float maxScroll = updateLayout() ? std::max(0.0f, g_layoutRoot->height - pageViewportHeight()) : 0.0f;
+        tab->scrollY = std::clamp((float)y, 0.0f, maxScroll);
+    }
+
+private:
+    ZepraBrowser::LayoutGeometryIndex index_;
+    const LayoutBox* indexedRoot_ = nullptr;
+    uint64_t indexedPass_ = 0;
+
+    // Brings the box tree and its positions up to date with the DOM;
+    // false when the page has no box tree
+    static bool updateLayout() {
+        if (!g_layoutRoot || !g_document || !g_cssEngine) return false;
+        if (Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) relayoutDocument(false);
+        if (g_layoutPending) layoutPage();
+        return g_layoutRoot != nullptr;
+    }
+
+    static ZepraBrowser::PageLayout currentPage() {
+        ZepraBrowser::PageLayout page;
+        PageFrame frame = pageFrame();
+        page.root = g_layoutRoot.get();
+        page.body = g_document ? g_document->body() : nullptr;
+        page.documentElement = g_document ? g_document->documentElement() : nullptr;
+        page.originX = frame.originX;
+        page.originY = frame.originY;
+        Tab* tab = activeTab();
+        page.scrollY = tab ? tab->scrollY : 0;
+        page.viewportWidth = g_width - getSidebarOffset();
+        page.viewportHeight = pageViewportHeight();
+        return page;
+    }
+};
+
+static Zepra::WebCore::PageGeometry* pageGeometry() {
+    static BrowserPageGeometry geometry;
+    return &geometry;
+}
+
 // Sidebar panel enum (matches reference image)
 enum class SidebarPanel {
     NoPanel = 0,    // Renamed from None to avoid X11 #define None conflict
@@ -3786,6 +3894,9 @@ void render() {
         g_scriptContext->runAnimationFrames();
         if (g_layoutRoot && Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
             relayoutDocument();
+        } else if (g_releaseDetachedPending) {
+            g_scriptContext->releaseDetachedNodes();
+            g_releaseDetachedPending = false;
         }
     }
 
@@ -3829,8 +3940,7 @@ void render() {
         g_linkHitBoxes.clear();
         g_cursorIsPointer = false;
         // vh is the content area (body's min-height: 100vh fills it)
-        ZepraBrowser::setLayoutViewport(contentW, contentH);
-        ZepraBrowser::layoutBlock(*g_layoutRoot, contentW, 0);
+        layoutPage();
         // The background covers the whole content area
         if (g_layoutRoot->height < contentH)
             g_layoutRoot->height = contentH;
@@ -3869,10 +3979,8 @@ void render() {
             g_cursorIsPointer = false;
             
             if (g_layoutRoot) {
-                // Run layout algorithm
-                float layoutWidth = contentW - 40;  // Margins
-                ZepraBrowser::setLayoutViewport(contentW, contentH);
-                ZepraBrowser::layoutBlock(*g_layoutRoot, layoutWidth, 0);
+                // Run layout algorithm (20px gutter, see pageFrame)
+                layoutPage();
                 
                 // Paint the layout tree
                 float scrollY = 0;
@@ -3882,7 +3990,8 @@ void render() {
                         break;
                     }
                 }
-                ZepraBrowser::paintBox(*g_layoutRoot, contentX + 20, contentY + 20, maxY, scrollY);
+                PageFrame frame = pageFrame();
+                ZepraBrowser::paintBox(*g_layoutRoot, contentX + frame.originX, contentY + frame.originY, maxY, scrollY);
                 g_layoutPainted = true;
                 
                 // Check if mouse is over any link hit box for pointer cursor
@@ -4652,7 +4761,7 @@ void handleClick(float mx, float my) {
     // removes stay alive until the next relayout, so the boxes below are safe.
     if (my > TOPBAR_HEIGHT && g_layoutRoot && g_scriptContext) {
         if (DOMElement* target = findElementAt(g_layoutRoot.get(), mx, my)) {
-            if (!g_scriptContext->dispatchMouseEvent(target, "click", mx, my - TOPBAR_HEIGHT)) return;
+            if (!g_scriptContext->dispatchMouseEvent(target, "click", mx - getSidebarOffset(), my - TOPBAR_HEIGHT)) return;
         }
     }
     

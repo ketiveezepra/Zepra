@@ -50,6 +50,7 @@ struct TimerCallback {
  */
 class CanvasRegistry;
 class DOMBindings;
+class PageGeometry;
 
 /**
  * @brief A request made by fetch() or XMLHttpRequest
@@ -179,6 +180,10 @@ public:
 
     /// The live DOM wrappers of this page
     DOMBindings* domBindings() { return domBindings_.get(); }
+
+    /// The page's layout, for element geometry, the viewport size and
+    /// scrolling (see page_geometry.hpp); null: no boxes, no scrolling
+    void setPageGeometry(PageGeometry* geometry);
     
     // ====== NEW: Dialog Handlers ======
     

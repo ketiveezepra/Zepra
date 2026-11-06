@@ -20,6 +20,7 @@
 #pragma once
 
 #include "browser/dom.hpp"
+#include "scripting/page_geometry.hpp"
 #include <functional>
 #include <memory>
 #include <string>
@@ -54,6 +55,13 @@ public:
     void installDocument(DOMDocument* document);
     void setCanvases(CanvasRegistry* canvases) { canvases_ = canvases; }
     void setFunctionCompiler(FunctionCompiler compiler) { compileFunction_ = std::move(compiler); }
+    /// Where getBoundingClientRect, offset*, client*, scroll* and the
+    /// window's size and scroll position come from (the browser's layout).
+    /// Without one, elements have no boxes and the page does not scroll.
+    void setPageGeometry(PageGeometry* geometry) { geometry_ = geometry; refreshWindowGlobals(); }
+    /// Copies the viewport size and scroll position to the bare globals
+    /// (innerWidth, scrollY, ...), which are not the window's accessors
+    void refreshWindowGlobals();
     /// document.readyState: "loading", "interactive" or "complete"
     void setReadyState(const std::string& state) { readyState_ = state; }
 
@@ -82,6 +90,7 @@ private:
     FunctionCompiler compileFunction_;
     DOMDocument* document_ = nullptr;
     CanvasRegistry* canvases_ = nullptr;
+    PageGeometry* geometry_ = nullptr;
     std::string readyState_ = "loading";
 
     Zepra::Runtime::Object* global_ = nullptr;   // window
@@ -98,6 +107,7 @@ private:
     Zepra::Runtime::Object* tokenListProto_ = nullptr;
     Zepra::Runtime::Object* eventProto_ = nullptr;
     Zepra::Runtime::Object* mouseEventProto_ = nullptr;
+    Zepra::Runtime::Object* domRectProto_ = nullptr;
     Zepra::Runtime::Object* listItemFn_ = nullptr;  // item(i) on the arrays standing in for NodeLists
     /// Per-tag interfaces (HTMLDivElement, HTMLCanvasElement, ...) by lowercase tag
     std::unordered_map<std::string, std::pair<std::string, Zepra::Runtime::Object*>> tagInterfaces_;
@@ -114,6 +124,15 @@ private:
     void installCharacterData();
     void installDocumentInterface();
     void installEvents();
+    void installGeometry();
+
+    // Layout geometry
+    static constexpr double kDefaultViewportWidth = 1280, kDefaultViewportHeight = 720;
+    ElementGeometry geometryOf(const DOMElement* element);
+    bool isScrollingElement(const DOMElement* element) const;
+    Zepra::Runtime::Value rectObject(const GeometryRect& rect);
+    DOMElement* offsetParentOf(DOMElement* element);
+    void scrollPage(double x, double y);
 
     // Wrappers and node ownership
     Zepra::Runtime::Object* prototypeFor(const DOMNode* node) const;

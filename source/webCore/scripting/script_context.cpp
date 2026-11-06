@@ -187,6 +187,8 @@ ScriptResult ScriptContext::run(const std::string& code, const std::string& file
         result.error = "VM not available";
         return result;
     }
+    // Bare innerWidth/scrollY read what the window's accessors would
+    if (domBindings_) domBindings_->refreshWindowGlobals();
     
     // Skip oversized scripts — extremely large bundles (>512KB) are still
     // beyond what ZepraScript's single-pass compile can handle safely.
@@ -401,6 +403,7 @@ void ScriptContext::runTask(const std::function<void()>& task, const char* what)
     // when it threw. A run stopped by the limits takes its queued microtasks
     // with it.
     ScriptRunGuard guard(vm_);
+    if (domBindings_) domBindings_->refreshWindowGlobals();
     try {
         task();
     } catch (const std::exception& e) {
@@ -460,6 +463,10 @@ bool ScriptContext::dispatchMouseEvent(DOMElement* target, const std::string& ty
 
 void ScriptContext::releaseDetachedNodes() {
     if (domBindings_) domBindings_->releaseDetachedNodes();
+}
+
+void ScriptContext::setPageGeometry(PageGeometry* geometry) {
+    if (domBindings_) domBindings_->setPageGeometry(geometry);
 }
 
 void ScriptContext::addEventListener(const std::string& eventType, std::function<void()> callback) {
@@ -599,16 +606,10 @@ void ScriptContext::setupWindowGlobals() {
     locObj->set("protocol", Value::string(new String("https:")));
     vm_->setGlobal("location", Value::object(locObj));
     
-    // window dimensions
-    vm_->setGlobal("innerWidth", Value::number(1280));
-    vm_->setGlobal("innerHeight", Value::number(720));
-    
     // 'window' — self-referencing global scope alias
     // Most JS starts with window.addEventListener, window.document, etc.
     // (an EventTarget: addEventListener comes from its prototype)
     auto* windowObj = domBindings_->window();
-    windowObj->set("innerWidth", Value::number(1280));
-    windowObj->set("innerHeight", Value::number(720));
     windowObj->set("navigator", Value::object(navObj));
     windowObj->set("location", Value::object(locObj));
     windowObj->set("console", Value::object(consoleObj));
