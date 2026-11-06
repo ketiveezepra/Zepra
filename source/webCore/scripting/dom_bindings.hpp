@@ -72,6 +72,11 @@ public:
     /// Call once nothing outside the DOM points at them (after a relayout).
     void releaseDetachedNodes();
     size_t detachedNodeCount() const { return graveyard_.size(); }
+    /// Keeps a subtree something other than a script took out of the tree
+    /// (the DevTools Inspector) as if a script had removed it: in its root's
+    /// wrapper while a script can reach a node of it, otherwise until
+    /// releaseDetachedNodes()
+    void adoptDetachedNode(std::unique_ptr<DOMNode> root) { park(std::move(root)); }
 
 private:
     using Args = std::vector<Zepra::Runtime::Value>;
