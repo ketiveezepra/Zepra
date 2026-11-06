@@ -50,18 +50,14 @@ ForcedPseudo forcedFor(int action) {
 // Keyboard focus and the edit field
 // ---------------------------------------------------------------------------
 
-void DevToolsPanel::blurConsole() {
+void DevToolsPanel::blurInputs() {
     consoleFocused_ = false;
+    networkFilterFocused_ = false;
     treeFocused_ = false;
     menuOpen_ = false;
     // A click on the page ends an edit, as in Firefox; the search keeps its text
     if (field_.kind != FieldKind::Closed && field_.kind != FieldKind::Search) closeField();
     else if (field_.kind == FieldKind::Search) field_.kind = FieldKind::Closed;
-}
-
-void DevToolsPanel::insertConsoleText(const std::string& text) {
-    if (field_.kind != FieldKind::Closed) field_.text.insert(text);
-    else consoleInputText_ += text;
 }
 
 bool DevToolsPanel::isDoubleClick(float x, float y) {

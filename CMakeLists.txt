@@ -203,6 +203,7 @@ if(USE_NXRENDER)
         source/integration/devtools/inspector_edit.cpp
         source/integration/devtools/panel_clipboard.cpp
         source/integration/devtools/dom_edit.cpp
+        source/integration/devtools/network_details.cpp
         source/zepraEngine/engine/dev_tools.cpp
         source/zepraEngine/engine/html_parser_stub.cpp
         source/zepraEngine/media/audio_equalizer.cpp
@@ -282,6 +283,7 @@ else()
         source/integration/devtools/inspector_edit.cpp
         source/integration/devtools/panel_clipboard.cpp
         source/integration/devtools/dom_edit.cpp
+        source/integration/devtools/network_details.cpp
         source/zepraEngine/engine/dev_tools.cpp
         source/zepraEngine/media/audio_equalizer.cpp
         source/zepraEngine/media/browser_audio.cpp

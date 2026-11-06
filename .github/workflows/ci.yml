@@ -50,9 +50,9 @@ jobs:
       - name: NXAudio tests
         run: ctest --test-dir build/source/media/nxaudio --output-on-failure
 
-      # DevTools models: Rules pane, edit field, DOM edits and search, forced pseudo-classes
+      # DevTools models: Rules pane, Network details, edit field, DOM edits and search, forced pseudo-classes
       - name: DevTools tests
-        run: ctest --test-dir build/test -R "DevToolsStyleRulesTests|DevToolsTextFieldTests|DevToolsDomEditTests|WebCoreForcedPseudoTests" --output-on-failure
+        run: ctest --test-dir build/test -R "DevToolsStyleRulesTests|DevToolsNetworkTests|DevToolsTextFieldTests|DevToolsDomEditTests|WebCoreForcedPseudoTests" --output-on-failure
 
   # ============================================================================
   # Windows — MSYS2 UCRT64 (GCC), Win32/WGL backend
@@ -87,9 +87,9 @@ jobs:
       - name: Build
         run: cmake --build build --parallel -- -k 0
 
-      # DevTools models: Rules pane, edit field, DOM edits and search, forced pseudo-classes
+      # DevTools models: Rules pane, Network details, edit field, DOM edits and search, forced pseudo-classes
       - name: DevTools tests
-        run: ctest --test-dir build/test -R "DevToolsStyleRulesTests|DevToolsTextFieldTests|DevToolsDomEditTests|WebCoreForcedPseudoTests" --output-on-failure
+        run: ctest --test-dir build/test -R "DevToolsStyleRulesTests|DevToolsNetworkTests|DevToolsTextFieldTests|DevToolsDomEditTests|WebCoreForcedPseudoTests" --output-on-failure
 
   # ============================================================================
   # macOS — Apple Silicon, AppleClang, Cocoa/NSOpenGL backend
@@ -113,6 +113,6 @@ jobs:
       - name: Build
         run: cmake --build build --parallel $(sysctl -n hw.ncpu) -- -k 0
 
-      # DevTools models: Rules pane, edit field, DOM edits and search, forced pseudo-classes
+      # DevTools models: Rules pane, Network details, edit field, DOM edits and search, forced pseudo-classes
       - name: DevTools tests
-        run: ctest --test-dir build/test -R "DevToolsStyleRulesTests|DevToolsTextFieldTests|DevToolsDomEditTests|WebCoreForcedPseudoTests" --output-on-failure
+        run: ctest --test-dir build/test -R "DevToolsStyleRulesTests|DevToolsNetworkTests|DevToolsTextFieldTests|DevToolsDomEditTests|WebCoreForcedPseudoTests" --output-on-failure

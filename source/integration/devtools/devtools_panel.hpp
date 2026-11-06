@@ -9,7 +9,8 @@
  * active page's DOM, style rules, computed styles, layout boxes, script
  * context, console log and network monitor directly. It changes the page only
  * when a declaration is switched off in the Rules pane, through that element's
- * style attribute.
+ * style attribute. The Network panel's "Disable cache" holds while the panel
+ * is open (Zepra::WebCore::setCacheDisabled).
  */
 #pragma once
 
@@ -21,6 +22,7 @@
 
 #include "input/events.h"
 #include "scripting/console_format.hpp"
+#include "network_details.hpp"
 #include "style_rules.hpp"
 #include "text_field.hpp"
 
@@ -100,14 +102,18 @@ public:
     bool onMouseWheel(float x, float y, float delta);
     /// Right button: the Inspector tree's context menu. True when the press was inside the panel.
     bool onRightMouseDown(float x, float y, const Page& page);
-    /// Keys while the console input has focus. False when the key is not for the panel.
+    /// Keys while a text field of the panel or the Inspector tree has focus. False when the key is not for the panel.
     bool onKey(NXRender::KeyCode key, const std::string& text, bool ctrl, bool shift, const Page& page);
-    /// Whether typed text goes to the panel: the console input or an Inspector edit field
-    bool consoleFocused() const { return consoleFocused_ || field_.kind != FieldKind::Closed; }
+    bool consoleFocused() const { return consoleFocused_; }
+    void insertConsoleText(const std::string& text) { consoleInputText_ += text; }
+    /// A text field of the panel (console input, Network filter, an Inspector edit field) has the keyboard
+    bool textInputFocused() const {
+        return consoleFocused_ || networkFilterFocused_ || field_.kind != FieldKind::Closed;
+    }
+    /// Pastes into the focused text field
+    void insertText(const std::string& text);
     /// The page was clicked: the panel lets go of the keyboard
-    void blurConsole();
-    /// Pasted text, for the console input or the open edit field
-    void insertConsoleText(const std::string& text);
+    void blurInputs();
 
 private:
     struct Row {
@@ -200,10 +206,23 @@ private:
     uint64_t nextConsoleId_ = 1;
 
     // Network
+    enum class NetworkDetailTab { Headers, Response, Timings };
     float networkScroll_ = 0, networkMax_ = 0;
-    int networkSelected_ = -1;          // index into the rows shown (after the type filter)
+    uint64_t networkSelectedId_ = 0;    // request id shown in the details pane (0: none)
+    std::vector<uint64_t> networkRowIds_;   // the rows shown, in order (for hit testing)
     int networkFilter_ = 0;             // index into kNetworkFilters (0 = all)
     std::vector<Rect> networkFilterButtons_;
+    std::string networkFilterText_;
+    bool networkFilterFocused_ = false;
+    bool disableCache_ = false;
+    Rect networkFilterBox_, disableCacheBox_, networkDetail_, networkDetailBody_, networkDetailClose_;
+    std::vector<Rect> networkDetailTabs_;
+    NetworkDetailTab networkDetailTab_ = NetworkDetailTab::Headers;
+    float networkDetailScroll_ = 0, networkDetailMax_ = 0;
+    // The Response tab's lines for one request at one width (rebuilt when either changes)
+    uint64_t responseLinesId_ = 0;
+    size_t responseLinesColumns_ = 0;
+    std::vector<std::string> responseLines_;
 
     // Inspector editing (inspector_edit.cpp): one edit field at a time, tree keys,
     // the tree's context menu, markup search, forced pseudo-classes
@@ -281,6 +300,9 @@ private:
     void refreshHighlight(const Page& page);
     void drawConsole(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
     void drawNetwork(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY);
+    void drawNetworkDetails(const Painter& p, const zepra::NetworkEntry& entry, const Rect& area,
+                            float mouseX, float mouseY);
+    void selectNetworkRequest(uint64_t id);
     void evaluateConsoleInput(const Page& page);
     void buildConsoleRows(const Page& page);
     Zepra::WebCore::DOMElement* elementForStyles() const;
