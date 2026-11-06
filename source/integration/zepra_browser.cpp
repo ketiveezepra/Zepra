@@ -1457,7 +1457,9 @@ void parseWithWebCore(const std::string& html) {
     // Set location globals from current URL
     g_scriptContext->setGlobal("__pageUrl__", g_currentUrl);
     
-    // Execute page scripts (inline + external)
+    // Execute page scripts (inline + external). The document's text is kept
+    // for the DevTools source view (inline scripts point into it).
+    g_scriptContext->registerSource(g_currentUrl, html);
     std::function<void(DOMElement*)> executePageScripts = [&](DOMElement* el) {
         if (!el) return;
         for (size_t i = 0; i < el->childNodes().size(); i++) {
@@ -1478,7 +1480,11 @@ void parseWithWebCore(const std::string& html) {
                         std::string code = child->textContent();
                         if (!code.empty()) {
                             std::cout << "[JS] Executing inline script (" << code.size() << " bytes)" << std::endl;
-                            auto result = g_scriptContext->evaluate(code, g_currentUrl);
+                            // Lines count from the document, so console links land on the page source
+                            size_t at = html.find(code);
+                            uint32_t firstLine = at == std::string::npos ? 1 :
+                                1 + (uint32_t)std::count(html.begin(), html.begin() + (long)at, '\n');
+                            auto result = g_scriptContext->evaluate(code, g_currentUrl, firstLine);
                             if (!result.success) {
                                 std::cerr << "[JS] Uncaught error in inline script: " << result.error << std::endl;
                             }
@@ -1491,6 +1497,7 @@ void parseWithWebCore(const std::string& html) {
                         if (scriptResp.success && !scriptResp.data.empty()) {
                             std::cout << "[JS] Executing external script (" 
                                       << scriptResp.data.size() << " bytes)" << std::endl;
+                            g_scriptContext->registerSource(scriptUrl, scriptResp.data);
                             auto result = g_scriptContext->evaluate(scriptResp.data, scriptUrl);
                             if (!result.success) {
                                 std::cerr << "[JS] Uncaught error in " << scriptUrl << ": " << result.error << std::endl;
