@@ -148,8 +148,8 @@ ScriptContext::ScriptContext() : vm_(nullptr), vmReady_(false) {
         vmReady_ = true;
         // Uncaught errors from microtasks and unhandled promise rejections
         // reach the page console
-        vm_->setErrorReporter([this](const std::string& message) {
-            emitConsole("error", message);
+        vm_->setErrorReporter([this](const std::string& message, const Zepra::Runtime::Value& thrown) {
+            reportThrown(message, thrown);
         });
         std::cout << "[ScriptContext] Per-tab VM initialized" << std::endl;
     } catch (const std::exception& e) {
@@ -231,6 +231,17 @@ void ScriptContext::reportError(const std::string& text, const std::string& file
         m.sourceLine = line;
     }
     emitConsole(std::move(m));
+}
+
+void ScriptContext::reportThrown(const std::string& text, const Zepra::Runtime::Value& thrown) {
+    // An Error carries the stack of where it was made: its first frame is the link
+    std::string file;
+    uint32_t line = 0;
+    if (thrown.isObject()) {
+        Zepra::Runtime::Value stack = thrown.asObject()->get("stack");
+        if (stack.isString()) firstStackFrame(stack.toString(), file, line);
+    }
+    reportError(text, file, line);
 }
 
 void ScriptContext::setCallerSource(ConsoleMessage& message) const {
@@ -387,14 +398,7 @@ ScriptResult ScriptContext::run(const std::string& code, const std::string& file
             result.error = execResult.error;
             bool exception = execResult.status == Zepra::Runtime::ExecutionResult::Status::Exception;
             if (thrown && exception) *thrown = execResult.value;
-            // An Error carries the stack of where it was made: its first frame is the link
-            std::string file;
-            uint32_t line = 0;
-            if (exception && execResult.value.isObject()) {
-                Zepra::Runtime::Value stack = execResult.value.asObject()->get("stack");
-                if (stack.isString()) firstStackFrame(stack.toString(), file, line);
-            }
-            reportError(execResult.error, file, line);
+            reportThrown(execResult.error, exception ? execResult.value : Zepra::Runtime::Value::undefined());
         }
     } catch (const std::exception& e) {
         result.success = false;
@@ -517,6 +521,8 @@ void ScriptContext::runTask(const std::function<void()>& task, const char* what)
     ScriptRunGuard guard(vm_);
     try {
         task();
+    } catch (const Zepra::Runtime::ThrownException& e) {
+        reportThrown(std::string("Uncaught exception in ") + what + ": " + e.what(), e.value());
     } catch (const std::exception& e) {
         emitConsole("error", std::string("Uncaught exception in ") + what + ": " + e.what());
         if (vm_->isTerminationRequested()) {

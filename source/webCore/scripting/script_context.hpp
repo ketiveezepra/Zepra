@@ -235,6 +235,8 @@ private:
                      Zepra::Runtime::Value* thrown = nullptr, uint32_t firstLine = 1);
     /// Reports a script's error to the console, at the position the engine gives
     void reportError(const std::string& text, const std::string& file, uint32_t line, uint32_t column = 0);
+    /// Reports an uncaught value: an Error links to the first frame of its stack
+    void reportThrown(const std::string& text, const Zepra::Runtime::Value& thrown);
     /// The script position the running native function was called from
     void setCallerSource(ConsoleMessage& message) const;
     /// Hands a console entry to the message handler, else the text handler, else the terminal

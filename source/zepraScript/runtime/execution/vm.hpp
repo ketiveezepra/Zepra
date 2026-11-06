@@ -186,8 +186,9 @@ public:
      * @brief Where uncaught errors from jobs and unhandled promise rejections
      * are reported ("Uncaught (in promise) ..."); stderr by default
      */
-    void setErrorReporter(std::function<void(const std::string&)> reporter) { errorReporter_ = std::move(reporter); }
-    void reportError(const std::string& message);
+    /// Receives uncaught errors of jobs and unhandled rejections, with the thrown value (undefined when none)
+    void setErrorReporter(std::function<void(const std::string&, const Value&)> reporter) { errorReporter_ = std::move(reporter); }
+    void reportError(const std::string& message, const Value& thrown = Value::undefined());
 
     /// HostPromiseRejectionTracker: a promise was rejected unhandled, or got its first handler
     void trackPromiseRejection(Promise* promise, bool handled);
@@ -542,7 +543,7 @@ private:
     std::deque<std::function<void()>> jobs_;
     bool drainingJobs_ = false;
     std::vector<Promise*> pendingRejections_;     // Rejected with no handler yet
-    std::function<void(const std::string&)> errorReporter_;
+    std::function<void(const std::string&, const Value&)> errorReporter_;
     
     // Sandbox/Security support
     ResourceMonitor* resourceMonitor_ = nullptr;  // Resource limit tracking

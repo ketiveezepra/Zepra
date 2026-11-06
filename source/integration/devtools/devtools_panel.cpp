@@ -1245,7 +1245,7 @@ void DevToolsPanel::buildConsoleRows(const Page& page) {
                 ConsoleRow c;
                 c.message = &m;
                 c.messageId = m.id;
-                c.depth = m.depth + 1;
+                c.depth = m.level == "input" ? m.depth : m.depth + 1;   // typed lines stay aligned
                 c.line = line;
                 c.continuation = true;
                 consoleRows_.push_back(std::move(c));

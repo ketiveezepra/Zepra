@@ -521,6 +521,22 @@ TEST(ConsoleSource, UncaughtErrorsPointAtTheThrow) {
     EXPECT_EQ(m.sourceLine, 3u);
 }
 
+TEST(ConsoleSource, CallbackAndPromiseErrorsLinkToo) {
+    Page page;
+    page.script->evaluate("setTimeout(function () {\n  throw new Error('late');\n}, 0);", "timer.js");
+    page.script->processTimers();
+    ASSERT_FALSE(page.console.empty());
+    EXPECT_NE(page.console.back().text.find("late"), std::string::npos) << page.console.back().text;
+    EXPECT_EQ(page.console.back().sourceUrl, "timer.js");
+    EXPECT_EQ(page.console.back().sourceLine, 2u);
+
+    page.script->evaluate("Promise.resolve().then(function () {\n\n  throw new TypeError('async');\n});", "promise.js");
+    ASSERT_FALSE(page.console.empty());
+    EXPECT_NE(page.console.back().text.find("async"), std::string::npos) << page.console.back().text;
+    EXPECT_EQ(page.console.back().sourceUrl, "promise.js");
+    EXPECT_EQ(page.console.back().sourceLine, 3u);
+}
+
 TEST(ConsoleSource, SyntaxErrorsHaveLineAndColumn) {
     Page page;
     page.script->evaluate("var ok = 1;\nvar x = ;", "bad.js", 5);

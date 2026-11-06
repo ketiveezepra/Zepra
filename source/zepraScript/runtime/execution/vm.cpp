@@ -2778,7 +2778,7 @@ void VM::runMicrotasks() {
             } catch (const SecurityError&) {
                 throw;
             } catch (const ThrownException& e) {
-                reportError(std::string("Uncaught ") + e.what());
+                reportError(std::string("Uncaught ") + e.what(), e.value());
             } catch (const JSError& e) {
                 reportError("Uncaught " + e.type() + ": " + e.what());
             } catch (const std::exception& e) {
@@ -2797,14 +2797,15 @@ void VM::runMicrotasks() {
     rejected.swap(pendingRejections_);
     for (Promise* promise : rejected) {
         if (!promise->isHandled()) {
-            reportError(std::string("Uncaught (in promise) ") + ThrownException(promise->result()).what());
+            reportError(std::string("Uncaught (in promise) ") + ThrownException(promise->result()).what(),
+                        promise->result());
         }
     }
 }
 
-void VM::reportError(const std::string& message) {
+void VM::reportError(const std::string& message, const Value& thrown) {
     if (errorReporter_) {
-        errorReporter_(message);
+        errorReporter_(message, thrown);
     } else {
         std::cerr << message << std::endl;
     }
