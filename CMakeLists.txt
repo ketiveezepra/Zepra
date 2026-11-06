@@ -199,6 +199,8 @@ if(USE_NXRENDER)
         source/integration/zepra_browser.cpp
         source/integration/devtools/devtools_panel.cpp
         source/integration/devtools/style_rules.cpp
+        source/integration/devtools/network_details.cpp
+        source/integration/devtools/console_input.cpp
         source/integration/page_keys.cpp
         source/zepraEngine/engine/dev_tools.cpp
         source/zepraEngine/engine/html_parser_stub.cpp
@@ -275,6 +277,8 @@ else()
         source/integration/zepra_browser.cpp
         source/integration/devtools/devtools_panel.cpp
         source/integration/devtools/style_rules.cpp
+        source/integration/devtools/network_details.cpp
+        source/integration/devtools/console_input.cpp
         source/integration/page_keys.cpp
         source/zepraEngine/engine/dev_tools.cpp
         source/zepraEngine/media/audio_equalizer.cpp

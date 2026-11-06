@@ -50,9 +50,11 @@ jobs:
       - name: NXAudio tests
         run: ctest --test-dir build/source/media/nxaudio --output-on-failure
 
-      # The DevTools Rules pane model (matched rules, cascade, inherited rules)
+      # The DevTools models: Rules pane (matched rules, cascade, inherited rules), the
+      # Network panel's details (filter, headers, response, timings), Console input
+      # (editor, autocomplete, filter) and console value formatting
       - name: DevTools tests
-        run: ctest --test-dir build/test -R DevToolsStyleRulesTests --output-on-failure
+        run: ctest --test-dir build/test -R "DevToolsStyleRulesTests|DevToolsNetworkTests|DevToolsConsoleInputTests|WebCoreConsoleFormatTests" --output-on-failure
 
       # Keys, typing, focus and forms on the live DOM
       - name: User input tests
@@ -91,9 +93,11 @@ jobs:
       - name: Build
         run: cmake --build build --parallel -- -k 0
 
-      # The DevTools Rules pane model (matched rules, cascade, inherited rules)
+      # The DevTools models: Rules pane (matched rules, cascade, inherited rules), the
+      # Network panel's details (filter, headers, response, timings), Console input
+      # (editor, autocomplete, filter) and console value formatting
       - name: DevTools tests
-        run: ctest --test-dir build/test -R DevToolsStyleRulesTests --output-on-failure
+        run: ctest --test-dir build/test -R "DevToolsStyleRulesTests|DevToolsNetworkTests|DevToolsConsoleInputTests|WebCoreConsoleFormatTests" --output-on-failure
 
       # Keys, typing, focus and forms on the live DOM
       - name: User input tests
@@ -121,9 +125,11 @@ jobs:
       - name: Build
         run: cmake --build build --parallel $(sysctl -n hw.ncpu) -- -k 0
 
-      # The DevTools Rules pane model (matched rules, cascade, inherited rules)
+      # The DevTools models: Rules pane (matched rules, cascade, inherited rules), the
+      # Network panel's details (filter, headers, response, timings), Console input
+      # (editor, autocomplete, filter) and console value formatting
       - name: DevTools tests
-        run: ctest --test-dir build/test -R DevToolsStyleRulesTests --output-on-failure
+        run: ctest --test-dir build/test -R "DevToolsStyleRulesTests|DevToolsNetworkTests|DevToolsConsoleInputTests|WebCoreConsoleFormatTests" --output-on-failure
 
       # Keys, typing, focus and forms on the live DOM
       - name: User input tests

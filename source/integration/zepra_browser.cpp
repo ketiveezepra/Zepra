@@ -88,6 +88,7 @@ extern "C" {
 #include "nxhttp.h"
 #include "http_client.hpp"
 #include "browser/network_recorder.hpp"
+#include "browser/network_recorder_http.hpp"
 #include "network_monitor.h"
 
 // ===========================================================================
@@ -488,6 +489,7 @@ struct HttpResponse {
     std::string finalUrl;                                          // after redirects
     std::vector<std::pair<std::string, std::string>> headers;      // response headers
     size_t transferred = 0;                                        // bytes off the wire
+    Zepra::WebCore::ResourceResponseInfo details;                  // headers, timings, body preview (Network panel)
 };
 
 /// What a request is for and who asked (the Network panel shows it)
@@ -541,11 +543,21 @@ public:
             entry = std::move(it->second);
             inFlight_.erase(it);
         }
+        if (!response.requestHeaders.empty()) {
+            std::vector<zepra::NetworkHeader> sent;
+            for (const auto& [name, value] : response.requestHeaders) sent.push_back({name, value});
+            entry.monitor->recordRequestHeaders(entry.id, std::move(sent));
+        }
         if (response.status == 0 && !response.error.empty()) {
             entry.monitor->recordError(entry.id, response.error);
             return;
         }
         zepra::NetworkResponse res;
+        for (const auto& [name, value] : response.responseHeaders) res.headers.push_back({name, value});
+        res.body_preview = response.bodyPreview;
+        res.body_truncated = response.bodyTruncated;
+        const auto& t = response.timings;
+        res.timings = {t.known, t.redirect, t.dns, t.connect, t.tls, t.send, t.wait, t.receive};
         res.status_code = response.status;
         res.status_text = response.statusText;
         res.content_type = response.mimeType;
@@ -616,13 +628,17 @@ HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& optio
         } else {
             std::cerr << "[Browser] FAILED " << url << ": " << response.error << " (" << (int)elapsedMs << " ms)" << std::endl;
         }
-        Zepra::WebCore::ResourceResponseInfo done;
+        Zepra::WebCore::ResourceResponseInfo done = std::move(response.details);
         done.status = response.statusCode;
         done.statusText = response.statusText;
         done.mimeType = response.contentType;
         done.bodySize = response.data.size();
         done.transferredBytes = response.transferred;
         done.error = response.error;
+        if (done.bodyPreview.empty() && response.error.empty()) {
+            done.bodyPreview = Zepra::WebCore::textBodyPreview(done.mimeType, response.data.data(), response.data.size(),
+                                                               Zepra::WebCore::kBodyPreviewLimit, done.bodyTruncated);
+        }
         g_tabNetworkRecorder.didFinishRequest(recordId, done);
         return response;
     };
@@ -666,6 +682,10 @@ HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& optio
         Zepra::Networking::HttpClient client(config);
         Zepra::Networking::HttpRequest request(httpMethodFromString(options.method), url);
         for (const auto& [name, value] : options.headers) request.setHeader(name, value);
+        if (Zepra::WebCore::cacheDisabled()) {   // DevTools "Disable cache"
+            request.setHeader("Cache-Control", "no-cache");
+            request.setHeader("Pragma", "no-cache");
+        }
         if (!options.body.empty()) request.setBody(options.body);
         
         auto netResponse = client.send(request);
@@ -677,6 +697,8 @@ HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& optio
         response.finalUrl = netResponse.url().empty() ? url : netResponse.url();
         response.transferred = netResponse.bytesReceived();
         for (const auto& [name, value] : netResponse.headers()) response.headers.emplace_back(name, value);
+        response.details.mimeType = response.contentType;
+        Zepra::WebCore::fillResponseDetails(response.details, netResponse);
         
         if (netResponse.hasError()) {
             response.success = false;
@@ -1243,6 +1265,7 @@ void parseWithWebCore(const std::string& html) {
     // Prevents use-after-free when worker threads hold stale pointers; other
     // tabs keep their boxes (and their loads) in Tab::layoutRoot
     ZepraBrowser::g_lazyImageLoader.cancelTab(g_activeTabId);
+    ZepraBrowser::g_lazyImageLoader.newPageLoad();
     
     g_styledLines.clear();
     
@@ -1454,7 +1477,9 @@ void parseWithWebCore(const std::string& html) {
     // Set location globals from current URL
     g_scriptContext->setGlobal("__pageUrl__", g_currentUrl);
     
-    // Execute page scripts (inline + external)
+    // Execute page scripts (inline + external). The document's text is kept
+    // for the DevTools source view (inline scripts point into it).
+    g_scriptContext->registerSource(g_currentUrl, html);
     std::function<void(DOMElement*)> executePageScripts = [&](DOMElement* el) {
         if (!el) return;
         for (size_t i = 0; i < el->childNodes().size(); i++) {
@@ -1475,7 +1500,11 @@ void parseWithWebCore(const std::string& html) {
                         std::string code = child->textContent();
                         if (!code.empty()) {
                             std::cout << "[JS] Executing inline script (" << code.size() << " bytes)" << std::endl;
-                            auto result = g_scriptContext->evaluate(code, g_currentUrl);
+                            // Lines count from the document, so console links land on the page source
+                            size_t at = html.find(code);
+                            uint32_t firstLine = at == std::string::npos ? 1 :
+                                1 + (uint32_t)std::count(html.begin(), html.begin() + (long)at, '\n');
+                            auto result = g_scriptContext->evaluate(code, g_currentUrl, firstLine);
                             if (!result.success) {
                                 std::cerr << "[JS] Uncaught error in inline script: " << result.error << std::endl;
                             }
@@ -1488,6 +1517,7 @@ void parseWithWebCore(const std::string& html) {
                         if (scriptResp.success && !scriptResp.data.empty()) {
                             std::cout << "[JS] Executing external script (" 
                                       << scriptResp.data.size() << " bytes)" << std::endl;
+                            g_scriptContext->registerSource(scriptUrl, scriptResp.data);
                             auto result = g_scriptContext->evaluate(scriptResp.data, scriptUrl);
                             if (!result.success) {
                                 std::cerr << "[JS] Uncaught error in " << scriptUrl << ": " << result.error << std::endl;
@@ -4115,7 +4145,7 @@ void render() {
         }
     }
     // Cursor switching based on UI state
-    if (g_addressFocused || g_searchFocused || g_devTools.consoleFocused()) {
+    if (g_addressFocused || g_searchFocused || g_devTools.textInputFocused()) {
         NXRender::setCursor(NXRender::CursorType::Text);
     } else if (g_currentCursorIsHand || isOverLink || g_cursorIsPointer || g_uiHoverHand) {
         NXRender::setCursor(NXRender::CursorType::Hand);
@@ -4754,7 +4784,7 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
         return;
     }
     
-    // DevTools console input takes the keys while it has focus
+    // DevTools text fields (console input, Network filter) take the keys while focused
     if (g_devTools.onKey(key, text, ctrl, shift, devToolsPage())) return;
 
     // Then the page, while nothing in the browser's own UI has focus:
@@ -4805,8 +4835,8 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
                     g_addressInput += clipboardText;
                 } else if (g_searchFocused) {
                     (g_focusedBox ? g_focusedBox->text : g_searchQuery) += clipboardText;
-                } else if (g_devTools.consoleFocused()) {
-                    g_devTools.insertConsoleText(clipboardText);
+                } else if (g_devTools.textInputFocused()) {
+                    g_devTools.insertText(clipboardText);
                 } else if (g_scriptContext) {
                     g_scriptContext->insertText(clipboardText, "insertFromPaste");
                     syncPageFocus();
@@ -5178,7 +5208,7 @@ void handleNXEvent(const NXRender::Event& event) {
             // Text that came without a key (IME commits, characters outside ASCII)
             handleKeyPress(NXRender::KeyCode::Unknown, event.textInput, false, false);
         } else if (event.type == NXRender::EventType::KeyUp && g_scriptContext && g_layoutRoot &&
-                   !g_addressFocused && !g_searchFocused && !g_devTools.consoleFocused()) {
+                   !g_addressFocused && !g_searchFocused && !g_devTools.textInputFocused()) {
             g_scriptContext->keyUp(ZepraBrowser::domKeyFor((NXRender::KeyCode)event.key.key, "", event.key.modifiers));
         }
     } else if (event.type == NXRender::EventType::FileDrop) {
@@ -5233,7 +5263,7 @@ void handleNXEvent(const NXRender::Event& event) {
                      g_devTools.pickerSelect(g_layoutRoot ? findElementAt(g_layoutRoot.get(), x, y) : nullptr);
                      g_mouseDown = true;
                  } else {
-                 g_devTools.blurConsole();
+                 g_devTools.blurInputs();
                  // Call main click handler (handles address bar, search, tabs, etc.)
                  extern void handleClick(float, float);
                  handleClick(x, y);
@@ -5529,6 +5559,9 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
             return NXRender::gpu()->createTexture(w, h, pixels);
         }
         return 0;
+    });
+    ZepraBrowser::g_lazyImageLoader.setTextureUpdater([](uint32_t texture, int w, int h, const uint8_t* pixels) {
+        if (NXRender::gpu()) NXRender::gpu()->updateTexture(texture, w, h, pixels);
     });
     Zepra::WebCore::setNetworkRecorder(&g_tabNetworkRecorder);  // before any loader thread runs
     ZepraBrowser::g_lazyImageLoader.start(2); // 2 worker threads

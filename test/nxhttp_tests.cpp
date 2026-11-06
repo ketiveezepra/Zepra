@@ -544,7 +544,8 @@ namespace {
 
 // A tiny HTTP/1.1 server on 127.0.0.1: /cl answers with Content-Length,
 // /chunked with chunked encoding, /close with "Connection: close", /nolen
-// with a close-delimited body. It counts the connections it accepted.
+// with a close-delimited body, /slow after 40 ms, /redirect with a 302 to
+// /slow. It counts the connections it accepted.
 class TestHttpServer {
 public:
     TestHttpServer() {
@@ -621,6 +622,13 @@ private:
             } else if (path == "/close") {
                 response = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 6\r\n\r\nclosed";
                 closeAfter = true;
+            } else if (path == "/slow") {
+                std::this_thread::sleep_for(std::chrono::milliseconds(40));
+                response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Order: 1\r\nX-Order: 2\r\n"
+                           "Content-Length: 4\r\n\r\nslow";
+            } else if (path == "/redirect") {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                response = "HTTP/1.1 302 Found\r\nLocation: /slow\r\nContent-Length: 0\r\n\r\n";
             } else if (path == "/nolen") {
                 response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nno length";
                 closeAfter = true;
@@ -738,6 +746,64 @@ TEST(HttpKeepAlive, LoaderThreadsShareThePoolSafely) {
     // thread rather than one per request
     EXPECT_LE(server.connections(), 4);
 }
+
+// The Network panel's Timings and Headers come from these
+TEST(HttpTimings, PhasesOfANewAndAReusedConnection) {
+    TestHttpServer server;
+    ASSERT_TRUE(server.ok());
+    std::string base = "http://127.0.0.1:" + std::to_string(server.port());
+    Zepra::Networking::HttpClient client(localConfig());
+
+    auto a = client.get(base + "/slow");
+    ASSERT_FALSE(a.hasError()) << a.error();
+    const auto& t = a.timings();
+    EXPECT_GE(t.dnsMs, 0.0) << "a new connection resolves the host";
+    EXPECT_GE(t.connectMs, 0.0);
+    EXPECT_EQ(t.tlsMs, -1.0) << "plain HTTP has no handshake";
+    EXPECT_GE(t.sendMs, 0.0);
+    EXPECT_GE(t.waitMs, 35.0) << "the server held the response for 40 ms";
+    EXPECT_GE(t.receiveMs, 0.0);
+    EXPECT_EQ(t.redirectMs, 0.0);
+    EXPECT_LE(t.dnsMs + t.connectMs + t.sendMs + t.waitMs + t.receiveMs, a.timingMs() + 1.0);
+
+    // The headers as written, Host and the defaults included, in order
+    const auto& sent = a.requestHeaders();
+    ASSERT_GE(sent.size(), 3u);
+    EXPECT_EQ(sent[0].first, "Host");
+    EXPECT_EQ(sent[0].second, "127.0.0.1:" + std::to_string(server.port()));
+    bool userAgent = false;
+    for (const auto& [name, value] : sent) userAgent |= name == "User-Agent" && value == localConfig().userAgent;
+    EXPECT_TRUE(userAgent);
+
+    // The response headers as they arrived: order and repeats kept
+    std::vector<std::string> names;
+    for (const auto& h : a.headerList()) names.push_back(h.first + "=" + h.second);
+    EXPECT_EQ(names, (std::vector<std::string>{"Content-Type=text/plain", "X-Order=1", "X-Order=2", "Content-Length=4"}));
+
+    auto b = client.get(base + "/cl");
+    ASSERT_FALSE(b.hasError()) << b.error();
+    EXPECT_TRUE(b.connectionReused());
+    EXPECT_EQ(b.timings().dnsMs, -1.0) << "a kept-alive connection skips DNS and connect";
+    EXPECT_EQ(b.timings().connectMs, -1.0);
+    EXPECT_LT(b.timings().waitMs, 35.0);
+}
+
+TEST(HttpTimings, RedirectHopsCountAsRedirectTime) {
+    TestHttpServer server;
+    ASSERT_TRUE(server.ok());
+    auto config = localConfig();
+    config.followRedirects = true;
+    Zepra::Networking::HttpClient client(config);
+
+    auto r = client.get("http://127.0.0.1:" + std::to_string(server.port()) + "/redirect");
+    ASSERT_FALSE(r.hasError()) << r.error();
+    EXPECT_EQ(r.statusCode(), 200);
+    EXPECT_EQ(r.bodyString(), "slow");
+    EXPECT_GE(r.timings().redirectMs, 15.0) << "the 302 took 20 ms";
+    EXPECT_GE(r.timings().waitMs, 35.0) << "the other phases are the final hop's";
+    EXPECT_GE(r.timingMs(), r.timings().redirectMs + r.timings().waitMs);
+    EXPECT_EQ(r.requestHeaders()[0].first, "Host");
+}
 #endif // !_WIN32
 
 // =============================================================================
@@ -831,4 +897,34 @@ TEST(NetworkMonitorThreads, ErrorsClearAndCallbacksOutsideTheLock) {
     monitor.recordResponse(late, res);
     EXPECT_TRUE(monitor.getEntries().empty());
     EXPECT_EQ(callbacks, 1);
+}
+
+TEST(NetworkMonitorThreads, RequestHeadersAndTimingsArriveLater) {
+    zepra::NetworkMonitor monitor;
+    zepra::NetworkRequest req;
+    req.method = "GET";
+    req.url = "https://example.test/";
+    uint64_t id = monitor.recordRequest(req);
+    EXPECT_TRUE(monitor.getEntries()[0].request.headers.empty());
+
+    monitor.recordRequestHeaders(id, {{"Host", "example.test"}, {"Cache-Control", "no-cache"}});
+    zepra::NetworkResponse res;
+    res.status_code = 200;
+    res.timings.known = true;
+    res.timings.dns = 12;
+    res.timings.wait = 80;
+    monitor.recordResponse(id, res);
+
+    auto e = monitor.getEntries()[0];
+    ASSERT_EQ(e.request.headers.size(), 2u);
+    EXPECT_EQ(e.request.headers[1].name, "Cache-Control");
+    EXPECT_TRUE(e.response.timings.known);
+    EXPECT_EQ(e.response.timings.dns, 12);
+    EXPECT_EQ(e.response.timings.connect, -1);
+    EXPECT_EQ(e.response.timings.wait, 80);
+
+    // Headers for a request cleared in flight are dropped
+    monitor.clear();
+    monitor.recordRequestHeaders(id, {{"Host", "example.test"}});
+    EXPECT_TRUE(monitor.getEntries().empty());
 }

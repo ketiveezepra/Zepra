@@ -103,6 +103,13 @@ public:
      * @brief Cancel all pending images
      */
     void cancelAll();
+
+    /**
+     * @brief A new page load starts. While DevTools' "Disable cache" is on
+     * (cacheDisabled()), images cached by an earlier load are fetched again
+     * the first time this load asks for them (the cached one shows meanwhile).
+     */
+    void newPageLoad() { ++loadEpoch_; }
     
     /**
      * @brief Get completed images (call from main/render thread)
@@ -136,6 +143,13 @@ public:
      */
     using TextureCreator = std::function<uint32_t(int width, int height, const uint8_t* pixels)>;
     void setTextureCreator(TextureCreator creator) { textureCreator_ = creator; }
+
+    /**
+     * @brief Set callback that replaces a texture's pixels (and size) in place; an
+     * image fetched again then reuses its texture, so boxes that show it follow
+     */
+    using TextureUpdater = std::function<void(uint32_t textureId, int width, int height, const uint8_t* pixels)>;
+    void setTextureUpdater(TextureUpdater updater) { textureUpdater_ = updater; }
 
     /**
      * @brief The texture to draw now for an image texture (main thread). For an
@@ -191,8 +205,12 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<int> pendingCount_{0};
     
-    // Texture creator (main thread callback)
+    // Texture creator and updater (main thread callbacks)
     TextureCreator textureCreator_;
+    TextureUpdater textureUpdater_;
+
+    // Bumped by newPageLoad()
+    std::atomic<uint64_t> loadEpoch_{0};
     
     // URL cache to avoid duplicate loads, filled when an image arrives (also when
     // its box was replaced by a relayout in the meantime, so the next layout hits it)
@@ -201,7 +219,12 @@ private:
         int width = 0;
         int height = 0;
         std::string svgData;       // SVG images: the document (textureId stays 0)
+        bool animated = false;     // a GIF with frames in animations_
+        uint64_t loadEpoch = 0;    // the page load that fetched (or refetched) it
     };
+    /// The cached image for `url`, if any; `refetch` is set (once per page load)
+    /// when "Disable cache" wants it fetched again
+    bool findCached(const std::string& url, CachedTexture& out, bool& refetch);
     std::unordered_map<std::string, CachedTexture> textureCache_;
     std::mutex cacheMutex_;
 
