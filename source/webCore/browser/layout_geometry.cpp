@@ -44,7 +44,9 @@ void contentExtent(const LayoutBox& box, float x, float y, float& right, float& 
 void LayoutGeometryIndex::build(const PageLayout& page) {
     boxes_.clear();
     if (!page.root) return;
-    if (page.body) boxes_[page.body].push_back({page.root, 0, 0});
+    // layoutBlock puts the root at its margin (body's), and paintBox draws it there
+    const float rootX = page.root->x, rootY = page.root->y;
+    if (page.body) boxes_[page.body].push_back({page.root, rootX, rootY});
     // Iterative walk: pages nest deeper than the stack likes
     struct Item {
         const LayoutBox* box;
@@ -59,7 +61,7 @@ void LayoutGeometryIndex::build(const PageLayout& page) {
             stack.push_back({&*it, x + it->x, y + it->y, owner});
         }
     };
-    pushChildren(*page.root, 0, 0, rootOwner);
+    pushChildren(*page.root, rootX, rootY, rootOwner);
     while (!stack.empty()) {
         Item item = stack.back();
         stack.pop_back();
@@ -73,7 +75,8 @@ void LayoutGeometryIndex::build(const PageLayout& page) {
     }
 }
 
-ElementGeometry LayoutGeometryIndex::geometryOf(const PageLayout& page, const DOMElement* element) const {
+ElementGeometry LayoutGeometryIndex::geometryOf(const PageLayout& page, const DOMElement* element,
+                                                bool withScrollSize) const {
     ElementGeometry g;
     if (!element || !page.root) return g;
     if (element == page.documentElement) {
@@ -100,6 +103,7 @@ ElementGeometry LayoutGeometryIndex::geometryOf(const PageLayout& page, const DO
     g.borderRight = box.borderRight;
     g.borderBottom = box.borderBottom;
     g.borderLeft = box.borderLeft;
+    if (!withScrollSize) return g;
 
     // Scrollable size: the padding box, grown to reach the furthest
     // descendant plus the end padding
@@ -111,6 +115,23 @@ ElementGeometry LayoutGeometryIndex::geometryOf(const PageLayout& page, const DO
     g.scrollWidth = std::max(padW, right - padX + (right > padX ? box.paddingRight : 0));
     g.scrollHeight = std::max(padH, bottom - padY + (bottom > padY ? box.paddingBottom : 0));
     return g;
+}
+
+void placeBoxes(const LayoutBox& root, float x, float y, float scrollY) {
+    struct Item {
+        const LayoutBox* box;
+        float x, y;
+    };
+    std::vector<Item> stack{{&root, x + root.x, y + root.y - scrollY}};
+    while (!stack.empty()) {
+        Item item = stack.back();
+        stack.pop_back();
+        item.box->screenX = item.x;
+        item.box->screenY = item.y;
+        for (const LayoutBox& child : item.box->children) {
+            if (child.type != LayoutType::None) stack.push_back({&child, item.x + child.x, item.y + child.y});
+        }
+    }
 }
 
 }  // namespace ZepraBrowser

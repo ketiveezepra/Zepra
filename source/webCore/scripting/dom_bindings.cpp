@@ -1323,15 +1323,18 @@ void scrollArguments(const FunctionCallInfo& info, double& x, double& y) {
         x = first.toNumber();
         y = info.argument(1).toNumber();
     }
-    if (std::isnan(x)) x = 0;
-    if (std::isnan(y)) y = 0;
+    // CSSOM View: non-finite coordinates are 0
+    if (!std::isfinite(x)) x = 0;
+    if (!std::isfinite(y)) y = 0;
 }
+
+double finiteOrZero(double v) { return std::isfinite(v) ? v : 0; }
 
 }  // namespace
 
-ElementGeometry DOMBindings::geometryOf(const DOMElement* element) {
+ElementGeometry DOMBindings::geometryOf(const DOMElement* element, bool withScrollSize) {
     if (!geometry_ || !element || !isConnectedTo(element, document_)) return {};
-    return geometry_->elementGeometry(element);
+    return geometry_->elementGeometry(element, withScrollSize);
 }
 
 bool DOMBindings::isScrollingElement(const DOMElement* element) const {
@@ -1374,10 +1377,16 @@ void DOMBindings::refreshWindowGlobals() {
     double width = geometry_ ? geometry_->viewportWidth() : kDefaultViewportWidth;
     double height = geometry_ ? geometry_->viewportHeight() : kDefaultViewportHeight;
     double sx = geometry_ ? geometry_->scrollX() : 0, sy = geometry_ ? geometry_->scrollY() : 0;
-    const std::pair<const char*, double> globals[] = {
-        {"innerWidth", width}, {"innerHeight", height}, {"scrollX", sx}, {"scrollY", sy},
-        {"pageXOffset", sx}, {"pageYOffset", sy}};
-    for (const auto& [name, value] : globals) vm_->setGlobal(name, Value::number(value));
+    const double values[kWindowGlobals] = {width, height, sx, sy, sx, sy};
+    for (size_t i = 0; i < kWindowGlobals; i++) {
+        // A page may replace these with its own (var scrollY = ...): leave those alone
+        Value current = vm_->getGlobal(kWindowGlobalNames[i]);
+        bool ours = !windowGlobalsSet_ || (current.isNumber() && current.asNumber() == windowGlobals_[i]);
+        if (!ours) continue;
+        windowGlobals_[i] = values[i];
+        vm_->setGlobal(kWindowGlobalNames[i], Value::number(values[i]));
+    }
+    windowGlobalsSet_ = true;
 }
 
 void DOMBindings::installGeometry() {
@@ -1426,10 +1435,10 @@ void DOMBindings::installGeometry() {
         return Value::number(g.hasBox && !g.inlineBox ? roundPx(g.borderLeft) : 0);
     }));
     accessor(p, "scrollWidth", on<DOMElement>("scrollWidth", [this](DOMElement& e, const Info&) {
-        return Value::number(roundPx(geometryOf(&e).scrollWidth));
+        return Value::number(roundPx(geometryOf(&e, true).scrollWidth));
     }));
     accessor(p, "scrollHeight", on<DOMElement>("scrollHeight", [this](DOMElement& e, const Info&) {
-        return Value::number(roundPx(geometryOf(&e).scrollHeight));
+        return Value::number(roundPx(geometryOf(&e, true).scrollHeight));
     }));
     // Only the page scrolls (no element is a scroll container yet): <html>
     // reads and moves the page's scroll position, other elements stay at 0
@@ -1438,7 +1447,7 @@ void DOMBindings::installGeometry() {
             return Value::number(isScrollingElement(&e) && geometry_ ? geometry_->scrollY() : 0);
         }),
         on<DOMElement>("scrollTop", [this](DOMElement& e, const Info& info) {
-            if (isScrollingElement(&e) && geometry_) scrollPage(geometry_->scrollX(), info.argument(0).toNumber());
+            if (isScrollingElement(&e) && geometry_) scrollPage(geometry_->scrollX(), finiteOrZero(info.argument(0).toNumber()));
             return Value::undefined();
         }));
     accessor(p, "scrollLeft",
@@ -1446,7 +1455,7 @@ void DOMBindings::installGeometry() {
             return Value::number(isScrollingElement(&e) && geometry_ ? geometry_->scrollX() : 0);
         }),
         on<DOMElement>("scrollLeft", [this](DOMElement& e, const Info& info) {
-            if (isScrollingElement(&e) && geometry_) scrollPage(info.argument(0).toNumber(), geometry_->scrollY());
+            if (isScrollingElement(&e) && geometry_) scrollPage(finiteOrZero(info.argument(0).toNumber()), geometry_->scrollY());
             return Value::undefined();
         }));
     for (const char* name : {"scrollTo", "scroll", "scrollBy"}) {
@@ -1461,7 +1470,8 @@ void DOMBindings::installGeometry() {
         }));
     }
     // scrollIntoView(alignToTop) / scrollIntoView({block}): start (default),
-    // end, center, or nearest (only when the box is not fully in view)
+    // end, center, or nearest (the closer edge, and only when the box is
+    // partly out of view without covering the whole viewport)
     method(p, "scrollIntoView", 0, on<DOMElement>("scrollIntoView", [this](DOMElement& e, const Info& info) {
         ElementGeometry g = geometryOf(&e);
         if (!g.hasBox || !geometry_) return Value::undefined();
@@ -1470,7 +1480,7 @@ void DOMBindings::installGeometry() {
         if (arg.isObject()) {
             Value b = arg.asObject()->get("block");
             if (!b.isUndefined()) block = b.toString();
-        } else if (info.argumentCount() > 0 && !arg.isUndefined() && !arg.toBoolean()) {
+        } else if (arg.isBoolean() && !arg.asBoolean()) {
             block = "end";
         }
         GeometryRect r = g.bounds();
@@ -1479,8 +1489,10 @@ void DOMBindings::installGeometry() {
         if (block == "end") target = sy + r.y + r.height - viewH;
         else if (block == "center") target = sy + r.y + r.height / 2 - viewH / 2;
         else if (block == "nearest") {
-            if (r.y >= 0 && r.y + r.height <= viewH) return Value::undefined();
-            if (r.y + r.height > viewH && r.height <= viewH) target = sy + r.y + r.height - viewH;
+            bool aboveTop = r.y < 0, belowBottom = r.y + r.height > viewH;
+            if (aboveTop == belowBottom) return Value::undefined();  // in view, or covering it
+            bool alignEnd = (aboveTop && r.height > viewH) || (belowBottom && r.height <= viewH);
+            if (alignEnd) target = sy + r.y + r.height - viewH;
         }
         scrollPage(geometry_->scrollX(), target);
         return Value::undefined();
@@ -1494,7 +1506,8 @@ void DOMBindings::installGeometry() {
     }));
     auto offsetOrigin = [this](DOMElement& e, bool vertical) -> double {
         ElementGeometry g = geometryOf(&e);
-        if (!g.hasBox) return 0;
+        // <body> sits at the page origin as far as offset* go (CSSOM View §7)
+        if (!g.hasBox || isTag(&e, "body")) return 0;
         double edge = vertical ? g.rects[0].y : g.rects[0].x;
         DOMElement* parent = offsetParentOf(&e);
         if (!parent || isTag(parent, "body")) {

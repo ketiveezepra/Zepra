@@ -51,9 +51,10 @@ public:
     void build(const PageLayout& page);
     void clear() { boxes_.clear(); }
 
-    /// The element's boxes in viewport coordinates at the page's scroll position
-    Zepra::WebCore::ElementGeometry geometryOf(const PageLayout& page,
-                                               const Zepra::WebCore::DOMElement* element) const;
+    /// The element's boxes in viewport coordinates at the page's scroll
+    /// position; `withScrollSize` also measures its content (a walk of its subtree)
+    Zepra::WebCore::ElementGeometry geometryOf(const PageLayout& page, const Zepra::WebCore::DOMElement* element,
+                                               bool withScrollSize) const;
 
 private:
     struct Placed {
@@ -62,5 +63,13 @@ private:
     };
     std::unordered_map<const Zepra::WebCore::DOMElement*, std::vector<Placed>> boxes_;
 };
+
+/**
+ * @brief Sets screenX/screenY of every box the way paintBox would, without
+ * painting: the root at (x + root.x, y + root.y - scrollY). Hit-testing reads
+ * them, so a tree rebuilt between frames (a script read geometry after
+ * changing the DOM) can be hit-tested before it is painted.
+ */
+void placeBoxes(const LayoutBox& root, float x, float y, float scrollY);
 
 }  // namespace ZepraBrowser

@@ -128,7 +128,14 @@ private:
 
     // Layout geometry
     static constexpr double kDefaultViewportWidth = 1280, kDefaultViewportHeight = 720;
-    ElementGeometry geometryOf(const DOMElement* element);
+    ElementGeometry geometryOf(const DOMElement* element, bool withScrollSize = false);
+    /// Bare globals mirroring the window's (refreshWindowGlobals), and the
+    /// values last written to them
+    static constexpr size_t kWindowGlobals = 6;
+    static constexpr const char* kWindowGlobalNames[kWindowGlobals] = {
+        "innerWidth", "innerHeight", "scrollX", "scrollY", "pageXOffset", "pageYOffset"};
+    double windowGlobals_[kWindowGlobals] = {};
+    bool windowGlobalsSet_ = false;
     bool isScrollingElement(const DOMElement* element) const;
     Zepra::Runtime::Value rectObject(const GeometryRect& rect);
     DOMElement* offsetParentOf(DOMElement* element);

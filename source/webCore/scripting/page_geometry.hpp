@@ -30,7 +30,7 @@ struct ElementGeometry {
     int position = 0;             ///< 0 static, 1 relative, 2 absolute, 3 fixed, 4 sticky
     std::vector<GeometryRect> rects;  ///< border boxes, first one first (getClientRects)
     double borderTop = 0, borderRight = 0, borderBottom = 0, borderLeft = 0;
-    double scrollWidth = 0, scrollHeight = 0;  ///< padding box grown to fit the content
+    double scrollWidth = 0, scrollHeight = 0;  ///< padding box grown to fit the content (if asked for)
 
     /// The smallest rectangle holding every border box (getBoundingClientRect)
     GeometryRect bounds() const;
@@ -39,8 +39,10 @@ struct ElementGeometry {
 class PageGeometry {
 public:
     virtual ~PageGeometry() = default;
-    /// The element's boxes, after laying out the page again if the DOM changed
-    virtual ElementGeometry elementGeometry(const DOMElement* element) = 0;
+    /// The element's boxes, after laying out the page again if the DOM
+    /// changed. scrollWidth/scrollHeight are filled in only `withScrollSize`
+    /// (measuring them walks the element's subtree).
+    virtual ElementGeometry elementGeometry(const DOMElement* element, bool withScrollSize) = 0;
     /// The page's content area, without the browser's own bars
     virtual double viewportWidth() = 0;
     virtual double viewportHeight() = 0;

@@ -3079,7 +3079,7 @@ static Tab* activeTab() {
 // change restyles and lays the page out first, as other browsers do.
 class BrowserPageGeometry : public Zepra::WebCore::PageGeometry {
 public:
-    Zepra::WebCore::ElementGeometry elementGeometry(const DOMElement* element) override {
+    Zepra::WebCore::ElementGeometry elementGeometry(const DOMElement* element, bool withScrollSize) override {
         if (!updateLayout()) return {};
         ZepraBrowser::PageLayout page = currentPage();
         if (indexedRoot_ != g_layoutRoot.get() || indexedPass_ != g_layoutPass) {
@@ -3087,7 +3087,7 @@ public:
             indexedRoot_ = g_layoutRoot.get();
             indexedPass_ = g_layoutPass;
         }
-        return index_.geometryOf(page, element);
+        return index_.geometryOf(page, element, withScrollSize);
     }
     double viewportWidth() override { return g_width - getSidebarOffset(); }
     double viewportHeight() override { return pageViewportHeight(); }
@@ -3136,6 +3136,19 @@ private:
 static Zepra::WebCore::PageGeometry* pageGeometry() {
     static BrowserPageGeometry geometry;
     return &geometry;
+}
+
+// A script that read geometry after changing the DOM left a box tree that
+// was never painted: give it screen positions so hit-testing works before
+// the next frame
+static void placeUnpaintedBoxes() {
+    if (!g_layoutRoot || g_layoutPainted) return;
+    if (g_layoutPending) layoutPage();
+    PageFrame frame = pageFrame();
+    Tab* tab = activeTab();
+    ZepraBrowser::placeBoxes(*g_layoutRoot, getSidebarOffset() + frame.originX, TOPBAR_HEIGHT + frame.originY,
+                             tab ? tab->scrollY : 0);
+    g_layoutPainted = true;
 }
 
 // Sidebar panel enum (matches reference image)
@@ -4479,8 +4492,7 @@ void onSelectTab(int tabId) {
     // If layout was restored from per-tab state, just re-layout it at current width
     if (g_layoutRoot) {
         g_focusedBox = nullptr;
-        float contentWidth = g_width - getSidebarOffset();
-        ZepraBrowser::layoutBlock(*g_layoutRoot, contentWidth, 0);
+        layoutPage();
         std::cout << "[Tab] Switched to tab " << tabId << " (restored DOM layout)" << std::endl;
         return;
     }
@@ -4512,10 +4524,7 @@ void onSelectTab(int tabId) {
         }
     }
     
-    if (g_layoutRoot) {
-        float contentWidth = g_width - getSidebarOffset();
-        ZepraBrowser::layoutBlock(*g_layoutRoot, contentWidth, 0);
-    }
+    if (g_layoutRoot) layoutPage();
     
     std::cout << "[Tab] Switched to tab " << tabId << " with " << g_styledLines.size() << " lines" << std::endl;
 }
@@ -4762,6 +4771,7 @@ void handleClick(float mx, float my) {
     if (my > TOPBAR_HEIGHT && g_layoutRoot && g_scriptContext) {
         if (DOMElement* target = findElementAt(g_layoutRoot.get(), mx, my)) {
             if (!g_scriptContext->dispatchMouseEvent(target, "click", mx - getSidebarOffset(), my - TOPBAR_HEIGHT)) return;
+            placeUnpaintedBoxes();
         }
     }
     

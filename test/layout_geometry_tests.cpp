@@ -55,10 +55,12 @@ public:
     int queries = 0;
 
     void reindex() { index.build(page); }
-    ElementGeometry elementGeometry(const DOMElement* element) override {
+    ElementGeometry elementGeometry(const DOMElement* element, bool withScrollSize) override {
         queries++;
-        return index.geometryOf(page, element);
+        return index.geometryOf(page, element, withScrollSize);
     }
+    /// Everything, scroll size included (what the index tests check)
+    ElementGeometry elementGeometry(const DOMElement* element) { return elementGeometry(element, true); }
     double viewportWidth() override { return page.viewportWidth; }
     double viewportHeight() override { return page.viewportHeight; }
     double scrollX() override { return page.scrollX; }
@@ -238,6 +240,38 @@ TEST(LayoutGeometryIndex, ScrollSizeReachesOverflowingContent) {
     EXPECT_DOUBLE_EQ(box.scrollHeight, 96);
 }
 
+TEST(LayoutGeometryIndex, RootSitsAtItsMarginLikePaintBox) {
+    // layoutBlock puts the root (body) at its margin: everything moves with it
+    Page page;
+    page.root.x = 8;
+    page.root.y = 8;
+    page.geometry.reindex();
+    ElementGeometry body = page.geometry.elementGeometry(page.doc->body());
+    EXPECT_DOUBLE_EQ(body.rects[0].x, 28);
+    ElementGeometry box = page.geometry.elementGeometry(page.byId("box"));
+    EXPECT_DOUBLE_EQ(box.rects[0].x, 20 + 8 + 8);
+    EXPECT_DOUBLE_EQ(box.rects[0].y, 20 + 8 + 8);
+}
+
+TEST(LayoutGeometryIndex, PlaceBoxesMatchesTheIndex) {
+    // Screen positions for hit-testing a tree that was not painted yet
+    Page page;
+    page.root.x = 8;
+    ZepraBrowser::placeBoxes(page.root, 100, 50, 30);
+    const LayoutBox& frame = *std::next(page.root.children.begin());
+    const LayoutBox& inner = frame.children.front();
+    EXPECT_FLOAT_EQ(page.root.screenX, 108);
+    EXPECT_FLOAT_EQ(inner.screenX, 108 + 8 + 25);
+    EXPECT_FLOAT_EQ(inner.screenY, 50 - 30 + 120 + 30);
+}
+
+TEST(LayoutGeometryIndex, ScrollSizeOnlyWhenAskedFor) {
+    Page page;
+    ElementGeometry g = page.geometry.elementGeometry(page.byId("box"), false);
+    EXPECT_TRUE(g.hasBox);
+    EXPECT_DOUBLE_EQ(g.scrollWidth, 0);
+}
+
 TEST(LayoutGeometryIndex, DocumentSize) {
     Page page;
     EXPECT_FLOAT_EQ(ZepraBrowser::documentHeight(page.geometry.page), 2000);
@@ -284,6 +318,8 @@ TEST(ScriptGeometry, OffsetPropertiesFollowTheOffsetParent) {
                         " document.getElementById('hidden').offsetParent].join()"),
               ",,");
     EXPECT_EQ(page.eval("document.getElementById('hidden').offsetWidth"), "0");
+    // <body> itself is at offset 0, 0
+    EXPECT_EQ(page.eval("document.body.offsetTop + ',' + document.body.offsetLeft"), "0,0");
     // Offsets from the page origin do not move when the page scrolls
     page.geometry.page.scrollY = 300;
     EXPECT_EQ(page.eval("box.offsetTop + ',' + box.getBoundingClientRect().top"), "28,-272");
@@ -323,6 +359,13 @@ TEST(ScriptGeometry, WindowAndDocumentScrolling) {
     // A script started after the browser scrolled sees the new position
     page.geometry.page.scrollY = 75;
     EXPECT_EQ(page.eval("scrollY + ',' + pageYOffset"), "75,75");
+    // Non-finite coordinates are 0
+    EXPECT_EQ(page.eval("scrollTo(0, Infinity); scrollY"), "0");
+    EXPECT_EQ(page.eval("scrollTo(0, 40); document.documentElement.scrollTop = NaN; scrollY"), "0");
+    // A page's own global of the same name is left alone
+    EXPECT_EQ(page.eval("var scrollY = 'mine'; scrollY"), "mine");
+    page.geometry.page.scrollY = 90;
+    EXPECT_EQ(page.eval("scrollY + ',' + window.scrollY + ',' + pageYOffset"), "mine,90,90");
 }
 
 TEST(ScriptGeometry, ScrollIntoView) {
@@ -341,6 +384,25 @@ TEST(ScriptGeometry, ScrollIntoView) {
     page.geometry.page.scrollY = 10;
     page.eval("document.getElementById('box').scrollIntoView({block: 'nearest'})");
     EXPECT_FLOAT_EQ(page.geometry.page.scrollY, 10);
+    // nearest, below the viewport: its bottom edge comes to the bottom (#inner bottom = 210)
+    page.geometry.page.viewportHeight = 100;
+    page.geometry.page.scrollY = 0;
+    page.eval("document.getElementById('inner').scrollIntoView({block: 'nearest'})");
+    EXPECT_FLOAT_EQ(page.geometry.page.scrollY, 110);
+    // nearest, above the viewport: its top edge comes to the top
+    page.geometry.page.scrollY = 500;
+    page.eval("document.getElementById('inner').scrollIntoView({block: 'nearest'})");
+    EXPECT_FLOAT_EQ(page.geometry.page.scrollY, 170);
+    // nearest, taller than the viewport and covering it: no move
+    page.geometry.page.viewportHeight = 30;
+    page.geometry.page.scrollY = 180;
+    page.eval("document.getElementById('inner').scrollIntoView({block: 'nearest'})");
+    EXPECT_FLOAT_EQ(page.geometry.page.scrollY, 180);
+    // null is not false: align to the top
+    page.geometry.page.viewportHeight = 700;
+    page.geometry.page.scrollY = 0;
+    page.eval("document.getElementById('inner').scrollIntoView(null)");
+    EXPECT_FLOAT_EQ(page.geometry.page.scrollY, 170);
 }
 
 TEST(ScriptGeometry, WithoutLayoutEverythingIsZero) {

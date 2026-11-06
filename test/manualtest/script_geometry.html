@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title>Script geometry manual test</title>
 <style>
-  body { font-family: sans-serif; margin: 0; padding: 16px; background: #fafafa; color: #222; }
+  body { font-family: sans-serif; padding: 16px; background: #fafafa; color: #222; }
   #box { width: 300px; height: 60px; padding: 10px; border: 4px solid #4a7; background: #eef8f0; }
   #frame { position: relative; width: 400px; height: 90px; border: 6px solid #47a; margin-top: 12px; background: #eef2fa; }
   #inner { position: absolute; left: 30px; top: 20px; width: 120px; height: 40px; background: #fbe; }
@@ -72,6 +72,14 @@
     document.getElementById("status").textContent = "geometry: " + passed + " passed, " + failed + " failed";
     document.getElementById("status").className = failed ? "fail" : "pass";
     console.log("geometry: " + passed + " passed, " + failed + " failed");
+    // Click 5px inside #box's top-left corner: the click lands where the rect says
+    box.addEventListener("click", function (e) {
+      var b = box.getBoundingClientRect();
+      row("click clientX/Y - rect left/top", Math.round(e.clientX - b.left) + "," + Math.round(e.clientY - b.top), "5,5");
+      // The next click (here) may hit-test the tree this read rebuilt
+      grow.style.height = "30px";
+      row("grow.offsetHeight in a click listener", grow.offsetHeight, 30);
+    });
   </script>
 </body>
 </html>
