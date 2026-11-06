@@ -225,11 +225,26 @@ public:
     void setActive(bool v)  { active_ = v; }
     void setChecked(bool v) { checked_ = v; }
     void setDisabled(bool v){ disabled_ = v; }
-    
+
+    // Form control state: the value the user typed or a script set (an
+    // <input>'s "dirty value"), and the checkedness a click or a script gave a
+    // checkbox or radio. Until one is set the value / checked attribute gives
+    // it; dom/form_controls.hpp reads the two together.
+    bool valueDirty() const { return valueDirty_; }
+    const std::string& dirtyValue() const { return dirtyValue_; }
+    void setDirtyValue(const std::string& v) { dirtyValue_ = v; valueDirty_ = true; }
+    bool checkedDirty() const { return checkedDirty_; }
+    void setDirtyChecked(bool v) { checked_ = v; checkedDirty_ = true; }
+    /// Back to the attributes (form reset)
+    void resetControlState() { dirtyValue_.clear(); valueDirty_ = checkedDirty_ = checked_ = false; }
+
 private:
     std::string tagName_;
     std::unordered_map<std::string, std::string> attributes_;
     std::unordered_map<std::string, std::string> styleMap_;
+    std::string dirtyValue_;
+    bool valueDirty_ = false;
+    bool checkedDirty_ = false;
 
     // Pseudo-class state
     bool hovered_  = false;

@@ -611,6 +611,9 @@ void ScriptContext::setupGlobals() {
         domBindings_ = std::make_unique<DOMBindings>(vm_, [this](const std::string& message) {
             emitConsole("error", message);
         });
+        domBindings_->setSubmitHandler([this](const FormSubmission& submission) {
+            if (submitHandler_) submitHandler_(submission);
+        });
     }
     setupWindowGlobals();
     setupDocumentGlobals();

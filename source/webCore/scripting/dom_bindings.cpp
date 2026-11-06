@@ -503,6 +503,7 @@ DOMBindings::DOMBindings(VM* vm, ErrorReporter reportError) : vm_(vm), reportErr
     installElement();
     installDocumentInterface();
     installEvents();
+    installForms();
 
     // Bare addEventListener(...) and friends act on the window
     // (the engine's global object is not the window yet)
@@ -1110,7 +1111,7 @@ void DOMBindings::installElement() {
     }
     // Reflected boolean attributes: present or absent
     for (const auto& [property, attribute] : std::initializer_list<std::pair<const char*, const char*>>{
-             {"hidden", "hidden"}, {"disabled", "disabled"}, {"checked", "checked"}, {"selected", "selected"},
+             {"hidden", "hidden"}, {"disabled", "disabled"}, {"defaultChecked", "checked"}, {"selected", "selected"},
              {"readOnly", "readonly"}, {"required", "required"}, {"multiple", "multiple"},
              {"autofocus", "autofocus"}, {"defer", "defer"}, {"async", "async"}, {"open", "open"},
              {"noValidate", "novalidate"}, {"controls", "controls"}, {"loop", "loop"}, {"muted", "muted"},
@@ -1136,15 +1137,38 @@ void DOMBindings::installElement() {
             e.setAttribute("tabindex", std::to_string(static_cast<long long>(info.argument(0).toNumber())));
             return Value::undefined();
         }));
-    // value: a textarea's text, otherwise the value attribute
+    // value: what the control holds (typed or set), not the attribute;
+    // defaultValue is the attribute (a textarea's text)
     accessor(h, "value",
-        on<DOMElement>("value", [](DOMElement& e, const Info&) {
+        on<DOMElement>("value", [](DOMElement& e, const Info&) { return str(formControlValue(&e)); }),
+        on<DOMElement>("value", [this](DOMElement& e, const Info& info) {
+            std::string v = info.argument(0).isNull() ? "" : info.argument(0).toString();
+            std::string tag = lower(e.tagName());
+            if (tag == "input" || tag == "textarea" || tag == "select") {
+                setFormControlValue(&e, v);
+                // A script's change is not the user's: no change event for it
+                if (focusedElement() == &e) valueAtFocus_ = v;
+                noteDomMutation();
+            } else {
+                e.setAttribute("value", v);
+            }
+            return Value::undefined();
+        }));
+    accessor(h, "defaultValue",
+        on<DOMElement>("defaultValue", [](DOMElement& e, const Info&) {
             return str(lower(e.tagName()) == "textarea" ? textOf(e) : e.getAttribute("value"));
         }),
-        on<DOMElement>("value", [this](DOMElement& e, const Info& info) {
+        on<DOMElement>("defaultValue", [this](DOMElement& e, const Info& info) {
             std::string v = info.argument(0).isNull() ? "" : info.argument(0).toString();
             if (lower(e.tagName()) == "textarea") setText(&e, v);
             else e.setAttribute("value", v);
+            return Value::undefined();
+        }));
+    accessor(h, "checked",
+        on<DOMElement>("checked", [](DOMElement& e, const Info&) { return Value::boolean(formControlChecked(&e)); }),
+        on<DOMElement>("checked", [](DOMElement& e, const Info& info) {
+            setFormControlChecked(&e, info.argument(0).toBoolean());
+            noteDomMutation();
             return Value::undefined();
         }));
 
@@ -1203,12 +1227,17 @@ void DOMBindings::installElement() {
     }));
 
     method(h, "click", 0, on<DOMElement>("click", [this](DOMElement& e, const Info&) {
-        if (!e.hasAttribute("disabled")) fireMouseEvent(&e, "click", 0, 0);
+        click(&e, 0, 0);
         return Value::undefined();
     }));
-    for (const char* name : {"focus", "blur"}) {
-        method(h, name, 0, on<DOMElement>(name, [](DOMElement&, const Info&) { return Value::undefined(); }));
-    }
+    method(h, "focus", 0, on<DOMElement>("focus", [this](DOMElement& e, const Info&) {
+        setFocus(&e);
+        return Value::undefined();
+    }));
+    method(h, "blur", 0, on<DOMElement>("blur", [this](DOMElement& e, const Info&) {
+        if (focusedElement() == &e) setFocus(nullptr);
+        return Value::undefined();
+    }));
     for (const char* name : {"offsetWidth", "offsetHeight", "offsetTop", "offsetLeft"}) {
         accessor(h, name, on<DOMElement>(name, [](DOMElement&, const Info&) { return Value::number(0); }));
     }
@@ -1332,8 +1361,10 @@ void DOMBindings::installDocumentInterface() {
         return wrap(d.documentElement());
     }));
     accessor(p, "activeElement", on<DOMDocument>("activeElement", [this](DOMDocument& d, const Info&) {
-        return wrap(d.body());
+        DOMElement* focused = focusedElement();
+        return wrap(focused ? focused : d.body());
     }));
+    method(p, "hasFocus", 0, on<DOMDocument>("hasFocus", [](DOMDocument&, const Info&) { return Value::boolean(true); }));
     accessor(p, "title",
         on<DOMDocument>("title", [](DOMDocument& d, const Info&) {
             std::string title = d.title();
@@ -1458,6 +1489,66 @@ void DOMBindings::installDocument(DOMDocument* document) {
 }
 
 // ----------------------------------------------------------------------------
+// Forms: form.submit(), requestSubmit(), reset(), elements; control.form
+// ----------------------------------------------------------------------------
+
+void DOMBindings::installForms() {
+    Object* form = tagInterfaces_["form"].second;
+    method(form, "submit", 0, on<DOMElement>("submit", [this](DOMElement& f, const Info&) {
+        submit(&f, nullptr);
+        return Value::undefined();
+    }));
+    method(form, "requestSubmit", 0, on<DOMElement>("requestSubmit", [this](DOMElement& f, const Info& info) {
+        DOMElement* submitter = nullptr;
+        if (!info.argument(0).isNullOrUndefined()) {
+            submitter = asElement(nodeOf(info.argument(0).isObject() ? info.argument(0).asObject() : nullptr));
+            if (!submitter || !isSubmitButton(submitter)) {
+                throw JSError("TypeError", "Failed to execute 'requestSubmit' on 'HTMLFormElement': The specified element is not a submit button.");
+            }
+            if (formOwner(submitter) != &f) {
+                throwDOMException("NotFoundError", "Failed to execute 'requestSubmit' on 'HTMLFormElement': The specified element is not owned by this form element.");
+            }
+        }
+        requestSubmit(&f, submitter);
+        return Value::undefined();
+    }));
+    method(form, "reset", 0, on<DOMElement>("reset", [this](DOMElement& f, const Info&) {
+        resetForm(&f);
+        return Value::undefined();
+    }));
+    method(form, "checkValidity", 0, on<DOMElement>("checkValidity", [](DOMElement&, const Info&) { return Value::boolean(true); }));
+    method(form, "reportValidity", 0, on<DOMElement>("reportValidity", [](DOMElement&, const Info&) { return Value::boolean(true); }));
+    accessor(form, "elements", on<DOMElement>("elements", [this](DOMElement& f, const Info&) {
+        return elementList(formControls(&f));
+    }));
+    accessor(form, "length", on<DOMElement>("length", [](DOMElement& f, const Info&) {
+        return Value::number(static_cast<double>(formControls(&f).size()));
+    }));
+
+    // control.form: the form owner (form attribute, else the <form> around it)
+    for (const char* tag : {"input", "button", "select", "textarea", "fieldset", "output", "object"}) {
+        auto it = tagInterfaces_.find(tag);
+        if (it == tagInterfaces_.end() || it->second.second->getOwnPropertyDescriptor("form")) continue;
+        accessor(it->second.second, "form", on<DOMElement>("form", [this](DOMElement& e, const Info&) {
+            DOMElement* owner = formOwner(&e);
+            return owner ? wrap(owner) : Value::null();
+        }));
+    }
+    // The text selection is the end of the value (no caret position yet)
+    for (const char* tag : {"input", "textarea"}) {
+        Object* proto = tagInterfaces_[tag].second;
+        for (const char* name : {"selectionStart", "selectionEnd"}) {
+            accessor(proto, name, on<DOMElement>(name, [](DOMElement& e, const Info&) {
+                return Value::number(static_cast<double>(formControlValue(&e).size()));
+            }), on<DOMElement>(name, [](DOMElement&, const Info&) { return Value::undefined(); }));
+        }
+        for (const char* name : {"select", "setSelectionRange", "setRangeText"}) {
+            method(proto, name, 0, on<DOMElement>(name, [](DOMElement&, const Info&) { return Value::undefined(); }));
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Event, CustomEvent, UIEvent, MouseEvent, KeyboardEvent, ...
 // ----------------------------------------------------------------------------
 
@@ -1558,9 +1649,9 @@ void DOMBindings::installEvents() {
     mouseEventProto_ = eventInterface("MouseEvent", ui);
     Object* pointer = eventInterface("PointerEvent", mouseEventProto_);
     eventInterface("WheelEvent", mouseEventProto_);
-    eventInterface("KeyboardEvent", ui);
-    eventInterface("FocusEvent", ui);
-    eventInterface("InputEvent", ui);
+    keyboardEventProto_ = eventInterface("KeyboardEvent", ui);
+    focusEventProto_ = eventInterface("FocusEvent", ui);
+    inputEventProto_ = eventInterface("InputEvent", ui);
     eventInterface("CompositionEvent", ui);
     eventInterface("TouchEvent", ui);
     eventInterface("ProgressEvent", eventProto_);
@@ -1570,8 +1661,28 @@ void DOMBindings::installEvents() {
     eventInterface("MessageEvent", eventProto_);
     eventInterface("AnimationEvent", eventProto_);
     eventInterface("TransitionEvent", eventProto_);
-    eventInterface("SubmitEvent", eventProto_);
+    submitEventProto_ = eventInterface("SubmitEvent", eventProto_);
     (void)pointer;
+
+    const std::pair<const char*, double> kLocations[] = {{"DOM_KEY_LOCATION_STANDARD", 0}, {"DOM_KEY_LOCATION_LEFT", 1},
+                                                         {"DOM_KEY_LOCATION_RIGHT", 2}, {"DOM_KEY_LOCATION_NUMPAD", 3}};
+    for (const auto& [name, value] : kLocations) {
+        constant(keyboardEventProto_, name, value);
+        if (Value ctor = vm_->getGlobal("KeyboardEvent"); ctor.isObject()) constant(ctor.asObject(), name, value);
+    }
+    // getModifierState("Shift") reads the event's shiftKey, ...
+    auto getModifierState = [this](const FunctionCallInfo& info) -> Value {
+        thisEvent(info, "getModifierState");
+        static const std::pair<const char*, const char*> kModifiers[] = {
+            {"Alt", "altKey"}, {"Control", "ctrlKey"}, {"Shift", "shiftKey"}, {"Meta", "metaKey"}};
+        std::string key = argString(info, 0);
+        for (const auto& [name, member] : kModifiers) {
+            if (key == name) return Value::boolean(vm_->getMember(info.thisValue(), member).toBoolean());
+        }
+        return Value::boolean(false);
+    };
+    method(keyboardEventProto_, "getModifierState", 1, getModifierState);
+    method(mouseEventProto_, "getModifierState", 1, getModifierState);
 }
 
 EventObject* DOMBindings::newEvent(Object* proto, const std::string& type, const Value& init) {
@@ -1583,6 +1694,22 @@ EventObject* DOMBindings::newEvent(Object* proto, const std::string& type, const
     // Defaults of the subclass members a page may read
     if (proto != eventProto_) {
         e->set("detail", proto == mouseEventProto_ ? Value::number(0) : Value::null());
+    }
+    if (proto == keyboardEventProto_) {
+        for (const char* k : {"key", "code"}) e->set(k, str(""));
+        for (const char* k : {"keyCode", "which", "charCode", "location"}) e->set(k, Value::number(0));
+        for (const char* k : {"repeat", "isComposing", "altKey", "ctrlKey", "shiftKey", "metaKey"}) e->set(k, Value::boolean(false));
+        e->set("detail", Value::number(0));
+    } else if (proto == inputEventProto_) {
+        e->set("data", Value::null());
+        e->set("inputType", str(""));
+        e->set("isComposing", Value::boolean(false));
+        e->set("detail", Value::number(0));
+    } else if (proto == focusEventProto_) {
+        e->set("relatedTarget", Value::null());
+        e->set("detail", Value::number(0));
+    } else if (proto == submitEventProto_) {
+        e->set("submitter", Value::null());
     }
     if (init.isObject()) {
         Object* o = init.asObject();
@@ -1835,6 +1962,172 @@ bool DOMBindings::fireMouseEvent(DOMElement* target, const std::string& type, do
     for (const char* k : {"altKey", "ctrlKey", "shiftKey", "metaKey"}) e->set(k, Value::boolean(false));
     e->set("relatedTarget", Value::null());
     return dispatch(wrap(target).asObject(), e);
+}
+
+bool DOMBindings::click(DOMElement* target, double clientX, double clientY) {
+    if (!target || !isConnectedTo(target, document_)) return true;
+    if (isDisabledControl(target)) return true;   // disabled controls get no click
+    // The element whose activation behavior runs: the target or the
+    // nearest ancestor with one
+    DOMElement* activator = nullptr;
+    for (DOMNode* n = target; n && !activator; n = n->parentNode()) {
+        DOMElement* e = asElement(n);
+        if (e && (isCheckable(e) || isSubmitButton(e) || isResetButton(e) || lower(e->tagName()) == "label")) activator = e;
+    }
+    if (activator && isDisabledControl(activator)) activator = nullptr;
+
+    // Checkbox / radio: the new state is visible to click listeners
+    bool checkable = activator && isCheckable(activator);
+    bool radio = checkable && inputType(activator) == "radio";
+    bool wasChecked = checkable && formControlChecked(activator);
+    DOMElement* previousRadio = nullptr;
+    if (radio) {
+        for (DOMElement* r : radioGroup(activator)) if (r != activator && formControlChecked(r)) previousRadio = r;
+    }
+    if (checkable) setFormControlChecked(activator, radio ? true : !wasChecked);
+
+    bool notCanceled = fireMouseEvent(target, "click", clientX, clientY);
+    if (!activator) return notCanceled;
+    if (checkable) {
+        if (!notCanceled) {
+            setFormControlChecked(activator, wasChecked);
+            if (previousRadio) setFormControlChecked(previousRadio, true);
+        } else if (formControlChecked(activator) != wasChecked) {
+            fireEvent(activator, "input", true, false);
+            fireEvent(activator, "change", true, false);
+        }
+        noteDomMutation();
+        return notCanceled;
+    }
+    if (!notCanceled) return false;
+    if (lower(activator->tagName()) == "label") {
+        // The labeled control: for="id", else the first one inside
+        DOMElement* control = nullptr;
+        if (activator->hasAttribute("for")) {
+            control = document_ ? document_->getElementById(activator->getAttribute("for")) : nullptr;
+        } else {
+            for (DOMElement* e : selectDescendants(activator, "input, button, select, textarea", true)) control = e;
+        }
+        if (control && control != target && !control->contains(target)) {
+            setFocus(control);
+            click(control, clientX, clientY);
+        }
+        return true;
+    }
+    if (DOMElement* form = formOwner(activator)) {
+        if (isSubmitButton(activator)) requestSubmit(form, activator);
+        else resetForm(form);
+    }
+    return true;
+}
+
+bool DOMBindings::fireKeyboardEvent(DOMElement* target, const std::string& type, const KeyEventInit& key) {
+    if (!target || !isConnectedTo(target, document_)) return true;
+    EventObject* e = newEvent(keyboardEventProto_, type, Value::undefined());
+    e->bubbles = e->cancelable = e->composed = true;
+    e->trusted = true;
+    e->set("key", str(key.key));
+    e->set("code", str(key.code));
+    e->set("location", Value::number(key.location));
+    e->set("repeat", Value::boolean(key.repeat));
+    e->set("altKey", Value::boolean(key.altKey));
+    e->set("ctrlKey", Value::boolean(key.ctrlKey));
+    e->set("shiftKey", Value::boolean(key.shiftKey));
+    e->set("metaKey", Value::boolean(key.metaKey));
+    // keypress carries the character code in all three legacy members;
+    // keydown/keyup carry the key code and no charCode
+    int charCode = 0;
+    if (type == "keypress") {
+        charCode = key.key == "Enter" ? 13 : (key.key.size() == 1 ? static_cast<unsigned char>(key.key[0]) : 0);
+    }
+    e->set("keyCode", Value::number(type == "keypress" ? charCode : key.keyCode));
+    e->set("which", Value::number(type == "keypress" ? charCode : key.keyCode));
+    e->set("charCode", Value::number(charCode));
+    return dispatch(wrap(target).asObject(), e);
+}
+
+bool DOMBindings::fireInputEvent(DOMElement* target, const std::string& type, const std::string& inputType,
+                                 const std::string& data) {
+    if (!target || !isConnectedTo(target, document_)) return true;
+    EventObject* e = newEvent(inputEventProto_, type, Value::undefined());
+    e->bubbles = e->composed = true;
+    e->cancelable = type == "beforeinput";
+    e->trusted = true;
+    e->set("inputType", str(inputType));
+    e->set("data", data.empty() ? Value::null() : str(data));
+    return dispatch(wrap(target).asObject(), e);
+}
+
+bool DOMBindings::fireFocusEvent(DOMElement* target, const std::string& type, DOMElement* related) {
+    if (!target || !isConnectedTo(target, document_)) return true;
+    EventObject* e = newEvent(focusEventProto_, type, Value::undefined());
+    // focus and blur stay on the element; focusin and focusout bubble
+    e->bubbles = type == "focusin" || type == "focusout";
+    e->composed = true;
+    e->trusted = true;
+    e->set("relatedTarget", related ? wrap(related) : Value::null());
+    return dispatch(wrap(target).asObject(), e);
+}
+
+DOMElement* DOMBindings::focusedElement() const {
+    DOMElement* focused = interactionState().focused;
+    return focused && isConnectedTo(focused, document_) ? focused : nullptr;
+}
+
+void DOMBindings::setFocus(DOMElement* element) {
+    if (element && (!isFocusable(element) || !isConnectedTo(element, document_))) return;
+    DOMElement* old = focusedElement();
+    if (old == element) return;
+    if (old) {
+        // The page has focus while the old element hears that it lost it
+        interactionState().focused = nullptr;
+        if (isTextControl(old) && formControlValue(old) != valueAtFocus_) fireEvent(old, "change", true, false);
+        fireFocusEvent(old, "blur", element);
+        fireFocusEvent(old, "focusout", element);
+        // A listener moved focus somewhere else: that move wins
+        if (interactionState().focused) return;
+    }
+    if (!element || !isConnectedTo(element, document_)) return;
+    interactionState().focused = element;
+    valueAtFocus_ = formControlValue(element);
+    fireFocusEvent(element, "focus", old);
+    if (interactionState().focused == element) fireFocusEvent(element, "focusin", old);
+}
+
+void DOMBindings::commitFocusedValue() {
+    DOMElement* focused = focusedElement();
+    if (!focused || !isTextControl(focused) || formControlValue(focused) == valueAtFocus_) return;
+    valueAtFocus_ = formControlValue(focused);
+    fireEvent(focused, "change", true, false);
+}
+
+bool DOMBindings::requestSubmit(DOMElement* form, DOMElement* submitter) {
+    if (!form || !isConnectedTo(form, document_)) return false;
+    EventObject* e = newEvent(submitEventProto_, "submit", Value::undefined());
+    e->bubbles = e->cancelable = true;
+    e->trusted = true;
+    e->set("submitter", submitter ? wrap(submitter) : Value::null());
+    if (!dispatch(wrap(form).asObject(), e)) return false;
+    submit(form, submitter);
+    return true;
+}
+
+void DOMBindings::submit(DOMElement* form, DOMElement* submitter) {
+    if (!form || !isConnectedTo(form, document_)) return;
+    FormSubmission plan = planFormSubmission(form, submitter);
+    if (plan.method == "dialog") return;   // closes a <dialog>: there are none yet
+    if (submitHandler_) submitHandler_(plan);
+}
+
+bool DOMBindings::resetForm(DOMElement* form) {
+    if (!form || !isConnectedTo(form, document_)) return false;
+    if (!fireEvent(form, "reset", true, true)) return false;
+    resetFormControls(form);
+    if (DOMElement* focused = focusedElement(); focused && formOwner(focused) == form) {
+        valueAtFocus_ = formControlValue(focused);
+    }
+    noteDomMutation();
+    return true;
 }
 
 bool DOMBindings::dispatch(Object* target, EventObject* e) {

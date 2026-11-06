@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Keys, typing and forms</title>
+<style>
+  body { font-family: sans-serif; background: #f4f5f7; color: #1d2330; margin: 16px; }
+  h1 { font-size: 20px; margin: 0 0 8px 0; }
+  p.hint { color: #556; font-size: 13px; margin: 0 0 12px 0; }
+  form { background: #ffffff; padding: 12px; border: 1px solid #ccd; }
+  input:focus, textarea:focus { background: #fff6cc; }
+  #status { font-weight: bold; margin: 10px 0; }
+  #echo { color: #0b5cad; margin: 6px 0; }
+  #log { font-family: monospace; font-size: 13px; background: #1d2330; color: #d6e2ff; padding: 8px; }
+</style>
+</head>
+<body>
+<h1>Keys, typing and forms</h1>
+<p class="hint">Click the field and type; Enter submits (this page cancels the submit and shows what would be sent).</p>
+<form id="f" action="https://example.com/search">
+  <input id="q" name="q" placeholder="search">
+  <input id="safe" name="safe" type="checkbox"> <label for="safe">safe search</label>
+  <input id="r1" name="size" type="radio" value="s" checked> small
+  <input id="r2" name="size" type="radio" value="l"> large
+  <button id="go">Search</button>
+</form>
+<div id="status">focus: (page)</div>
+<div id="echo">value: ""</div>
+<div id="log">events appear here</div>
+<script>
+  var q = document.getElementById('q');
+  var f = document.getElementById('f');
+  var lines = [];
+  function show(text) {
+    var log = document.getElementById('log');
+    if (!lines.length) log.textContent = '';
+    var line = document.createElement('div');
+    line.textContent = text;
+    log.appendChild(line);
+    lines.push(line);
+    if (lines.length > 10) log.removeChild(lines.shift());
+  }
+  ['keydown', 'keypress', 'keyup'].forEach(function (type) {
+    q.addEventListener(type, function (e) { show(type + ' ' + (e.key === ' ' ? 'Space' : e.key) + ' (' + e.code + ', ' + e.keyCode + ')'); });
+  });
+  q.addEventListener('input', function (e) {
+    show('input ' + e.inputType);
+    document.getElementById('echo').textContent = 'value: "' + q.value + '"';
+  });
+  q.addEventListener('change', function () { show('change "' + q.value + '"'); });
+  ['focusin', 'focusout'].forEach(function (type) {
+    f.addEventListener(type, function (e) {
+      show(type + ' ' + e.target.id);
+      var a = document.activeElement;
+      document.getElementById('status').textContent = 'focus: ' + (a === document.body ? '(page)' : a.id);
+    });
+  });
+  document.getElementById('safe').addEventListener('change', function (e) {
+    show('change safe=' + e.target.checked);
+  });
+  f.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var parts = [];
+    for (var i = 0; i < f.elements.length; i++) {
+      var el = f.elements[i];
+      if (!el.name || ((el.type === 'checkbox' || el.type === 'radio') && !el.checked)) continue;
+      if (el.tagName === 'BUTTON' && el !== e.submitter) continue;
+      parts.push(el.name + '=' + el.value);
+    }
+    document.getElementById('status').textContent = 'submit by ' + (e.submitter ? e.submitter.id : 'Enter') + ': ' + parts.join('&');
+  });
+</script>
+</body>
+</html>
