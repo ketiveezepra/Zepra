@@ -4,7 +4,8 @@
  * @file devtools_panel.cpp
  * @brief Docked developer tools: Inspector (DOM tree, style rules, box model,
  *        computed styles, element picker), Console (page output, JS input)
- *        and Network (the tab's NetworkMonitor).
+ *        and Network (the tab's NetworkMonitor: request list with a waterfall,
+ *        filter box, Disable cache, and a request's Headers, Response and Timings).
  */
 #include "devtools_panel.hpp"
 
@@ -20,6 +21,7 @@
 #include "css/css_engine.hpp"
 #include "scripting/script_context.hpp"
 #include "browser/layout_engine.h"
+#include "browser/network_recorder.hpp"
 #include "network_monitor.h"
 
 using namespace Zepra::WebCore;
@@ -405,7 +407,9 @@ void DevToolsPanel::hide() {
     picker_ = false;
     pickHover_ = nullptr;
     consoleFocused_ = false;
+    networkFilterFocused_ = false;
     resizing_ = false;
+    Zepra::WebCore::setCacheDisabled(false);   // "Disable cache" holds while the panel is open
 }
 
 void DevToolsPanel::toggle() {
@@ -447,7 +451,7 @@ void DevToolsPanel::syncWithDocument(const Page& page) {
         treeScroll_ = 0;
         stylesScroll_ = 0;
         rulesScroll_ = 0;
-        networkSelected_ = -1;
+        networkSelectedId_ = 0;
         styleEdits_.clear();
         highlightKey_ = nullptr;
         highlightSelector_.clear();
@@ -496,6 +500,7 @@ void DevToolsPanel::draw(const Painter& p, const Page& page, float x, float y, f
     if (!visible_) return;
     syncWithDocument(page);
     caretBlink_++;
+    Zepra::WebCore::setCacheDisabled(disableCache_);
 
     // Resize by dragging the top edge
     if (resizing_) {
@@ -1424,17 +1429,99 @@ bool networkFilterMatches(int filter, zepra::NetworkResourceType type) {
 
 } // namespace
 
-void DevToolsPanel::drawNetwork(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY) {
-    const float barH = 26, headH = 22, detailH = 22;
-    networkToolbar_ = {area.x, area.y, area.w, barH};
-    // A snapshot: loader threads append to the monitor while this draws
-    std::vector<zepra::NetworkEntry> entries;
-    if (page.network) entries = page.network->getEntries();
-    std::vector<const zepra::NetworkEntry*> shown;
-    shown.reserve(entries.size());
-    for (const auto& e : entries) {
-        if (networkFilterMatches(networkFilter_, e.type)) shown.push_back(&e);
+namespace {
+
+// A copy of an entry without its headers and body: the list is rebuilt every frame
+zepra::NetworkEntry listCopy(const zepra::NetworkEntry& e) {
+    zepra::NetworkEntry r;
+    r.request.id = e.request.id;
+    r.request.method = e.request.method;
+    r.request.url = e.request.url;
+    r.request.start_time = e.request.start_time;
+    r.response.status_code = e.response.status_code;
+    r.response.content_type = e.response.content_type;
+    r.response.content_length = e.response.content_length;
+    r.response.transferred_bytes = e.response.transferred_bytes;
+    r.response.end_time = e.response.end_time;
+    r.response.duration_ms = e.response.duration_ms;
+    r.response.timings = e.response.timings;
+    r.type = e.type;
+    r.completed = e.completed;
+    r.failed = e.failed;
+    return r;
+}
+
+// Every character the panel font can't draw as '?'
+std::string asciiOnly(const std::string& s) {
+    std::vector<std::string> lines = responseLines(s, "", 0, 1);
+    return lines.empty() ? std::string() : lines[0];
+}
+
+// `s` broken into lines that fit `maxW` (at most `maxLines`, the last one cut with "...")
+std::vector<std::string> wrapToWidth(const Painter& p, const std::string& s, float size, float maxW, size_t maxLines) {
+    std::vector<std::string> lines;
+    size_t pos = 0;
+    while (pos < s.size() && lines.size() < maxLines) {
+        std::string rest = s.substr(pos);
+        if (p.textWidth(rest, size) <= maxW) { lines.push_back(rest); return lines; }
+        if (lines.size() + 1 == maxLines) { lines.push_back(fitText(p, rest, size, maxW)); return lines; }
+        size_t lo = 1, hi = rest.size();
+        while (lo < hi) {
+            size_t mid = (lo + hi + 1) / 2;
+            if (p.textWidth(rest.substr(0, mid), size) <= maxW) lo = mid; else hi = mid - 1;
+        }
+        lines.push_back(rest.substr(0, lo));
+        pos += lo;
     }
+    if (lines.empty()) lines.push_back("");
+    return lines;
+}
+
+double msSince(std::chrono::system_clock::time_point from, std::chrono::system_clock::time_point to) {
+    return std::chrono::duration<double, std::milli>(to - from).count();
+}
+
+} // namespace
+
+void DevToolsPanel::selectNetworkRequest(uint64_t id) {
+    if (id != networkSelectedId_) networkDetailScroll_ = 0;
+    networkSelectedId_ = id;
+}
+
+void DevToolsPanel::insertText(const std::string& text) {
+    if (networkFilterFocused_) networkFilterText_ += text;
+    else if (consoleFocused_) consoleInputText_ += text;
+}
+
+void DevToolsPanel::drawNetwork(const Painter& p, const Page& page, const Rect& area, float mouseX, float mouseY) {
+    const float barH = 26, headH = 22;
+    networkToolbar_ = {area.x, area.y, area.w, barH};
+    // Slim copies of the rows (loader threads append while this draws), and the
+    // selected request in full for the details pane
+    const NetworkFilter textFilter(networkFilterText_);
+    std::vector<zepra::NetworkEntry> shown;
+    zepra::NetworkEntry selected;
+    bool hasSelected = false;
+    size_t total = 0, bytes = 0;
+    int failed = 0;
+    auto now = std::chrono::system_clock::now();
+    std::chrono::system_clock::time_point first, last;
+    if (page.network) {
+        page.network->forEachEntry([&](const zepra::NetworkEntry& e) {
+            bytes += e.response.transferred_bytes ? e.response.transferred_bytes : e.response.content_length;
+            if (e.failed) failed++;
+            auto start = e.request.start_time;
+            auto end = e.completed ? e.response.end_time : now;
+            if (!total || start < first) first = start;
+            if (!total || end > last) last = end;
+            total++;
+            if (!networkFilterMatches(networkFilter_, e.type) || !textFilter.matches(e)) return;
+            shown.push_back(listCopy(e));
+            if (e.request.id == networkSelectedId_) { selected = e; hasSelected = true; }
+        });
+    }
+    if (!hasSelected) networkSelectedId_ = 0;   // cleared, or filtered out of the list
+    const bool filtered = networkFilter_ != 0 || !textFilter.empty();
 
     p.rect(networkToolbar_.x, networkToolbar_.y, networkToolbar_.w, barH, kToolbar, 255);
     p.rect(networkToolbar_.x, networkToolbar_.y + barH - 1, networkToolbar_.w, 1, kBorder, 255);
@@ -1443,9 +1530,36 @@ void DevToolsPanel::drawNetwork(const Painter& p, const Page& page, const Rect& 
            clearButton_.contains(mouseX, mouseY) ? kHover : kBg, 255);
     p.text("Clear", clearButton_.x + 8, clearButton_.y + 14, kText, kSmallFont);
 
+    // Filter box
+    float fx = clearButton_.x + clearButton_.w + 8;
+    networkFilterBox_ = {fx, area.y + 4, std::min(220.0f, std::max(120.0f, area.w * 0.16f)), barH - 8};
+    p.rect(networkFilterBox_.x, networkFilterBox_.y, networkFilterBox_.w, networkFilterBox_.h, kBg, 255);
+    if (networkFilterFocused_) {
+        const Rect& b = networkFilterBox_;
+        p.rect(b.x, b.y, b.w, 1, kAccent, 255); p.rect(b.x, b.y + b.h - 1, b.w, 1, kAccent, 255);
+        p.rect(b.x, b.y, 1, b.h, kAccent, 255); p.rect(b.x + b.w - 1, b.y, 1, b.h, kAccent, 255);
+    }
+    {
+        const float tx = networkFilterBox_.x + 7, maxW = networkFilterBox_.w - 14;
+        p.pushClip(networkFilterBox_.x + 1, networkFilterBox_.y, networkFilterBox_.w - 2, networkFilterBox_.h);
+        if (networkFilterText_.empty() && !networkFilterFocused_) {
+            p.text("Filter URLs", tx, networkFilterBox_.y + 13, kMuted, kSmallFont);
+        } else {
+            // The end of the text stays in view while typing
+            std::string shownText = asciiOnly(networkFilterText_);
+            while (shownText.size() > 1 && p.textWidth(shownText, kSmallFont) > maxW - 4) shownText.erase(0, 1);
+            p.text(shownText, tx, networkFilterBox_.y + 13, kText, kSmallFont);
+            if (networkFilterFocused_ && (caretBlink_ / 30) % 2 == 0) {
+                float cx = tx + p.textWidth(shownText, kSmallFont) + 1;
+                p.rect(cx, networkFilterBox_.y + 4, 1, networkFilterBox_.h - 8, kText, 255);
+            }
+        }
+        p.popClip();
+    }
+
     // Type filter chips
     networkFilterButtons_.clear();
-    float fx = clearButton_.x + clearButton_.w + 14;
+    fx = networkFilterBox_.x + networkFilterBox_.w + 14;
     p.rect(fx - 7, area.y + 6, 1, barH - 12, kBorder, 255);
     for (int i = 0; i < kNetworkFilterCount; i++) {
         Rect b = {fx, area.y + 4, p.textWidth(kNetworkFilters[i], kSmallFont) + 14, barH - 8};
@@ -1456,28 +1570,35 @@ void DevToolsPanel::drawNetwork(const Painter& p, const Page& page, const Rect& 
         fx += b.w + 4;
     }
 
+    // Disable cache (holds while the panel is open)
+    fx += 10;
+    p.rect(fx - 7, area.y + 6, 1, barH - 12, kBorder, 255);
+    disableCacheBox_ = {fx, area.y + 4, 18 + p.textWidth("Disable cache", kSmallFont) + 6, barH - 8};
+    if (disableCacheBox_.contains(mouseX, mouseY)) {
+        p.rect(disableCacheBox_.x, disableCacheBox_.y, disableCacheBox_.w, disableCacheBox_.h, kHover, 255);
+    }
+    {
+        float bx = disableCacheBox_.x + 3, by = disableCacheBox_.y + 3;
+        if (disableCache_) {
+            p.rect(bx, by, 12, 12, kAccent, 255);
+            p.line(bx + 2.5f, by + 6, bx + 5, by + 9, kBg);
+            p.line(bx + 5, by + 9, bx + 9.5f, by + 3, kBg);
+        } else {
+            p.rect(bx, by, 12, 1, kMuted, 255); p.rect(bx, by + 11, 12, 1, kMuted, 255);
+            p.rect(bx, by, 1, 12, kMuted, 255); p.rect(bx + 11, by, 1, 12, kMuted, 255);
+        }
+        p.text("Disable cache", bx + 17, disableCacheBox_.y + 14, disableCache_ ? kText : kMuted, kSmallFont);
+    }
+    fx += disableCacheBox_.w;
+
     // Summary: requests, bytes off the wire, first request start to last response end
     {
-        size_t bytes = 0;
-        int failed = 0;
-        bool any = false;
-        auto now = std::chrono::system_clock::now();
-        std::chrono::system_clock::time_point first, last;
-        for (const auto& e : entries) {
-            bytes += e.response.transferred_bytes ? e.response.transferred_bytes : e.response.content_length;
-            if (e.failed) failed++;
-            auto start = e.request.start_time;
-            auto end = e.completed ? e.response.end_time : now;
-            if (!any || start < first) first = start;
-            if (!any || end > last) last = end;
-            any = true;
-        }
-        double totalMs = any ? std::chrono::duration<double, std::milli>(last - first).count() : 0;
+        double totalMs = total ? msSince(first, last) : 0;
         std::string summary;
-        if (networkFilter_ != 0) summary += std::to_string(shown.size()) + " of ";
-        summary += std::to_string(entries.size()) + (entries.size() == 1 && networkFilter_ == 0 ? " request" : " requests") +
+        if (filtered) summary += std::to_string(shown.size()) + " of ";
+        summary += std::to_string(total) + (total == 1 && !filtered ? " request" : " requests") +
             "   " + zepra::formatSize(bytes) + " transferred   " +
-            (any ? zepra::formatDuration(std::max(totalMs, 1.0)) : std::string("0 ms"));
+            (total ? zepra::formatDuration(std::max(totalMs, 1.0)) : std::string("0 ms"));
         if (failed) summary += "   " + std::to_string(failed) + " failed";
         float sw = p.textWidth(summary, kSmallFont);
         if (area.x + area.w - 12 - sw > fx + 8) {
@@ -1485,14 +1606,21 @@ void DevToolsPanel::drawNetwork(const Painter& p, const Page& page, const Rect& 
         }
     }
 
-    // Columns
+    // The list, and the details pane beside it when a request is selected
+    const float listW = hasSelected ? std::max(300.0f, std::floor(area.w * 0.42f)) : area.w;
     struct Col { const char* name; float w; };
-    float fixed = 56 + 60 + 180 + 70 + 80 + 76;
-    Col cols[] = {{"Status", 56}, {"Method", 60}, {"File", std::max(140.0f, area.w - fixed - 8)},
-                  {"Domain", 180}, {"Type", 70}, {"Size", 80}, {"Time", 76}};
+    std::vector<Col> cols;
+    if (hasSelected) {
+        cols = {{"Status", 56}, {"Method", 60}, {"File", std::max(80.0f, listW - 56 - 60 - 70 - 16)}, {"Time", 70}};
+    } else {
+        float waterfallW = std::max(160.0f, std::floor(area.w * 0.22f));
+        float fixed = 56 + 60 + 160 + 60 + 72 + 70 + waterfallW;
+        cols = {{"Status", 56}, {"Method", 60}, {"File", std::max(140.0f, area.w - fixed - 16)},
+                {"Domain", 160}, {"Type", 60}, {"Size", 72}, {"Time", 70}, {"Waterfall", waterfallW}};
+    }
     float headY = area.y + barH;
-    p.rect(area.x, headY, area.w, headH, kBgAlt, 255);
-    p.rect(area.x, headY + headH - 1, area.w, 1, kBorder, 255);
+    p.rect(area.x, headY, listW, headH, kBgAlt, 255);
+    p.rect(area.x, headY + headH - 1, listW, 1, kBorder, 255);
     float cx = area.x + 8;
     std::vector<float> colX;
     for (const auto& c : cols) {
@@ -1501,24 +1629,30 @@ void DevToolsPanel::drawNetwork(const Painter& p, const Page& page, const Rect& 
         cx += c.w;
     }
 
-    bool hasDetail = networkSelected_ >= 0 && networkSelected_ < (int)shown.size();
-    networkList_ = {area.x, headY + headH, area.w, area.h - barH - headH - (hasDetail ? detailH : 0)};
+    networkList_ = {area.x, headY + headH, listW, area.h - barH - headH};
     networkMax_ = shown.size() * kRowH - networkList_.h + 4;
     networkScroll_ = clampScroll(networkScroll_, networkMax_);
 
+    // The waterfall's time axis: first request start to last response end
+    const double spanMs = std::max(1.0, total ? msSince(first, last) : 1.0);
+
+    networkRowIds_.clear();
     p.pushClip(networkList_.x, networkList_.y, networkList_.w, networkList_.h);
-    if (entries.empty()) {
+    if (total == 0) {
         p.text("No requests recorded for this tab yet.", area.x + 12, networkList_.y + 22, kMuted, kFont);
     } else if (shown.empty()) {
-        p.text(std::string("No ") + kNetworkFilters[networkFilter_] + " requests.", area.x + 12, networkList_.y + 22, kMuted, kFont);
+        p.text(textFilter.empty() ? std::string("No ") + kNetworkFilters[networkFilter_] + " requests."
+                                  : std::string("No requests match the filter."),
+               area.x + 12, networkList_.y + 22, kMuted, kFont);
     }
     float ry = networkList_.y - networkScroll_;
     for (size_t i = 0; i < shown.size(); i++, ry += kRowH) {
+        const auto& e = shown[i];
+        networkRowIds_.push_back(e.request.id);
         if (ry + kRowH < networkList_.y || ry > networkList_.y + networkList_.h) continue;
-        const auto& e = *shown[i];
-        bool selected = (int)i == networkSelected_;
+        bool isSelected = e.request.id == networkSelectedId_;
         bool hovered = networkList_.contains(mouseX, mouseY) && mouseY >= ry && mouseY < ry + kRowH;
-        p.rect(area.x, ry, area.w, kRowH, selected ? kSelection : hovered ? kHover : (i % 2 ? kBgAlt : kBg), 255);
+        p.rect(area.x, ry, listW, kRowH, isSelected ? kSelection : hovered ? kHover : (i % 2 ? kBgAlt : kBg), 255);
         float baseline = ry + 13;
         int status = e.response.status_code;
         std::string statusStr = e.failed ? "(failed)" : status > 0 ? std::to_string(status) : "...";
@@ -1526,26 +1660,196 @@ void DevToolsPanel::drawNetwork(const Painter& p, const Page& page, const Rect& 
                                status < 300 ? kOk : status < 400 ? kWarnText : kErrorText;
         p.text(statusStr, colX[0], baseline, statusColor, kSmallFont);
         p.text(e.request.method, colX[1], baseline, kText, kSmallFont);
-        p.text(truncate(urlFile(e.request.url), (size_t)std::max(8.0f, cols[2].w / 6.5f)), colX[2], baseline, kText, kSmallFont);
-        p.text(truncate(urlHost(e.request.url), 26), colX[3], baseline, kMuted, kSmallFont);
+        p.text(fitText(p, asciiOnly(urlFile(e.request.url)), kSmallFont, cols[2].w - 10), colX[2], baseline, kText, kSmallFont);
+        std::string timeStr = e.completed || e.failed ? zepra::formatDuration(std::max(e.response.duration_ms, 1.0)) : "pending";
+        if (hasSelected) {
+            p.text(timeStr, colX[3], baseline, kMuted, kSmallFont);
+            continue;
+        }
+        p.text(fitText(p, urlHost(e.request.url), kSmallFont, cols[3].w - 10), colX[3], baseline, kMuted, kSmallFont);
         p.text(resourceTypeStr(e.type), colX[4], baseline, kMuted, kSmallFont);
         p.text(e.response.content_length ? zepra::formatSize(e.response.content_length) : "-", colX[5], baseline, kMuted, kSmallFont);
-        std::string timeStr = e.completed || e.failed ? zepra::formatDuration(std::max(e.response.duration_ms, 1.0)) : "pending";
         p.text(timeStr, colX[6], baseline, kMuted, kSmallFont);
+
+        // Waterfall: where the request sits in the page load, split into its phases
+        const float wx = colX[7], ww = cols[7].w - 16;
+        const double startMs = msSince(first, e.request.start_time);
+        const double durMs = e.completed || e.failed ? e.response.duration_ms : msSince(e.request.start_time, now);
+        float x0 = wx + (float)(startMs / spanMs) * ww;
+        float bw = std::max(2.0f, (float)(durMs / spanMs) * ww);
+        std::vector<TimingPhase> phases = timingPhases(e);
+        if (phases.empty()) {
+            p.rect(x0, ry + 5, bw, kRowH - 10, kMuted, 255);
+        } else {
+            double phaseTotal = phases.back().start + phases.back().duration;
+            for (const auto& ph : phases) {
+                if (phaseTotal <= 0) break;
+                float px = x0 + (float)(ph.start / phaseTotal) * bw;
+                float pw = (float)(ph.duration / phaseTotal) * bw;
+                if (pw >= 0.5f) p.rect(px, ry + 5, std::max(1.0f, pw), kRowH - 10, e.failed ? kErrorText : ph.color, 255);
+            }
+        }
     }
     p.popClip();
 
-    if (hasDetail) {
-        const auto& e = *shown[networkSelected_];
-        float dy = area.y + area.h - detailH;
-        p.rect(area.x, dy, area.w, detailH, kToolbar, 255);
-        p.rect(area.x, dy, area.w, 1, kBorder, 255);
-        std::string detail = e.request.method + " " + e.request.url;
-        if (!e.response.content_type.empty()) detail += "   " + e.response.content_type;
-        if (e.response.transferred_bytes) detail += "   " + zepra::formatSize(e.response.transferred_bytes) + " on the wire";
-        if (e.failed && !e.error.empty()) detail += "   " + e.error;
-        p.text(truncate(detail, 220), area.x + 12, dy + 15, e.failed ? kErrorText : kText, kSmallFont);
+    if (hasSelected) {
+        networkDetail_ = {area.x + listW, area.y + barH, area.w - listW, area.h - barH};
+        drawNetworkDetails(p, selected, networkDetail_, mouseX, mouseY);
+    } else {
+        networkDetail_ = {};
+        networkDetailBody_ = {};
+        networkDetailTabs_.clear();
     }
+}
+
+void DevToolsPanel::drawNetworkDetails(const Painter& p, const zepra::NetworkEntry& e, const Rect& area,
+                                       float mouseX, float mouseY) {
+    const float tabH = 24;
+    p.rect(area.x, area.y, area.w, area.h, kBg, 255);
+    p.rect(area.x, area.y, 1, area.h, kBorder, 255);
+
+    // Tabs, and the button that closes the pane
+    p.rect(area.x + 1, area.y, area.w - 1, tabH, kBgAlt, 255);
+    p.rect(area.x + 1, area.y + tabH - 1, area.w - 1, 1, kBorder, 255);
+    const char* names[] = {"Headers", "Response", "Timings"};
+    networkDetailTabs_.clear();
+    float tx = area.x + 6;
+    for (int i = 0; i < 3; i++) {
+        Rect r{tx, area.y, p.textWidth(names[i], kSmallFont) + 20, tabH};
+        bool active = (int)networkDetailTab_ == i;
+        if (!active && r.contains(mouseX, mouseY)) p.rect(r.x, r.y, r.w, r.h - 1, kHover, 255);
+        p.text(names[i], r.x + 10, r.y + 16, active ? kText : kMuted, kSmallFont);
+        if (active) p.rect(r.x, r.y + r.h - 3, r.w, 2, kAccent, 255);
+        networkDetailTabs_.push_back(r);
+        tx += r.w;
+    }
+    networkDetailClose_ = {area.x + area.w - 24, area.y + 3, 18, tabH - 6};
+    {
+        bool hover = networkDetailClose_.contains(mouseX, mouseY);
+        if (hover) p.rect(networkDetailClose_.x, networkDetailClose_.y, networkDetailClose_.w, networkDetailClose_.h, kHover, 255);
+        float cx = networkDetailClose_.x + 9, cy = networkDetailClose_.y + networkDetailClose_.h / 2;
+        p.line(cx - 4, cy - 4, cx + 4, cy + 4, hover ? kText : kMuted);
+        p.line(cx - 4, cy + 4, cx + 4, cy - 4, hover ? kText : kMuted);
+    }
+
+    networkDetailBody_ = {area.x + 1, area.y + tabH, area.w - 1, area.h - tabH};
+    const Rect& body = networkDetailBody_;
+    const float lineH = 16, padX = 12;
+    float contentH = 0;
+    float y = body.y + 4 - networkDetailScroll_;
+    auto visible = [&](float rowY, float h) { return rowY + h >= body.y && rowY <= body.y + body.h; };
+    p.pushClip(body.x, body.y, body.w, body.h);
+
+    switch (networkDetailTab_) {
+        case NetworkDetailTab::Headers: {
+            std::vector<HeaderLine> lines = headerLines(e);
+            float nameW = 0;
+            for (const auto& l : lines) if (!l.section) nameW = std::max(nameW, p.textWidth(asciiOnly(l.name), kSmallFont));
+            nameW = std::min(nameW + 14, body.w * 0.4f);
+            const float valueX = body.x + padX + 10 + nameW, valueW = body.x + body.w - padX - valueX;
+            for (const auto& l : lines) {
+                if (l.section) {
+                    if (contentH > 0) { y += 6; contentH += 6; }
+                    if (visible(y, lineH + 2)) {
+                        p.rect(body.x, y, body.w, lineH + 2, kBgAlt, 255);
+                        p.text(l.name, body.x + padX, y + 12, kText, kSmallFont);
+                    }
+                    y += lineH + 4;
+                    contentH += lineH + 4;
+                    continue;
+                }
+                std::vector<std::string> wrapped = wrapToWidth(p, asciiOnly(l.value), kSmallFont, std::max(40.0f, valueW), 8);
+                float h = wrapped.size() * lineH;
+                if (visible(y, h)) {
+                    p.text(fitText(p, asciiOnly(l.name), kSmallFont, nameW - 4), body.x + padX + 10, y + 12, kTag, kSmallFont);
+                    uint32_t color = l.name == "Error" ? kErrorText : kText;
+                    for (size_t i = 0; i < wrapped.size(); i++) p.text(wrapped[i], valueX, y + 12 + i * lineH, color, kSmallFont);
+                }
+                y += h;
+                contentH += h;
+            }
+            break;
+        }
+        case NetworkDetailTab::Response: {
+            std::string message;
+            if (e.failed) message = e.error.empty() ? "The request failed." : "The request failed: " + e.error;
+            else if (!e.completed) message = "Waiting for the response.";
+            else if (e.response.body_preview.empty()) {
+                message = e.response.content_length == 0 ? "No response body."
+                    : (e.response.content_type.empty() ? std::string("Binary data") : e.response.content_type) +
+                      ", " + zepra::formatSize(e.response.content_length) + " (no text preview)";
+            }
+            if (!message.empty()) {
+                p.text(fitText(p, asciiOnly(message), kFont, body.w - 2 * padX), body.x + padX, y + 14, kMuted, kFont);
+                contentH = lineH + 8;
+                break;
+            }
+            // Wrapped at the pane's width in average characters; a line that still
+            // doesn't fit (wide glyphs) is cut
+            const float charW = std::max(1.0f, p.textWidth("abcdefghijklmnopqrstuvwxyz", kSmallFont) / 26.0f);
+            size_t columns = (size_t)std::max(20.0f, std::floor((body.w - 2 * padX) / charW));
+            if (responseLinesId_ != e.request.id || responseLinesColumns_ != columns) {
+                responseLines_ = responseLines(e.response.body_preview, e.response.content_type, columns, 5000);
+                responseLinesId_ = e.request.id;
+                responseLinesColumns_ = columns;
+            }
+            size_t firstLine = (size_t)std::max(0.0f, std::floor((body.y - y) / lineH));
+            for (size_t i = firstLine; i < responseLines_.size(); i++) {
+                float ly = y + i * lineH;
+                if (ly > body.y + body.h) break;
+                p.text(fitText(p, responseLines_[i], kSmallFont, body.w - 2 * padX), body.x + padX, ly + 12, kText, kSmallFont);
+            }
+            contentH = responseLines_.size() * lineH;
+            if (e.response.body_truncated) {
+                float ly = y + contentH + 4;
+                p.text("Showing the first " + zepra::formatSize(e.response.body_preview.size()) + " of " +
+                       zepra::formatSize(e.response.content_length) + ".", body.x + padX, ly + 12, kMuted, kSmallFont);
+                contentH += lineH + 8;
+            }
+            break;
+        }
+        case NetworkDetailTab::Timings: {
+            std::vector<TimingPhase> phases = timingPhases(e);
+            if (phases.empty()) {
+                p.text("Waiting for the response.", body.x + padX, y + 14, kMuted, kFont);
+                contentH = lineH + 8;
+                break;
+            }
+            const float labelW = 120, valueW = 76;
+            const float barX = body.x + padX + labelW, barW = std::max(40.0f, body.w - 2 * padX - labelW - valueW);
+            const double phaseTotal = std::max(0.001, phases.back().start + phases.back().duration);
+            const float rowH = 20;
+            p.text("Request Timing", body.x + padX, y + 14, kText, kSmallFont);
+            y += rowH + 2;
+            for (const auto& ph : phases) {
+                p.text(ph.name, body.x + padX + 8, y + 14, kMuted, kSmallFont);
+                float bx = barX + (float)(ph.start / phaseTotal) * barW;
+                float bw = std::max(1.0f, (float)(ph.duration / phaseTotal) * barW);
+                p.rect(bx, y + 5, bw, rowH - 10, ph.color, 255);
+                std::string ms = formatPhase(ph.duration);
+                p.text(ms, body.x + body.w - padX - p.textWidth(ms, kSmallFont), y + 14, kText, kSmallFont);
+                y += rowH;
+            }
+            p.rect(body.x + padX, y + 2, body.w - 2 * padX, 1, kBorder, 255);
+            y += 6;
+            std::string totalStr = formatPhase(e.response.duration_ms);
+            p.text("Total", body.x + padX + 8, y + 14, kText, kSmallFont);
+            p.text(totalStr, body.x + body.w - padX - p.textWidth(totalStr, kSmallFont), y + 14, kText, kSmallFont);
+            y += rowH;
+            if (!e.response.timings.known) {
+                p.text("This loader does not measure the phases of its requests.", body.x + padX + 8, y + 14, kMuted, kSmallFont);
+                y += rowH;
+            } else if (e.response.timings.dns < 0) {
+                p.text("The request reused a kept-alive connection: no DNS, connect or TLS.", body.x + padX + 8, y + 14, kMuted, kSmallFont);
+                y += rowH;
+            }
+            contentH = y + networkDetailScroll_ - body.y;
+            break;
+        }
+    }
+    p.popClip();
+    networkDetailMax_ = contentH - body.h + 12;
+    networkDetailScroll_ = clampScroll(networkDetailScroll_, networkDetailMax_);
 }
 
 // ============================================================================
@@ -1555,6 +1859,7 @@ void DevToolsPanel::drawNetwork(const Painter& p, const Page& page, const Rect& 
 bool DevToolsPanel::onMouseDown(float x, float y, const Page& page) {
     if (!visible_ || !panel_.contains(x, y)) return false;
     consoleFocused_ = false;
+    networkFilterFocused_ = false;
     if (y < panel_.y + kResizeGrip) {
         resizing_ = true;
         resizeGrabOffset_ = y - panel_.y;
@@ -1619,20 +1924,41 @@ bool DevToolsPanel::onMouseDown(float x, float y, const Page& page) {
         case PanelTab::Network:
             if (clearButton_.contains(x, y)) {
                 if (page.network) page.network->clear();
-                networkSelected_ = -1;
+                networkSelectedId_ = 0;
+                break;
+            }
+            if (networkFilterBox_.contains(x, y)) {
+                networkFilterFocused_ = true;
+                break;
+            }
+            if (disableCacheBox_.contains(x, y)) {
+                disableCache_ = !disableCache_;
+                Zepra::WebCore::setCacheDisabled(disableCache_);
                 break;
             }
             for (size_t i = 0; i < networkFilterButtons_.size(); i++) {
                 if (networkFilterButtons_[i].contains(x, y)) {
                     networkFilter_ = (int)i;
-                    networkSelected_ = -1;
                     networkScroll_ = 0;
                     return true;
                 }
             }
+            if (networkSelectedId_ && networkDetail_.contains(x, y)) {
+                if (networkDetailClose_.contains(x, y)) {
+                    networkSelectedId_ = 0;
+                    break;
+                }
+                for (size_t i = 0; i < networkDetailTabs_.size(); i++) {
+                    if (networkDetailTabs_[i].contains(x, y)) {
+                        networkDetailTab_ = (NetworkDetailTab)i;
+                        networkDetailScroll_ = 0;
+                    }
+                }
+                break;
+            }
             if (networkList_.contains(x, y)) {
                 int idx = (int)std::floor((y - networkList_.y + networkScroll_) / kRowH);
-                networkSelected_ = idx >= 0 ? idx : -1;
+                if (idx >= 0 && idx < (int)networkRowIds_.size()) selectNetworkRequest(networkRowIds_[idx]);
             }
             break;
     }
@@ -1657,7 +1983,11 @@ bool DevToolsPanel::onMouseWheel(float x, float y, float delta) {
             consoleStick_ = consoleScroll_ >= consoleMax_ - 1;
             break;
         case PanelTab::Network:
-            networkScroll_ = clampScroll(networkScroll_ + step, networkMax_);
+            if (networkSelectedId_ && networkDetailBody_.contains(x, y)) {
+                networkDetailScroll_ = clampScroll(networkDetailScroll_ + step, networkDetailMax_);
+            } else {
+                networkScroll_ = clampScroll(networkScroll_ + step, networkMax_);
+            }
             break;
     }
     return true;
@@ -1665,6 +1995,34 @@ bool DevToolsPanel::onMouseWheel(float x, float y, float delta) {
 
 bool DevToolsPanel::onKey(NXRender::KeyCode key, const std::string& text, bool ctrl, bool, const Page& page) {
     using NXRender::KeyCode;
+    if (visible_ && networkFilterFocused_ && tab_ == PanelTab::Network) {
+        if (ctrl || key == KeyCode::F12) return false;   // browser shortcuts (Ctrl+V pastes through insertText)
+        switch (key) {
+            case KeyCode::Enter:
+                networkFilterFocused_ = false;
+                return true;
+            case KeyCode::Escape:
+                // The first Escape clears the box, the second leaves it
+                if (networkFilterText_.empty()) networkFilterFocused_ = false;
+                else networkFilterText_.clear();
+                networkScroll_ = 0;
+                return true;
+            case KeyCode::Backspace:
+                if (!networkFilterText_.empty()) {
+                    do { networkFilterText_.pop_back(); }
+                    while (!networkFilterText_.empty() && ((unsigned char)networkFilterText_.back() & 0xC0) == 0x80);
+                }
+                networkScroll_ = 0;
+                return true;
+            case KeyCode::Tab:
+                return true;
+            default:
+                if (!text.empty()) networkFilterText_ += text;
+                else if (key == KeyCode::Space) networkFilterText_ += ' ';
+                networkScroll_ = 0;
+                return true;
+        }
+    }
     if (!visible_ || !consoleFocused_ || tab_ != PanelTab::Console) return false;
     if (ctrl || key == KeyCode::F12) return false;   // browser shortcuts (Ctrl+V pastes through insertConsoleText)
     std::string& input = consoleInputText_;
