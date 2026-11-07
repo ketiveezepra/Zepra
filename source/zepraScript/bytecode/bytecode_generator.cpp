@@ -1640,6 +1640,25 @@ void BytecodeGenerator::compileExpression(const Frontend::Expression* expr) {
         case Frontend::NodeType::TemplateLiteral:
             compileTemplateLiteral(static_cast<const Frontend::TemplateLiteralExpr*>(expr));
             break;
+        case Frontend::NodeType::TaggedTemplateExpression: {
+            // One strings array per template site, made here and kept in the
+            // constant pool, so a tag sees the same array on every call
+            // (lit-html and friends cache on it)
+            const auto* site = static_cast<const Frontend::TemplateObjectExpr*>(expr);
+            std::vector<Runtime::Value> cooked, raw;
+            for (const std::string& part : site->cooked()) cooked.push_back(Runtime::Value::string(new Runtime::String(part)));
+            for (const std::string& part : site->raw()) raw.push_back(Runtime::Value::string(new Runtime::String(part)));
+            auto* rawArray = new Runtime::Array(std::move(raw));
+            rawArray->preventExtensions();
+            auto* strings = new Runtime::Array(std::move(cooked));
+            Runtime::PropertyDescriptor rawProperty;
+            rawProperty.value = Runtime::Value::object(rawArray);
+            rawProperty.attributes = Runtime::PropertyAttribute::None;
+            strings->defineProperty("raw", rawProperty);
+            strings->preventExtensions();
+            emitConstant(Runtime::Value::object(strings));
+            break;
+        }
         case Frontend::NodeType::ClassExpression:
             compileClassExpression(static_cast<const Frontend::ClassExpr*>(expr));
             break;
