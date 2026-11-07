@@ -31,6 +31,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <future>
 #include <sstream>
 #include <string>
@@ -161,7 +162,12 @@ int g_height = 1080;
 static float g_mouseX = 0, g_mouseY = 0;
 
 // Forward Declarations
-void onNavigate(const std::string& input);
+/// The body of a POST navigation (a form with method="post")
+struct NavigationPost {
+    std::string body;
+    std::string contentType;
+};
+void onNavigate(const std::string& input, const NavigationPost* post = nullptr);
 static bool g_mouseDown = false;
 
 // X11 cursors
@@ -376,10 +382,16 @@ using ZepraBrowser::LayoutBox;
 static LayoutBox* g_focusedBox = nullptr;
 // The focus the current styles were computed with (:focus restyles on change)
 static DOMElement* g_styledFocus = nullptr;
-// A GET form submission waiting for the end of the script task that made it
-static struct PendingSubmission { std::string url; bool newTab = false; int tabId = -1; } g_pendingSubmission;
+// A form submission waiting for the end of the script task that made it
+static struct PendingSubmission {
+    std::string url;
+    bool newTab = false;
+    int tabId = -1;
+    bool isPost = false;
+    NavigationPost post;
+} g_pendingSubmission;
 static void syncPageFocus();
-void openNewTab(const std::string& url);
+void openNewTab(const std::string& url, const NavigationPost* post = nullptr);
 
 // Input cursor position (for visual feedback)
 static int g_cursorBlink = 0;
@@ -436,7 +448,8 @@ static std::atomic<bool> g_asyncLoadComplete{false}; // True when g_loadResults 
 // A finished background page load, waiting for the main loop to apply it
 struct PageLoadResult {
     int tabId = 0;          // Tab that started the load
-    std::string url;
+    std::string url;        // as requested
+    std::string finalUrl;   // after redirects (a POST answered with 303 lands on a GET)
     std::string title;
     std::string content;
     std::string error;
@@ -1507,6 +1520,11 @@ void parseWithWebCore(const std::string& html) {
     // one for target=_blank) once the script task that made them is over
     g_scriptContext->setSubmitHandler([pageTabId, pageUrl = g_currentUrl](const Zepra::WebCore::FormSubmission& form) {
         std::string action = resolveUrl(pageUrl, form.action.empty() ? pageUrl : form.action);
+        if (form.method == "post") {
+            // The action URL as it is (its query stays), the data in the body
+            g_pendingSubmission = {action, form.target == "_blank", pageTabId, true, {form.body, form.contentType}};
+            return;
+        }
         if (form.method != "get") {
             std::cout << "[Form] " << form.method << " submissions are not supported yet: " << action << std::endl;
             return;
@@ -3907,6 +3925,10 @@ void render() {
             }
             // The tab was closed, or navigated somewhere else while this loaded
             if (!loadTab || loadTab->url != result.url) continue;
+            if (!result.finalUrl.empty()) {
+                result.url = result.finalUrl;
+                loadTab->url = result.url;
+            }
             loadTab->isLoading = false;
             if (loadTab->id != g_activeTabId) {
                 // The page globals belong to the active tab; load this one when it is selected
@@ -4022,8 +4044,9 @@ void render() {
     if (!g_pendingSubmission.url.empty()) {
         PendingSubmission submission = std::move(g_pendingSubmission);
         g_pendingSubmission = {};
-        if (submission.newTab) openNewTab(submission.url);
-        else if (submission.tabId == g_activeTabId) onNavigate(submission.url);
+        const NavigationPost* post = submission.isPost ? &submission.post : nullptr;
+        if (submission.newTab) openNewTab(submission.url, post);
+        else if (submission.tabId == g_activeTabId) onNavigate(submission.url, post);
     }
 
     // === LAZY IMAGE LOADER POLL ===
@@ -4487,7 +4510,7 @@ static void saveActiveTabState() {
 }
 
 // Opens a tab, makes it active and loads url in it
-void openNewTab(const std::string& url) {
+void openNewTab(const std::string& url, const NavigationPost* post) {
     saveActiveTabState();
 
     Tab tab;
@@ -4510,7 +4533,7 @@ void openNewTab(const std::string& url) {
     g_focusedBox = nullptr;
     Zepra::WebCore::interactionState() = {};
 
-    onNavigate(url);
+    onNavigate(url, post);
 }
 
 void onNewTab() {
@@ -4642,7 +4665,7 @@ void onSelectTab(int tabId) {
     std::cout << "[Tab] Switched to tab " << tabId << " with " << g_styledLines.size() << " lines" << std::endl;
 }
 
-void onNavigate(const std::string& input) {
+void onNavigate(const std::string& input, const NavigationPost* post) {
     // Parse the input intelligently
     std::string url = parseSmartUrl(input);
     
@@ -4687,7 +4710,7 @@ void onNavigate(const std::string& input) {
             if (tab.id == g_activeTabId) tab.clearNetworkLog();   // the Network panel shows one page
         }
         
-        std::cout << "[Browser] Loading (async): " << url << std::endl;
+        std::cout << "[Browser] Loading (async): " << (post ? "POST " : "") << url << std::endl;
         
         // Update tab state to show loading
         for (Tab& tab : g_tabs) {
@@ -4701,9 +4724,22 @@ void onNavigate(const std::string& input) {
         
         // Spawn background thread; the result goes to the tab that asked for it
         int tabId = g_activeTabId;
-        std::thread([url, tabId]() {
+        std::optional<NavigationPost> postData;
+        if (post) postData = *post;
+        std::thread([url, tabId, postData]() {
             // Fetch in background
-            HttpResponse resp = httpGet(url, Zepra::WebCore::ResourceKind::Document, tabId);
+            HttpResponse resp;
+            if (postData) {
+                HttpRequestOptions options;
+                options.method = "POST";
+                options.kind = Zepra::WebCore::ResourceKind::Document;
+                options.tabId = tabId;
+                options.body = postData->body;
+                options.headers.emplace_back("Content-Type", postData->contentType);
+                resp = httpRequest(url, options);
+            } else {
+                resp = httpGet(url, Zepra::WebCore::ResourceKind::Document, tabId);
+            }
             
             // Prepare data
             std::string pendingTitle;
@@ -4736,6 +4772,7 @@ void onNavigate(const std::string& input) {
                 PageLoadResult result;
                 result.tabId = tabId;
                 result.url = url;
+                if (resp.finalUrl != url) result.finalUrl = resp.finalUrl;
                 result.title = std::move(pendingTitle);
                 result.content = std::move(pendingContent);
                 result.error = std::move(pendingError);
