@@ -298,8 +298,6 @@ ScriptResult ScriptContext::run(const std::string& code, const std::string& file
         result.error = "VM not available";
         return result;
     }
-    // Bare innerWidth/scrollY read what the window's accessors would
-    if (domBindings_) domBindings_->refreshWindowGlobals();
     
     // Skip oversized scripts — extremely large bundles (>512KB) are still
     // beyond what ZepraScript's single-pass compile can handle safely.
@@ -521,7 +519,6 @@ void ScriptContext::runTask(const std::function<void()>& task, const char* what)
     // when it threw. A run stopped by the limits takes its queued microtasks
     // with it.
     ScriptRunGuard guard(vm_);
-    if (domBindings_) domBindings_->refreshWindowGlobals();
     try {
         task();
     } catch (const Zepra::Runtime::ThrownException& e) {
@@ -634,6 +631,10 @@ void ScriptContext::setupGlobals() {
         domBindings_->setSubmitHandler([this](const FormSubmission& submission) {
             if (submitHandler_) submitHandler_(submission);
         });
+        // window is the global object: `var x` at script level is window.x,
+        // and window.x = 1 makes a bare x readable (UMD bundles, jQuery's $,
+        // dataLayer, ...)
+        vm_->setGlobalObject(domBindings_->window());
     }
     setupWindowGlobals();
     setupDocumentGlobals();

@@ -1235,11 +1235,16 @@ ExprPtr Parser::parseLeftHandSideExpression() {
                 );
             }
         } else if (check(TokenType::Template)) {
-            // Tagged template: tag`string` or tag`${expr}`
+            // Tagged template: tag`a${x}b` calls tag(["a", "b"] with .raw, x)
             advance(); // consume template token
-            auto templateExpr = parseTemplateLiteral();
+            std::vector<std::string> cooked;
             std::vector<ExprPtr> args;
-            args.push_back(std::move(templateExpr));
+            args.push_back(nullptr);  // The strings array, below
+            if (!parseTemplateParts(cooked, args)) return nullptr;
+            std::vector<std::string> raw = previousToken_.templateRaw;
+            raw.resize(cooked.size());
+            args[0] = std::make_unique<TemplateObjectExpr>(std::move(cooked), std::move(raw),
+                                                           previousToken_.start);
             expr = std::make_unique<CallExpr>(std::move(expr), std::move(args));
         } else {
             break;
@@ -1543,91 +1548,49 @@ ExprPtr Parser::parseFunctionExpression(bool isAsync) {
                                           isAsync, isGenerator);
 }
 
-ExprPtr Parser::parseTemplateLiteral() {
-    // Parse template literal: `Hello ${name}!`
-    // Token value contains parts with \x01 and \x02 markers for expressions
-    
-    const std::string& templateStr = previousToken_.value;
-    
-    // Check if it's a simple template (no expressions)
-    if (templateStr.find('\x01') == std::string::npos) {
-        // Simple template: just a string
-        return std::make_unique<LiteralExpr>(templateStr, previousToken_.start);
-    }
-    
-    // Complex template with expressions
-    // For now, convert to string concatenation
-    // Full implementation would use TemplateLiteralExpr AST node
-    
-    std::vector<ExprPtr> parts;
+// Splits the template token just read into its cooked string parts and
+// its parsed substitutions (appended to `expressions`); one more string part
+// than substitutions
+bool Parser::parseTemplateParts(std::vector<std::string>& cooked, std::vector<ExprPtr>& expressions) {
+    const std::string templateStr = previousToken_.value;
     size_t pos = 0;
-    
-    while (pos < templateStr.size()) {
+    while (true) {
         size_t exprStart = templateStr.find('\x01', pos);
-        
         if (exprStart == std::string::npos) {
-            // Remaining string part
-            if (pos < templateStr.size()) {
-                std::string part = templateStr.substr(pos);
-                parts.push_back(std::make_unique<LiteralExpr>(part));
-            }
-            break;
+            cooked.push_back(templateStr.substr(pos));
+            return true;
         }
-        
-        // String part before expression
-        if (exprStart > pos) {
-            std::string part = templateStr.substr(pos, exprStart - pos);
-            parts.push_back(std::make_unique<LiteralExpr>(part));
-        }
-        
-        // Expression part
+        cooked.push_back(templateStr.substr(pos, exprStart - pos));
         size_t exprEnd = templateStr.find('\x02', exprStart);
         if (exprEnd == std::string::npos) {
             error("Malformed template literal");
-            return nullptr;
+            return false;
         }
-        
-        // Parse embedded expression
         std::string exprCode = templateStr.substr(exprStart + 1, exprEnd - exprStart - 1);
-        
-        // Create a temporary parser for the expression
         auto exprSource = SourceCode::fromString(exprCode, "<template expression>");
         Parser exprParser(exprSource.get());
         exprParser.superFlag_ = superFlag_;  // `${super.x}` inside a method
         ExprPtr expr = exprParser.parseExpression();
-        
-        if (expr) {
-            parts.push_back(std::move(expr));
+        if (!expr || exprParser.hasErrors()) {
+            error("Invalid expression in template literal");
+            return false;
         }
-        
+        expressions.push_back(std::move(expr));
         pos = exprEnd + 1;
     }
-    
-    // Build concatenation expression: part1 + part2 + part3...
-    if (parts.empty()) {
-        return std::make_unique<LiteralExpr>("");
+}
+
+ExprPtr Parser::parseTemplateLiteral() {
+    // `Hello ${name}!`: a string, its parts joined with the substitutions
+    // converted to strings (`${1}${2}` is "12", not 3)
+    const SourceLocation loc = previousToken_.start;
+    std::vector<std::string> cooked;
+    std::vector<ExprPtr> expressions;
+    if (!parseTemplateParts(cooked, expressions)) return nullptr;
+    if (expressions.empty()) {
+        return std::make_unique<LiteralExpr>(cooked.empty() ? std::string() : cooked[0], loc);
     }
-    
-    if (parts.size() == 1) {
-        return std::move(parts[0]);
-    }
-    
-    // Build left-to-right concatenation tree
-    ExprPtr result = std::make_unique<BinaryExpr>(
-        TokenType::Plus,
-        std::move(parts[0]),
-        std::move(parts[1])
-    );
-    
-    for (size_t i = 2; i < parts.size(); i++) {
-        result = std::make_unique<BinaryExpr>(
-            TokenType::Plus,
-            std::move(result),
-            std::move(parts[i])
-        );
-    }
-    
-    return result;
+    return std::make_unique<TemplateLiteralExpr>(std::move(cooked), std::move(expressions), loc);
 }
 
 ExprPtr Parser::parseClassExpression() {

@@ -366,10 +366,12 @@ TEST(ScriptGeometry, WindowAndDocumentScrolling) {
     // Non-finite coordinates are 0
     EXPECT_EQ(page.eval("scrollTo(0, Infinity); scrollY"), "0");
     EXPECT_EQ(page.eval("scrollTo(0, 40); document.documentElement.scrollTop = NaN; scrollY"), "0");
-    // A page's own global of the same name is left alone
+    // window.scrollY is [Replaceable]: a page's own global of that name
+    // replaces it (window is the global object), the others keep reading
+    // the page's scroll position
     EXPECT_EQ(page.eval("var scrollY = 'mine'; scrollY"), "mine");
     page.geometry.page.scrollY = 90;
-    EXPECT_EQ(page.eval("scrollY + ',' + window.scrollY + ',' + pageYOffset"), "mine,90,90");
+    EXPECT_EQ(page.eval("scrollY + ',' + window.scrollY + ',' + pageYOffset"), "mine,mine,90");
 }
 
 TEST(ScriptGeometry, ScrollIntoView) {

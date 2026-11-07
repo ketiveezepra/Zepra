@@ -4783,6 +4783,57 @@ void onSearch(const std::string& query) {
     onNavigate(query);
 }
 
+// A press on the page waiting for its release (the click and link follow then)
+struct PagePress {
+    bool active = false;
+    float x = 0, y = 0;
+};
+PagePress g_pagePress;
+
+#ifdef USE_WEBCORE
+// Follows the link under (mx, my) when the press at (pressX, pressY) was on
+// that same link; true when one was followed
+bool followLinkAt(float mx, float my, float pressX, float pressY) {
+    for (const auto& linkBox : g_linkHitBoxes) {
+        auto inside = [&](float x, float y) {
+            return x >= linkBox.x && x <= linkBox.x + linkBox.w && y >= linkBox.y && y <= linkBox.y + linkBox.h;
+        };
+        if (inside(mx, my) && inside(pressX, pressY)) {
+            // Clicked on a link!
+            std::cout << "[Browser] Link clicked: " << linkBox.href 
+                      << " (target=" << linkBox.target << ")" << std::endl;
+            
+            // Navigate to link href
+            std::string targetUrl = linkBox.href;
+            
+            // Handle relative URLs
+            if (!targetUrl.empty() && targetUrl[0] == '/') {
+                // Convert relative to absolute using current URL base
+                size_t pos = g_currentUrl.find("://");
+                if (pos != std::string::npos) {
+                    size_t slashPos = g_currentUrl.find('/', pos + 3);
+                    targetUrl = g_currentUrl.substr(0, slashPos) + targetUrl;
+                }
+            }
+            
+            if (!targetUrl.empty()) {
+                // Check target attribute
+                if (linkBox.target == "_blank") {
+                    // Open in new tab
+                    std::cout << "[Browser] Opening in new tab: " << targetUrl << std::endl;
+                    openNewTab(targetUrl);
+                } else {
+                    // Open in same window (default or _self)
+                    onNavigate(targetUrl);
+                }
+            }
+            return true;
+        }
+    }
+    return false;
+}
+#endif
+
 void handleClick(float mx, float my) {
     // Alert dialog intercepts all clicks
     if (g_alertVisible) {
@@ -4893,13 +4944,14 @@ void handleClick(float mx, float my) {
     // relayout, so the boxes below are safe.
     if (my > TOPBAR_HEIGHT && g_layoutRoot && g_scriptContext) {
         DOMElement* target = findElementAt(g_layoutRoot.get(), mx, my);
-        bool notCanceled = target ? g_scriptContext->pressElement(target, mx - getSidebarOffset(), my - TOPBAR_HEIGHT)
-                                  : (g_scriptContext->focusElement(nullptr), true);
+        if (target) g_scriptContext->mouseDown(target, mx - getSidebarOffset(), my - TOPBAR_HEIGHT);
+        else g_scriptContext->focusElement(nullptr);
         // A listener that read geometry after changing the DOM left a box
         // tree that was never painted: place it for the hit-tests below
         placeUnpaintedBoxes();
         syncPageFocus();
-        if (!notCanceled) return;
+        // The click, and the link it may follow, wait for the release
+        g_pagePress = {true, mx, my};
     }
     
     // Check web content layout tree for inputs (HTML-rendered search box)
@@ -4916,41 +4968,8 @@ void handleClick(float mx, float my) {
         }
     }
 #ifdef USE_WEBCORE
-    // Check for link clicks in content area
-    for (const auto& linkBox : g_linkHitBoxes) {
-        if (mx >= linkBox.x && mx <= linkBox.x + linkBox.w &&
-            my >= linkBox.y && my <= linkBox.y + linkBox.h) {
-            // Clicked on a link!
-            std::cout << "[Browser] Link clicked: " << linkBox.href 
-                      << " (target=" << linkBox.target << ")" << std::endl;
-            
-            // Navigate to link href
-            std::string targetUrl = linkBox.href;
-            
-            // Handle relative URLs
-            if (!targetUrl.empty() && targetUrl[0] == '/') {
-                // Convert relative to absolute using current URL base
-                size_t pos = g_currentUrl.find("://");
-                if (pos != std::string::npos) {
-                    size_t slashPos = g_currentUrl.find('/', pos + 3);
-                    targetUrl = g_currentUrl.substr(0, slashPos) + targetUrl;
-                }
-            }
-            
-            if (!targetUrl.empty()) {
-                // Check target attribute
-                if (linkBox.target == "_blank") {
-                    // Open in new tab
-                    std::cout << "[Browser] Opening in new tab: " << targetUrl << std::endl;
-                    openNewTab(targetUrl);
-                } else {
-                    // Open in same window (default or _self)
-                    onNavigate(targetUrl);
-                }
-            }
-            return;
-        }
-    }
+    // Without page scripts a press on a link follows it right away
+    if (!g_scriptContext) followLinkAt(mx, my, mx, my);
 #endif
 }
 
@@ -5419,6 +5438,11 @@ void handleNXEvent(const NXRender::Event& event) {
                  bool overPage = y > TOPBAR_HEIGHT && !g_devTools.contains(x, y);
                  DOMElement* hovered = overPage ? findElementAt(g_layoutRoot.get(), x, y) : nullptr;
                  setInteractionState(hovered, state.active, state.focused);
+                 // mouseover/out, mouseenter/leave and mousemove for the page
+                 if (g_scriptContext) {
+                     g_scriptContext->mouseMove(hovered, x - getSidebarOffset(), y - TOPBAR_HEIGHT, g_mouseDown);
+                     placeUnpaintedBoxes();
+                 }
                  if (g_devTools.pickerActive()) g_devTools.pickerHover(hovered);
              }
 
@@ -5478,6 +5502,25 @@ void handleNXEvent(const NXRender::Event& event) {
                  g_devTools.onMouseUp(x, y);
                  ::g_mouseHandler.handleLeftRelease(x, y); 
                  g_mouseDown = false;
+                 // The page press ends: mouseup, then the click where press and
+                 // release meet, then the link it was on unless a listener
+                 // canceled the click
+                 if (g_pagePress.active) {
+                     PagePress press = g_pagePress;
+                     g_pagePress = {};
+                     bool overPage = y > TOPBAR_HEIGHT && !g_devTools.contains(x, y);
+                     DOMElement* released = (overPage && g_layoutRoot && g_layoutPainted)
+                                                ? findElementAt(g_layoutRoot.get(), x, y) : nullptr;
+                     Zepra::WebCore::MouseUpResult up;
+                     if (g_scriptContext) {
+                         up = g_scriptContext->mouseUp(released, x - getSidebarOffset(), y - TOPBAR_HEIGHT);
+                         placeUnpaintedBoxes();
+                         syncPageFocus();
+                     }
+#ifdef USE_WEBCORE
+                     if (overPage && up.clicked && !up.canceled) followLinkAt(x, y, press.x, press.y);
+#endif
+                 }
                  if (g_layoutRoot) {
                      const auto& state = Zepra::WebCore::interactionState();
                      setInteractionState(state.hovered, nullptr, state.focused);

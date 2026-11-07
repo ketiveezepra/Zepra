@@ -50,6 +50,16 @@ struct KeyEventInit {
     bool metaKey = false;
 };
 
+/// The members of a MouseEvent beyond its position
+struct MouseEventInit {
+    int button = 0;                     // which button changed: 0 primary
+    int buttons = 0;                    // buttons held down: 1 primary
+    int detail = 0;                     // click count for mousedown/mouseup/click
+    DOMElement* relatedTarget = nullptr; // mouseover/out/enter/leave: the other element
+    bool bubbles = true;
+    bool cancelable = true;
+};
+
 class DOMBindings {
 public:
     using ErrorReporter = std::function<void(const std::string& message)>;
@@ -79,10 +89,7 @@ public:
     /// Where getBoundingClientRect, offset*, client*, scroll* and the
     /// window's size and scroll position come from (the browser's layout).
     /// Without one, elements have no boxes and the page does not scroll.
-    void setPageGeometry(PageGeometry* geometry) { geometry_ = geometry; refreshWindowGlobals(); }
-    /// Copies the viewport size and scroll position to the bare globals
-    /// (innerWidth, scrollY, ...), which are not the window's accessors
-    void refreshWindowGlobals();
+    void setPageGeometry(PageGeometry* geometry) { geometry_ = geometry; }
     /// document.readyState: "loading", "interactive" or "complete"
     void setReadyState(const std::string& state) { readyState_ = state; }
     /// Where getComputedStyle() reads styles (the browser's CSS engine).
@@ -109,6 +116,16 @@ public:
     bool fireEvent(DOMNode* target, const std::string& type, bool bubbles, bool cancelable);
     /// Fires a mouse event (clientX/clientY) at a connected element
     bool fireMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY);
+    bool fireMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY,
+                        const MouseEventInit& init);
+    /// True when the element is in this page's document
+    bool isConnected(const DOMElement* element) const;
+    /// The element the primary button went down on (mousedown), until it
+    /// comes up; and the element the pointer is over (mouseover/out)
+    DOMElement* pressedElement() const { return pressed_; }
+    void setPressedElement(DOMElement* element) { pressed_ = element; }
+    DOMElement* pointerElement() const { return pointer_; }
+    void setPointerElement(DOMElement* element) { pointer_ = element; }
     /// A click as the user makes it (and el.click()): a checkbox or radio
     /// toggles before listeners run and back when one cancels; otherwise it
     /// gets input and change, a submit button submits its form, a reset
@@ -160,6 +177,8 @@ private:
 
     Zepra::Runtime::VM* vm_;
     ErrorReporter reportError_;
+    DOMElement* pressed_ = nullptr;
+    DOMElement* pointer_ = nullptr;
     FunctionCompiler compileFunction_;
     DOMDocument* document_ = nullptr;
     CanvasRegistry* canvases_ = nullptr;
@@ -214,13 +233,6 @@ private:
     // Layout geometry
     static constexpr double kDefaultViewportWidth = 1280, kDefaultViewportHeight = 720;
     ElementGeometry geometryOf(const DOMElement* element, bool withScrollSize = false);
-    /// Bare globals mirroring the window's (refreshWindowGlobals), and the
-    /// values last written to them
-    static constexpr size_t kWindowGlobals = 6;
-    static constexpr const char* kWindowGlobalNames[kWindowGlobals] = {
-        "innerWidth", "innerHeight", "scrollX", "scrollY", "pageXOffset", "pageYOffset"};
-    double windowGlobals_[kWindowGlobals] = {};
-    bool windowGlobalsSet_ = false;
     bool isScrollingElement(const DOMElement* element) const;
     Zepra::Runtime::Value rectObject(const GeometryRect& rect);
     DOMElement* offsetParentOf(DOMElement* element);

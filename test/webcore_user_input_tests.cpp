@@ -512,3 +512,98 @@ TEST(PageKeys, KeyCodeAndKeyValues) {
     EXPECT_EQ(shiftKey.location, 1);
     EXPECT_EQ(ZepraBrowser::domKeyFor(KeyCode::Unknown, "", none).key, "Unidentified");
 }
+
+namespace {
+const char* kMousePage = R"(<!DOCTYPE html><html><body>
+<div id="outer"><div id="a"><span id="a1">one</span></div><div id="b">two</div></div>
+<input id="field"><p id="text">text</p>
+</body></html>)";
+
+const char* kMouseLogger = R"(
+var log = [];
+function rec(e) {
+    var t = e.currentTarget.id || e.currentTarget.nodeName;
+    log.push(e.type + ':' + t + (e.relatedTarget ? '<' + (e.relatedTarget.id || '?') : ''));
+}
+for (var id of ['outer', 'a', 'a1', 'b'])
+    for (var type of ['mousedown', 'mouseup', 'click', 'mouseover', 'mouseout', 'mouseenter', 'mouseleave'])
+        document.getElementById(id).addEventListener(type, rec);
+)";
+}  // namespace
+
+TEST(Mouse, PressAndReleaseOrder) {
+    Page page(kMousePage);
+    page.eval(kMouseLogger);
+    EXPECT_TRUE(page.script->mouseDown(page.byId("a1"), 5, 5));
+    EXPECT_EQ(page.eval("log.join(' ')"), "mousedown:a1 mousedown:a mousedown:outer");
+    page.eval("log = []");
+    MouseUpResult up = page.script->mouseUp(page.byId("a1"), 5, 5);
+    EXPECT_TRUE(up.clicked);
+    EXPECT_FALSE(up.canceled);
+    EXPECT_EQ(page.eval("log.join(' ')"), "mouseup:a1 mouseup:a mouseup:outer click:a1 click:a click:outer");
+    // mousedown carries the held button, mouseup none
+    page.eval("var buttons = []; document.addEventListener('mousedown', function (e) { buttons.push(e.buttons, e.button, e.detail); });"
+              "document.addEventListener('mouseup', function (e) { buttons.push(e.buttons); });");
+    page.script->mouseDown(page.byId("b"), 1, 2);
+    page.script->mouseUp(page.byId("b"), 1, 2);
+    EXPECT_EQ(page.eval("buttons.join()"), "1,0,1,0");
+}
+
+TEST(Mouse, ClickGoesWherePressAndReleaseMeet) {
+    Page page(kMousePage);
+    page.eval(kMouseLogger);
+    // Pressed on #a1, released on #b: the click is at their common ancestor
+    page.script->mouseDown(page.byId("a1"), 5, 5);
+    page.eval("log = []");
+    MouseUpResult up = page.script->mouseUp(page.byId("b"), 5, 5);
+    EXPECT_TRUE(up.clicked);
+    EXPECT_EQ(page.eval("log.join(' ')"), "mouseup:b mouseup:outer click:outer");
+    // Released off the page: mouseup nowhere, no click
+    page.script->mouseDown(page.byId("a1"), 5, 5);
+    up = page.script->mouseUp(nullptr, 5, 5);
+    EXPECT_FALSE(up.clicked);
+    // A release without a press clicks nothing
+    page.eval("log = []");
+    up = page.script->mouseUp(page.byId("b"), 5, 5);
+    EXPECT_FALSE(up.clicked);
+    EXPECT_EQ(page.eval("log.join(' ')"), "mouseup:b mouseup:outer");
+    // A canceled click is reported (the browser keeps links from following it)
+    page.eval("document.getElementById('b').addEventListener('click', function (e) { e.preventDefault(); })");
+    page.script->mouseDown(page.byId("b"), 5, 5);
+    EXPECT_TRUE(page.script->mouseUp(page.byId("b"), 5, 5).canceled);
+}
+
+TEST(Mouse, CanceledMousedownKeepsFocus) {
+    Page page(kMousePage);
+    page.script->mouseDown(page.byId("field"), 5, 5);
+    page.script->mouseUp(page.byId("field"), 5, 5);
+    EXPECT_EQ(page.script->focusedElement(), page.byId("field"));
+    page.eval("document.getElementById('text').addEventListener('mousedown', function (e) { e.preventDefault(); })");
+    page.script->mouseDown(page.byId("text"), 5, 5);
+    EXPECT_EQ(page.script->focusedElement(), page.byId("field"));
+    page.script->mouseUp(page.byId("text"), 5, 5);
+    // Without the listener, pressing text gives focus back to the page
+    page.script->mouseDown(page.byId("outer"), 5, 5);
+    EXPECT_EQ(page.script->focusedElement(), nullptr);
+}
+
+TEST(Mouse, OverOutEnterLeave) {
+    Page page(kMousePage);
+    page.eval(kMouseLogger);
+    page.eval("var moves = 0; document.getElementById('a1').addEventListener('mousemove', function () { moves++; })");
+    page.script->mouseMove(page.byId("a1"), 5, 5, false);
+    EXPECT_EQ(page.eval("log.join(' ')"),
+              "mouseover:a1 mouseover:a mouseover:outer mouseenter:outer mouseenter:a mouseenter:a1");
+    page.eval("log = []");
+    page.script->mouseMove(page.byId("a1"), 6, 5, false);
+    EXPECT_EQ(page.eval("log.join(' ') + '|' + moves"), "|2");
+    // From #a1 to #b: leave #a1 and #a, not #outer, which holds both
+    page.script->mouseMove(page.byId("b"), 7, 5, false);
+    EXPECT_EQ(page.eval("log.join(' ')"),
+              "mouseout:a1<b mouseout:a<b mouseout:outer<b mouseleave:a1<b mouseleave:a<b "
+              "mouseover:b<a1 mouseover:outer<a1 mouseenter:b<a1");
+    page.eval("log = []");
+    // Off the page
+    page.script->mouseMove(nullptr, 0, 0, false);
+    EXPECT_EQ(page.eval("log.join(' ')"), "mouseout:b mouseout:outer mouseleave:b mouseleave:outer");
+}
