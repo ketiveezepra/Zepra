@@ -86,3 +86,35 @@ TEST(LexerTests, SlashAfterOperatorIsRegExp) {
     EXPECT_EQ(lexer.nextToken().type, TokenType::Star);
     EXPECT_EQ(lexer.nextToken().type, TokenType::RegExp);
 }
+
+TEST(LexerTests, ByteOrderMarkBeforeTheFirstToken) {
+    auto source = SourceCode::fromString("\xEF\xBB\xBFvar x");
+    Lexer lexer(source.get());
+    Token tok = lexer.nextToken();
+    EXPECT_EQ(tok.type, TokenType::Var);
+    EXPECT_EQ(tok.start.line, 1u);
+}
+
+TEST(LexerTests, TemplateCookedAndRawParts) {
+    auto source = SourceCode::fromString("`a\\n${ \"}\" + `x${1}` }b\\x41`");
+    Lexer lexer(source.get());
+    Token tok = lexer.nextToken();
+    ASSERT_EQ(tok.type, TokenType::Template);
+    // The substitution's source sits between \x01 and \x02, whole
+    EXPECT_EQ(tok.value, std::string("a\n\x01 \"}\" + `x${1}` \x02" "bA"));
+    ASSERT_EQ(tok.templateRaw.size(), 2u);
+    EXPECT_EQ(tok.templateRaw[0], "a\\n");
+    EXPECT_EQ(tok.templateRaw[1], "b\\x41");
+    EXPECT_EQ(lexer.nextToken().type, TokenType::EndOfFile);
+}
+
+TEST(LexerTests, LineContinuationInStringsAndTemplates) {
+    auto source = SourceCode::fromString("'a\\\nb' `c\\\r\nd`");
+    Lexer lexer(source.get());
+    Token tok = lexer.nextToken();
+    ASSERT_EQ(tok.type, TokenType::String);
+    EXPECT_EQ(tok.value, "ab");
+    tok = lexer.nextToken();
+    ASSERT_EQ(tok.type, TokenType::Template);
+    EXPECT_EQ(tok.value, "cd");
+}

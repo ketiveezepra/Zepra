@@ -3,7 +3,8 @@
 /**
  * webcore_dom_bindings_tests.cpp - Page scripts change the real DOM: live
  * wrappers (one object per node), every mutation reaching the C++ tree,
- * DOM events, and the lifetime of nodes scripts remove. No window.
+ * DOM events, the lifetime of nodes scripts remove, and window as the
+ * global object.
  */
 
 #include <gtest/gtest.h>
@@ -142,6 +143,35 @@ TEST(MutationObserver, TakeRecordsDisconnectAndErrors) {
     bool reported = false;
     for (const auto& line : page.console) reported = reported || line.find("boom") != std::string::npos;
     EXPECT_TRUE(reported);
+}
+
+TEST(DomBindings, WindowIsTheGlobalObject) {
+    Page page(kPage);
+    // var and function declarations at script level are window properties
+    EXPECT_EQ(page.eval("var answer = 42; function hello() { return 'hi'; }"
+                        " [window.answer, window.hello(), 'answer' in window].join()"),
+              "42,hi,true");
+    // What a bundle puts on window is a bare global in later scripts (UMD, jQuery's $)
+    page.eval("(function (root) { root.Lib = { v: 7 }; root.$ = function () { return 'jq'; }; })(this);");
+    EXPECT_EQ(page.eval("Lib.v + ',' + $()"), "7,jq");
+    EXPECT_EQ(page.eval("this === window && globalThis === window && self === window"), "true");
+    // Assigning an undeclared name makes a window property
+    EXPECT_EQ(page.eval("implicitGlobal = 5; window.implicitGlobal"), "5");
+    // A script's var names exist (undefined) before it runs, even in a branch not taken
+    EXPECT_EQ(page.eval("var before = typeof laterVar; if (false) { var laterVar = 1; } before + ',' + laterVar"),
+              "undefined,undefined");
+    // Reading an undeclared name throws; typeof does not
+    EXPECT_EQ(page.eval("(function () { try { notDeclaredAnywhere; return 'no'; }"
+                        " catch (e) { return e.name + ': ' + e.message; } })()"),
+              "ReferenceError: notDeclaredAnywhere is not defined");
+    EXPECT_EQ(page.eval("typeof notDeclaredAnywhere"), "undefined");
+    // Built-ins and DOM interfaces are the same either way, and for-in skips them
+    EXPECT_EQ(page.eval("[window.Array === Array, window.document === document,"
+                        " window.HTMLElement === HTMLElement, window.setTimeout === setTimeout].join()"),
+              "true,true,true,true");
+    EXPECT_EQ(page.eval("var seen = []; for (var k in window) { if (k === 'Array' || k === 'JSON') seen.push(k); }"
+                        " seen.length"),
+              "0");
 }
 
 TEST(DomBindings, AppendChildReachesTheDom) {

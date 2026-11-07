@@ -64,11 +64,8 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 - Regex engine is not conformant: no lookaround, `{n,m}` does nothing, byte-based matching, no named groups or backreferences, slow. RegExp objects have no `source`/`flags`/`global`/`lastIndex` properties.
 - Strings are byte-indexed, not UTF-16.
 - Async generators, `for await` and top-level await are not supported. WebAssembly is still a fake namespace; URL/URLSearchParams and the observers in ScriptContext are stubs.
-- Reading an undeclared variable does not throw a ReferenceError; tagged templates (``String.raw`x` ``) are not supported.
-- A UTF-8 byte-order mark at the start of a script is a parse error.
 - `Object.defineProperty` does not reject redefining a non-configurable property.
 - WeakMap/WeakSet hold their keys strongly (no weak-reference hook in the collector yet).
-- `globalThis` in a page is the engine's global object, not `window`.
 
 ## 🛠️ High-Priority Bug Fixes (The "Unfreeze" Sprint)
 

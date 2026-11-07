@@ -1521,24 +1521,8 @@ DOMElement* DOMBindings::offsetParentOf(DOMElement* element) {
 void DOMBindings::scrollPage(double x, double y) {
     if (!geometry_) return;
     geometry_->scrollTo(x, y);
-    refreshWindowGlobals();
 }
 
-void DOMBindings::refreshWindowGlobals() {
-    double width = geometry_ ? geometry_->viewportWidth() : kDefaultViewportWidth;
-    double height = geometry_ ? geometry_->viewportHeight() : kDefaultViewportHeight;
-    double sx = geometry_ ? geometry_->scrollX() : 0, sy = geometry_ ? geometry_->scrollY() : 0;
-    const double values[kWindowGlobals] = {width, height, sx, sy, sx, sy};
-    for (size_t i = 0; i < kWindowGlobals; i++) {
-        // A page may replace these with its own (var scrollY = ...): leave those alone
-        Value current = vm_->getGlobal(kWindowGlobalNames[i]);
-        bool ours = !windowGlobalsSet_ || (current.isNumber() && current.asNumber() == windowGlobals_[i]);
-        if (!ours) continue;
-        windowGlobals_[i] = values[i];
-        vm_->setGlobal(kWindowGlobalNames[i], Value::number(values[i]));
-    }
-    windowGlobalsSet_ = true;
-}
 
 void DOMBindings::installGeometry() {
     domRectProto_ = makeInterface("DOMRect", nullptr);
@@ -1681,19 +1665,33 @@ void DOMBindings::installGeometry() {
         return Value::number(roundPx(geometryOf(&e).bounds().height));
     }));
 
-    // Window: viewport size and the page's scroll position
+    // Window: viewport size and the page's scroll position. These are
+    // [Replaceable]: assigning one (or `var scrollY = ...` at script level)
+    // turns it into the page's own plain property.
     Object* w = global_;
+    auto replaceable = [w](const std::string& name) -> BuiltinFn {
+        return [w, name](const Info& info) -> Value {
+            PropertyDescriptor desc;
+            desc.value = info.argumentCount() > 0 ? info.argument(0) : Value::undefined();
+            desc.attributes = PropertyAttribute::Writable | PropertyAttribute::Configurable |
+                              PropertyAttribute::Enumerable;
+            w->defineProperty(name, desc);
+            return Value::undefined();
+        };
+    };
     accessor(w, "innerWidth", [this](const Info&) -> Value {
         return Value::number(geometry_ ? geometry_->viewportWidth() : kDefaultViewportWidth);
-    });
+    }, replaceable("innerWidth"));
     accessor(w, "innerHeight", [this](const Info&) -> Value {
         return Value::number(geometry_ ? geometry_->viewportHeight() : kDefaultViewportHeight);
-    });
+    }, replaceable("innerHeight"));
     for (const char* name : {"scrollX", "pageXOffset"}) {
-        accessor(w, name, [this](const Info&) -> Value { return Value::number(geometry_ ? geometry_->scrollX() : 0); });
+        accessor(w, name, [this](const Info&) -> Value { return Value::number(geometry_ ? geometry_->scrollX() : 0); },
+                 replaceable(name));
     }
     for (const char* name : {"scrollY", "pageYOffset"}) {
-        accessor(w, name, [this](const Info&) -> Value { return Value::number(geometry_ ? geometry_->scrollY() : 0); });
+        accessor(w, name, [this](const Info&) -> Value { return Value::number(geometry_ ? geometry_->scrollY() : 0); },
+                 replaceable(name));
     }
     for (const char* name : {"scrollTo", "scroll", "scrollBy"}) {
         bool relative = std::strcmp(name, "scrollBy") == 0;
@@ -1706,10 +1704,7 @@ void DOMBindings::installGeometry() {
             return Value::undefined();
         };
         method(w, name, 2, scroll);
-        // Bare scrollTo(...) acts on the window (the global object is not the window yet)
-        vm_->setGlobal(name, Value::object(new Function(name, scroll, 2)));
     }
-    refreshWindowGlobals();
 }
 
 // ----------------------------------------------------------------------------
@@ -2353,6 +2348,9 @@ void DOMBindings::releaseDetachedNodes() {
     // Hover and focus must not point into what goes away
     InteractionState& state = interactionState();
     for (const auto& root : graveyard_) {
+        for (DOMElement** p : {&pressed_, &pointer_}) {
+            if (*p && root->contains(*p)) *p = nullptr;
+        }
         for (DOMElement** p : {&state.hovered, &state.active, &state.focused}) {
             if (*p && root->contains(*p)) *p = nullptr;
         }
@@ -2378,18 +2376,38 @@ bool DOMBindings::fireEvent(DOMNode* target, const std::string& type, bool bubbl
 }
 
 bool DOMBindings::fireMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY) {
+    MouseEventInit init;
+    init.detail = 1;
+    init.buttons = type == "mousedown" ? 1 : 0;
+    return fireMouseEvent(target, type, clientX, clientY, init);
+}
+
+bool DOMBindings::fireMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY,
+                                 const MouseEventInit& init) {
     if (!target || !isConnectedTo(target, document_)) return true;
     EventObject* e = newEvent(mouseEventProto_, type, Value::undefined());
-    e->bubbles = e->cancelable = e->composed = true;
+    e->bubbles = init.bubbles;
+    e->cancelable = init.cancelable;
+    e->composed = true;
     e->trusted = true;
-    for (const char* k : {"clientX", "pageX", "screenX", "x", "offsetX"}) e->set(k, Value::number(clientX));
-    for (const char* k : {"clientY", "pageY", "screenY", "y", "offsetY"}) e->set(k, Value::number(clientY));
-    e->set("detail", Value::number(1));
-    e->set("button", Value::number(0));
-    e->set("buttons", Value::number(type == "mousedown" ? 1 : 0));
+    // pageX/Y count from the document's origin: the client position plus the page scroll
+    double sx = geometry_ ? geometry_->scrollX() : 0, sy = geometry_ ? geometry_->scrollY() : 0;
+    for (const char* k : {"clientX", "screenX", "x", "offsetX"}) e->set(k, Value::number(clientX));
+    for (const char* k : {"clientY", "screenY", "y", "offsetY"}) e->set(k, Value::number(clientY));
+    e->set("pageX", Value::number(clientX + sx));
+    e->set("pageY", Value::number(clientY + sy));
+    e->set("detail", Value::number(init.detail));
+    e->set("button", Value::number(init.button));
+    e->set("buttons", Value::number(init.buttons));
+    e->set("which", Value::number(init.button + 1));
     for (const char* k : {"altKey", "ctrlKey", "shiftKey", "metaKey"}) e->set(k, Value::boolean(false));
-    e->set("relatedTarget", Value::null());
+    DOMElement* related = init.relatedTarget && isConnectedTo(init.relatedTarget, document_) ? init.relatedTarget : nullptr;
+    e->set("relatedTarget", related ? wrap(related) : Value::null());
     return dispatch(wrap(target).asObject(), e);
+}
+
+bool DOMBindings::isConnected(const DOMElement* element) const {
+    return element && isConnectedTo(element, document_);
 }
 
 bool DOMBindings::click(DOMElement* target, double clientX, double clientY) {

@@ -71,3 +71,14 @@ in_delete | (function(){ var o = { a: 1 }; var had = "a" in o; delete o.a; retur
 date_basic | (function(){ var d = new Date(2020, 0, 15); return d.getFullYear() === 2020 && d.getMonth() === 0 && d.getDate() === 15; })()
 string_from_number | String(12) === "12" && (12).toString() === "12" && 1 + "2" === "12"
 equality_rules | (null == undefined) && !(null === undefined) && ("1" == 1) && !("1" === 1) && (NaN !== NaN)
+undeclared_reference_error | (function(){ try { notDeclared_x; return false; } catch (e) { return e instanceof ReferenceError && e.message === "notDeclared_x is not defined"; } })()
+typeof_undeclared_plain | typeof notDeclared_z === "undefined"
+undeclared_call_reference_error | (function(){ try { notDeclaredFn(); return false; } catch (e) { return e.name === "ReferenceError"; } })()
+template_substitutions_are_strings | (function(){ var a = 1, b = 2; return `${a}${b}` === "12" && typeof `${5}` === "string"; })()
+template_nested | (function(){ var n = 1; return `a${`b${n}`}c` === "ab1c" && `${"}"}x` === "}x"; })()
+template_escapes | `\x41\u0042\u{43}` === "ABC"
+tagged_template | (function(){ function t(s, a, b){ return s.length + "|" + s.join("-") + "|" + a + "+" + b; } return t`x${1}y${2}z` === "3|x-y-z|1+2"; })()
+tagged_template_raw | (function(){ function t(s){ return s.raw[0]; } return t`a\nb` === "a\\nb" && String.raw`c\t${1}` === "c\\t1"; })()
+tagged_template_same_strings | (function(){ function id(s){ return s; } function f(){ return id`q${1}`; } return f() === f() && Array.isArray(f()); })()
+tagged_template_method_this | (function(){ var o = { n: 3, tag(s, v){ return this.n + v; } }; return o.tag`a${4}` === 7; })()
+string_hex_and_pair_escapes | "\x41" === "A" && "\uD83D\uDE00" === "\u{1F600}" && "\u00e9" === "\xe9"
