@@ -408,20 +408,24 @@ bool isComputedProperty(const std::string& key) {
 
 class ComputedStyleObject final : public Object {
 public:
-    ComputedStyleObject(VM* vm, const DOMBindings* bindings, NodeWrapper* owner, bool pseudoElement, Object* methods)
+    /// `pseudo`: the pseudo-element ("before"), empty for the element, or
+    /// kInvalidPseudo for an argument that names no pseudo-element
+    ComputedStyleObject(VM* vm, const DOMBindings* bindings, NodeWrapper* owner, std::string pseudo, Object* methods)
         : Object(ObjectType::Proxy), vm_(vm), bindings_(bindings), owner_(owner),
-          pseudoElement_(pseudoElement), methods_(methods) {}
+          pseudo_(std::move(pseudo)), methods_(methods) {}
+
+    static constexpr const char* kInvalidPseudo = ":invalid";
 
     using Object::get;
     using Object::set;
     using Object::has;
 
     /// Read again on every access, so the object follows style changes.
-    /// Pseudo-elements have no computed style here: they read as empty.
+    /// An argument that names no pseudo-element reads as empty.
     std::vector<std::pair<std::string, std::string>> values() const {
         DOMElement* el = asElement(owner_->node);
-        if (!el || pseudoElement_) return {};
-        return bindings_->computedValues(el);
+        if (!el || pseudo_ == kInvalidPseudo) return {};
+        return bindings_->computedValues(el, pseudo_);
     }
 
     std::string value(const std::string& property) const {
@@ -470,7 +474,7 @@ private:
     VM* vm_;
     const DOMBindings* bindings_;
     NodeWrapper* owner_;
-    bool pseudoElement_;
+    std::string pseudo_;
     Object* methods_;
 };
 
@@ -1568,61 +1572,111 @@ void DOMBindings::installGeometry() {
     accessor(p, "scrollHeight", on<DOMElement>("scrollHeight", [this](DOMElement& e, const Info&) {
         return Value::number(roundPx(geometryOf(&e, true).scrollHeight));
     }));
-    // Only the page scrolls (no element is a scroll container yet): <html>
-    // reads and moves the page's scroll position, other elements stay at 0
+    // <html> reads and moves the page's scroll position; a scroll container
+    // (overflow other than visible) its own; other elements stay at 0
     accessor(p, "scrollTop",
         on<DOMElement>("scrollTop", [this](DOMElement& e, const Info&) {
-            return Value::number(isScrollingElement(&e) && geometry_ ? geometry_->scrollY() : 0);
+            if (isScrollingElement(&e)) return Value::number(geometry_ ? geometry_->scrollY() : 0);
+            ElementGeometry g = geometryOf(&e);
+            return Value::number(g.scrollContainer ? g.scrollTop : 0);
         }),
         on<DOMElement>("scrollTop", [this](DOMElement& e, const Info& info) {
-            if (isScrollingElement(&e) && geometry_) scrollPage(geometry_->scrollX(), finiteOrZero(info.argument(0).toNumber()));
+            double y = finiteOrZero(info.argument(0).toNumber());
+            if (isScrollingElement(&e)) {
+                if (geometry_) scrollPage(geometry_->scrollX(), y);
+            } else {
+                ElementGeometry g = geometryOf(&e);
+                if (g.scrollContainer) geometry_->scrollElementTo(&e, g.scrollLeft, y);
+            }
             return Value::undefined();
         }));
     accessor(p, "scrollLeft",
         on<DOMElement>("scrollLeft", [this](DOMElement& e, const Info&) {
-            return Value::number(isScrollingElement(&e) && geometry_ ? geometry_->scrollX() : 0);
+            if (isScrollingElement(&e)) return Value::number(geometry_ ? geometry_->scrollX() : 0);
+            ElementGeometry g = geometryOf(&e);
+            return Value::number(g.scrollContainer ? g.scrollLeft : 0);
         }),
         on<DOMElement>("scrollLeft", [this](DOMElement& e, const Info& info) {
-            if (isScrollingElement(&e) && geometry_) scrollPage(finiteOrZero(info.argument(0).toNumber()), geometry_->scrollY());
+            double x = finiteOrZero(info.argument(0).toNumber());
+            if (isScrollingElement(&e)) {
+                if (geometry_) scrollPage(x, geometry_->scrollY());
+            } else {
+                ElementGeometry g = geometryOf(&e);
+                if (g.scrollContainer) geometry_->scrollElementTo(&e, x, g.scrollTop);
+            }
             return Value::undefined();
         }));
     for (const char* name : {"scrollTo", "scroll", "scrollBy"}) {
         bool relative = std::strcmp(name, "scrollBy") == 0;
         method(p, name, 0, on<DOMElement>(name, [this, relative](DOMElement& e, const Info& info) {
-            if (!isScrollingElement(&e) || !geometry_) return Value::undefined();
-            double x = relative ? 0 : geometry_->scrollX(), y = relative ? 0 : geometry_->scrollY();
+            if (!geometry_) return Value::undefined();
+            double atX, atY;
+            if (isScrollingElement(&e)) {
+                atX = geometry_->scrollX();
+                atY = geometry_->scrollY();
+            } else {
+                ElementGeometry g = geometryOf(&e);
+                if (!g.scrollContainer) return Value::undefined();
+                atX = g.scrollLeft;
+                atY = g.scrollTop;
+            }
+            double x = relative ? 0 : atX, y = relative ? 0 : atY;
             scrollArguments(info, x, y);
-            if (relative) { x += geometry_->scrollX(); y += geometry_->scrollY(); }
-            scrollPage(x, y);
+            if (relative) { x += atX; y += atY; }
+            if (isScrollingElement(&e)) scrollPage(x, y);
+            else geometry_->scrollElementTo(&e, x, y);
             return Value::undefined();
         }));
     }
-    // scrollIntoView(alignToTop) / scrollIntoView({block}): start (default),
-    // end, center, or nearest (the closer edge, and only when the box is
-    // partly out of view without covering the whole viewport)
+    // scrollIntoView(alignToTop) / scrollIntoView({block, inline}): every
+    // scroll container around the element, innermost first, then the page.
+    // block/inline: start (default for block), end, center, or nearest
+    // (default for inline: the closer edge, and only when the box is partly
+    // out of view without covering the whole scrollport).
     method(p, "scrollIntoView", 0, on<DOMElement>("scrollIntoView", [this](DOMElement& e, const Info& info) {
-        ElementGeometry g = geometryOf(&e);
-        if (!g.hasBox || !geometry_) return Value::undefined();
-        std::string block = "start";
+        if (!geometry_ || !geometryOf(&e).hasBox) return Value::undefined();
+        std::string block = "start", inlineAlign = "nearest";
         Value arg = info.argument(0);
         if (arg.isObject()) {
             Value b = arg.asObject()->get("block");
             if (!b.isUndefined()) block = b.toString();
+            Value i = arg.asObject()->get("inline");
+            if (!i.isUndefined()) inlineAlign = i.toString();
         } else if (arg.isBoolean() && !arg.asBoolean()) {
             block = "end";
         }
-        GeometryRect r = g.bounds();
-        double viewH = geometry_->viewportHeight(), sy = geometry_->scrollY();
-        double target = sy + r.y;
-        if (block == "end") target = sy + r.y + r.height - viewH;
-        else if (block == "center") target = sy + r.y + r.height / 2 - viewH / 2;
-        else if (block == "nearest") {
-            bool aboveTop = r.y < 0, belowBottom = r.y + r.height > viewH;
-            if (aboveTop == belowBottom) return Value::undefined();  // in view, or covering it
-            bool alignEnd = (aboveTop && r.height > viewH) || (belowBottom && r.height <= viewH);
-            if (alignEnd) target = sy + r.y + r.height - viewH;
+        // Where the scrollport must move to show [start, start + size] that
+        // now sits at `start` relative to a scrollport of `view` scrolled to `at`
+        auto target = [](const std::string& align, double at, double start, double size, double view,
+                         bool& move) -> double {
+            move = true;
+            if (align == "end") return at + start + size - view;
+            if (align == "center") return at + start + size / 2 - view / 2;
+            if (align == "nearest") {
+                bool before = start < 0, after = start + size > view;
+                if (before == after) { move = false; return at; }  // in view, or covering it
+                bool alignEnd = (before && size > view) || (after && size <= view);
+                return alignEnd ? at + start + size - view : at + start;
+            }
+            return at + start;
+        };
+        for (DOMElement* a = asElement(e.parentNode()); a && !isScrollingElement(a); a = asElement(a->parentNode())) {
+            ElementGeometry ag = geometryOf(a);
+            if (!ag.hasBox || !ag.scrollContainer) continue;
+            GeometryRect r = geometryOf(&e).bounds();
+            const GeometryRect& box = ag.rects[0];
+            double portX = box.x + ag.borderLeft, portY = box.y + ag.borderTop;
+            double portW = std::max(0.0, box.width - ag.borderLeft - ag.borderRight);
+            double portH = std::max(0.0, box.height - ag.borderTop - ag.borderBottom);
+            bool moveX, moveY;
+            double x = target(inlineAlign, ag.scrollLeft, r.x - portX, r.width, portW, moveX);
+            double y = target(block, ag.scrollTop, r.y - portY, r.height, portH, moveY);
+            if (moveX || moveY) geometry_->scrollElementTo(a, moveX ? x : ag.scrollLeft, moveY ? y : ag.scrollTop);
         }
-        scrollPage(geometry_->scrollX(), target);
+        GeometryRect r = geometryOf(&e).bounds();
+        bool move;
+        double y = target(block, geometry_->scrollY(), r.y, r.height, geometry_->viewportHeight(), move);
+        if (move) scrollPage(geometry_->scrollX(), y);
         return Value::undefined();
     }));
 
@@ -2120,9 +2174,25 @@ void DOMBindings::installComputedStyle() {
         if (!w || !asElement(w->node)) {
             throw JSError("TypeError", "Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
         }
-        Value pseudo = info.argument(1);
-        bool pseudoElement = !pseudo.isNullOrUndefined() && !pseudo.toString().empty();
-        auto* style = new ComputedStyleObject(vm_, this, w, pseudoElement, methods);
+        // The second argument (CSSOM 9.1): one not starting with a colon
+        // means the element itself; "::name" (or the legacy ":before",
+        // ":after", ":first-line", ":first-letter") a pseudo-element; any
+        // other value an empty, read-only declaration (as Chrome gives)
+        std::string pseudo;
+        Value pseudoArg = info.argument(1);
+        if (!pseudoArg.isNullOrUndefined()) {
+            std::string text = pseudoArg.toString();
+            if (!text.empty() && text[0] == ':') {
+                bool doubleColon = text.size() > 1 && text[1] == ':';
+                std::string name = text.substr(doubleColon ? 2 : 1);
+                for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                static const std::unordered_set<std::string> kNames = {
+                    "before", "after", "marker", "first-line", "first-letter", "placeholder", "selection"};
+                bool legacy = name == "before" || name == "after" || name == "first-line" || name == "first-letter";
+                pseudo = (kNames.count(name) && (doubleColon || legacy)) ? name : ComputedStyleObject::kInvalidPseudo;
+            }
+        }
+        auto* style = new ComputedStyleObject(vm_, this, w, pseudo, methods);
         style->setPrototype(styleDeclarationProto_);
         return Value::object(style);
     }, 1);
@@ -2130,8 +2200,14 @@ void DOMBindings::installComputedStyle() {
     vm_->setGlobal("getComputedStyle", Value::object(fn));
 }
 
-std::vector<std::pair<std::string, std::string>> DOMBindings::computedValues(DOMElement* element) const {
-    if (!element || !computedStyleSource_ || !isConnectedTo(element, document_)) return {};
+std::vector<std::pair<std::string, std::string>> DOMBindings::computedValues(DOMElement* element,
+                                                                         const std::string& pseudo) const {
+    if (!element || !isConnectedTo(element, document_)) return {};
+    if (!pseudo.empty()) {
+        const CSSComputedStyle* style = pseudoStyleSource_ ? pseudoStyleSource_(element, pseudo) : nullptr;
+        return style ? computedStyleProperties(*style) : std::vector<std::pair<std::string, std::string>>{};
+    }
+    if (!computedStyleSource_) return {};
     const CSSComputedStyle* style = computedStyleSource_(element);
     if (!style) return {};
     return computedStyleProperties(*style);

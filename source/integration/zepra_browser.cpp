@@ -1237,6 +1237,10 @@ static void rebuildLayoutTree() {
     int totalBoxes = countBoxes(*g_layoutRoot);
     std::cout << "[Layout] Built layout tree: " << totalBoxes << " total boxes, "
               << g_layoutRoot->children.size() << " direct children" << std::endl;
+    // Scroll positions of elements that are no longer scroll containers
+    // (removed or restyled) are dropped; the others carry over to the new boxes
+    ZepraBrowser::elementScrollOffsets().prune(*g_layoutRoot);
+
     // Recorded after building, so any DOM writes made while building cannot
     // trigger a relayout on every frame
     g_layoutDomVersion = Zepra::WebCore::domMutationVersion();
@@ -1463,6 +1467,16 @@ void parseWithWebCore(const std::string& html) {
             }
             return pageCss->getComputedStyle(element);
         });
+    g_scriptContext->setPseudoElementStyleSource(
+        [pageCss, styledVersion = g_layoutDomVersion](DOMElement* element, const std::string& pseudo) mutable
+            -> const CSSComputedStyle* {
+            uint64_t version = Zepra::WebCore::domMutationVersion();
+            if (version != g_layoutDomVersion && version != styledVersion) {
+                pageCss->computeStyles();
+                styledVersion = version;
+            }
+            return pageCss->getPseudoElementStyle(element, pseudo);
+        });
 
     // fetch()/XMLHttpRequest: the request runs on its own thread and is
     // recorded in this tab's Network panel; the script context settles the
@@ -1644,6 +1658,17 @@ static bool looksLikeHTMLAttributes(const std::string& text) {
 
 
 // Boxes paint one border colour: the colour of the first side that has a width
+static int overflowKind(Zepra::WebCore::OverflowValue value) {
+    using Zepra::WebCore::OverflowValue;
+    switch (value) {
+        case OverflowValue::Hidden: return ZepraBrowser::kOverflowHidden;
+        case OverflowValue::Scroll: return ZepraBrowser::kOverflowScroll;
+        case OverflowValue::Auto: return ZepraBrowser::kOverflowAuto;
+        case OverflowValue::Clip: return ZepraBrowser::kOverflowClip;
+        default: return ZepraBrowser::kOverflowVisible;
+    }
+}
+
 static Zepra::WebCore::CSSColor usedBorderColor(const CSSComputedStyle& style) {
     if (style.borderTopWidth > 0) return style.borderTopColor;
     if (style.borderRightWidth > 0) return style.borderRightColor;
@@ -2555,6 +2580,10 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     blockBox->opacity = childStyle->opacity;
                     blockBox->overflowHidden = (childStyle->overflowX == OverflowValue::Hidden || 
                                                 childStyle->overflowY == OverflowValue::Hidden);
+                    // Clipping and scrolling (overflow other than visible): the
+                    // element's box is a scroll container (see layout_engine.h)
+                    blockBox->overflowX = overflowKind(childStyle->overflowX);
+                    blockBox->overflowY = overflowKind(childStyle->overflowY);
                     blockBox->visibilityHidden = (childStyle->visibility == Visibility::Hidden);
                     blockBox->boxSizing = (childStyle->boxSizing == Zepra::WebCore::BoxSizing::BorderBox) ? 1 : 0;
                     
@@ -3144,13 +3173,8 @@ class BrowserPageGeometry : public Zepra::WebCore::PageGeometry {
 public:
     Zepra::WebCore::ElementGeometry elementGeometry(const DOMElement* element, bool withScrollSize) override {
         if (!updateLayout()) return {};
-        ZepraBrowser::PageLayout page = currentPage();
-        if (indexedRoot_ != g_layoutRoot.get() || indexedPass_ != g_layoutPass) {
-            index_.build(page);
-            indexedRoot_ = g_layoutRoot.get();
-            indexedPass_ = g_layoutPass;
-        }
-        return index_.geometryOf(page, element, withScrollSize);
+        reindex();
+        return index_.geometryOf(currentPage(), element, withScrollSize);
     }
     double viewportWidth() override { return g_width - getSidebarOffset(); }
     double viewportHeight() override { return pageViewportHeight(); }
@@ -3165,11 +3189,25 @@ public:
         float maxScroll = updateLayout() ? std::max(0.0f, g_layoutRoot->height - pageViewportHeight()) : 0.0f;
         tab->scrollY = std::clamp((float)y, 0.0f, maxScroll);
     }
+    void scrollElementTo(const DOMElement* element, double x, double y) override {
+        if (!updateLayout()) return;
+        reindex();
+        // The next frame paints (and hit-tests) the content at the new position
+        if (const LayoutBox* box = index_.principalBox(element)) ZepraBrowser::scrollContainerTo(*box, (float)x, (float)y);
+    }
 
 private:
     ZepraBrowser::LayoutGeometryIndex index_;
     const LayoutBox* indexedRoot_ = nullptr;
     uint64_t indexedPass_ = 0;
+
+    void reindex() {
+        if (indexedRoot_ != g_layoutRoot.get() || indexedPass_ != g_layoutPass) {
+            index_.build(currentPage());
+            indexedRoot_ = g_layoutRoot.get();
+            indexedPass_ = g_layoutPass;
+        }
+    }
 
     // Brings the box tree and its positions up to date with the DOM;
     // false when the page has no box tree
@@ -4714,8 +4752,16 @@ void onNavigate(const std::string& input) {
 // Find LayoutBox at screen coordinates (recursive)
 static DOMElement* findElementAt(LayoutBox* box, float x, float y);
 
+// Whether the point is inside the box as last placed on screen
+static bool boxContains(const LayoutBox* box, float x, float y) {
+    return x >= box->screenX && x < box->screenX + box->width &&
+           y >= box->screenY && y < box->screenY + box->height;
+}
+
 LayoutBox* findBoxAt(LayoutBox* box, float x, float y) {
     if (!box) return nullptr;
+    // A clipping box's content is only visible (and hit) inside it
+    if (ZepraBrowser::clipsContent(*box) && !boxContains(box, x, y)) return nullptr;
     
     // Check children first (top-most) in reverse order
     for (auto it = box->children.rbegin(); it != box->children.rend(); ++it) {
@@ -5292,6 +5338,7 @@ bool loadResources() {
 // Deepest DOM element whose box contains the point (screen coordinates)
 static DOMElement* findElementAt(LayoutBox* box, float x, float y) {
     if (!box) return nullptr;
+    if (ZepraBrowser::clipsContent(*box) && !boxContains(box, x, y)) return nullptr;
     for (auto it = box->children.rbegin(); it != box->children.rend(); ++it) {
         if (DOMElement* el = findElementAt(&(*it), x, y)) return el;
     }
@@ -5481,6 +5528,16 @@ void handleNXEvent(const NXRender::Event& event) {
              }
         } else if (event.type == NXRender::EventType::MouseWheel) {
              if (g_devTools.onMouseWheel(x, y, event.mouse.wheelDelta)) return;
+             // The innermost scroll container under the pointer that can
+             // still move that way scrolls; otherwise the page does
+             if (g_layoutRoot && g_layoutPainted) {
+                 float dy = -event.mouse.wheelDelta * 40.0f;
+                 if (const LayoutBox* box = ZepraBrowser::userScrollContainerAt(*g_layoutRoot, x, y, 0, dy)) {
+                     ZepraBrowser::ScrollOffset at = ZepraBrowser::scrollOffsetOf(*box);
+                     ZepraBrowser::scrollContainerTo(*box, at.x, at.y + dy);
+                     return;
+                 }
+             }
              for (auto& tab : g_tabs) {
                  if (tab.id == g_activeTabId) {
                      tab.scrollY -= event.mouse.wheelDelta * 40.0f;

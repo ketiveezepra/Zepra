@@ -189,6 +189,63 @@ const CSSComputedStyle* StyleResolver::getComputedStyle(DOMElement* element) {
     return &styleCache_[element];
 }
 
+const CSSComputedStyle* StyleResolver::getPseudoElementStyle(DOMElement* element, const std::string& pseudo) {
+    static const std::unordered_set<std::string> kPseudoElements = {
+        "before", "after", "marker", "first-line", "first-letter", "placeholder", "selection",
+    };
+    if (!element || !kPseudoElements.count(pseudo)) return nullptr;
+
+    auto& perElement = pseudoStyleCache_[element];
+    auto cached = perElement.find(pseudo);
+    if (cached != perElement.end()) return &cached->second;
+
+    // A pseudo-element inherits from its element (CSS Pseudo 4, 4.1); its
+    // own initial display is inline
+    const CSSComputedStyle* elementStyle = getComputedStyle(element);
+    CSSComputedStyle computed = elementStyle ? CSSComputedStyle::inherit(*elementStyle) : CSSComputedStyle();
+    computed.display = DisplayValue::Inline;
+
+    std::vector<std::pair<CSSStyleSheet*, StyleOrigin>> sheetPairs;
+    for (const auto& entry : stylesheets_) sheetPairs.push_back({entry.sheet.get(), entry.origin});
+    cascade_.setMatchPseudoElement(pseudo);
+    auto matched = cascade_.collectMatchingRulesWithOrigins(element, sheetPairs);
+    cascade_.setMatchPseudoElement("");
+    cascade_.sortByCascade(matched);
+
+    // Normal declarations, then !important ones in reverse origin order (no
+    // style attribute or presentational hints reach a pseudo-element)
+    for (const auto& match : matched) {
+        if (match.rule && match.rule->style()) {
+            applyDeclarations(computed, match.rule->style(), elementStyle, Importance::Normal);
+        }
+    }
+    for (StyleOrigin origin : {StyleOrigin::Author, StyleOrigin::User, StyleOrigin::UserAgent}) {
+        for (const auto& match : matched) {
+            if (match.origin == origin && match.rule && match.rule->style() && match.rule->style()->hasImportant()) {
+                applyDeclarations(computed, match.rule->style(), elementStyle, Importance::Important);
+            }
+        }
+    }
+
+    for (CSSLength* len : {&computed.marginTop, &computed.marginRight, &computed.marginBottom,
+                           &computed.marginLeft, &computed.paddingTop, &computed.paddingRight,
+                           &computed.paddingBottom, &computed.paddingLeft}) {
+        if (len->unit == CSSLength::Unit::Em || len->unit == CSSLength::Unit::Rem ||
+            len->unit == CSSLength::Unit::Pt || len->unit == CSSLength::Unit::Ex ||
+            len->unit == CSSLength::Unit::Ch) {
+            *len = CSSLength::px(len->toPx(computed.fontSize, 16.0f, 0, 0, 0));
+        }
+    }
+
+    // `content: normal` computes to none on ::before/::after (CSS Content 3, 2)
+    if ((pseudo == "before" || pseudo == "after") && (computed.content.empty() || computed.content == "normal")) {
+        computed.content = "none";
+    }
+
+    auto [it, inserted] = perElement.emplace(pseudo, std::move(computed));
+    return &it->second;
+}
+
 std::vector<MatchedRule> StyleResolver::matchedRules(DOMElement* element) {
     std::vector<std::pair<CSSStyleSheet*, StyleOrigin>> sheetPairs;
     for (const auto& entry : stylesheets_) {
@@ -205,10 +262,12 @@ bool isInheritedProperty(const std::string& property) {
 
 void StyleResolver::invalidateElement(DOMElement* element) {
     styleCache_.erase(element);
+    pseudoStyleCache_.erase(element);
 }
 
 void StyleResolver::invalidateAll() {
     styleCache_.clear();
+    pseudoStyleCache_.clear();
 }
 
 // ============================================================================
@@ -758,25 +817,24 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     // =====================================================================
     // Overflow & Box
     // =====================================================================
-    else if (property == "overflow") {
-        OverflowValue ov = OverflowValue::Visible;
-        if (value == "hidden") ov = OverflowValue::Hidden;
-        else if (value == "scroll") ov = OverflowValue::Scroll;
-        else if (value == "auto") ov = OverflowValue::Auto;
-        else if (value == "clip") ov = OverflowValue::Clip;
-        style.overflowX = ov; style.overflowY = ov;
-    }
-    else if (property == "overflow-x") {
-        if (value == "hidden") style.overflowX = OverflowValue::Hidden;
-        else if (value == "scroll") style.overflowX = OverflowValue::Scroll;
-        else if (value == "auto") style.overflowX = OverflowValue::Auto;
-        else style.overflowX = OverflowValue::Visible;
-    }
-    else if (property == "overflow-y") {
-        if (value == "hidden") style.overflowY = OverflowValue::Hidden;
-        else if (value == "scroll") style.overflowY = OverflowValue::Scroll;
-        else if (value == "auto") style.overflowY = OverflowValue::Auto;
-        else style.overflowY = OverflowValue::Visible;
+    else if (property == "overflow" || property == "overflow-x" || property == "overflow-y") {
+        auto keyword = [](const std::string& v) {
+            if (v == "hidden") return OverflowValue::Hidden;
+            if (v == "scroll") return OverflowValue::Scroll;
+            if (v == "auto" || v == "overlay") return OverflowValue::Auto;
+            if (v == "clip") return OverflowValue::Clip;
+            return OverflowValue::Visible;
+        };
+        if (property == "overflow-x") style.overflowX = keyword(value);
+        else if (property == "overflow-y") style.overflowY = keyword(value);
+        else {
+            // One value for both axes, or "x y" (CSS Overflow 3, 3.1)
+            std::istringstream in(value);
+            std::string first, second;
+            in >> first >> second;
+            style.overflowX = keyword(first);
+            style.overflowY = second.empty() ? style.overflowX : keyword(second);
+        }
     }
     else if (property == "box-sizing") {
         if (value == "border-box") style.boxSizing = BoxSizing::BorderBox;

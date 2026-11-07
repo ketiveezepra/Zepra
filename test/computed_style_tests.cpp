@@ -74,6 +74,14 @@ struct Page {
                 }
                 return css->getComputedStyle(element);
             });
+            script->setPseudoElementStyleSource(
+                [this](DOMElement* element, const std::string& pseudo) -> const CSSComputedStyle* {
+                    if (domMutationVersion() != styledVersion) {
+                        css->computeStyles();
+                        styledVersion = domMutationVersion();
+                    }
+                    return css->getPseudoElementStyle(element, pseudo);
+                });
         }
     }
 
@@ -187,10 +195,72 @@ TEST(ComputedStyle, DetachedElementReadsEmpty) {
 
 TEST(ComputedStyle, PseudoElementArgument) {
     Page page(kPage);
+    // null, "" and a value without a colon mean the element itself
     EXPECT_EQ(page.eval("var box = document.getElementById('box');"
                         "[getComputedStyle(box, null).width, getComputedStyle(box, '').width,"
-                        " getComputedStyle(box, '::before').length].join('|')"),
-              "200px|200px|0");
+                        " getComputedStyle(box, 'before').width].join('|')"),
+              "200px|200px|200px");
+    // Not a pseudo-element: an empty declaration
+    EXPECT_EQ(page.eval("[getComputedStyle(box, '::nope').length, getComputedStyle(box, ':hover').length,"
+                        " getComputedStyle(box, ':marker').length].join('|')"), "0|0|0");
+}
+
+const char* kPseudoPage = R"HTML(<!DOCTYPE html><html><head><style>
+#box { color: rgb(10, 20, 30); font-size: 20px; width: 300px }
+#box::before { content: '\2192  '; color: rgb(200, 0, 0); padding-left: 1em }
+#box:after { content: "end"; display: block; margin-top: 5px }
+.tip::after { content: attr(data-tip) !important; }
+.tip::after { content: "lost"; background-color: #0000ff }
+p::before, li::before { content: counter(item) ". " }
+#box::first-line { font-weight: 700 }
+div:hover::before { color: rgb(0, 0, 1) }
+</style></head><body>
+<div id="box" style="color: rgb(1, 1, 1)">text</div>
+<span class="tip" id="tip" data-tip="hi">t</span>
+<p id="para">p</p>
+<b id="plain">b</b>
+</body></html>)HTML";
+
+TEST(ComputedStyle, PseudoElementsTakeTheirOwnRules) {
+    Page page(kPseudoPage);
+    page.eval("var box = document.getElementById('box'); var b = getComputedStyle(box, '::before');"
+              "var a = getComputedStyle(box, '::after')");
+    // Their own rules, inline by default, inheriting from the element (whose
+    // style attribute does not reach them)
+    EXPECT_EQ(page.eval("[b.content, b.color, b.display, b.fontSize, b.paddingLeft].join('|')"),
+              "\"\u2192 \"|rgb(200, 0, 0)|inline|20px|20px");
+    EXPECT_EQ(page.eval("[a.content, a.color, a.display, a.marginTop, a.width].join('|')"),
+              "\"end\"|rgb(1, 1, 1)|block|5px|auto");
+    // Legacy one-colon argument, any case
+    EXPECT_EQ(page.eval("getComputedStyle(box, ':BEFORE').color"), "rgb(200, 0, 0)");
+    EXPECT_EQ(page.eval("getComputedStyle(box, '::first-line').fontWeight"), "700");
+    // The element's own style is untouched by the pseudo-element rules
+    EXPECT_EQ(page.eval("var cs = getComputedStyle(box); [cs.color, cs.display, cs.content].join('|')"),
+              "rgb(1, 1, 1)|block|");
+}
+
+TEST(ComputedStyle, PseudoElementCascade) {
+    Page page(kPseudoPage);
+    // !important beats a later rule; the later rule still gives the background
+    EXPECT_EQ(page.eval("var t = getComputedStyle(document.getElementById('tip'), '::after');"
+                        "t.content + '|' + t.backgroundColor"), "attr(data-tip)|rgb(0, 0, 255)");
+    // A selector list
+    EXPECT_EQ(page.eval("getComputedStyle(document.getElementById('para'), '::before').content"),
+              "counter(item) \". \"");
+    // No rule: content computes to none on ::before/::after, normal elsewhere
+    EXPECT_EQ(page.eval("var p = document.getElementById('plain');"
+                        "[getComputedStyle(p, '::before').content, getComputedStyle(p, '::after').content,"
+                        " getComputedStyle(p, '::before').display].join('|')"), "none|none|inline");
+    // The cascade follows class changes
+    EXPECT_EQ(page.eval("var pcs = getComputedStyle(p, '::after'); p.className = 'tip'; pcs.content"),
+              "attr(data-tip)");
+}
+
+TEST(ComputedStyle, PseudoElementSelectorsDoNotMatchTheElement) {
+    Page page(kPseudoPage);
+    // #box::before's padding and color stay on the pseudo-element
+    EXPECT_EQ(page.eval("var cs = getComputedStyle(document.getElementById('box'));"
+                        "cs.paddingLeft + '|' + cs.marginTop"), "0px|0px");
 }
 
 TEST(ComputedStyle, ReadsFollowStyleChanges) {

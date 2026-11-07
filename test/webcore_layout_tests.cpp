@@ -645,3 +645,265 @@ TEST(BackgroundImage, CoverAndLengthSizes) {
     EXPECT_FLOAT_EQ(sized[0].x, 68);
     EXPECT_FLOAT_EQ(sized[0].y, 84);
 }
+
+// ---------------------------------------------------------------------------
+// Borders paint inside the border box
+// ---------------------------------------------------------------------------
+
+struct Stroke {
+    float x, y, w, h, thickness;
+};
+std::vector<Tile> g_rects;
+std::vector<Stroke> g_strokes;
+
+/// Paints one box at (10, 20) and returns the rectangles drawn (the
+/// background first, when it has one)
+void paintBorderBox(LayoutBox& box) {
+    g_rects.clear();
+    g_strokes.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float x, float y, float w, float h, uint32_t) { g_rects.push_back({x, y, w, h}); },
+        [](float x, float y, float w, float h, uint32_t, float t) { g_strokes.push_back({x, y, w, h, t}); },
+        nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(
+        [](float x, float y, float w, float h, float, uint32_t, uint8_t) { g_rects.push_back({x, y, w, h}); },
+        nullptr);
+    ZepraBrowser::paintBox(box, 10, 20, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(nullptr, nullptr);
+}
+
+/// Whether every rectangle stays inside [x, x+w] x [y, y+h]
+bool allInside(const std::vector<Tile>& rects, float x, float y, float w, float h) {
+    for (const auto& r : rects) {
+        if (r.x < x || r.y < y || r.x + r.w > x + w || r.y + r.h > y + h) return false;
+    }
+    return true;
+}
+
+TEST(Borders, UniformBorderStaysInsideTheBox) {
+    LayoutBox box;
+    box.width = 100;
+    box.height = 50;
+    box.borderTop = box.borderRight = box.borderBottom = box.borderLeft = 4;
+    paintBorderBox(box);
+    EXPECT_TRUE(g_strokes.empty());  // no centered stroke spilling 2px outside
+    ASSERT_EQ(g_rects.size(), 4u);
+    EXPECT_TRUE(allInside(g_rects, 10, 20, 100, 50));
+    // Top and bottom span the width; the sides fill the height between them
+    EXPECT_FLOAT_EQ(g_rects[0].x, 10);
+    EXPECT_FLOAT_EQ(g_rects[0].y, 20);
+    EXPECT_FLOAT_EQ(g_rects[0].w, 100);
+    EXPECT_FLOAT_EQ(g_rects[0].h, 4);
+    EXPECT_FLOAT_EQ(g_rects[1].y, 66);
+    EXPECT_FLOAT_EQ(g_rects[2].x, 10);
+    EXPECT_FLOAT_EQ(g_rects[2].y, 24);
+    EXPECT_FLOAT_EQ(g_rects[2].w, 4);
+    EXPECT_FLOAT_EQ(g_rects[2].h, 42);
+    EXPECT_FLOAT_EQ(g_rects[3].x, 106);
+    // The four pieces cover the border area exactly once: 2 * 100 * 4 + 2 * 42 * 4
+    float area = 0;
+    for (const auto& r : g_rects) area += r.w * r.h;
+    EXPECT_FLOAT_EQ(area, 1136);
+}
+
+TEST(Borders, MixedWidthsAndOneSide) {
+    LayoutBox box;
+    box.width = 80;
+    box.height = 30;
+    box.borderTop = 1;
+    box.borderLeft = 6;
+    paintBorderBox(box);
+    ASSERT_EQ(g_rects.size(), 2u);
+    EXPECT_TRUE(allInside(g_rects, 10, 20, 80, 30));
+    EXPECT_FLOAT_EQ(g_rects[1].w, 6);
+    EXPECT_FLOAT_EQ(g_rects[1].h, 29);
+}
+
+TEST(Borders, BorderWiderThanTheBoxIsClamped) {
+    LayoutBox box;
+    box.width = 6;
+    box.height = 6;
+    box.borderTop = box.borderRight = box.borderBottom = box.borderLeft = 5;
+    paintBorderBox(box);
+    EXPECT_TRUE(allInside(g_rects, 10, 20, 6, 6));
+}
+
+TEST(Borders, RoundedBorderStrokeIsInsetByHalfItsWidth) {
+    LayoutBox box;
+    box.width = 100;
+    box.height = 50;
+    box.borderRadius = 8;
+    box.borderTop = box.borderRight = box.borderBottom = box.borderLeft = 4;
+    paintBorderBox(box);
+    ASSERT_EQ(g_strokes.size(), 1u);
+    const Stroke& s = g_strokes[0];
+    EXPECT_FLOAT_EQ(s.thickness, 4);
+    // The stroke's outer edge is the border box edge
+    EXPECT_FLOAT_EQ(s.x - s.thickness / 2, 10);
+    EXPECT_FLOAT_EQ(s.y - s.thickness / 2, 20);
+    EXPECT_FLOAT_EQ(s.x + s.w + s.thickness / 2, 110);
+    EXPECT_FLOAT_EQ(s.y + s.h + s.thickness / 2, 70);
+}
+
+TEST(Borders, TransparentBorderPaintsNothing) {
+    LayoutBox box;
+    box.width = 40;
+    box.height = 40;
+    box.borderTop = box.borderRight = box.borderBottom = box.borderLeft = 3;
+    box.borderVisible = false;
+    paintBorderBox(box);
+    EXPECT_TRUE(g_rects.empty());
+    EXPECT_TRUE(g_strokes.empty());
+}
+
+// ---------------------------------------------------------------------------
+// Overflow: clipping, scrolled painting, floats, the overflow shorthand
+// ---------------------------------------------------------------------------
+
+std::vector<Tile> g_pushedClips;
+int g_poppedClips = 0;
+std::vector<Tile> g_links;
+
+/// The first rectangle of that size (h < 0: any height)
+const Tile* findRect(const std::vector<Tile>& rects, float w, float h) {
+    for (const Tile& r : rects) {
+        if (r.w == w && (h < 0 || r.h == h)) return &r;
+    }
+    return nullptr;
+}
+
+struct ClippedPaint {
+    std::vector<Tile> rects, clips, links;
+};
+
+ClippedPaint paintClipped(LayoutBox& box) {
+    g_rects.clear();
+    g_pushedClips.clear();
+    g_poppedClips = 0;
+    g_links.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float x, float y, float w, float h, uint32_t) { g_rects.push_back({x, y, w, h}); },
+        [](float, float, float, float, uint32_t, float) {}, nullptr, nullptr,
+        [](float x, float y, float w, float h, const std::string&, const std::string&) { g_links.push_back({x, y, w, h}); },
+        nullptr);
+    ZepraBrowser::setLayoutClipCallbacks([](float x, float y, float w, float h) { g_pushedClips.push_back({x, y, w, h}); },
+                                         [] { g_poppedClips++; });
+    ZepraBrowser::paintBox(box, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutClipCallbacks(nullptr, nullptr);
+    return {g_rects, g_pushedClips, g_links};
+}
+
+/// A 100 x 50 scroller (2px border) at (10, 10) holding a 100px-tall
+/// coloured child and a link scrolled above it
+struct Scroller {
+    std::unique_ptr<DOMDocument> doc;
+    LayoutBox root;
+    LayoutBox* box = nullptr;
+    LayoutBox* child = nullptr;
+    LayoutBox* link = nullptr;
+
+    explicit Scroller(int overflow) {
+        ZepraBrowser::elementScrollOffsets().clear();
+        HTMLParser parser;
+        doc = parser.parse("<!doctype html><div id=s><p id=c>c</p><a id=l href=x>l</a></div>");
+        root.children.emplace_back();
+        box = &root.children.back();
+        box->domElement = doc->getElementById("s");
+        box->x = 10; box->y = 10; box->width = 100; box->height = 50;
+        box->borderTop = box->borderRight = box->borderBottom = box->borderLeft = 2;
+        box->overflowX = box->overflowY = overflow;
+        box->children.emplace_back();
+        child = &box->children.back();
+        child->domElement = doc->getElementById("c");
+        child->x = 2; child->y = 2; child->width = 96; child->height = 100;
+        child->hasBgColor = true;
+        child->bgColor = 0x112233;
+        box->children.emplace_back();
+        link = &box->children.back();
+        link->domElement = doc->getElementById("l");
+        link->type = LayoutType::Inline;
+        link->x = 2; link->y = 2; link->width = 30; link->height = 16;
+        link->text = "l";
+        link->isLink = true;
+        link->href = "x";
+    }
+    ~Scroller() { ZepraBrowser::elementScrollOffsets().clear(); }
+};
+
+TEST(Overflow, ScrollerClipsToItsPaddingBoxAndPaintsScrolled) {
+    Scroller s(ZepraBrowser::kOverflowAuto);
+    ZepraBrowser::scrollContainerTo(*s.box, 0, 30);
+    ClippedPaint p = paintClipped(s.root);
+    ASSERT_EQ(p.clips.size(), 1u);
+    EXPECT_FLOAT_EQ(p.clips[0].x, 12);
+    EXPECT_FLOAT_EQ(p.clips[0].y, 12);
+    EXPECT_FLOAT_EQ(p.clips[0].w, 96);
+    EXPECT_FLOAT_EQ(p.clips[0].h, 46);
+    EXPECT_EQ(g_poppedClips, 1);
+    // The child's background moved up by the scroll position
+    const Tile* bg = findRect(p.rects, 96, 100);
+    ASSERT_NE(bg, nullptr);
+    EXPECT_FLOAT_EQ(bg->y, 10 + 2 - 30);
+    EXPECT_FLOAT_EQ(s.child->screenY, 10 + 2 - 30);
+    // A scroll thumb on the right, inside the padding box
+    const Tile* thumb = findRect(p.rects, 6, -1);
+    ASSERT_NE(thumb, nullptr);
+    EXPECT_GE(thumb->x, 12);
+    EXPECT_LE(thumb->x + thumb->w, 108);
+    EXPECT_GT(thumb->y, 12);  // scrolled 30 of 56: the thumb is off the top
+    // The link (scrolled to 10 + 2 - 30 = -18 .. -2, above the scrollport) is not clickable
+    EXPECT_TRUE(p.links.empty());
+}
+
+TEST(Overflow, PartlyVisibleLinkIsClickableOnlyInsideTheScrollport) {
+    Scroller s(ZepraBrowser::kOverflowAuto);
+    ZepraBrowser::scrollContainerTo(*s.box, 0, 10);
+    ClippedPaint p = paintClipped(s.root);
+    ASSERT_EQ(p.links.size(), 1u);
+    // At 10 + 2 - 10 = 2 .. 18 on screen: the part above the padding edge
+    // (12) is cut off
+    EXPECT_FLOAT_EQ(p.links[0].y, 12);
+    EXPECT_FLOAT_EQ(p.links[0].h, 6);
+}
+
+TEST(Overflow, HiddenClipsWithoutAThumbAndVisibleDoesNotClip) {
+    Scroller hidden(ZepraBrowser::kOverflowHidden);
+    ClippedPaint p = paintClipped(hidden.root);
+    EXPECT_EQ(p.clips.size(), 1u);
+    EXPECT_EQ(findRect(p.rects, 6, -1), nullptr);  // no thumb
+    EXPECT_EQ(p.links.size(), 1u);
+
+    Scroller visible(ZepraBrowser::kOverflowVisible);
+    p = paintClipped(visible.root);
+    EXPECT_TRUE(p.clips.empty());
+    EXPECT_EQ(findRect(p.rects, 6, -1), nullptr);
+}
+
+TEST(Overflow, ClippingBoxContainsItsFloats) {
+    LayoutBox outer;
+    outer.domElement = reinterpret_cast<Zepra::WebCore::DOMElement*>(&outer);  // any element
+    LayoutBox& f = addBox(outer, LayoutType::Block);
+    f.floatType = 1;
+    f.cssWidth = ZepraBrowser::LayoutLength::px(50);
+    f.cssHeight = ZepraBrowser::LayoutLength::px(80);
+    LayoutBox plain = outer;
+    ZepraBrowser::layoutBlock(plain, 400, 0);
+    EXPECT_FLOAT_EQ(plain.height, 0);  // floats hang out of an ordinary block
+    outer.overflowY = ZepraBrowser::kOverflowHidden;
+    ZepraBrowser::layoutBlock(outer, 400, 0);
+    EXPECT_FLOAT_EQ(outer.height, 80);
+}
+
+TEST(Cascade, OverflowShorthandTakesOneOrTwoValues) {
+    StyledDoc d("<!doctype html><div id=a></div><div id=b></div><div id=c></div><div id=d></div>",
+                "#a { overflow: auto } #b { overflow: hidden scroll } #c { overflow-y: clip } #d { overflow: overlay }");
+    EXPECT_EQ(d.style("a")->overflowX, OverflowValue::Auto);
+    EXPECT_EQ(d.style("a")->overflowY, OverflowValue::Auto);
+    EXPECT_EQ(d.style("b")->overflowX, OverflowValue::Hidden);
+    EXPECT_EQ(d.style("b")->overflowY, OverflowValue::Scroll);
+    EXPECT_EQ(d.style("c")->overflowX, OverflowValue::Visible);
+    EXPECT_EQ(d.style("c")->overflowY, OverflowValue::Clip);
+    EXPECT_EQ(d.style("d")->overflowY, OverflowValue::Auto);
+}
