@@ -71,10 +71,19 @@ void resetFormControls(const DOMElement* form);
 
 /// The name/value pairs a submission sends, in tree order: enabled controls
 /// with a name; checkboxes and radios only when checked; buttons only when
-/// they are the submitter
-std::vector<std::pair<std::string, std::string>> formData(const DOMElement* form, const DOMElement* submitter);
+/// they are the submitter. When `files` is given it gets, for each pair,
+/// whether it came from a file input (sent with no file: we have no picker)
+std::vector<std::pair<std::string, std::string>> formData(const DOMElement* form, const DOMElement* submitter,
+                                                          std::vector<bool>* files = nullptr);
 /// application/x-www-form-urlencoded: "q=a+b&lang=en"
 std::string urlEncodeFormData(const std::vector<std::pair<std::string, std::string>>& data);
+/// multipart/form-data: a part per pair between `boundary` lines; names are
+/// escaped as browsers do (" CR LF as %22 %0D %0A), `files[i]` marks a file
+/// part (an empty filename and application/octet-stream)
+std::string multipartFormData(const std::vector<std::pair<std::string, std::string>>& data,
+                              const std::vector<bool>& files, const std::string& boundary);
+/// text/plain: "name=value" lines ending in CR LF, nothing escaped
+std::string plainTextFormData(const std::vector<std::pair<std::string, std::string>>& data);
 
 /// Where and how a form goes: the submitter's formaction / formmethod /
 /// formtarget win over the form's attributes
@@ -82,7 +91,11 @@ struct FormSubmission {
     std::string action;   // as written; empty means the document's own URL
     std::string method;   // "get", "post" or "dialog"
     std::string target;   // "_blank", a frame name, or empty
-    std::string body;     // the url-encoded form data
+    /// "application/x-www-form-urlencoded", "multipart/form-data" or
+    /// "text/plain" (formenctype / enctype; GET always url-encodes)
+    std::string enctype;
+    std::string body;          // the form data in that encoding
+    std::string contentType;   // the Content-Type a POST sends (the boundary included)
 };
 FormSubmission planFormSubmission(const DOMElement* form, const DOMElement* submitter);
 /// The URL a GET submission navigates to: `actionUrl` (already resolved)
