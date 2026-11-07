@@ -11,7 +11,8 @@
 #include <string>
 #include <cstdint>
 
-namespace Zepra::WebCore {
+// The embedding API's small DOM; its own namespace, see dom_node.hpp
+namespace Zepra::WebCore::Mini {
 
 class DOMEvent {
 public:
@@ -34,4 +35,4 @@ private:
     bool defaultPrevented_ = false;
 };
 
-} // namespace Zepra::WebCore
+} // namespace Zepra::WebCore::Mini

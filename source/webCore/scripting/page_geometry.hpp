@@ -31,6 +31,8 @@ struct ElementGeometry {
     std::vector<GeometryRect> rects;  ///< border boxes, first one first (getClientRects)
     double borderTop = 0, borderRight = 0, borderBottom = 0, borderLeft = 0;
     double scrollWidth = 0, scrollHeight = 0;  ///< padding box grown to fit the content (if asked for)
+    bool scrollContainer = false;  ///< overflow other than visible/clip: scrollTop/scrollLeft move it
+    double scrollTop = 0, scrollLeft = 0;  ///< its scroll position
 
     /// The smallest rectangle holding every border box (getBoundingClientRect)
     GeometryRect bounds() const;
@@ -51,6 +53,12 @@ public:
     virtual double scrollY() = 0;
     /// Scrolls the page; positions outside the scrollable range are clamped
     virtual void scrollTo(double x, double y) = 0;
+    /// Scrolls an element that is a scroll container (elementGeometry's
+    /// scrollContainer) to (x, y), clamped to its range; other elements
+    /// do not move. Lays the page out first if the DOM changed.
+    virtual void scrollElementTo(const DOMElement* element, double x, double y) {
+        (void)element; (void)x; (void)y;
+    }
 };
 
 inline GeometryRect ElementGeometry::bounds() const {

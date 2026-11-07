@@ -43,6 +43,14 @@ std::unique_ptr<Program> Parser::parseProgram() {
     return std::make_unique<Program>(std::move(body));
 }
 
+Parser::NestingGuard::NestingGuard(Parser& p) : parser(p) {
+    if (++parser.nestingDepth_ > kMaxNestingDepth) {
+        --parser.nestingDepth_;
+        parser.error("Maximum nesting depth exceeded");
+        throw ParseError("Maximum nesting depth exceeded");
+    }
+}
+
 // Token handling
 Token& Parser::current() { return currentToken_; }
 
@@ -477,6 +485,7 @@ std::vector<FunctionParam> Parser::parseParameters() {
 
 // Statement parsing
 StmtPtr Parser::parseStatement() {
+    NestingGuard nesting(*this);
 #ifndef NDEBUG
     assertProgress();
 #endif
@@ -954,6 +963,7 @@ ExprPtr Parser::tryParseArrowFunction() {
 }
 
 ExprPtr Parser::parseAssignmentExpression() {
+    NestingGuard nesting(*this);
     if (ExprPtr arrow = tryParseArrowFunction()) {
         return arrow;
     }
@@ -1135,6 +1145,7 @@ ExprPtr Parser::parseExponentiationExpression() {
 }
 
 ExprPtr Parser::parseUnaryExpression() {
+    NestingGuard nesting(*this);
     // Handle await expression
     if (match(TokenType::Await)) {
         ExprPtr argument = parseUnaryExpression();

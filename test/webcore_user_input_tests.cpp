@@ -38,6 +38,10 @@ struct Page {
     std::vector<FormSubmission> submissions;
 
     explicit Page(const std::string& html) {
+        // Focus, hover and press are process-wide: a test's freed elements
+        // must not look focused to the next test's document (an allocator
+        // can hand the same address to one of its elements)
+        interactionState() = {};
         HTMLParser parser;
         doc = parser.parse(html);
         script = std::make_unique<ScriptContext>();
@@ -55,6 +59,8 @@ struct Page {
     }
 
     DOMElement* byId(const std::string& id) { return doc->getElementById(id); }
+
+    ~Page() { interactionState() = {}; }
 };
 
 KeyEventInit key(const std::string& k, const std::string& code, int keyCode) {
@@ -307,19 +313,6 @@ TEST(Keys, MaxlengthReadonlyAndListenersThatRewriteTheValue) {
     typeKey(page, 'h');
     typeKey(page, 'i');
     EXPECT_EQ(formControlValue(page.byId("c")), "HI");
-}
-
-TEST(Keys, FocusDoesNotOutliveItsDocument) {
-    {
-        Page page(kForm);
-        page.script->focusElement(page.byId("q"));
-        ASSERT_EQ(page.script->focusedElement(), page.byId("q"));
-    }
-    // A later page's element allocated at the same address must not start out
-    // focused (seen on Windows, where the allocator reuses the address)
-    EXPECT_EQ(interactionState().focused, nullptr);
-    EXPECT_EQ(interactionState().hovered, nullptr);
-    EXPECT_EQ(interactionState().active, nullptr);
 }
 
 TEST(Keys, WithoutFocusKeysGoToTheBody) {

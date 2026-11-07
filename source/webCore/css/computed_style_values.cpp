@@ -7,8 +7,10 @@
 
 #include "css/computed_style_values.hpp"
 
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <string>
 
 namespace Zepra::WebCore {
 
@@ -51,6 +53,58 @@ std::string colorStr(const CSSColor& c) {
     if (c.a == 255) std::snprintf(buf, sizeof buf, "rgb(%d, %d, %d)", c.r, c.g, c.b);
     else std::snprintf(buf, sizeof buf, "rgba(%d, %d, %d, %.2f)", c.r, c.g, c.b, c.a / 255.0);
     return buf;
+}
+
+// Strings in `content` print double-quoted with their escapes resolved, as
+// browsers serialize them ('\\2192 x' -> "→x"); keywords, counter() and attr()
+// as written
+std::string contentStr(const std::string& value) {
+    auto appendUtf8 = [](std::string& out, unsigned long cp) {
+        if (cp == 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) cp = 0xFFFD;
+        if (cp < 0x80) out += static_cast<char>(cp);
+        else if (cp < 0x800) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+        else if (cp < 0x10000) {
+            out += static_cast<char>(0xE0 | (cp >> 12));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (cp >> 18));
+            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    };
+    std::string out;
+    for (size_t i = 0; i < value.size(); i++) {
+        char c = value[i];
+        if (c != '\'' && c != '"') { out += c; continue; }
+        const char quote = c;
+        std::string text;
+        for (i++; i < value.size() && value[i] != quote; i++) {
+            if (value[i] != '\\' || i + 1 >= value.size()) { text += value[i]; continue; }
+            i++;
+            if (std::isxdigit(static_cast<unsigned char>(value[i]))) {
+                unsigned long cp = 0;
+                int digits = 0;
+                while (i < value.size() && digits < 6 && std::isxdigit(static_cast<unsigned char>(value[i]))) {
+                    cp = cp * 16 + std::stoul(std::string(1, value[i]), nullptr, 16);
+                    i++;
+                    digits++;
+                }
+                if (!(i < value.size() && (value[i] == ' ' || value[i] == '\t' || value[i] == '\n'))) i--;
+                appendUtf8(text, cp);
+            } else if (value[i] != '\n') {
+                text += value[i];
+            }
+        }
+        out += '"';
+        for (char t : text) {
+            if (t == '"' || t == '\\') out += '\\';
+            out += t;
+        }
+        out += '"';
+    }
+    return out;
 }
 
 const char* displayStr(DisplayValue d) {
@@ -201,6 +255,7 @@ std::vector<std::pair<std::string, std::string>> resolve(const CSSComputedStyle&
     if (everything || s.letterSpacing != 0) add("letter-spacing", formatComputedNumber(s.letterSpacing) + "px");
     add("white-space", s.whiteSpace);
     add("vertical-align", s.verticalAlign);
+    if (everything || !s.content.empty()) add("content", contentStr(s.content));
     add("cursor", s.cursor);
     add("pointer-events", s.pointerEvents);
     if (everything || !s.boxShadow.empty()) add("box-shadow", s.boxShadow);

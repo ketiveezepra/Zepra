@@ -149,6 +149,19 @@ private:
     Token previousToken_;
     std::vector<std::string> errors_;
     static constexpr size_t kMaxErrors = 100;  // stop parsing hopeless input
+
+    // Nested expressions and statements parse recursively; past this depth the
+    // input is a SyntaxError instead of a stack overflow that kills the browser
+    // (`x = [[[[...` or `((((...` a hundred thousand levels deep did)
+public:
+    static constexpr int kMaxNestingDepth = 400;
+private:
+    int nestingDepth_ = 0;
+    struct NestingGuard {
+        Parser& parser;
+        explicit NestingGuard(Parser& p);
+        ~NestingGuard() { --parser.nestingDepth_; }
+    };
     
     // Parser state
     bool inLoop_ = false;

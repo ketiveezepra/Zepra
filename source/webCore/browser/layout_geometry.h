@@ -44,31 +44,48 @@ float documentHeight(const PageLayout& page);
 /**
  * @brief The boxes of every element, found in one walk of the tree. Holds
  * pointers into the tree: build it again after the tree is rebuilt or laid
- * out again. Scrolling needs no rebuild (positions are kept unscrolled).
+ * out again. Scrolling needs no rebuild (positions are kept unscrolled; the
+ * page's and each scroll container's position are applied when asked).
  */
 class LayoutGeometryIndex {
 public:
     void build(const PageLayout& page);
-    void clear() { boxes_.clear(); }
+    void clear() { boxes_.clear(); containers_.clear(); }
 
     /// The element's boxes in viewport coordinates at the page's scroll
     /// position; `withScrollSize` also measures its content (a walk of its subtree)
     Zepra::WebCore::ElementGeometry geometryOf(const PageLayout& page, const Zepra::WebCore::DOMElement* element,
                                                bool withScrollSize) const;
 
+    /// The element's first box (its principal box), null when it has none
+    const LayoutBox* principalBox(const Zepra::WebCore::DOMElement* element) const;
+
+    /// How far the boxes of the element are moved by the scroll containers
+    /// around them (the sum of their scroll positions)
+    ScrollOffset ancestorScroll(const Zepra::WebCore::DOMElement* element) const;
+
 private:
     struct Placed {
         const LayoutBox* box;
-        float x, y;  ///< border-box origin, relative to the root box's
+        float x, y;     ///< border-box origin, relative to the root box's, unscrolled
+        int container;  ///< innermost scroll container around the box (containers_), -1: none
+    };
+    struct Container {
+        const LayoutBox* box;
+        int parent;  ///< the scroll container around this one, -1: none
     };
     std::unordered_map<const Zepra::WebCore::DOMElement*, std::vector<Placed>> boxes_;
+    std::vector<Container> containers_;
+
+    ScrollOffset scrollAround(int container) const;
 };
 
 /**
  * @brief Sets screenX/screenY of every box the way paintBox would, without
  * painting: the root at (x + root.x, y + root.y - scrollY). Hit-testing reads
  * them, so a tree rebuilt between frames (a script read geometry after
- * changing the DOM) can be hit-tested before it is painted.
+ * changing the DOM) can be hit-tested before it is painted. The content of
+ * a scroll container is moved by its scroll position, as paintBox draws it.
  */
 void placeBoxes(const LayoutBox& root, float x, float y, float scrollY);
 

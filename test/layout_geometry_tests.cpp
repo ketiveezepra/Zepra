@@ -20,6 +20,7 @@
 #include "scripting/script_context.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <string>
 
@@ -68,6 +69,9 @@ public:
     void scrollTo(double, double y) override {
         double maxScroll = std::max(0.0f, page.root->height - page.viewportHeight);
         page.scrollY = (float)std::clamp(y, 0.0, maxScroll);
+    }
+    void scrollElementTo(const DOMElement* element, double x, double y) override {
+        if (const LayoutBox* box = index.principalBox(element)) ZepraBrowser::scrollContainerTo(*box, (float)x, (float)y);
     }
 };
 
@@ -419,4 +423,237 @@ TEST(ScriptGeometry, WithoutLayoutEverythingIsZero) {
         " innerWidth].join()");
     ASSERT_TRUE(r.success) << r.error;
     EXPECT_EQ(r.value, "0,0,0,,0,1280");
+}
+
+// ---------------------------------------------------------------------------
+// Scroll containers: elements with overflow other than visible
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const char* kScrollPage = R"HTML(<!DOCTYPE html><html><head></head><body>
+<div id="list"><p id="first">1</p><p id="middle">2</p><p id="last">3</p><div id="nested"><p id="deep">d</p></div></div>
+<div id="clipped"><p id="under">u</p></div>
+<div id="plain"><p id="spill">s</p></div>
+</body></html>)HTML";
+
+/// #list: overflow-y: auto, 200 x 100 at (8, 8) with a 5px border and 10px
+/// padding, holding three 40px rows and a nested 60px scroller (#nested,
+/// overflow: scroll) whose content is 150px tall; content height
+/// 10 + 3 * 40 + 60 + 10 = 200 (padding box 190 x 90, so max scrollTop 110).
+/// #clipped: overflow: hidden, 100 x 50, content 120px tall.
+/// #plain: overflow visible, 100 x 50, content 120px tall.
+struct ScrollPage {
+    std::unique_ptr<DOMDocument> doc;
+    std::unique_ptr<ScriptContext> script;
+    TestGeometry geometry;
+    LayoutBox root;
+
+    ScrollPage() {
+        ZepraBrowser::elementScrollOffsets().clear();
+        HTMLParser parser;
+        doc = parser.parse(kScrollPage);
+        script = std::make_unique<ScriptContext>();
+        script->setConsoleHandler([](const std::string&, const std::string&) {});
+        script->initialize(doc.get());
+
+        root.width = 1200; root.height = 2000;
+        LayoutBox& list = addBox(root, byId("list"), 8, 8, 200, 100);
+        setBorder(list, 5);
+        list.paddingTop = list.paddingRight = list.paddingBottom = list.paddingLeft = 10;
+        list.overflowY = ZepraBrowser::kOverflowAuto;
+        addBox(list, byId("first"), 15, 15, 170, 40);
+        addBox(list, byId("middle"), 15, 55, 170, 40);
+        addBox(list, byId("last"), 15, 95, 170, 40);
+        LayoutBox& nested = addBox(list, byId("nested"), 15, 135, 170, 60);
+        nested.overflowX = nested.overflowY = ZepraBrowser::kOverflowScroll;
+        addBox(nested, byId("deep"), 0, 100, 170, 50);  // its content reaches 150
+
+        LayoutBox& clipped = addBox(root, byId("clipped"), 8, 300, 100, 50);
+        clipped.overflowX = clipped.overflowY = ZepraBrowser::kOverflowHidden;
+        addBox(clipped, byId("under"), 0, 0, 100, 120);
+        LayoutBox& plain = addBox(root, byId("plain"), 8, 400, 100, 50);
+        addBox(plain, byId("spill"), 0, 0, 100, 120);
+
+        geometry.page.root = &root;
+        geometry.page.body = doc->body();
+        geometry.page.documentElement = doc->documentElement();
+        geometry.page.originX = 20;
+        geometry.page.originY = 20;
+        geometry.page.viewportWidth = 1240;
+        geometry.page.viewportHeight = 700;
+        geometry.reindex();
+        script->setPageGeometry(&geometry);
+    }
+    ~ScrollPage() { ZepraBrowser::elementScrollOffsets().clear(); }
+
+    DOMElement* byId(const std::string& id) { return doc->getElementById(id); }
+    const LayoutBox& box(const std::string& id) { return *geometry.index.principalBox(byId(id)); }
+
+    std::string eval(const std::string& code) {
+        ScriptResult r = script->evaluate(code, "test.js");
+        EXPECT_TRUE(r.success) << r.error << "\n  in: " << code;
+        return r.success ? r.value : "<error: " + r.error + ">";
+    }
+};
+
+}  // namespace
+
+TEST(ScrollContainers, WhichBoxesScroll) {
+    ScrollPage page;
+    EXPECT_TRUE(ZepraBrowser::isScrollContainer(page.box("list")));
+    EXPECT_TRUE(ZepraBrowser::isScrollContainer(page.box("clipped")));
+    EXPECT_FALSE(ZepraBrowser::isScrollContainer(page.box("plain")));
+    // overflow-y: auto alone makes x auto too (visible computes to auto)
+    EXPECT_TRUE(ZepraBrowser::userScrollableY(page.box("list")));
+    EXPECT_TRUE(ZepraBrowser::userScrollableX(page.box("list")));
+    // hidden: scripts scroll it, the user does not
+    EXPECT_FALSE(ZepraBrowser::userScrollableY(page.box("clipped")));
+    // overflow: clip clips without being a scroll container
+    LayoutBox clip;
+    clip.domElement = page.byId("plain");
+    clip.overflowX = clip.overflowY = ZepraBrowser::kOverflowClip;
+    EXPECT_TRUE(ZepraBrowser::clipsContent(clip));
+    EXPECT_FALSE(ZepraBrowser::isScrollContainer(clip));
+    // Inline boxes and anonymous boxes never clip
+    clip.overflowX = clip.overflowY = ZepraBrowser::kOverflowHidden;
+    clip.type = LayoutType::Inline;
+    EXPECT_FALSE(ZepraBrowser::clipsContent(clip));
+}
+
+TEST(ScrollContainers, RangeAndClamping) {
+    ScrollPage page;
+    const LayoutBox& list = page.box("list");
+    float w = 0, h = 0;
+    ZepraBrowser::scrollableSize(list, w, h);
+    EXPECT_FLOAT_EQ(w, 190);
+    EXPECT_FLOAT_EQ(h, 200);  // the nested scroller counts with its own 60px, not its 150px content
+    ZepraBrowser::ScrollOffset max = ZepraBrowser::maxScrollOffset(list);
+    EXPECT_FLOAT_EQ(max.x, 0);
+    EXPECT_FLOAT_EQ(max.y, 110);
+    EXPECT_TRUE(ZepraBrowser::scrollContainerTo(list, 50, 500));
+    EXPECT_FLOAT_EQ(ZepraBrowser::scrollOffsetOf(list).x, 0);
+    EXPECT_FLOAT_EQ(ZepraBrowser::scrollOffsetOf(list).y, 110);
+    ZepraBrowser::scrollContainerTo(list, 0, std::nan(""));
+    EXPECT_FLOAT_EQ(ZepraBrowser::scrollOffsetOf(list).y, 0);
+    EXPECT_FALSE(ZepraBrowser::scrollContainerTo(page.box("plain"), 0, 10));
+    // A stored position past a range that shrank reads clamped
+    ZepraBrowser::elementScrollOffsets().set(page.byId("list"), {0, 1000});
+    EXPECT_FLOAT_EQ(ZepraBrowser::scrollOffsetOf(list).y, 110);
+}
+
+TEST(ScrollContainers, ContentMovesWithTheScrollPosition) {
+    ScrollPage page;
+    ZepraBrowser::scrollContainerTo(page.box("list"), 0, 30);
+    ZepraBrowser::scrollContainerTo(page.box("nested"), 0, 25);
+    // #list itself does not move; its content moves up by 30
+    EXPECT_DOUBLE_EQ(page.geometry.elementGeometry(page.byId("list")).rects[0].y, 20 + 8);
+    EXPECT_DOUBLE_EQ(page.geometry.elementGeometry(page.byId("middle")).rects[0].y, 20 + 8 + 55 - 30);
+    // Nested containers add up
+    EXPECT_DOUBLE_EQ(page.geometry.elementGeometry(page.byId("deep")).rects[0].y, 20 + 8 + 135 + 100 - 30 - 25);
+    // The page scroll comes on top
+    page.geometry.page.scrollY = 5;
+    EXPECT_DOUBLE_EQ(page.geometry.elementGeometry(page.byId("middle")).rects[0].y, 20 + 8 + 55 - 30 - 5);
+    ElementGeometry g = page.geometry.elementGeometry(page.byId("list"));
+    EXPECT_TRUE(g.scrollContainer);
+    EXPECT_DOUBLE_EQ(g.scrollTop, 30);
+    // placeBoxes (hit-testing) agrees
+    ZepraBrowser::placeBoxes(page.root, 20, 20, 0);
+    EXPECT_FLOAT_EQ(page.box("middle").screenY, 20 + 8 + 55 - 30);
+    EXPECT_FLOAT_EQ(page.box("deep").screenY, 20 + 8 + 135 + 100 - 30 - 25);
+}
+
+TEST(ScrollContainers, ForgottenWhenTheElementStopsScrolling) {
+    ScrollPage page;
+    ZepraBrowser::scrollContainerTo(page.box("list"), 0, 30);
+    ZepraBrowser::scrollContainerTo(page.box("clipped"), 0, 20);
+    ZepraBrowser::elementScrollOffsets().prune(page.root);
+    EXPECT_FLOAT_EQ(ZepraBrowser::elementScrollOffsets().get(page.byId("list")).y, 30);
+    // #clipped restyled to overflow: visible
+    page.root.children.begin()->overflowY = ZepraBrowser::kOverflowAuto;  // still #list
+    std::next(page.root.children.begin())->overflowX = ZepraBrowser::kOverflowVisible;
+    std::next(page.root.children.begin())->overflowY = ZepraBrowser::kOverflowVisible;
+    ZepraBrowser::elementScrollOffsets().prune(page.root);
+    EXPECT_FLOAT_EQ(ZepraBrowser::elementScrollOffsets().get(page.byId("clipped")).y, 0);
+    EXPECT_FLOAT_EQ(ZepraBrowser::elementScrollOffsets().get(page.byId("list")).y, 30);
+}
+
+TEST(ScrollContainers, WheelPicksTheInnermostScrollerThatCanMove) {
+    ScrollPage page;
+    ZepraBrowser::placeBoxes(page.root, 20, 20, 0);
+    // Over a row of #list: #list scrolls down
+    const LayoutBox* found = ZepraBrowser::userScrollContainerAt(page.root, 50, 50, 0, 40);
+    ASSERT_NE(found, nullptr);
+    EXPECT_EQ(found->domElement, page.byId("list"));
+    // Up while at the top: nothing to do, the page scrolls
+    EXPECT_EQ(ZepraBrowser::userScrollContainerAt(page.root, 50, 50, 0, -40), nullptr);
+    // #list at its end: #nested (135 - 110 = 25 into #list, at 53 .. 113 on
+    // screen) is in view. Down over it: the inner one first
+    ZepraBrowser::scrollContainerTo(page.box("list"), 0, 110);
+    ZepraBrowser::placeBoxes(page.root, 20, 20, 0);
+    found = ZepraBrowser::userScrollContainerAt(page.root, 50, 60, 0, 40);
+    ASSERT_NE(found, nullptr);
+    EXPECT_EQ(found->domElement, page.byId("nested"));
+    // Up: #nested is at its top, so #list takes over
+    found = ZepraBrowser::userScrollContainerAt(page.root, 50, 60, 0, -40);
+    ASSERT_NE(found, nullptr);
+    EXPECT_EQ(found->domElement, page.byId("list"));
+    // Down with both at their end: the page
+    ZepraBrowser::scrollContainerTo(page.box("nested"), 0, 90);
+    EXPECT_EQ(ZepraBrowser::userScrollContainerAt(page.root, 50, 60, 0, 40), nullptr);
+    // overflow: hidden is not scrolled by the wheel; outside every scroller: the page
+    EXPECT_EQ(ZepraBrowser::userScrollContainerAt(page.root, 30, 20 + 300 + 10, 0, 40), nullptr);
+    EXPECT_EQ(ZepraBrowser::userScrollContainerAt(page.root, 900, 50, 0, 40), nullptr);
+    // A point below #list's box, where its scrolled-out content lies, is not in it
+    EXPECT_EQ(ZepraBrowser::userScrollContainerAt(page.root, 50, 20 + 8 + 100 + 5, 0, 40), nullptr);
+}
+
+TEST(ScrollContainers, ScriptsReadAndMoveTheScrollPosition) {
+    ScrollPage page;
+    page.eval("var list = document.getElementById('list')");
+    EXPECT_EQ(page.eval("[list.scrollTop, list.scrollHeight, list.clientHeight].join()"), "0,200,90");
+    EXPECT_EQ(page.eval("list.scrollTop = 40; list.scrollTop"), "40");
+    EXPECT_EQ(page.eval("document.getElementById('middle').getBoundingClientRect().top"), "43");  // 28 + 55 - 40
+    // Clamped to the range, in both directions
+    EXPECT_EQ(page.eval("list.scrollTop = 9999; list.scrollTop"), "110");
+    EXPECT_EQ(page.eval("list.scrollTop = -5; list.scrollTop"), "0");
+    // No horizontal overflow: scrollLeft stays 0
+    EXPECT_EQ(page.eval("list.scrollLeft = 30; list.scrollLeft"), "0");
+    // scrollTo / scrollBy, numbers and options
+    EXPECT_EQ(page.eval("list.scrollTo(0, 25); list.scrollTop"), "25");
+    EXPECT_EQ(page.eval("list.scrollBy(0, 10); list.scrollTop"), "35");
+    EXPECT_EQ(page.eval("list.scrollBy({top: -100}); list.scrollTop"), "0");
+    EXPECT_EQ(page.eval("list.scroll({top: 60}); list.scrollTop"), "60");
+    // overflow: hidden scrolls from scripts
+    EXPECT_EQ(page.eval("var c = document.getElementById('clipped'); c.scrollTop = 30; c.scrollTop"), "30");
+    // The page did not move
+    EXPECT_FLOAT_EQ(page.geometry.page.scrollY, 0);
+}
+
+TEST(ScrollContainers, ElementsThatDoNotScrollStayAtZero) {
+    ScrollPage page;
+    EXPECT_EQ(page.eval("var p = document.getElementById('plain'); p.scrollTop = 30; p.scrollTo(0, 40);"
+                        "p.scrollTop + ',' + p.scrollHeight"), "0,120");
+    EXPECT_EQ(page.eval("var f = document.getElementById('first'); f.scrollTop = 5; f.scrollTop"), "0");
+    // <html> still scrolls the page
+    EXPECT_EQ(page.eval("document.documentElement.scrollTop = 50; window.scrollY"), "50");
+}
+
+TEST(ScrollContainers, ScrollIntoViewScrollsTheContainersFirst) {
+    ScrollPage page;
+    // #last (95..135 from #list's border edge) comes to the top of the
+    // scrollport, #list's padding edge (5px down)
+    page.eval("document.getElementById('last').scrollIntoView()");
+    EXPECT_EQ(page.eval("document.getElementById('list').scrollTop"), "90");
+    EXPECT_EQ(page.eval("var r = document.getElementById('last').getBoundingClientRect();"
+                        "var l = document.getElementById('list').getBoundingClientRect(); r.top - l.top"), "5");
+    // nearest: already visible, nothing moves
+    page.eval("document.getElementById('last').scrollIntoView({block: 'nearest'})");
+    EXPECT_EQ(page.eval("document.getElementById('list').scrollTop"), "90");
+    // end, through two containers: #deep (100..150 in #nested) bottom at #nested's bottom
+    page.eval("document.getElementById('deep').scrollIntoView(false)");
+    EXPECT_EQ(page.eval("document.getElementById('nested').scrollTop"), "90");
+    // then #deep (now 145..195 from #list's border edge) at the bottom of
+    // #list's scrollport (5 + 90): 195 - 95
+    EXPECT_EQ(page.eval("document.getElementById('list').scrollTop"), "100");
 }

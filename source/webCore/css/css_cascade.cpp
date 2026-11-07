@@ -15,6 +15,7 @@
 #include "browser/dom.hpp"
 #include "dom/form_controls.hpp"
 #include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <sstream>
 
@@ -409,13 +410,57 @@ bool CSSCascade::selectorMatches(DOMElement* element, const std::string& selecto
                 size_t ge = group.find_last_not_of(" \t\n\r");
                 if (gs != std::string::npos) {
                     group = group.substr(gs, ge - gs + 1);
-                    if (selectorGroupMatches(element, group)) return true;
+                    if (pseudoElement_.empty()) {
+                        if (selectorGroupMatches(element, group)) return true;
+                    } else {
+                        // For a pseudo-element: the group must end in it, and
+                        // the rest (with :is()/:not() inside it) is matched
+                        // against the element as usual
+                        std::string rest;
+                        if (splitPseudoElement(group, rest) == pseudoElement_) {
+                            std::string saved;
+                            saved.swap(pseudoElement_);
+                            bool matched = rest.empty() || selectorGroupMatches(element, rest);
+                            pseudoElement_.swap(saved);
+                            if (matched) return true;
+                        }
+                    }
                 }
                 groupStart = i + 1;
             }
         }
         return false;
     }
+}
+
+std::string CSSCascade::splitPseudoElement(const std::string& group, std::string& rest) {
+    rest = group;
+    // The last colon outside brackets and parentheses
+    size_t colon = std::string::npos;
+    int depth = 0;
+    bool inBracket = false;
+    for (size_t i = 0; i < group.size(); i++) {
+        char c = group[i];
+        if (c == '[') inBracket = true;
+        else if (c == ']') inBracket = false;
+        else if (!inBracket && c == '(') depth++;
+        else if (!inBracket && c == ')' && depth > 0) depth--;
+        else if (!inBracket && depth == 0 && c == ':') colon = i;
+    }
+    if (colon == std::string::npos) return "";
+    std::string name = group.substr(colon + 1);
+    for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (char c : name) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-') return "";
+    }
+    bool doubleColon = colon > 0 && group[colon - 1] == ':';
+    bool legacy = name == "before" || name == "after" || name == "first-line" || name == "first-letter";
+    if (!doubleColon && !legacy) return "";   // a pseudo-class (p:hover)
+    size_t start = doubleColon ? colon - 1 : colon;
+    rest = group.substr(0, start);
+    size_t e = rest.find_last_not_of(" \t\n\r");
+    rest = e == std::string::npos ? "" : rest.substr(0, e + 1);
+    return name;
 }
 
 // Match a single selector group (no commas) — handles combinators
@@ -434,6 +479,14 @@ bool CSSCascade::selectorGroupMatches(DOMElement* element, const std::string& se
         while (i < len && (selector[i] == ' ' || selector[i] == '\t')) i++;
         if (i >= len) break;
         
+        // A combinator with nothing to its left (">p", "a > > b") is invalid. Without
+        // this check the part reader below stopped on it without moving, and this
+        // loop never ended: one such selector froze the page.
+        if ((selector[i] == '>' || selector[i] == '+' || selector[i] == '~') &&
+            (parts.empty() || combinators.size() >= parts.size())) {
+            return false;
+        }
+
         // Check for combinator
         if (!parts.empty() && (selector[i] == '>' || selector[i] == '+' || selector[i] == '~')) {
             char comb = selector[i];

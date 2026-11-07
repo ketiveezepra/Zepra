@@ -15,7 +15,10 @@
 #include <unordered_map>
 #include <memory>
 
-namespace Zepra::WebCore {
+// The embedding API's small DOM (api/context_impl.hpp, JSDOMBridge). Its own
+// namespace: browser/dom.hpp defines classes of the same names, and the two in one
+// library broke the link ("multiple definition of DOMNode::removeChild").
+namespace Zepra::WebCore::Mini {
 
 class DOMDocument;
 class DOMElement;
@@ -150,4 +153,4 @@ private:
     DOMElement* htmlElement_ = nullptr;
 };
 
-} // namespace Zepra::WebCore
+} // namespace Zepra::WebCore::Mini

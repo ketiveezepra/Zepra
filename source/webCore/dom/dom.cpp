@@ -79,6 +79,22 @@ DOMNode::DOMNode(NodeType type) : nodeType_(type) {}
 
 DOMNode::~DOMNode() {
     if (binding_) binding_->nodeDestroyed();
+    // Hover, active and focus are raw pointers in a process-wide state. A node can be
+    // freed by many paths (a script removing it, DevTools edits, the document or a
+    // tab going away) and none may leave them dangling: the next focus() or restyle
+    // would read freed memory.
+    InteractionState& state = interactionState();
+    if (nodeType_ == NodeType::Element) {
+        for (DOMElement** p : {&state.hovered, &state.active, &state.focused}) {
+            if (*p && static_cast<const DOMNode*>(*p) == this) *p = nullptr;
+        }
+        auto& forced = state.forced;
+        forced.erase(std::remove_if(forced.begin(), forced.end(),
+                                    [this](const InteractionState::ForcedEntry& e) {
+                                        return static_cast<const DOMNode*>(e.element) == this;
+                                    }),
+                     forced.end());
+    }
 }
 
 void DOMNode::adopt(DOMNode* child) {
@@ -515,16 +531,6 @@ DOMDocument::DOMDocument() : DOMNode(NodeType::Document) {
 
 DOMDocument::~DOMDocument() {
     mutationSinks().erase(this);
-    // Hover, focus and forced states are kept by address, across documents: a
-    // later document's element at the same address must not inherit them
-    InteractionState& state = interactionState();
-    for (DOMElement** p : {&state.hovered, &state.active, &state.focused}) {
-        if (*p && contains(*p)) *p = nullptr;
-    }
-    auto& forced = state.forced;
-    forced.erase(std::remove_if(forced.begin(), forced.end(),
-                                [&](const InteractionState::ForcedEntry& e) { return e.element && contains(e.element); }),
-                 forced.end());
 }
 
 DOMElement* DOMDocument::body() const {

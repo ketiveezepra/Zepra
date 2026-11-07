@@ -69,6 +69,83 @@ jobs:
       - name: Computed style tests
         run: ctest --test-dir build/test -R ComputedStyleTests --output-on-failure
 
+      # NXNet: URL parsing, HTTP framing, keep-alive and timings against a local
+      # server, the DNS cache, request validation, crypto
+      - name: Networking tests
+        run: ctest --test-dir build/test -R "NxHttpTests|NxHttpSecurityTest|NxCryptoTests" --output-on-failure
+
+      # Hostile HTML/CSS/JS input (hangs, stack overflows) and the live DOM bindings
+      - name: Parser robustness and DOM binding tests
+        run: ctest --test-dir build/test -R "ParserRobustnessTests|WebCoreDomBindingsTests" --output-on-failure
+
+  # ============================================================================
+  # Linux — Debug with AddressSanitizer and UndefinedBehaviorSanitizer
+  # Release builds hid a crash on every DNS lookup, use-after-frees in the focus
+  # state and in tests, and a heap overflow in the URL parser: only the test
+  # targets are built, and every suite runs under the sanitizers.
+  # ============================================================================
+  linux-sanitizers:
+    name: Linux (ASan + UBSan tests)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config \
+            libx11-dev libxrandr-dev libgl-dev libglu1-mesa-dev \
+            libfreetype-dev libharfbuzz-dev libwebp-dev \
+            libssl-dev libcurl4-openssl-dev zlib1g-dev \
+            libsdl2-dev libjson-c-dev
+
+      - name: Configure
+        run: >
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Debug -DUSE_NXRENDER=ON
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build test targets
+        run: >
+          cmake --build build --parallel $(nproc) -- -k 0
+          nxhttp_tests nxhttp_security_test nxcrypto_tests parser_robustness_tests
+          webcore_dom_bindings_tests webcore_layout_tests webcore_user_input_tests
+          webcore_forced_pseudo_tests webcore_console_format_tests computed_style_tests
+          layout_geometry_tests svg_raster_tests zepra_engine_tests
+          devtools_style_rules_tests devtools_network_tests devtools_console_input_tests
+          devtools_text_field_tests devtools_dom_edit_tests
+          zeprascript-unit-tests zeprascript-integration-tests
+
+      # Leak reports are off for now: the engine's GC heap is torn down at exit only
+      # in part, so every suite would fail on leaks before reaching real errors
+      - name: Run tests under the sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: |
+          set -e
+          cd build/bin
+          for t in nxhttp_tests nxhttp_security_test nxcrypto_tests parser_robustness_tests \
+                   webcore_dom_bindings_tests webcore_layout_tests webcore_user_input_tests \
+                   webcore_forced_pseudo_tests webcore_console_format_tests computed_style_tests \
+                   layout_geometry_tests svg_raster_tests zepra_engine_tests \
+                   devtools_style_rules_tests devtools_network_tests devtools_console_input_tests \
+                   devtools_text_field_tests devtools_dom_edit_tests zeprascript-integration-tests; do
+            echo "::group::$t"
+            timeout 900 ./$t
+            echo "::endgroup::"
+          done
+          # Throughput thresholds are for optimized builds; everything else runs
+          timeout 900 ./zeprascript-unit-tests \
+            --gtest_filter=-SandboxLoadTests.CheckLimitsOverhead:SandboxLoadTests.IsolatedGlobalLookupSpeed:VMStress.StackThroughput
+
   # ============================================================================
   # Windows — MSYS2 UCRT64 (GCC), Win32/WGL backend
   # ============================================================================
