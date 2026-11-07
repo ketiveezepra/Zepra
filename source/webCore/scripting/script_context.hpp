@@ -52,6 +52,7 @@ class CanvasRegistry;
 class CSSComputedStyle;
 class DOMBindings;
 class PageGeometry;
+class StorageArea;
 struct KeyEventInit;
 struct FormSubmission;
 
@@ -178,6 +179,9 @@ public:
     
     // Global variables
     void setGlobal(const std::string& name, const std::string& value);
+    /// The page's URL: sets __pageUrl__ and picks the origin whose
+    /// localStorage the page sees (web_storage.hpp)
+    void setPageUrl(const std::string& url);
     
     // Access internals
     Zepra::Runtime::VM* vm() { return vm_; }
@@ -396,6 +400,9 @@ private:
 
     // Go before the VM whose objects point into them
     std::unique_ptr<DOMBindings> domBindings_;
+    // localStorage's origin (empty: an opaque page, which gets opaqueStorage_)
+    std::string storageOrigin_;
+    std::unique_ptr<StorageArea> opaqueStorage_;
     std::unique_ptr<CanvasRegistry> canvasRegistry_;
 };
 

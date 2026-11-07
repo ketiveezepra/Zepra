@@ -84,7 +84,7 @@ Merged pull requests on `main` (ketiveezepra/Zepra), newest first. Dates are mer
 - [ ] **Chunked Decoding:** *(not checked)* Fix the empty body and chunked decoding bugs in the new `nxhttp` C engine.
 
 ### 4. Storage Persistence (B13-B15)
-- [x] **Data Saving:** History, settings and bookmarks are written to disk (`9eda6cc`). Not run yet: the crash-recovery test below. `localStorage` is in-memory only.
+- [x] **Data Saving:** History, settings and bookmarks are written to disk (`9eda6cc`). Not run yet: the crash-recovery test below. `localStorage` is kept on disk per origin (`<config dir>/localStorage/`); `sessionStorage` is in memory, per page.
 
 ---
 

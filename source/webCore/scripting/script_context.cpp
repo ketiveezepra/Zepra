@@ -11,6 +11,7 @@
 #include "scripting/script_context.hpp"
 #include "scripting/canvas_bindings.hpp"
 #include "scripting/dom_bindings.hpp"
+#include "scripting/web_storage.hpp"
 #include <iostream>
 #include <algorithm>
 #include <chrono>
@@ -21,6 +22,7 @@
 
 // ZepraScript internal headers
 #include "runtime/execution/vm.hpp"
+#include "runtime/execution/js_error.hpp"
 #include "runtime/execution/Sandbox.h"
 #include "runtime/execution/context.hpp"
 #include "runtime/execution/global_object.hpp"
@@ -67,15 +69,11 @@ private:
     Zepra::Runtime::ResourceMonitor* previous_ = nullptr;
 };
 
-// An in-memory Web Storage: string keys and values in insertion order with
-// getItem, setItem, removeItem, clear, key(n) and a length property.
-Zepra::Runtime::Object* makeWebStorage() {
+// A Storage object (localStorage / sessionStorage): getItem, setItem,
+// removeItem, clear, key(n) and length over the area `area()` returns (looked
+// up on each call: the page's origin can change before its scripts run)
+Zepra::Runtime::Object* makeWebStorage(Zepra::Runtime::VM* vm, std::function<StorageArea*()> area) {
     using namespace Zepra::Runtime;
-    struct Data {
-        std::vector<std::string> order;
-        std::unordered_map<std::string, std::string> values;
-    };
-    auto data = std::make_shared<Data>();
     auto* storage = new Object();
 
     auto method = [storage](const char* name, size_t arity, NativeFn fn) {
@@ -87,38 +85,53 @@ Zepra::Runtime::Object* makeWebStorage() {
     auto text = [](const std::vector<Value>& args, size_t index) {
         return index < args.size() ? args[index].toString() : std::string("undefined");
     };
+    auto needs = [](const std::vector<Value>& args, size_t count, const char* name) {
+        if (args.size() < count) {
+            throw JSError("TypeError", std::string("Failed to execute '") + name + "' on 'Storage': " +
+                                       std::to_string(count) + " argument" + (count > 1 ? "s" : "") +
+                                       " required, but only " + std::to_string(args.size()) + " present.");
+        }
+    };
 
-    method("getItem", 1, [data, text](Context*, const std::vector<Value>& args) -> Value {
-        auto found = data->values.find(text(args, 0));
-        return found == data->values.end() ? Value::null() : Value::string(new String(found->second));
+    method("getItem", 1, [area, text, needs](Context*, const std::vector<Value>& args) -> Value {
+        needs(args, 1, "getItem");
+        auto value = area()->getItem(text(args, 0));
+        return value ? Value::string(new String(*value)) : Value::null();
     });
-    method("setItem", 2, [data, text](Context*, const std::vector<Value>& args) -> Value {
+    method("setItem", 2, [vm, area, text, needs](Context*, const std::vector<Value>& args) -> Value {
+        needs(args, 2, "setItem");
         const std::string key = text(args, 0);
-        if (data->values.find(key) == data->values.end()) data->order.push_back(key);
-        data->values[key] = text(args, 1);
-        return Value::undefined();
-    });
-    method("removeItem", 1, [data, text](Context*, const std::vector<Value>& args) -> Value {
-        const std::string key = text(args, 0);
-        if (data->values.erase(key) > 0) {
-            data->order.erase(std::remove(data->order.begin(), data->order.end(), key), data->order.end());
+        if (!area()->setItem(key, text(args, 1))) {
+            Value error = vm->newError("Error", "Failed to execute 'setItem' on 'Storage': Setting the value of '" +
+                                                    key + "' exceeded the quota.");
+            if (error.isObject()) {
+                error.asObject()->set("name", Value::string(new String("QuotaExceededError")));
+                error.asObject()->set("code", Value::number(22));
+            }
+            throw ThrownException(error);
         }
         return Value::undefined();
     });
-    method("clear", 0, [data](Context*, const std::vector<Value>&) -> Value {
-        data->order.clear();
-        data->values.clear();
+    method("removeItem", 1, [area, text, needs](Context*, const std::vector<Value>& args) -> Value {
+        needs(args, 1, "removeItem");
+        area()->removeItem(text(args, 0));
         return Value::undefined();
     });
-    method("key", 1, [data](Context*, const std::vector<Value>& args) -> Value {
-        const double index = args.empty() ? 0 : args[0].toNumber();
-        if (!(index >= 0) || index >= static_cast<double>(data->order.size())) return Value::null();
-        return Value::string(new String(data->order[static_cast<size_t>(index)]));
+    method("clear", 0, [area](Context*, const std::vector<Value>&) -> Value {
+        area()->clear();
+        return Value::undefined();
+    });
+    method("key", 1, [area, needs](Context*, const std::vector<Value>& args) -> Value {
+        needs(args, 1, "key");
+        const double index = args[0].toNumber();
+        if (!(index >= 0) || index >= 4294967296.0) return Value::null();
+        auto key = area()->key(static_cast<size_t>(index));
+        return key ? Value::string(new String(*key)) : Value::null();
     });
 
     PropertyDescriptor length;
-    length.getter = Value::object(createNativeFunction("length", [data](Context*, const std::vector<Value>&) -> Value {
-        return Value::number(static_cast<double>(data->order.size()));
+    length.getter = Value::object(createNativeFunction("length", [area](Context*, const std::vector<Value>&) -> Value {
+        return Value::number(static_cast<double>(area()->length()));
     }, 0));
     length.attributes = PropertyAttribute::Configurable;
     storage->defineProperty("length", length);
@@ -543,6 +556,11 @@ void ScriptContext::removeStoredCallback(const std::string& key) {
     if (callbackStore_) callbackStore_->deleteProperty(key);
 }
 
+void ScriptContext::setPageUrl(const std::string& url) {
+    storageOrigin_ = storageOriginOf(url);
+    setGlobal("__pageUrl__", url);
+}
+
 void ScriptContext::setGlobal(const std::string& name, const std::string& value) {
     if (vm_) {
         vm_->setGlobal(name, Zepra::Runtime::Value::string(
@@ -824,9 +842,15 @@ void ScriptContext::setupWindowGlobals() {
     vm_->setGlobal("window", Value::object(windowObj));
     vm_->setGlobal("self", Value::object(windowObj));
     
-    // localStorage and sessionStorage: separate in-memory stores (not persisted yet)
-    auto* localStorageObj = makeWebStorage();
-    auto* sessionStorageObj = makeWebStorage();
+    // localStorage: the origin's area, kept on disk by the browser
+    // (setPageUrl picks the origin); sessionStorage: this page's own, in memory
+    opaqueStorage_ = std::make_unique<StorageArea>();
+    auto* localStorageObj = makeWebStorage(vm_, [this]() -> StorageArea* {
+        StorageArea* area = localStorageFor(storageOrigin_);
+        return area ? area : opaqueStorage_.get();
+    });
+    auto sessionArea = std::make_shared<StorageArea>();
+    auto* sessionStorageObj = makeWebStorage(vm_, [sessionArea]() { return sessionArea.get(); });
     vm_->setGlobal("localStorage", Value::object(localStorageObj));
     vm_->setGlobal("sessionStorage", Value::object(sessionStorageObj));
     windowObj->set("localStorage", Value::object(localStorageObj));
