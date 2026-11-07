@@ -281,6 +281,7 @@ private:
     std::unique_ptr<CSSKeyframesRule> parseKeyframesRule();
     std::unique_ptr<CSSImportRule> parseImportRule();
     void parseRulesInto(CSSStyleSheet* sheet, int depth);
+    void skipInvalidRule();
 
     std::string parseSelector_();
     std::string parseDeclarationBlock();

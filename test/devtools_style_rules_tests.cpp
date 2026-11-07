@@ -122,7 +122,8 @@ struct Page {
         e->setAttribute("style", ed.writtenStyle);
     }
     const CSSStyleRule* rule(const std::string& id, const std::string& selector, const std::string& source = "") {
-        const RuleBlock* b = findBlock(rules(id).blocks, selector, source);
+        ElementRules all = rules(id);  // `b` points into it
+        const RuleBlock* b = findBlock(all.blocks, selector, source);
         return b ? b->rule : nullptr;
     }
 };
@@ -271,7 +272,9 @@ TEST(DevToolsStyleRules, InheritedFromNearestAncestorWins) {
 
 TEST(DevToolsStyleRules, SwitchingOffARuleDeclarationAffectsOnlyThatElement) {
     Page page;
-    const RuleBlock* b = findBlock(page.rules("x").blocks, ".b");
+    // Keep the ElementRules alive: `b` points into its blocks
+    ElementRules before = page.rules("x");
+    const RuleBlock* b = findBlock(before.blocks, ".b");
     ASSERT_NE(b, nullptr);
     const CSSStyleRule* bRule = b->rule;
 
@@ -523,7 +526,8 @@ TEST(DevToolsStyleRules, EditingASwitchedOffDeclarationKeepsItOff) {
     EXPECT_TRUE(setDeclarationValue(page.edit("x"), idRule, "margin-left", "5px"));
     page.write("x");
     EXPECT_FLOAT_EQ(page.style("x")->marginLeft.value, 0);
-    const RuleDeclaration* ml = findDecl(findBlock(page.rules("x").blocks, "#x"), "margin-left");
+    ElementRules edited = page.rules("x");  // `ml` points into it
+    const RuleDeclaration* ml = findDecl(findBlock(edited.blocks, "#x"), "margin-left");
     EXPECT_TRUE(ml->disabled);
     EXPECT_TRUE(ml->edited);
     EXPECT_EQ(ml->value, "5px");

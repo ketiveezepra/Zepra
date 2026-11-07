@@ -18,7 +18,7 @@ namespace Zepra::Runtime {
     class Context;
 }
 
-namespace Zepra::WebCore {
+namespace Zepra::WebCore::Mini {
     class DOMDocument;
     class DOMElement;
     class DOMNode;
@@ -36,17 +36,17 @@ public:
     ~JSDOMBridge();
     
     // Initialize bridge with VM and document
-    void initialize(Runtime::VM* vm, WebCore::DOMDocument* document);
+    void initialize(Runtime::VM* vm, WebCore::Mini::DOMDocument* document);
     
     // Create JS wrappers for DOM objects
-    Runtime::Object* wrapDocument(WebCore::DOMDocument* doc);
-    Runtime::Object* wrapElement(WebCore::DOMElement* element);
-    Runtime::Object* wrapNode(WebCore::DOMNode* node);
-    Runtime::Object* wrapEvent(WebCore::DOMEvent* event);
+    Runtime::Object* wrapDocument(WebCore::Mini::DOMDocument* doc);
+    Runtime::Object* wrapElement(WebCore::Mini::DOMElement* element);
+    Runtime::Object* wrapNode(WebCore::Mini::DOMNode* node);
+    Runtime::Object* wrapEvent(WebCore::Mini::DOMEvent* event);
     
     // Unwrap JS objects to DOM nodes
-    WebCore::DOMNode* unwrapNode(Runtime::Object* obj);
-    WebCore::DOMElement* unwrapElement(Runtime::Object* obj);
+    WebCore::Mini::DOMNode* unwrapNode(Runtime::Object* obj);
+    WebCore::Mini::DOMElement* unwrapElement(Runtime::Object* obj);
     
     // Expose global DOM APIs
     void exposeWindowObject();
@@ -57,11 +57,11 @@ public:
     Runtime::Value executeScript(const std::string& code);
     
     // Event handling
-    void dispatchEventToJS(WebCore::DOMEvent* event);
+    void dispatchEventToJS(WebCore::Mini::DOMEvent* event);
     
 private:
     Runtime::VM* vm_ = nullptr;
-    WebCore::DOMDocument* document_ = nullptr;
+    WebCore::Mini::DOMDocument* document_ = nullptr;
     
     // Cache of wrapped objects
     std::unordered_map<void*, Runtime::Object*> wrappedObjects_;

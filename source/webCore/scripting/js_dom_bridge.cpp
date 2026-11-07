@@ -30,10 +30,10 @@ using Zepra::Runtime::Value;
 using Zepra::Runtime::Object;
 using Zepra::Runtime::Function;
 using Zepra::Runtime::Context;
-using Zepra::WebCore::DOMDocument;
-using Zepra::WebCore::DOMElement;
-using Zepra::WebCore::DOMNode;
-using Zepra::WebCore::DOMText;
+using Zepra::WebCore::Mini::DOMDocument;
+using Zepra::WebCore::Mini::DOMElement;
+using Zepra::WebCore::Mini::DOMNode;
+using Zepra::WebCore::Mini::DOMText;
 
 // -----------------------------------------------------------------------------
 // Static storage for bridge instances (one per VM)
@@ -149,7 +149,7 @@ Value JSDOMBridge::executeScript(const std::string& code) {
     return result.value;
 }
 
-void JSDOMBridge::dispatchEventToJS(WebCore::DOMEvent* /*event*/) {
+void JSDOMBridge::dispatchEventToJS(WebCore::Mini::DOMEvent* /*event*/) {
     // Placeholder – event dispatch to JS listeners would be implemented here.
 }
 
@@ -170,7 +170,7 @@ static Value js_createElement(Context* ctx, const std::vector<Value>& args) {
     Object* docObj = docVal.asObject();
     // The wrapper object stores the real DOMDocument pointer in its private data
     // (we stored it during exposeWindowObject). For now we just create a new element.
-    auto* newElem = new WebCore::DOMElement(tag, nullptr);
+    auto* newElem = new WebCore::Mini::DOMElement(tag, nullptr);
     auto* elemWrapper = new Object();
     // In a real bridge we would attach native getters/setters here.
     // For beta we simply return the wrapper; real mutation will be limited.

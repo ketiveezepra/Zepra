@@ -9,7 +9,8 @@
 #include <algorithm>
 #include <functional>
 
-namespace Zepra::WebCore {
+// The embedding API's small DOM; its own namespace, see dom_node.hpp
+namespace Zepra::WebCore::Mini {
 
 // -----------------------------------------------------------------------------
 // DOMNode
@@ -197,4 +198,4 @@ std::vector<DOMElement*> DOMDocument::getElementsByTagName(const std::string& ta
     return result;
 }
 
-} // namespace Zepra::WebCore
+} // namespace Zepra::WebCore::Mini

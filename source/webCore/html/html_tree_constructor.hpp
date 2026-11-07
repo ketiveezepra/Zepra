@@ -117,6 +117,7 @@ private:
     // ─── Open elements stack ──────────────────────────────────────────────
     // Per WHATWG: "a stack of open elements"
     std::vector<DOMElement*> openElements_;
+    static constexpr size_t kMaxTreeDepth = 512;
 
     DOMElement* currentNode() const {
         return openElements_.empty() ? nullptr : openElements_.back();
