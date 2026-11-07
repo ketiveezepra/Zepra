@@ -103,6 +103,12 @@ private:
     Token scanRegExp();
     Token scanTemplate();
     Token scanOperator();
+    // After a backslash: consumes one escape sequence and appends its value
+    void scanEscape(std::string& out);
+    // After `${`: moves to the `}` that ends the substitution (skipping
+    // strings, nested templates and comments); false at end of input
+    bool skipTemplateSubstitution();
+    void skipNestedTemplate();
     
     // Utilities
     Token makeToken(TokenType type);
