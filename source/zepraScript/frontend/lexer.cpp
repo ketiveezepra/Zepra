@@ -76,6 +76,12 @@ Lexer::Lexer(const SourceCode* source)
     , location_{1, 1, 0}
     , tokenStart_{1, 1, 0}
 {
+    // A UTF-8 byte-order mark before the first token is not part of the script
+    if (srcLen_ >= 3 && static_cast<unsigned char>(src_[0]) == 0xEF &&
+        static_cast<unsigned char>(src_[1]) == 0xBB && static_cast<unsigned char>(src_[2]) == 0xBF) {
+        offset_ = 3;
+        location_.offset = 3;
+    }
 }
 
 char Lexer::current() const {
@@ -310,6 +316,131 @@ Token Lexer::scanNumber() {
     return token;
 }
 
+namespace {
+int hexValue(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+void appendUtf8(std::string& out, uint32_t codepoint) {
+    if (codepoint <= 0x7F) {
+        out += static_cast<char>(codepoint);
+    } else if (codepoint <= 0x7FF) {
+        out += static_cast<char>(0xC0 | (codepoint >> 6));
+        out += static_cast<char>(0x80 | (codepoint & 0x3F));
+    } else if (codepoint <= 0xFFFF) {
+        out += static_cast<char>(0xE0 | (codepoint >> 12));
+        out += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (codepoint & 0x3F));
+    } else if (codepoint <= 0x10FFFF) {
+        out += static_cast<char>(0xF0 | (codepoint >> 18));
+        out += static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (codepoint & 0x3F));
+    } else {
+        out += "\xEF\xBF\xBD";  // Replacement character
+    }
+}
+}  // namespace
+
+void Lexer::scanEscape(std::string& out) {
+    // Reads `count` hex digits; -1 (nothing consumed past the bad digit) when one is missing
+    auto readHex = [this](int count) -> int32_t {
+        int32_t v = 0;
+        for (int i = 0; i < count; i++) {
+            int d = hexValue(current());
+            if (d < 0) return -1;
+            v = (v << 4) | d;
+            advance();
+        }
+        return v;
+    };
+    // \uXXXX or \u{X...}, after the 'u'
+    auto readUnicode = [&]() -> int32_t {
+        if (current() == '{') {
+            advance();
+            int32_t v = 0;
+            int digits = 0;
+            while (current() != '}' && current() != '\0') {
+                int d = hexValue(current());
+                if (d < 0 || digits >= 6) return -1;
+                v = (v << 4) | d;
+                advance();
+                digits++;
+            }
+            if (current() != '}' || digits == 0) return -1;
+            advance();
+            return v;
+        }
+        return readHex(4);
+    };
+
+    char c = current();
+    switch (c) {
+        case 'n': advance(); out += '\n'; return;
+        case 'r': advance(); out += '\r'; return;
+        case 't': advance(); out += '\t'; return;
+        case 'b': advance(); out += '\b'; return;
+        case 'f': advance(); out += '\f'; return;
+        case 'v': advance(); out += '\v'; return;
+        case '0':
+            advance();
+            out += '\0';
+            return;
+        case '\r':
+            // Line continuation: the escaped line break is not part of the value
+            advance();
+            if (current() == '\n') advance();
+            return;
+        case '\n':
+            advance();
+            return;
+        case 'x': {
+            advance();
+            int32_t v = readHex(2);
+            if (v < 0) {
+                addError("Invalid hexadecimal escape sequence");
+                return;
+            }
+            appendUtf8(out, static_cast<uint32_t>(v));
+            return;
+        }
+        case 'u': {
+            advance();
+            int32_t v = readUnicode();
+            if (v < 0) {
+                addError("Invalid Unicode escape sequence");
+                out += "\xEF\xBF\xBD";
+                return;
+            }
+            // A surrogate pair written as two escapes is one code point
+            if (v >= 0xD800 && v <= 0xDBFF && current() == '\\' && peek(1) == 'u') {
+                size_t saveOffset = offset_;
+                SourceLocation saveLocation = location_;
+                advance();
+                advance();
+                int32_t low = readUnicode();
+                if (low >= 0xDC00 && low <= 0xDFFF) {
+                    v = 0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00);
+                } else {
+                    offset_ = saveOffset;
+                    location_ = saveLocation;
+                }
+            }
+            appendUtf8(out, static_cast<uint32_t>(v));
+            return;
+        }
+        case '\0':
+            return;
+        default:
+            // \\ \' \" \` \$ and any other character stand for themselves
+            out += advance();
+            return;
+    }
+}
+
 Token Lexer::scanString(char quote) {
     std::string value;
     bool hasEscapes = false;
@@ -318,75 +449,7 @@ Token Lexer::scanString(char quote) {
         if (current() == '\\') {
             hasEscapes = true;
             advance();
-            switch (current()) {
-                case 'n': value += '\n'; break;
-                case 'r': value += '\r'; break;
-                case 't': value += '\t'; break;
-                case 'b': value += '\b'; break;
-                case 'f': value += '\f'; break;
-                case 'v': value += '\v'; break;
-                case '0': value += '\0'; break;
-                case '\\': value += '\\'; break;
-                case '\'': value += '\''; break;
-                case '"': value += '"'; break;
-                case 'u': {
-                    advance();
-                    uint32_t codepoint = 0;
-                    if (current() == '{') {
-                        // \u{XXXXX} — 1-6 hex digits
-                        advance();
-                        int digits = 0;
-                        while (current() != '}' && current() != '\0' && digits < 6) {
-                            if (!isHexDigit(current())) {
-                                addError("Invalid Unicode escape");
-                                break;
-                            }
-                            codepoint = (codepoint << 4) | (isDigit(current()) ? current() - '0' :
-                                (current() >= 'a' ? current() - 'a' + 10 : current() - 'A' + 10));
-                            advance();
-                            digits++;
-                        }
-                        if (current() == '}') advance();
-                    } else {
-                        // \uXXXX — exactly 4 hex digits
-                        for (int i = 0; i < 4; i++) {
-                            if (!isHexDigit(current())) {
-                                addError("Invalid Unicode escape");
-                                codepoint = 0xFFFD;
-                                break;
-                            }
-                            codepoint = (codepoint << 4) | (isDigit(current()) ? current() - '0' :
-                                (current() >= 'a' ? current() - 'a' + 10 : current() - 'A' + 10));
-                            advance();
-                        }
-                    }
-                    // Encode codepoint as UTF-8
-                    if (codepoint <= 0x7F) {
-                        value += static_cast<char>(codepoint);
-                    } else if (codepoint <= 0x7FF) {
-                        value += static_cast<char>(0xC0 | (codepoint >> 6));
-                        value += static_cast<char>(0x80 | (codepoint & 0x3F));
-                    } else if (codepoint <= 0xFFFF) {
-                        value += static_cast<char>(0xE0 | (codepoint >> 12));
-                        value += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-                        value += static_cast<char>(0x80 | (codepoint & 0x3F));
-                    } else if (codepoint <= 0x10FFFF) {
-                        value += static_cast<char>(0xF0 | (codepoint >> 18));
-                        value += static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
-                        value += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-                        value += static_cast<char>(0x80 | (codepoint & 0x3F));
-                    } else {
-                        // Invalid codepoint — replacement character
-                        value += "\xEF\xBF\xBD";
-                    }
-                    // Don't advance again — the loop's advance() handles the next char
-                    continue;
-                }
-                default:
-                    value += current();
-                    break;
-            }
-            advance();
+            scanEscape(value);
         } else if (current() == '\n') {
             addError("Unterminated string literal");
             break;
@@ -491,63 +554,108 @@ Token Lexer::scanIdentifierOrKeyword() {
 }
 
 Token Lexer::scanTemplate() {
-    // Scan template literal: `Hello ${name}!`
-    // Returns Template token with parts and expressions
-    
+    // `text ${expr} text`: the token's value is the cooked text with each
+    // substitution's source between \x01 and \x02 markers; templateRaw holds
+    // the raw text of each string part
     std::string value;
-    bool hasExpressions = false;
-    
+    std::vector<std::string> raw(1);
+
     while (current() != '\0' && current() != '`') {
-        if (current() == '\\') {
-            // Escape sequence
+        char c = current();
+        if (c == '\\') {
+            size_t start = offset_;
             advance();
-            char escaped = advance();
-            switch (escaped) {
-                case 'n': value += '\n'; break;
-                case 't': value += '\t'; break;
-                case 'r': value += '\r'; break;
-                case '\\': value += '\\'; break;
-                case '`': value += '`'; break;
-                case '$': value += '$'; break;
-                default: value += escaped; break;
-            }
-        } else if (current() == '$' && peek(1) == '{') {
-            // Embedded expression: ${...}
-            hasExpressions = true;
-            
-            // Mark where expression starts
-            value += "\x01"; // Use special marker for parser
-            advance(); // $
-            advance(); // {
-            
-            // Scan until } (with nesting support)
-            int braceDepth = 1;
-            while (current() != '\0' && braceDepth > 0) {
-                if (current() == '{') braceDepth++;
-                else if (current() == '}') braceDepth--;
-                
-                if (braceDepth > 0) {
-                    value += advance();
-                }
-            }
-            
-            if (current() == '}') {
-                advance(); // Close }
-                value += "\x02"; // End expression marker
-            } else {
+            scanEscape(value);
+            raw.back().append(src_ + start, offset_ - start);
+        } else if (c == '$' && peek(1) == '{') {
+            advance();  // $
+            advance();  // {
+            size_t start = offset_;
+            if (!skipTemplateSubstitution()) {
                 return errorToken("Unterminated template expression");
             }
+            value += '\x01';
+            value.append(src_ + start, offset_ - start);
+            value += '\x02';
+            advance();  // }
+            raw.emplace_back();
+        } else if (c == '\r') {
+            // CR and CRLF read as LF, in both the cooked and the raw text
+            advance();
+            if (current() == '\n') advance();
+            value += '\n';
+            raw.back() += '\n';
         } else {
-            value += advance();
+            char ch = advance();
+            value += ch;
+            raw.back() += ch;
         }
     }
-    
+
     if (current() != '`') {
         return errorToken("Unterminated template literal");
     }
     advance(); // Closing `
-    
-    return makeToken(TokenType::Template, value);
+
+    Token token = makeToken(TokenType::Template, value);
+    token.templateRaw = std::move(raw);
+    return token;
+}
+
+bool Lexer::skipTemplateSubstitution() {
+    int depth = 0;
+    while (current() != '\0') {
+        char c = current();
+        if (c == '}' && depth == 0) return true;
+        if (c == '{') {
+            depth++;
+            advance();
+        } else if (c == '}') {
+            depth--;
+            advance();
+        } else if (c == '"' || c == '\'') {
+            advance();
+            while (current() != '\0' && current() != c && current() != '\n') {
+                if (current() == '\\') advance();
+                advance();
+            }
+            if (current() == c) advance();
+        } else if (c == '`') {
+            advance();
+            skipNestedTemplate();
+        } else if (c == '/' && peek(1) == '/') {
+            while (current() != '\0' && current() != '\n') advance();
+        } else if (c == '/' && peek(1) == '*') {
+            advance();
+            advance();
+            while (current() != '\0' && !(current() == '*' && peek(1) == '/')) advance();
+            if (current() != '\0') {
+                advance();
+                advance();
+            }
+        } else {
+            advance();
+        }
+    }
+    return false;
+}
+
+void Lexer::skipNestedTemplate() {
+    // After the opening backquote of a template inside a substitution
+    while (current() != '\0' && current() != '`') {
+        if (current() == '\\') {
+            advance();
+            if (current() != '\0') advance();
+        } else if (current() == '$' && peek(1) == '{') {
+            advance();
+            advance();
+            if (!skipTemplateSubstitution()) return;
+            advance();  // }
+        } else {
+            advance();
+        }
+    }
+    if (current() == '`') advance();
 }
 
 Token Lexer::scanOperator() {

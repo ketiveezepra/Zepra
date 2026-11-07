@@ -126,6 +126,7 @@ private:
     ExprPtr tryParseArrowFunction();
     ExprPtr parseClassExpression();
     ExprPtr parseTemplateLiteral();
+    bool parseTemplateParts(std::vector<std::string>& cooked, std::vector<ExprPtr>& expressions);
 
     // Property keys and methods shared by object literals and class bodies
     ExprPtr parsePropertyKey(bool& computed);

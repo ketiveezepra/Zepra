@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <vector>
 
 namespace Zepra::WebCore {
 
@@ -112,14 +113,93 @@ void ScriptContext::setSubmitHandler(SubmitHandler handler) { submitHandler_ = s
 
 bool ScriptContext::pressElement(DOMElement* target, double clientX, double clientY) {
     if (!vm_ || !domBindings_ || !target) return true;
+    mouseDown(target, clientX, clientY);
+    return !mouseUp(target, clientX, clientY).canceled;
+}
+
+bool ScriptContext::mouseDown(DOMElement* target, double clientX, double clientY) {
+    if (!vm_ || !domBindings_) return true;
+    domBindings_->setPressedElement(nullptr);
+    if (!target) return true;
     bool notCanceled = true;
     runTask([&] {
-        // Focus moves on the press, before the click
-        DOMElement* focusable = focusableSelfOrAncestor(target);
-        domBindings_->setFocus(focusable);
-        notCanceled = domBindings_->click(target, clientX, clientY);
+        MouseEventInit init;
+        init.buttons = 1;
+        init.detail = 1;
+        notCanceled = domBindings_->fireMouseEvent(target, "mousedown", clientX, clientY, init);
+        // Focus moves on the press, before the click; a canceled mousedown
+        // leaves it where it was
+        if (notCanceled) domBindings_->setFocus(focusableSelfOrAncestor(target));
     }, "event listener");
+    // The mousedown gave the element a wrapper, which keeps it alive if a
+    // listener removes it before the release
+    if (domBindings_->isConnected(target)) domBindings_->setPressedElement(target);
     return notCanceled;
+}
+
+MouseUpResult ScriptContext::mouseUp(DOMElement* target, double clientX, double clientY) {
+    MouseUpResult result;
+    if (!vm_ || !domBindings_) return result;
+    DOMElement* pressed = domBindings_->pressedElement();
+    domBindings_->setPressedElement(nullptr);
+    if (!target) return result;
+    runTask([&] {
+        MouseEventInit init;
+        init.detail = 1;
+        domBindings_->fireMouseEvent(target, "mouseup", clientX, clientY, init);
+        // The click goes to the nearest element holding both where the
+        // button went down and where it came up
+        if (!pressed || !domBindings_->isConnected(pressed) || !domBindings_->isConnected(target)) return;
+        DOMElement* clickTarget = nullptr;
+        for (DOMNode* n = pressed; n && !clickTarget; n = n->parentNode()) {
+            if (n->contains(target) && n->nodeType() == NodeType::Element) clickTarget = static_cast<DOMElement*>(n);
+        }
+        if (!clickTarget) return;
+        result.clicked = true;
+        result.canceled = !domBindings_->click(clickTarget, clientX, clientY);
+    }, "event listener");
+    return result;
+}
+
+void ScriptContext::mouseMove(DOMElement* target, double clientX, double clientY, bool buttonDown) {
+    if (!vm_ || !domBindings_) return;
+    DOMElement* old = domBindings_->pointerElement();
+    if (old && !domBindings_->isConnected(old)) old = nullptr;
+    if (target && !domBindings_->isConnected(target)) target = nullptr;
+    if (old == target && !target) return;
+    runTask([&] {
+        MouseEventInit init;
+        init.buttons = buttonDown ? 1 : 0;
+        if (old != target) {
+            auto contains = [](DOMNode* a, DOMNode* b) { return a && b && a->contains(b); };
+            if (old) {
+                MouseEventInit out = init;
+                out.relatedTarget = target;
+                domBindings_->fireMouseEvent(old, "mouseout", clientX, clientY, out);
+                // mouseleave at the old element and each ancestor the pointer left, innermost first
+                out.bubbles = out.cancelable = false;
+                for (DOMNode* n = old; n && n->nodeType() == NodeType::Element && !contains(n, target); n = n->parentNode()) {
+                    domBindings_->fireMouseEvent(static_cast<DOMElement*>(n), "mouseleave", clientX, clientY, out);
+                }
+            }
+            if (target) {
+                MouseEventInit over = init;
+                over.relatedTarget = old;
+                domBindings_->fireMouseEvent(target, "mouseover", clientX, clientY, over);
+                // mouseenter at each element the pointer entered, outermost first
+                std::vector<DOMElement*> entered;
+                for (DOMNode* n = target; n && n->nodeType() == NodeType::Element && !contains(n, old); n = n->parentNode()) {
+                    entered.push_back(static_cast<DOMElement*>(n));
+                }
+                over.bubbles = over.cancelable = false;
+                for (auto it = entered.rbegin(); it != entered.rend(); ++it) {
+                    domBindings_->fireMouseEvent(*it, "mouseenter", clientX, clientY, over);
+                }
+            }
+        }
+        if (target) domBindings_->fireMouseEvent(target, "mousemove", clientX, clientY, init);
+    }, "event listener");
+    domBindings_->setPointerElement(target && domBindings_->isConnected(target) ? target : nullptr);
 }
 
 KeyResult ScriptContext::keyDown(const KeyEventInit& key, const std::string& text) {

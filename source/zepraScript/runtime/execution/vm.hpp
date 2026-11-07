@@ -223,22 +223,55 @@ public:
     
     /**
      * @brief Set a global variable
+     *
+     * With a global object attached (setGlobalObject), the global is that
+     * object's property; otherwise it lives in the VM's own table.
      */
-    void setGlobal(const std::string& name, Value value) { globals_[name] = value; }
+    void setGlobal(const std::string& name, Value value) {
+        if (globalObject_) {
+            globalObject_->set(name, value);
+            return;
+        }
+        globals_[name] = value;
+    }
     
     /**
-     * @brief Get a global variable
+     * @brief Get a global variable (undefined when there is none)
+     *
+     * Reads the stored value: an accessor on the global object is not run.
      */
     Value getGlobal(const std::string& name) const {
         auto it = globals_.find(name);
-        return it != globals_.end() ? it->second : Value::undefined();
+        if (it != globals_.end()) return it->second;
+        if (globalObject_) return globalObject_->get(name);
+        return Value::undefined();
     }
+
+    /** True when a global of that name exists (declared, or a property of the global object) */
+    bool hasGlobal(const std::string& name) const {
+        return globals_.count(name) != 0 || (globalObject_ && globalObject_->has(name));
+    }
+
+    /**
+     * @brief Make `object` the global object (a page's `window`)
+     *
+     * From then on global variables are its properties, as in a browser:
+     * `var x` and function declarations at script level define `window.x`,
+     * and `window.x = 1` makes a bare `x` readable. Globals already set on
+     * the VM move onto the object, unless it has its own property of that
+     * name; those that move are not enumerable, like built-ins.
+     */
+    void setGlobalObject(Object* object);
+    Object* globalObject() const { return globalObject_; }
 
     /** The names of every global variable (unordered) */
     std::vector<std::string> globalNames() const {
         std::vector<std::string> names;
         names.reserve(globals_.size());
         for (const auto& entry : globals_) names.push_back(entry.first);
+        if (globalObject_) {
+            for (const std::string& name : globalObject_->getOwnPropertyNames()) names.push_back(name);
+        }
         return names;
     }
     
@@ -512,8 +545,14 @@ private:
     // Helper: Cleanup excess heap after returning to shallow
     void shrinkHeapIfNeeded();
     
-    // Global variables
+    // Global variables (only those set before a global object is attached)
     std::unordered_map<std::string, Value> globals_;
+    // The global object (a page's window), when the embedder attached one
+    Object* globalObject_ = nullptr;
+
+    // Global variable access for the interpreter (runs accessors)
+    bool lookupGlobal(const std::string& name, Value& out);
+    void assignGlobal(const std::string& name, const Value& value);
     
     // Open upvalues (linked list, ordered by stack slot)
     RuntimeUpvalue* openUpvalues_ = nullptr;

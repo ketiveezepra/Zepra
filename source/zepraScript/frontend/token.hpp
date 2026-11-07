@@ -7,6 +7,7 @@
 
 #include "../config.hpp"
 #include <string>
+#include <vector>
 #include <string_view>
 
 namespace Zepra::Frontend {
@@ -176,6 +177,10 @@ struct Token {
     
     // For string literals
     bool hasEscapes = false;
+
+    // For template literals: the raw text of each string part (String.raw,
+    // tagged templates); `value` holds the cooked text
+    std::vector<std::string> templateRaw;
     
     bool isKeyword() const;
     bool isOperator() const;

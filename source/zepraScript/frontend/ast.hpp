@@ -712,6 +712,27 @@ private:
 };
 
 /**
+ * @brief The strings array a tagged template passes its tag: tag`a${x}b`
+ * calls tag(strings, x) with strings = ["a", "b"] and strings.raw the raw
+ * text of each part. The same array every time that template runs.
+ */
+class TemplateObjectExpr : public Expression {
+public:
+    TemplateObjectExpr(std::vector<std::string> cooked, std::vector<std::string> raw,
+                       SourceLocation loc = {})
+        : Expression(NodeType::TaggedTemplateExpression, loc)
+        , cooked_(std::move(cooked))
+        , raw_(std::move(raw)) {}
+
+    const std::vector<std::string>& cooked() const { return cooked_; }
+    const std::vector<std::string>& raw() const { return raw_; }
+
+private:
+    std::vector<std::string> cooked_;
+    std::vector<std::string> raw_;
+};
+
+/**
  * @brief Spread element: `...iterable`
  */
 class SpreadExpr : public Expression {

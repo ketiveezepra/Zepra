@@ -60,6 +60,11 @@ struct KeyResult {
     bool canceled = false;   ///< a listener called preventDefault(): no default action
     bool consumed = false;   ///< the focused control used the key (typing, Backspace, Enter, arrows)
 };
+/// What releasing the primary button did on the page (ScriptContext::mouseUp)
+struct MouseUpResult {
+    bool clicked = false;      ///< a click fired (press and release on the same element or inside one)
+    bool canceled = false;     ///< a click listener called preventDefault(): links stay put
+};
 /// Receives a form submission no listener canceled (the browser navigates)
 using SubmitHandler = std::function<void(const FormSubmission& submission)>;
 
@@ -216,6 +221,25 @@ public:
      * @return false when a click listener canceled it (links stay put)
      */
     bool pressElement(DOMElement* target, double clientX, double clientY);
+    /**
+     * @brief The primary button going down on a page element: mousedown,
+     * then, unless a listener canceled it, focus moves to the element or its
+     * nearest focusable ancestor (elsewhere the page takes focus)
+     * @return false when a mousedown listener canceled it
+     */
+    bool mouseDown(DOMElement* target, double clientX, double clientY);
+    /**
+     * @brief The primary button coming up over `target` (null off the page):
+     * mouseup there, then the click and its default action at the nearest
+     * element holding both the pressed and the released element
+     */
+    MouseUpResult mouseUp(DOMElement* target, double clientX, double clientY);
+    /**
+     * @brief The pointer moving over `target` (null off the page): when the
+     * element under it changed, mouseout/mouseleave on the old one and
+     * mouseover/mouseenter on the new one; then mousemove
+     */
+    void mouseMove(DOMElement* target, double clientX, double clientY, bool buttonDown);
     /**
      * @brief A key going down: keydown at the focused element (else the body),
      * keypress for keys that make a character, then, unless canceled, the
