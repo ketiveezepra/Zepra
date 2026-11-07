@@ -78,6 +78,66 @@ TEST_F(UrlParsingTests, InvalidUrl) {
     SUCCEED();
 }
 
+// A "?" inside the fragment is not a query: the query length went negative and
+// the parser asked malloc for 2^64 bytes (found by fuzzing)
+TEST_F(UrlParsingTests, QuestionMarkInFragmentIsNotAQuery) {
+    NxUrl* url = nx_url_parse("http://example.com/p#/b?c=d#e");
+    ASSERT_NE(url, nullptr);
+    EXPECT_STREQ(url->path, "/p");
+    EXPECT_EQ(url->query, nullptr);
+    EXPECT_STREQ(url->fragment, "/b?c=d#e");
+    nx_url_free(url);
+
+    url = nx_url_parse("http://example.com#?x");
+    ASSERT_NE(url, nullptr);
+    EXPECT_STREQ(url->path, "/");
+    EXPECT_EQ(url->query, nullptr);
+    EXPECT_STREQ(url->fragment, "?x");
+    nx_url_free(url);
+}
+
+// The authority ends at "/", "?" or "#": an "@" after them is not userinfo
+TEST_F(UrlParsingTests, AtSignInQueryDoesNotChangeTheHost) {
+    NxUrl* url = nx_url_parse("http://bank.example?next=@evil.example/");
+    ASSERT_NE(url, nullptr);
+    EXPECT_STREQ(url->host, "bank.example");
+    EXPECT_EQ(url->userinfo, nullptr);
+    EXPECT_STREQ(url->query, "next=@evil.example/");
+    nx_url_free(url);
+
+    url = nx_url_parse("http://user:pw@host.example:8080/x");
+    ASSERT_NE(url, nullptr);
+    EXPECT_STREQ(url->userinfo, "user:pw");
+    EXPECT_STREQ(url->host, "host.example");
+    EXPECT_EQ(url->port, 8080);
+    nx_url_free(url);
+}
+
+TEST_F(UrlParsingTests, PortsOutsideTheRangeAreRejected) {
+    for (const char* bad : {"http://a.example:0/", "http://a.example:65536/", "http://a.example:-1/",
+                            "http://a.example:80x/", "http://a.example:99999999999/"}) {
+        NxUrl* url = nx_url_parse(bad);
+        EXPECT_EQ(url, nullptr) << bad;
+        if (url) nx_url_free(url);
+    }
+    NxUrl* url = nx_url_parse("http://a.example:/");  // empty port: the default
+    ASSERT_NE(url, nullptr);
+    EXPECT_EQ(url->port, 80);
+    nx_url_free(url);
+
+    url = nx_url_parse("http://[::1]:8080/x");
+    ASSERT_NE(url, nullptr);
+    EXPECT_STREQ(url->host, "[::1]");
+    EXPECT_EQ(url->port, 8080);
+    nx_url_free(url);
+
+    url = nx_url_parse("http://[::1]/x");  // colons inside the brackets are not a port
+    ASSERT_NE(url, nullptr);
+    EXPECT_STREQ(url->host, "[::1]");
+    EXPECT_EQ(url->port, 80);
+    nx_url_free(url);
+}
+
 // =============================================================================
 // URL Scheme Classification (Security Critical)
 // =============================================================================
@@ -385,6 +445,7 @@ TEST(NxHttpSummaryTests, PrintSecurityReport) {
 
 #include "http_response_reader.hpp"
 #include "http_client.hpp"
+#include "dns_resolver.hpp"
 #include "network_monitor.h"
 
 #include <atomic>
@@ -414,6 +475,75 @@ std::string bodyOf(const Zepra::Networking::HttpWireResponse& r) {
 }
 
 } // namespace
+
+// HttpRequest splits its URL the way the server will read it
+TEST(HttpRequestUrl, AuthorityEndsAtQueryOrFragment) {
+    using Zepra::Networking::HttpRequest;
+    HttpRequest a("https://example.com?q=1#top");
+    EXPECT_EQ(a.host(), "example.com");
+    EXPECT_EQ(a.port(), 443);
+    EXPECT_EQ(a.path(), "/");
+    EXPECT_EQ(a.query(), "q=1") << "the fragment never goes on the wire";
+
+    HttpRequest b("http://user:pw@example.com:8080/a/b?x=/y#frag?z");
+    EXPECT_EQ(b.host(), "example.com");
+    EXPECT_EQ(b.port(), 8080);
+    EXPECT_EQ(b.path(), "/a/b");
+    EXPECT_EQ(b.query(), "x=/y");
+
+    HttpRequest v6("http://[::1]:8080/p");
+    EXPECT_EQ(v6.host(), "::1");
+    EXPECT_EQ(v6.hostHeader(), "[::1]");
+    EXPECT_EQ(v6.port(), 8080);
+}
+
+TEST(HttpRequestUrl, UnsendableRequestsAreRejected) {
+    using Zepra::Networking::HttpMethod;
+    using Zepra::Networking::HttpRequest;
+    std::string error;
+    EXPECT_TRUE(HttpRequest(HttpMethod::GET, "https://example.com/a?b=c").validate(error)) << error;
+    for (const char* bad : {"ftp://example.com/", "file:///etc/passwd", "http:///nohost",
+                            "http://example.com:0/", "http://example.com:70000/",
+                            "http://example.com:12ab/", "http://exa mple.com/",
+                            "http://example.com/a b", "http://example.com/a\r\nX-Injected: 1"}) {
+        EXPECT_FALSE(HttpRequest(HttpMethod::GET, bad).validate(error)) << bad;
+    }
+    HttpRequest injected(HttpMethod::GET, "http://example.com/");
+    injected.setHeader("X-Test", "ok\r\nX-Injected: 1");
+    EXPECT_FALSE(injected.validate(error));
+    HttpRequest badName(HttpMethod::GET, "http://example.com/");
+    badName.setHeader("Bad Name", "v");
+    EXPECT_FALSE(badName.validate(error));
+}
+
+TEST(HttpRequestUrl, HeaderNamesAreCaseInsensitive) {
+    Zepra::Networking::HttpRequest r("http://example.com/");
+    r.setHeader("content-type", "text/plain");
+    EXPECT_TRUE(r.hasHeader("Content-Type"));
+    EXPECT_EQ(r.header("CONTENT-TYPE"), "text/plain");
+    EXPECT_FALSE(r.hasHeader("Content-Length"));
+}
+
+// Redirects to a scheme the client can't speak end with an error, not a request
+TEST(HttpRequestUrl, ClientRefusesARequestItCannotSend) {
+    Zepra::Networking::HttpClient client;
+    auto res = client.get("http://example.com/a\r\nHost: evil");
+    EXPECT_TRUE(res.hasError());
+}
+
+// The DNS cache entry used to share its name (and so, after linking, its inline
+// copy code) with HttpCache's CacheEntry: caching the first lookup wrote through
+// a null pointer in a debug build
+TEST(DnsResolverCache, RepeatedLookupsComeFromTheCache) {
+    Zepra::Networking::DnsResolver resolver;
+    auto first = resolver.resolve("localhost");
+    ASSERT_TRUE(first.success) << first.error;
+    ASSERT_FALSE(first.addresses.empty());
+    auto second = resolver.resolve("localhost");
+    ASSERT_TRUE(second.success);
+    EXPECT_EQ(second.addresses, first.addresses);
+    EXPECT_EQ(second.hostname, "localhost");
+}
 
 TEST(HttpFraming, ContentLengthStopsAtTheBody) {
     using namespace Zepra::Networking;

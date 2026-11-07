@@ -212,14 +212,40 @@ TEST_F(ForcedPseudoTest, RemovedElementMatchesNothing) {
     setForcedPseudoClass(link, ForcedPseudo::Hover, true);
     ASSERT_EQ(color("sib"), kBlue);
     {
-        // Removed and destroyed: the entry stays but must not be dereferenced
+        // Removed and destroyed: the entry goes with the element, so a new element
+        // that later gets the same address is not forced by mistake
         std::unique_ptr<DOMNode> removed = outer->removeChild(link);
         ASSERT_NE(removed, nullptr);
     }
     EXPECT_EQ(color("sib"), kSpanPlain);
     EXPECT_EQ(color("link2"), kLinkPlain);
     EXPECT_EQ(color("outer"), kDivPlain);
-    EXPECT_TRUE(clearForcedPseudoClasses());
+    EXPECT_TRUE(interactionState().forced.empty());
+    EXPECT_FALSE(clearForcedPseudoClasses()) << "nothing is forced any more";
+}
+
+// Hover, active and focus are raw pointers in process-wide state: freeing the
+// element (or its whole document) must clear them, or the next focus() or
+// restyle reads freed memory
+TEST_F(ForcedPseudoTest, DestroyedElementsLeaveNoInteractionPointers) {
+    InteractionState& state = interactionState();
+    state.hovered = el("link");
+    state.active = el("link");
+    state.focused = el("in");
+    {
+        std::unique_ptr<DOMNode> removed = el("outer")->removeChild(el("link"));
+        ASSERT_NE(removed, nullptr);
+        EXPECT_EQ(state.hovered, removed.get()) << "detached but alive: kept";
+    }
+    EXPECT_EQ(state.hovered, nullptr);
+    EXPECT_EQ(state.active, nullptr);
+    EXPECT_EQ(state.focused, el("in")) << "other elements are untouched";
+
+    setForcedPseudoClass(el("in2"), ForcedPseudo::Focus, true);
+    css.reset();
+    doc.reset();
+    EXPECT_EQ(state.focused, nullptr);
+    EXPECT_TRUE(state.forced.empty());
 }
 
 TEST_F(ForcedPseudoTest, DetachedElementStillAliveDoesNotReachTheDocument) {

@@ -382,10 +382,30 @@ void CSSParser::parseRulesInto(CSSStyleSheet* sheet, int depth) {
             pos_ = savedPos;
         }
         
+        size_t before = pos_;
         auto rule = parseRule();
         if (rule && sheet->cssRules()) {
             sheet->cssRules()->add(std::move(rule));
         }
+        // A rule the parser could not read must still be stepped over, or this loop
+        // spins forever on the UI thread (a stray "{ ... }" with no selector did)
+        if (pos_ == before) skipInvalidRule();
+    }
+}
+
+// Error recovery for an unreadable rule (CSS Syntax 3, "consume a qualified rule"):
+// drop everything up to and including its {}-block, or one character if there is none
+void CSSParser::skipInvalidRule() {
+    if (eof()) return;
+    if (peek() != '{') {
+        consume();
+        return;
+    }
+    int depth = 0;
+    while (!eof()) {
+        char c = consume();
+        if (c == '{') depth++;
+        else if (c == '}' && --depth == 0) return;
     }
 }
 

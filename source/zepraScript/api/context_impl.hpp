@@ -39,7 +39,7 @@ public:
         , sandbox_(Runtime::SandboxConfig::browser())
         , resourceMonitor_(std::make_unique<Runtime::ResourceMonitor>(sandbox_.limits))
         , vm_(std::make_unique<Runtime::VM>(nullptr))
-        , domDocument_(std::make_unique<Zepra::WebCore::DOMDocument>())
+        , domDocument_(std::make_unique<Zepra::WebCore::Mini::DOMDocument>())
         , jsDomBridge_(std::make_unique<Zepra::Bridge::JSDOMBridge>())
     {
         vm_->setGCHeap(gcHeap_.get());
@@ -132,7 +132,7 @@ private:
     std::unique_ptr<Runtime::VM> vm_;
 
     // DOM bridge members (added for beta SPA support)
-    std::unique_ptr<Zepra::WebCore::DOMDocument> domDocument_;
+    std::unique_ptr<Zepra::WebCore::Mini::DOMDocument> domDocument_;
     std::unique_ptr<Zepra::Bridge::JSDOMBridge> jsDomBridge_;
 };
 

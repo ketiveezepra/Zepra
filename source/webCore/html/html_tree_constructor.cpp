@@ -152,6 +152,14 @@ std::pair<DOMNode*, DOMNode*> HTML5TreeConstructor::appropriateInsertionLocation
     DOMNode* target = currentNode() ? static_cast<DOMNode*>(currentNode()) : static_cast<DOMNode*>(doc_.get());
     DOMNode* before = nullptr;
 
+    // Past kMaxTreeDepth open elements, new nodes go to the element at that depth
+    // instead of nesting further (Chromium caps parser depth at 512 the same way).
+    // Styling, serializing and freeing a tree all recurse over it, and a page of
+    // 100,000 nested <b> tags overflowed the stack.
+    if (openElements_.size() > kMaxTreeDepth) {
+        target = openElements_[kMaxTreeDepth - 1];
+    }
+
     if (fosterParenting_) {
         // Find last table element in open stack
         DOMElement* lastTable = nullptr;

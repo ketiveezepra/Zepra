@@ -301,6 +301,16 @@ if(TARGET webcore)
     endif()
     add_test(NAME DevToolsConsoleInputTests COMMAND devtools_console_input_tests)
 
+    # Hostile input for the HTML, CSS and JavaScript parsers (hangs, stack overflows)
+    add_executable(parser_robustness_tests parser_robustness_tests.cpp)
+    target_link_libraries(parser_robustness_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(parser_robustness_tests pthread)
+    endif()
+    add_test(NAME ParserRobustnessTests COMMAND parser_robustness_tests)
+    # A regression here is a hang: fail instead of stalling the CI job
+    set_tests_properties(ParserRobustnessTests PROPERTIES TIMEOUT 120)
+
     # SVG rasterizing (nanosvg + rewrite pass) for <img>, inline <svg> and icons
     add_executable(svg_raster_tests svg_raster_tests.cpp)
     target_link_libraries(svg_raster_tests webcore GTest::gtest GTest::gtest_main)

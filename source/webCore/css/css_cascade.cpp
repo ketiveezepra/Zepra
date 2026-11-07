@@ -434,6 +434,14 @@ bool CSSCascade::selectorGroupMatches(DOMElement* element, const std::string& se
         while (i < len && (selector[i] == ' ' || selector[i] == '\t')) i++;
         if (i >= len) break;
         
+        // A combinator with nothing to its left (">p", "a > > b") is invalid. Without
+        // this check the part reader below stopped on it without moving, and this
+        // loop never ended: one such selector froze the page.
+        if ((selector[i] == '>' || selector[i] == '+' || selector[i] == '~') &&
+            (parts.empty() || combinators.size() >= parts.size())) {
+            return false;
+        }
+
         // Check for combinator
         if (!parts.empty() && (selector[i] == '>' || selector[i] == '+' || selector[i] == '~')) {
             char comb = selector[i];

@@ -9,9 +9,34 @@
 #include <cctype>
 #include <cstdlib>
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
 
 namespace Zepra::WebCore {
+
+namespace {
+
+// The number at s[pos], without throwing: std::stof threw on "." or "1e99" inside
+// rgb()/hsl(), and nothing caught it, so one bad color in a page's CSS aborted
+// the browser. Infinity and NaN read as 0.
+bool readNumber(const std::string& s, size_t pos, float& value, size_t& used) {
+    const char* begin = s.c_str() + pos;
+    char* end = nullptr;
+    value = std::strtof(begin, &end);
+    used = static_cast<size_t>(end - begin);
+    if (used == 0) return false;
+    if (!std::isfinite(value)) value = 0;
+    return true;
+}
+
+// A color channel 0..255 from any float (casting an out-of-range float is undefined)
+uint8_t channel(float v) {
+    if (!(v > 0)) return 0;
+    if (v >= 255.0f) return 255;
+    return static_cast<uint8_t>(v);
+}
+
+} // namespace
 
 CSSComputedStyle::CSSComputedStyle() = default;
 
@@ -154,15 +179,16 @@ CSSColor CSSColor::parse(const std::string& str) {
         // Parse comma or space separated values
         size_t pos = 0;
         auto nextNum = [&]() -> int {
-            while (pos < inner.length() && !std::isdigit(inner[pos]) && inner[pos] != '.') pos++;
+            while (pos < inner.length() && !std::isdigit(static_cast<unsigned char>(inner[pos])) && inner[pos] != '.' && inner[pos] != '-') pos++;
             if (pos >= inner.length()) return 0;
             size_t numPos;
-            float val = std::stof(inner.substr(pos), &numPos);
+            float val;
+            if (!readNumber(inner, pos, val, numPos)) { pos++; return 0; }
             pos += numPos;
             // Check for percentage
             while (pos < inner.length() && inner[pos] == ' ') pos++;
-            if (pos < inner.length() && inner[pos] == '%') { pos++; return (int)(val * 255.0f / 100.0f); }
-            return (int)val;
+            if (pos < inner.length() && inner[pos] == '%') { pos++; return channel(val * 255.0f / 100.0f); }
+            return channel(val);
         };
 
         r = nextNum();
@@ -170,10 +196,11 @@ CSSColor CSSColor::parse(const std::string& str) {
         b = nextNum();
         if (str.substr(0, 5) == "rgba(") {
             // Alpha can be 0-1 float or 0-255 int
-            while (pos < inner.length() && !std::isdigit(inner[pos]) && inner[pos] != '.') pos++;
-            if (pos < inner.length()) {
-                float alpha = std::stof(inner.substr(pos));
-                a = alpha <= 1.0f ? (int)(alpha * 255.0f) : (int)alpha;
+            while (pos < inner.length() && !std::isdigit(static_cast<unsigned char>(inner[pos])) && inner[pos] != '.') pos++;
+            float alpha;
+            size_t used;
+            if (pos < inner.length() && readNumber(inner, pos, alpha, used)) {
+                a = channel(alpha <= 1.0f ? alpha * 255.0f : alpha);
             }
         }
         return {(uint8_t)r, (uint8_t)g, (uint8_t)b, (uint8_t)a};
@@ -187,10 +214,11 @@ CSSColor CSSColor::parse(const std::string& str) {
             std::string inner = str.substr(start, end - start);
             size_t pos = 0;
             auto nextNum = [&]() -> float {
-                while (pos < inner.length() && !std::isdigit(inner[pos]) && inner[pos] != '.' && inner[pos] != '-') pos++;
+                while (pos < inner.length() && !std::isdigit(static_cast<unsigned char>(inner[pos])) && inner[pos] != '.' && inner[pos] != '-') pos++;
                 if (pos >= inner.length()) return 0;
                 size_t numPos;
-                float val = std::stof(inner.substr(pos), &numPos);
+                float val;
+                if (!readNumber(inner, pos, val, numPos)) { pos++; return 0; }
                 pos += numPos;
                 while (pos < inner.length() && inner[pos] == ' ') pos++;
                 if (pos < inner.length() && inner[pos] == '%') { pos++; }
@@ -205,13 +233,15 @@ CSSColor CSSColor::parse(const std::string& str) {
             if (str.substr(0, 5) == "hsla(") {
                 float alpha = nextNum();
                 if (alpha > 1.0f && std::to_string(alpha).find('.') == std::string::npos) alpha /= 255.0f;
-                if (alpha <= 1.0f) a = (int)(alpha * 255.0f);
-                else a = (int)alpha;
+                a = channel(alpha <= 1.0f ? alpha * 255.0f : alpha);
             }
-            
-            // Normalize hue to 0-360
-            while (h < 0) h += 360.0f;
-            while (h >= 360.0f) h -= 360.0f;
+            s = std::clamp(s, 0.0f, 1.0f);
+            l = std::clamp(l, 0.0f, 1.0f);
+
+            // Normalize hue to 0-360 (fmod: subtracting 360 from 1e30 changes
+            // nothing, and that loop never ended)
+            h = std::fmod(h, 360.0f);
+            if (h < 0) h += 360.0f;
             h /= 360.0f;
             
             auto hue2rgb = [](float p, float q, float t) -> float {
@@ -234,7 +264,7 @@ CSSColor CSSColor::parse(const std::string& str) {
                 b_f = hue2rgb(p, q, h - 1.0f/3.0f);
             }
             
-            return {(uint8_t)(r_f * 255.0f), (uint8_t)(g_f * 255.0f), (uint8_t)(b_f * 255.0f), (uint8_t)a};
+            return {channel(r_f * 255.0f), channel(g_f * 255.0f), channel(b_f * 255.0f), (uint8_t)a};
         }
     }
 
