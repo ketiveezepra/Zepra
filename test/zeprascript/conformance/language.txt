@@ -71,3 +71,6 @@ in_delete | (function(){ var o = { a: 1 }; var had = "a" in o; delete o.a; retur
 date_basic | (function(){ var d = new Date(2020, 0, 15); return d.getFullYear() === 2020 && d.getMonth() === 0 && d.getDate() === 15; })()
 string_from_number | String(12) === "12" && (12).toString() === "12" && 1 + "2" === "12"
 equality_rules | (null == undefined) && !(null === undefined) && ("1" == 1) && !("1" === 1) && (NaN !== NaN)
+undeclared_reference_error | (function(){ try { notDeclared_x; return false; } catch (e) { return e instanceof ReferenceError && e.message === "notDeclared_x is not defined"; } })()
+typeof_undeclared_plain | typeof notDeclared_z === "undefined"
+undeclared_call_reference_error | (function(){ try { notDeclaredFn(); return false; } catch (e) { return e.name === "ReferenceError"; } })()

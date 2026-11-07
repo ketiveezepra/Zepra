@@ -75,10 +75,7 @@ public:
     /// Where getBoundingClientRect, offset*, client*, scroll* and the
     /// window's size and scroll position come from (the browser's layout).
     /// Without one, elements have no boxes and the page does not scroll.
-    void setPageGeometry(PageGeometry* geometry) { geometry_ = geometry; refreshWindowGlobals(); }
-    /// Copies the viewport size and scroll position to the bare globals
-    /// (innerWidth, scrollY, ...), which are not the window's accessors
-    void refreshWindowGlobals();
+    void setPageGeometry(PageGeometry* geometry) { geometry_ = geometry; }
     /// document.readyState: "loading", "interactive" or "complete"
     void setReadyState(const std::string& state) { readyState_ = state; }
     /// Where getComputedStyle() reads styles (the browser's CSS engine).
@@ -203,13 +200,6 @@ private:
     // Layout geometry
     static constexpr double kDefaultViewportWidth = 1280, kDefaultViewportHeight = 720;
     ElementGeometry geometryOf(const DOMElement* element, bool withScrollSize = false);
-    /// Bare globals mirroring the window's (refreshWindowGlobals), and the
-    /// values last written to them
-    static constexpr size_t kWindowGlobals = 6;
-    static constexpr const char* kWindowGlobalNames[kWindowGlobals] = {
-        "innerWidth", "innerHeight", "scrollX", "scrollY", "pageXOffset", "pageYOffset"};
-    double windowGlobals_[kWindowGlobals] = {};
-    bool windowGlobalsSet_ = false;
     bool isScrollingElement(const DOMElement* element) const;
     Zepra::Runtime::Value rectObject(const GeometryRect& rect);
     DOMElement* offsetParentOf(DOMElement* element);

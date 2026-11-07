@@ -170,6 +170,8 @@ enum class Opcode : uint8 {
     OP_OBJECT_SPREAD,  // [obj, source] -> [obj] with source's own enumerable properties copied
     OP_SET_FIELD_INIT, // [ctor, initializer] -> [ctor]
     OP_INIT_FIELDS,    // [this, ctor] -> [result]: runs ctor's field initializer on this, if any
+    OP_GET_GLOBAL_TYPEOF, // u16 name: like OP_GET_GLOBAL, but undefined (not a ReferenceError) when undeclared
+    OP_DECLARE_GLOBAL,    // u16 name: a script's hoisted `var`; defines it as undefined unless it exists
 
     // End marker
     OP_END

@@ -428,6 +428,45 @@ void VM::toPrimitiveOperands(Value& a, Value& b) {
     if (b.isObject()) b = toPrimitive(b, false);
 }
 
+void VM::setGlobalObject(Object* object) {
+    globalObject_ = object;
+    if (!object) return;
+    for (const auto& entry : globals_) {
+        if (object->hasOwnProperty(entry.first)) continue;
+        PropertyDescriptor desc;
+        desc.value = entry.second;
+        desc.attributes = PropertyAttribute::Writable | PropertyAttribute::Configurable;
+        object->defineProperty(entry.first, desc);
+    }
+    globals_.clear();
+}
+
+bool VM::lookupGlobal(const std::string& name, Value& out) {
+    auto it = globals_.find(name);
+    if (it != globals_.end()) {
+        out = it->second;
+        return true;
+    }
+    if (globalObject_ && globalObject_->has(name)) {
+        out = getProperty(Value::object(globalObject_), name);
+        return true;
+    }
+    return false;
+}
+
+void VM::assignGlobal(const std::string& name, const Value& value) {
+    auto it = globals_.find(name);
+    if (it != globals_.end()) {
+        it->second = value;
+        return;
+    }
+    if (globalObject_) {
+        setProperty(Value::object(globalObject_), name, value);
+        return;
+    }
+    globals_[name] = value;
+}
+
 Value VM::makeError(const std::string& type, const std::string& message) {
     auto* error = new Error(message, type);
     Object* prototype = nullptr;
@@ -514,17 +553,39 @@ void VM::dispatch(Opcode op) {
         }
 
         case Opcode::OP_GET_GLOBAL: {
-            push(getGlobal(constantString(readShort())));
+            const std::string& name = constantString(readShort());
+            Value value;
+            if (!lookupGlobal(name, value)) {
+                throw ThrownException(makeError("ReferenceError", name + " is not defined"));
+            }
+            push(value);
+            break;
+        }
+
+        case Opcode::OP_GET_GLOBAL_TYPEOF: {
+            // typeof x: an undeclared name is undefined, not an error
+            Value value;
+            push(lookupGlobal(constantString(readShort()), value) ? value : Value::undefined());
             break;
         }
 
         case Opcode::OP_SET_GLOBAL: {
-            globals_[constantString(readShort())] = peek();
+            assignGlobal(constantString(readShort()), peek());
             break;
         }
 
         case Opcode::OP_DEFINE_GLOBAL: {
-            globals_[constantString(readShort())] = pop();
+            const std::string& name = constantString(readShort());
+            Value value = pop();
+            assignGlobal(name, value);
+            break;
+        }
+
+        case Opcode::OP_DECLARE_GLOBAL: {
+            // A script's hoisted `var x`: undefined until assigned, an existing
+            // global keeps its value
+            const std::string& name = constantString(readShort());
+            if (!hasGlobal(name)) assignGlobal(name, Value::undefined());
             break;
         }
 

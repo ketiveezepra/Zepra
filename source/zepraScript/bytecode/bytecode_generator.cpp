@@ -212,6 +212,10 @@ std::unique_ptr<BytecodeChunk> BytecodeGenerator::compile(const Frontend::Progra
     current_ = &mainState;
 
     const auto& body = program->body();
+    // A script's `var` names exist (as undefined) before any of it runs
+    std::vector<std::string> varNames;
+    for (const auto& stmt : body) collectVarNames(stmt.get(), varNames);
+    for (const auto& name : varNames) emitNameOperand(Opcode::OP_DECLARE_GLOBAL, name);
     hoistFunctionDeclarations(body);
 
     // The value of a final expression statement is the script's result
@@ -1766,6 +1770,17 @@ void BytecodeGenerator::compileUnaryExpression(const Frontend::UnaryExpr* expr) 
             emit(Opcode::OP_TRUE);
         }
         return;
+    }
+
+    // typeof of a name that may not be declared reads it without a ReferenceError
+    if (expr->op() == Frontend::TokenType::Typeof &&
+        expr->argument()->type() == Frontend::NodeType::Identifier) {
+        const std::string& name = static_cast<const Frontend::IdentifierExpr*>(expr->argument())->name();
+        if (name != "undefined" && resolveLocal(name) == -1 && resolveUpvalue(name) == -1) {
+            emitNameOperand(Opcode::OP_GET_GLOBAL_TYPEOF, name);
+            emit(Opcode::OP_TYPEOF);
+            return;
+        }
     }
 
     compileExpression(expr->argument());

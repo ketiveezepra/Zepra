@@ -1514,24 +1514,8 @@ DOMElement* DOMBindings::offsetParentOf(DOMElement* element) {
 void DOMBindings::scrollPage(double x, double y) {
     if (!geometry_) return;
     geometry_->scrollTo(x, y);
-    refreshWindowGlobals();
 }
 
-void DOMBindings::refreshWindowGlobals() {
-    double width = geometry_ ? geometry_->viewportWidth() : kDefaultViewportWidth;
-    double height = geometry_ ? geometry_->viewportHeight() : kDefaultViewportHeight;
-    double sx = geometry_ ? geometry_->scrollX() : 0, sy = geometry_ ? geometry_->scrollY() : 0;
-    const double values[kWindowGlobals] = {width, height, sx, sy, sx, sy};
-    for (size_t i = 0; i < kWindowGlobals; i++) {
-        // A page may replace these with its own (var scrollY = ...): leave those alone
-        Value current = vm_->getGlobal(kWindowGlobalNames[i]);
-        bool ours = !windowGlobalsSet_ || (current.isNumber() && current.asNumber() == windowGlobals_[i]);
-        if (!ours) continue;
-        windowGlobals_[i] = values[i];
-        vm_->setGlobal(kWindowGlobalNames[i], Value::number(values[i]));
-    }
-    windowGlobalsSet_ = true;
-}
 
 void DOMBindings::installGeometry() {
     domRectProto_ = makeInterface("DOMRect", nullptr);
@@ -1674,19 +1658,33 @@ void DOMBindings::installGeometry() {
         return Value::number(roundPx(geometryOf(&e).bounds().height));
     }));
 
-    // Window: viewport size and the page's scroll position
+    // Window: viewport size and the page's scroll position. These are
+    // [Replaceable]: assigning one (or `var scrollY = ...` at script level)
+    // turns it into the page's own plain property.
     Object* w = global_;
+    auto replaceable = [w](const std::string& name) -> BuiltinFn {
+        return [w, name](const Info& info) -> Value {
+            PropertyDescriptor desc;
+            desc.value = info.argumentCount() > 0 ? info.argument(0) : Value::undefined();
+            desc.attributes = PropertyAttribute::Writable | PropertyAttribute::Configurable |
+                              PropertyAttribute::Enumerable;
+            w->defineProperty(name, desc);
+            return Value::undefined();
+        };
+    };
     accessor(w, "innerWidth", [this](const Info&) -> Value {
         return Value::number(geometry_ ? geometry_->viewportWidth() : kDefaultViewportWidth);
-    });
+    }, replaceable("innerWidth"));
     accessor(w, "innerHeight", [this](const Info&) -> Value {
         return Value::number(geometry_ ? geometry_->viewportHeight() : kDefaultViewportHeight);
-    });
+    }, replaceable("innerHeight"));
     for (const char* name : {"scrollX", "pageXOffset"}) {
-        accessor(w, name, [this](const Info&) -> Value { return Value::number(geometry_ ? geometry_->scrollX() : 0); });
+        accessor(w, name, [this](const Info&) -> Value { return Value::number(geometry_ ? geometry_->scrollX() : 0); },
+                 replaceable(name));
     }
     for (const char* name : {"scrollY", "pageYOffset"}) {
-        accessor(w, name, [this](const Info&) -> Value { return Value::number(geometry_ ? geometry_->scrollY() : 0); });
+        accessor(w, name, [this](const Info&) -> Value { return Value::number(geometry_ ? geometry_->scrollY() : 0); },
+                 replaceable(name));
     }
     for (const char* name : {"scrollTo", "scroll", "scrollBy"}) {
         bool relative = std::strcmp(name, "scrollBy") == 0;
@@ -1699,10 +1697,7 @@ void DOMBindings::installGeometry() {
             return Value::undefined();
         };
         method(w, name, 2, scroll);
-        // Bare scrollTo(...) acts on the window (the global object is not the window yet)
-        vm_->setGlobal(name, Value::object(new Function(name, scroll, 2)));
     }
-    refreshWindowGlobals();
 }
 
 // ----------------------------------------------------------------------------
