@@ -50,6 +50,16 @@ struct KeyEventInit {
     bool metaKey = false;
 };
 
+/// The members of a MouseEvent beyond its position
+struct MouseEventInit {
+    int button = 0;                     // which button changed: 0 primary
+    int buttons = 0;                    // buttons held down: 1 primary
+    int detail = 0;                     // click count for mousedown/mouseup/click
+    DOMElement* relatedTarget = nullptr; // mouseover/out/enter/leave: the other element
+    bool bubbles = true;
+    bool cancelable = true;
+};
+
 class DOMBindings {
 public:
     using ErrorReporter = std::function<void(const std::string& message)>;
@@ -96,6 +106,16 @@ public:
     bool fireEvent(DOMNode* target, const std::string& type, bool bubbles, bool cancelable);
     /// Fires a mouse event (clientX/clientY) at a connected element
     bool fireMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY);
+    bool fireMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY,
+                        const MouseEventInit& init);
+    /// True when the element is in this page's document
+    bool isConnected(const DOMElement* element) const;
+    /// The element the primary button went down on (mousedown), until it
+    /// comes up; and the element the pointer is over (mouseover/out)
+    DOMElement* pressedElement() const { return pressed_; }
+    void setPressedElement(DOMElement* element) { pressed_ = element; }
+    DOMElement* pointerElement() const { return pointer_; }
+    void setPointerElement(DOMElement* element) { pointer_ = element; }
     /// A click as the user makes it (and el.click()): a checkbox or radio
     /// toggles before listeners run and back when one cancels; otherwise it
     /// gets input and change, a submit button submits its form, a reset
@@ -147,6 +167,8 @@ private:
 
     Zepra::Runtime::VM* vm_;
     ErrorReporter reportError_;
+    DOMElement* pressed_ = nullptr;
+    DOMElement* pointer_ = nullptr;
     FunctionCompiler compileFunction_;
     DOMDocument* document_ = nullptr;
     CanvasRegistry* canvases_ = nullptr;

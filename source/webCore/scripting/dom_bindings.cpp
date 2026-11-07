@@ -2340,6 +2340,9 @@ void DOMBindings::releaseDetachedNodes() {
     // Hover and focus must not point into what goes away
     InteractionState& state = interactionState();
     for (const auto& root : graveyard_) {
+        for (DOMElement** p : {&pressed_, &pointer_}) {
+            if (*p && root->contains(*p)) *p = nullptr;
+        }
         for (DOMElement** p : {&state.hovered, &state.active, &state.focused}) {
             if (*p && root->contains(*p)) *p = nullptr;
         }
@@ -2365,18 +2368,38 @@ bool DOMBindings::fireEvent(DOMNode* target, const std::string& type, bool bubbl
 }
 
 bool DOMBindings::fireMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY) {
+    MouseEventInit init;
+    init.detail = 1;
+    init.buttons = type == "mousedown" ? 1 : 0;
+    return fireMouseEvent(target, type, clientX, clientY, init);
+}
+
+bool DOMBindings::fireMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY,
+                                 const MouseEventInit& init) {
     if (!target || !isConnectedTo(target, document_)) return true;
     EventObject* e = newEvent(mouseEventProto_, type, Value::undefined());
-    e->bubbles = e->cancelable = e->composed = true;
+    e->bubbles = init.bubbles;
+    e->cancelable = init.cancelable;
+    e->composed = true;
     e->trusted = true;
-    for (const char* k : {"clientX", "pageX", "screenX", "x", "offsetX"}) e->set(k, Value::number(clientX));
-    for (const char* k : {"clientY", "pageY", "screenY", "y", "offsetY"}) e->set(k, Value::number(clientY));
-    e->set("detail", Value::number(1));
-    e->set("button", Value::number(0));
-    e->set("buttons", Value::number(type == "mousedown" ? 1 : 0));
+    // pageX/Y count from the document's origin: the client position plus the page scroll
+    double sx = geometry_ ? geometry_->scrollX() : 0, sy = geometry_ ? geometry_->scrollY() : 0;
+    for (const char* k : {"clientX", "screenX", "x", "offsetX"}) e->set(k, Value::number(clientX));
+    for (const char* k : {"clientY", "screenY", "y", "offsetY"}) e->set(k, Value::number(clientY));
+    e->set("pageX", Value::number(clientX + sx));
+    e->set("pageY", Value::number(clientY + sy));
+    e->set("detail", Value::number(init.detail));
+    e->set("button", Value::number(init.button));
+    e->set("buttons", Value::number(init.buttons));
+    e->set("which", Value::number(init.button + 1));
     for (const char* k : {"altKey", "ctrlKey", "shiftKey", "metaKey"}) e->set(k, Value::boolean(false));
-    e->set("relatedTarget", Value::null());
+    DOMElement* related = init.relatedTarget && isConnectedTo(init.relatedTarget, document_) ? init.relatedTarget : nullptr;
+    e->set("relatedTarget", related ? wrap(related) : Value::null());
     return dispatch(wrap(target).asObject(), e);
+}
+
+bool DOMBindings::isConnected(const DOMElement* element) const {
+    return element && isConnectedTo(element, document_);
 }
 
 bool DOMBindings::click(DOMElement* target, double clientX, double clientY) {
