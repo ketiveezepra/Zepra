@@ -33,6 +33,7 @@ namespace Zepra::Runtime { class Object; class Value; class VM; class FunctionCa
 namespace Zepra::WebCore {
 
 class CanvasRegistry;
+class MutationObservers;
 class CSSComputedStyle;
 class NodeWrapper;
 class EventObject;
@@ -150,6 +151,7 @@ private:
 
     Zepra::Runtime::VM* vm_;
     ErrorReporter reportError_;
+    std::unique_ptr<MutationObservers> mutationObservers_;
     FunctionCompiler compileFunction_;
     DOMDocument* document_ = nullptr;
     CanvasRegistry* canvases_ = nullptr;

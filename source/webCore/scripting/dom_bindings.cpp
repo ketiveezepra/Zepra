@@ -7,6 +7,7 @@
 
 #include "scripting/dom_bindings.hpp"
 #include "scripting/canvas_bindings.hpp"
+#include "scripting/mutation_observer.hpp"
 #include "css/computed_style_values.hpp"
 #include "css/css_engine.hpp"
 #include "css/css_style_declaration.hpp"
@@ -610,6 +611,10 @@ DOMBindings::DOMBindings(VM* vm, ErrorReporter reportError) : vm_(vm), reportErr
     global_ = window;
     // makeInterface put Window and EventTarget on the global object only
     for (const char* name : {"EventTarget", "Window"}) defineHidden(global_, name, vm_->getGlobal(name));
+    mutationObservers_ = std::make_unique<MutationObservers>(vm_, *this, [this](const std::exception& ex) {
+        reportException(ex);
+    });
+    mutationObservers_->install(global_);
 
     installNode();
     installCharacterData();
@@ -632,6 +637,8 @@ DOMBindings::DOMBindings(VM* vm, ErrorReporter reportError) : vm_(vm), reportErr
 }
 
 DOMBindings::~DOMBindings() {
+    // No more records once the page's scripts are gone
+    mutationObservers_.reset();
     // Nodes that outlive the page's script objects must not point at them
     for (NodeWrapper* w : wrappers_) {
         if (w->node) w->node->setBinding(nullptr);
@@ -1842,6 +1849,7 @@ void DOMBindings::installDocumentInterface() {
 void DOMBindings::installDocument(DOMDocument* document) {
     document_ = document;
     if (!document_) return;
+    document_->setMutationSink(mutationObservers_.get());
     Value doc = wrap(document_);
     // A plain property (cookies are not stored yet)
     doc.asObject()->set("cookie", str(""));

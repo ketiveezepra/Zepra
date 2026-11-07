@@ -23,6 +23,29 @@ class DOMElement;
 uint64_t domMutationVersion();
 void noteDomMutation();
 class DOMDocument;
+class DOMNode;
+class DOMElement;
+
+/**
+ * @brief Told about each change to a document's tree (MutationObserver):
+ * set on the document with DOMDocument::setMutationSink. Called after the
+ * change, with the nodes involved still alive (a removed node is still
+ * owned by the caller of removeChild).
+ */
+class DOMMutationSink {
+public:
+    virtual ~DOMMutationSink() = default;
+    /// One child added (added) or removed (removed) or replaced (both), between
+    /// previousSibling and nextSibling
+    virtual void childList(DOMNode* parent, DOMNode* added, DOMNode* removed,
+                           DOMNode* previousSibling, DOMNode* nextSibling) = 0;
+    /// An attribute set or removed; oldValue null when it was absent
+    virtual void attribute(DOMElement* element, const std::string& name, const std::string* oldValue) = 0;
+    /// A text or comment node's data changed
+    virtual void characterData(DOMNode* node, const std::string& oldValue) = 0;
+};
+/// Reports a text or comment node's data change to its document's sink
+void noteCharacterDataChange(DOMNode* node, const std::string& oldValue);
 class RenderNode;
 
 /// Whether an element matches a CSS selector list, as the style cascade matches it
@@ -126,11 +149,16 @@ public:
     
     std::string nodeName() const override { return "#text"; }
     std::string nodeValue() const override { return data_; }
-    void setNodeValue(const std::string& value) override { data_ = value; noteDomMutation(); }
+    void setNodeValue(const std::string& value) override { setData(value); }
     
     const std::string& data() const { return data_; }
-    void setData(const std::string& data) { data_ = data; noteDomMutation(); }
-    void appendData(const std::string& extra) { data_ += extra; noteDomMutation(); }
+    void setData(const std::string& data) {
+        std::string old = std::move(data_);
+        data_ = data;
+        noteDomMutation();
+        noteCharacterDataChange(this, old);
+    }
+    void appendData(const std::string& extra) { setData(data_ + extra); }
     size_t length() const { return data_.length(); }
     
     std::unique_ptr<DOMNode> cloneNode(bool deep) const override;
@@ -148,7 +176,12 @@ public:
     
     std::string nodeName() const override { return "#comment"; }
     std::string nodeValue() const override { return data_; }
-    void setNodeValue(const std::string& value) override { data_ = value; noteDomMutation(); }
+    void setNodeValue(const std::string& value) override {
+        std::string old = std::move(data_);
+        data_ = value;
+        noteDomMutation();
+        noteCharacterDataChange(this, old);
+    }
     const std::string& data() const { return data_; }
     
     std::unique_ptr<DOMNode> cloneNode(bool deep) const override;
@@ -290,6 +323,16 @@ public:
     
     // Cloning
     std::unique_ptr<DOMNode> cloneNode(bool deep) const override;
+
+    ~DOMDocument() override;
+
+    /// Who hears about changes to this document's nodes (null: nobody).
+    /// Looked up by the document's address, so a node that outlives its
+    /// document never reads the freed document.
+    void setMutationSink(DOMMutationSink* sink);
+    DOMMutationSink* mutationSink() const;
+    /// Detaches a sink from every document it was set on
+    static void removeMutationSink(DOMMutationSink* sink);
     
 private:
     DOMElement* documentElement_ = nullptr;

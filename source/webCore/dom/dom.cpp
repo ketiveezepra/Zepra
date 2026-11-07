@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <functional>
+#include <unordered_map>
 
 namespace Zepra::WebCore {
 
@@ -112,6 +113,42 @@ static uint64_t s_domMutationVersion = 0;
 uint64_t domMutationVersion() { return s_domMutationVersion; }
 void noteDomMutation() { ++s_domMutationVersion; }
 
+namespace {
+// Documents with a mutation sink, by address: a node's ownerDocument pointer
+// is only compared, never followed (the document may be gone)
+std::unordered_map<const DOMDocument*, DOMMutationSink*>& mutationSinks() {
+    static std::unordered_map<const DOMDocument*, DOMMutationSink*> sinks;
+    return sinks;
+}
+
+DOMMutationSink* sinkOf(const DOMNode* node) {
+    auto& sinks = mutationSinks();
+    if (!node || sinks.empty()) return nullptr;
+    const DOMDocument* doc = node->nodeType() == NodeType::Document ? static_cast<const DOMDocument*>(node)
+                                                                     : node->ownerDocument();
+    auto it = sinks.find(doc);
+    return it != sinks.end() ? it->second : nullptr;
+}
+}  // namespace
+
+void DOMDocument::setMutationSink(DOMMutationSink* sink) {
+    if (sink) mutationSinks()[this] = sink;
+    else mutationSinks().erase(this);
+}
+
+DOMMutationSink* DOMDocument::mutationSink() const { return sinkOf(this); }
+
+void DOMDocument::removeMutationSink(DOMMutationSink* sink) {
+    auto& sinks = mutationSinks();
+    for (auto it = sinks.begin(); it != sinks.end();) {
+        it = it->second == sink ? sinks.erase(it) : std::next(it);
+    }
+}
+
+void noteCharacterDataChange(DOMNode* node, const std::string& oldValue) {
+    if (DOMMutationSink* sink = sinkOf(node)) sink->characterData(node, oldValue);
+}
+
 DOMNode* DOMNode::appendChild(std::unique_ptr<DOMNode> child) {
     if (!child) return nullptr;
     noteDomMutation();
@@ -119,7 +156,9 @@ DOMNode* DOMNode::appendChild(std::unique_ptr<DOMNode> child) {
     child->parent_ = this;
     adopt(child.get());
     DOMNode* ptr = child.get();
+    DOMNode* previous = children_.empty() ? nullptr : children_.back().get();
     children_.push_back(std::move(child));
+    if (DOMMutationSink* sink = sinkOf(this)) sink->childList(this, ptr, nullptr, previous, nullptr);
     return ptr;
 }
 
@@ -131,27 +170,36 @@ DOMNode* DOMNode::insertBefore(std::unique_ptr<DOMNode> child, DOMNode* refChild
     adopt(child.get());
     DOMNode* ptr = child.get();
     
-    if (!refChild) {
-        children_.push_back(std::move(child));
-    } else {
-        for (auto it = children_.begin(); it != children_.end(); ++it) {
-            if (it->get() == refChild) {
-                children_.insert(it, std::move(child));
-                return ptr;
-            }
+    DOMNode* previous = nullptr;
+    DOMNode* next = nullptr;
+    auto at = children_.end();
+    for (auto it = children_.begin(); refChild && it != children_.end(); ++it) {
+        if (it->get() == refChild) {
+            at = it;
+            break;
         }
-        children_.push_back(std::move(child));
     }
+    if (at != children_.end()) {
+        next = at->get();
+        if (at != children_.begin()) previous = std::prev(at)->get();
+    } else if (!children_.empty()) {
+        previous = children_.back().get();
+    }
+    children_.insert(at, std::move(child));
+    if (DOMMutationSink* sink = sinkOf(this)) sink->childList(this, ptr, nullptr, previous, next);
     return ptr;
 }
 
 std::unique_ptr<DOMNode> DOMNode::removeChild(DOMNode* child) {
     for (auto it = children_.begin(); it != children_.end(); ++it) {
         if (it->get() == child) {
+            DOMNode* previous = it == children_.begin() ? nullptr : std::prev(it)->get();
+            DOMNode* next = std::next(it) == children_.end() ? nullptr : std::next(it)->get();
             std::unique_ptr<DOMNode> removed = std::move(*it);
             children_.erase(it);
             noteDomMutation();
             removed->parent_ = nullptr;
+            if (DOMMutationSink* sink = sinkOf(this)) sink->childList(this, nullptr, removed.get(), previous, next);
             return removed;
         }
     }
@@ -167,8 +215,14 @@ DOMNode* DOMNode::replaceChild(std::unique_ptr<DOMNode> newChild, DOMNode* oldCh
             adopt(newChild.get());
             oldChild->parent_ = nullptr;
             DOMNode* ptr = newChild.get();
+            DOMNode* previous = it == children_.begin() ? nullptr : std::prev(it)->get();
+            DOMNode* next = std::next(it) == children_.end() ? nullptr : std::next(it)->get();
+            std::unique_ptr<DOMNode> old = std::move(*it);
             *it = std::move(newChild);
             noteDomMutation();
+            // The replaced node is destroyed on return, so it is not handed
+            // to the sink (nothing in the bindings calls replaceChild)
+            if (DOMMutationSink* sink = sinkOf(this)) sink->childList(this, ptr, nullptr, previous, next);
             return ptr;
         }
     }
@@ -237,12 +291,27 @@ std::string DOMElement::getAttribute(const std::string& name) const {
 }
 
 void DOMElement::setAttribute(const std::string& name, const std::string& value) {
+    DOMMutationSink* sink = sinkOf(this);
+    if (!sink) {
+        attributes_[name] = value;
+        noteDomMutation();
+        return;
+    }
+    auto it = attributes_.find(name);
+    bool had = it != attributes_.end();
+    std::string old = had ? it->second : std::string();
     attributes_[name] = value;
     noteDomMutation();
+    sink->attribute(this, name, had ? &old : nullptr);
 }
 
 void DOMElement::removeAttribute(const std::string& name) {
-    if (attributes_.erase(name)) noteDomMutation();
+    auto it = attributes_.find(name);
+    if (it == attributes_.end()) return;
+    std::string old = std::move(it->second);
+    attributes_.erase(it);
+    noteDomMutation();
+    if (DOMMutationSink* sink = sinkOf(this)) sink->attribute(this, name, &old);
 }
 
 bool DOMElement::hasAttribute(const std::string& name) const {
@@ -442,6 +511,10 @@ std::unique_ptr<DOMNode> DOMElement::cloneNode(bool deep) const {
 
 DOMDocument::DOMDocument() : DOMNode(NodeType::Document) {
     document_ = this;
+}
+
+DOMDocument::~DOMDocument() {
+    mutationSinks().erase(this);
 }
 
 DOMElement* DOMDocument::body() const {
