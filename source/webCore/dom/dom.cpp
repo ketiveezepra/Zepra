@@ -515,6 +515,16 @@ DOMDocument::DOMDocument() : DOMNode(NodeType::Document) {
 
 DOMDocument::~DOMDocument() {
     mutationSinks().erase(this);
+    // Hover, focus and forced states are kept by address, across documents: a
+    // later document's element at the same address must not inherit them
+    InteractionState& state = interactionState();
+    for (DOMElement** p : {&state.hovered, &state.active, &state.focused}) {
+        if (*p && contains(*p)) *p = nullptr;
+    }
+    auto& forced = state.forced;
+    forced.erase(std::remove_if(forced.begin(), forced.end(),
+                                [&](const InteractionState::ForcedEntry& e) { return e.element && contains(e.element); }),
+                 forced.end());
 }
 
 DOMElement* DOMDocument::body() const {

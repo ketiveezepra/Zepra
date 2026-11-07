@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "browser/dom.hpp"
+#include "css/css_engine.hpp"
 #include "dom/form_controls.hpp"
 #include "html/html_parser.hpp"
 #include "scripting/dom_bindings.hpp"
@@ -306,6 +307,19 @@ TEST(Keys, MaxlengthReadonlyAndListenersThatRewriteTheValue) {
     typeKey(page, 'h');
     typeKey(page, 'i');
     EXPECT_EQ(formControlValue(page.byId("c")), "HI");
+}
+
+TEST(Keys, FocusDoesNotOutliveItsDocument) {
+    {
+        Page page(kForm);
+        page.script->focusElement(page.byId("q"));
+        ASSERT_EQ(page.script->focusedElement(), page.byId("q"));
+    }
+    // A later page's element allocated at the same address must not start out
+    // focused (seen on Windows, where the allocator reuses the address)
+    EXPECT_EQ(interactionState().focused, nullptr);
+    EXPECT_EQ(interactionState().hovered, nullptr);
+    EXPECT_EQ(interactionState().active, nullptr);
 }
 
 TEST(Keys, WithoutFocusKeysGoToTheBody) {
