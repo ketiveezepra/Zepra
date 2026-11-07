@@ -163,6 +163,10 @@ struct LayoutBox {
     
     // Overflow clipping
     bool overflowHidden = false;
+    /// overflow-x / overflow-y of an element's box (kOverflow*). A box whose
+    /// overflow is not visible clips its content to its padding box, and
+    /// is a scroll container unless it is `clip` (see isScrollContainer).
+    int overflowX = 0, overflowY = 0;
     
     // CSS Positioning: 0=static, 1=relative, 2=absolute, 3=fixed, 4=sticky
     int positionType = 0;
@@ -264,6 +268,75 @@ struct LayoutBox {
     float totalWidth() const { return width + marginLeft + marginRight; }
     float totalHeight() const { return height + marginTop + marginBottom; }
 };
+
+// =============================================================================
+// OVERFLOW AND SCROLL CONTAINERS
+// =============================================================================
+
+enum : int { kOverflowVisible = 0, kOverflowHidden = 1, kOverflowScroll = 2, kOverflowAuto = 3, kOverflowClip = 4 };
+
+/// Whether the box clips its content to its padding box: an element's block
+/// box whose overflow is not visible (text runs and inline boxes never clip)
+bool clipsContent(const LayoutBox& box);
+
+/// Whether the box is a scroll container (CSS Overflow 3, 2): it clips and
+/// is not `overflow: clip`. Scripts can scroll every one; the user only
+/// those that show a scrolling mechanism (scroll or auto) in that axis.
+bool isScrollContainer(const LayoutBox& box);
+bool userScrollableX(const LayoutBox& box);
+bool userScrollableY(const LayoutBox& box);
+
+struct ScrollOffset {
+    float x = 0, y = 0;
+};
+
+/**
+ * @brief How far each scroll container is scrolled, by element. The box tree
+ * is rebuilt on every relayout, so the positions live here, not in the
+ * boxes; readers clamp them to the box's current range.
+ */
+class ElementScrollOffsets {
+public:
+    ScrollOffset get(const Zepra::WebCore::DOMElement* element) const;
+    void set(const Zepra::WebCore::DOMElement* element, ScrollOffset offset);
+    void clear() { offsets_.clear(); }
+    bool empty() const { return offsets_.empty(); }
+    /// Forgets elements that are no longer scroll containers in `root`'s
+    /// tree (removed, or restyled), so a freed element's address is not
+    /// reused with an old position
+    void prune(const LayoutBox& root);
+
+private:
+    std::vector<std::pair<const Zepra::WebCore::DOMElement*, ScrollOffset>> offsets_;
+};
+
+/// The page's scroll containers (the one set paintBox and the geometry read)
+ElementScrollOffsets& elementScrollOffsets();
+
+/// The scrollable overflow of a box, from its padding-box origin: the
+/// padding box, grown to the furthest border box of its content plus the end
+/// padding (what scrollWidth/scrollHeight report). Content of a nested
+/// clipping box counts with that box's size only.
+void scrollableSize(const LayoutBox& box, float& width, float& height);
+
+/// The furthest a scroll container can scroll (0 when its content fits)
+ScrollOffset maxScrollOffset(const LayoutBox& box);
+
+/// The box's scroll position, clamped to its range; {0, 0} for a box that
+/// is not a scroll container
+ScrollOffset scrollOffsetOf(const LayoutBox& box);
+
+/// Scrolls a scroll container to (x, y), clamped to its range (positions
+/// that are not finite are 0). Returns false for another box.
+bool scrollContainerTo(const LayoutBox& box, float x, float y);
+
+/**
+ * @brief The innermost scroll container under the point (screen
+ * coordinates, as paintBox last placed the boxes) that the user can scroll
+ * by (dx, dy): one that scrolls in that direction and is not already at the
+ * end of its range. Null when the page itself should scroll.
+ */
+const LayoutBox* userScrollContainerAt(const LayoutBox& root, float x, float y, float dx, float dy);
 
 // =============================================================================
 // LAYOUT FUNCTIONS

@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Scroll containers, borders and pseudo-element styles</title>
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 16px; background-color: #fafafa; color: #222222; }
+  .row { display: flex; align-items: flex-start; }
+  #list { width: 220px; height: 120px; overflow-y: auto; border: 4px solid #3b6fd8; padding: 6px; background-color: #ffffff; }
+  #list p { margin: 0; height: 28px; border-bottom: 1px solid #dddddd; }
+  #nested { height: 50px; overflow: scroll; border: 2px solid #d8873b; }
+  #nested div { height: 140px; background-color: #fdf1e4; }
+  #clipped { width: 160px; height: 60px; overflow: hidden; border: 4px solid #2f9e57; margin-left: 24px; }
+  #clipped div { height: 200px; background-color: #e6f6ec; }
+  #floats { overflow: hidden; border: 4px solid #8a3bd8; margin-left: 24px; width: 120px; }
+  #floats div { float: left; width: 50px; height: 40px; background-color: #efe4fd; }
+  #frame { width: 100px; height: 40px; border: 10px solid #b00020; margin: 16px 0 0 0; }
+  #touch { width: 100px; height: 8px; background-color: #222222; }
+  #tip::before { content: '\2192  '; color: rgb(200, 0, 0); }
+  #tip::after { content: "end"; display: block; }
+  table { border-collapse: collapse; margin-top: 12px; }
+  td, th { border: 1px solid #bbb; padding: 2px 8px; font-size: 13px; }
+  .pass { color: #186b2e; font-weight: bold; }
+  .fail { color: #b00020; font-weight: bold; }
+</style>
+</head>
+<body>
+  <p id="status">scripts did not run</p>
+  <div class="row">
+    <div id="list">
+      <p>row 1</p><p>row 2</p><p>row 3</p><p id="row4">row 4</p><p>row 5</p>
+      <div id="nested"><div><a href="#x" id="deep">deep link</a></div></div>
+      <p id="lastrow">last row</p>
+    </div>
+    <div id="clipped"><div>overflow: hidden (scripts scroll it, the wheel does not)</div></div>
+    <div id="floats"><div>f1</div><div>f2</div><div>f3</div></div>
+  </div>
+  <!-- The 10px red frame must touch the black bar below with no gap and no overlap -->
+  <div id="frame"></div><div id="touch"></div>
+  <span id="tip">tip</span>
+  <table id="results"><tr><th>expression</th><th>value</th><th>expected</th><th></th></tr></table>
+  <script>
+    var results = document.getElementById("results");
+    var passed = 0, failed = 0;
+    function row(label, value, expected) {
+      var tr = document.createElement("tr");
+      var ok = String(value) === String(expected);
+      [label, String(value), String(expected), ok ? "PASS" : "FAIL"].forEach(function (t, i) {
+        var td = document.createElement("td");
+        td.textContent = t;
+        if (i === 3) td.className = ok ? "pass" : "fail";
+        tr.appendChild(td);
+      });
+      results.appendChild(tr);
+      if (ok) passed++; else failed++;
+    }
+    var list = document.getElementById("list");
+    var clipped = document.getElementById("clipped");
+    var row4 = document.getElementById("row4");
+
+    var before = row4.getBoundingClientRect().top;
+    row("list.scrollTop (start)", list.scrollTop, 0);
+    row("list.scrollHeight > list.clientHeight", list.scrollHeight > list.clientHeight, true);
+    list.scrollTop = 40;
+    row("list.scrollTop = 40", list.scrollTop, 40);
+    row("row 4 moved up by 40", before - row4.getBoundingClientRect().top, 40);
+    list.scrollTop = 100000;
+    row("list.scrollTop clamps to scrollHeight - clientHeight", list.scrollTop, list.scrollHeight - list.clientHeight);
+    list.scrollTo(0, 10);
+    list.scrollBy(0, 15);
+    row("scrollTo(0, 10) then scrollBy(0, 15)", list.scrollTop, 25);
+    clipped.scrollTop = 30;
+    row("overflow: hidden scrolls from scripts", clipped.scrollTop, 30);
+    row("overflow: visible stays at 0", (function () { var t = document.getElementById("touch"); t.scrollTop = 9; return t.scrollTop; })(), 0);
+    row("floats inside overflow: hidden are contained", document.getElementById("floats").clientHeight, 40);
+    document.getElementById("lastrow").scrollIntoView({block: "nearest"});
+    // The row's bottom comes to the scrollport's bottom; #list's 6px end padding stays below
+    row("scrollIntoView({block: 'nearest'}) on the last row", list.scrollTop, list.scrollHeight - list.clientHeight - 6);
+    row("window did not scroll", window.scrollY, 0);
+    list.scrollTop = 0;
+
+    var tip = document.getElementById("tip");
+    row("getComputedStyle(tip, '::before').content", getComputedStyle(tip, "::before").content, '"→ "');
+    row("getComputedStyle(tip, '::before').color", getComputedStyle(tip, "::before").color, "rgb(200, 0, 0)");
+    row("getComputedStyle(tip, '::after').display", getComputedStyle(tip, "::after").display, "block");
+    row("getComputedStyle(tip, ':after').content", getComputedStyle(tip, ":after").content, '"end"');
+    row("getComputedStyle(tip).content", getComputedStyle(tip).content, "");
+    row("getComputedStyle(row4, '::before').content", getComputedStyle(row4, "::before").content, "none");
+
+    document.getElementById("status").textContent = passed + " of " + (passed + failed) + " checks pass";
+  </script>
+</body>
+</html>

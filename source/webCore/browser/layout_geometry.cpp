@@ -25,43 +25,29 @@ float documentHeight(const PageLayout& page) {
     return std::max(page.viewportHeight, height);
 }
 
-namespace {
-
-// Bottom-right corner of the furthest border box below `box`, relative to
-// the root box's origin (box itself at x, y)
-void contentExtent(const LayoutBox& box, float x, float y, float& right, float& bottom) {
-    for (const LayoutBox& child : box.children) {
-        if (child.type == LayoutType::None) continue;
-        float cx = x + child.x, cy = y + child.y;
-        right = std::max(right, cx + child.width);
-        bottom = std::max(bottom, cy + child.height);
-        contentExtent(child, cx, cy, right, bottom);
-    }
-}
-
-}  // namespace
-
 void LayoutGeometryIndex::build(const PageLayout& page) {
     boxes_.clear();
+    containers_.clear();
     if (!page.root) return;
     // layoutBlock puts the root at its margin (body's), and paintBox draws it there
     const float rootX = page.root->x, rootY = page.root->y;
-    if (page.body) boxes_[page.body].push_back({page.root, rootX, rootY});
+    if (page.body) boxes_[page.body].push_back({page.root, rootX, rootY, -1});
     // Iterative walk: pages nest deeper than the stack likes
     struct Item {
         const LayoutBox* box;
         float x, y;
         const DOMElement* parentOwner;
+        int container;  // innermost scroll container around the box
     };
     std::vector<Item> stack;
     const DOMElement* rootOwner = page.body ? page.body : page.root->domElement;
     // Children pushed in reverse so the walk keeps tree order
-    auto pushChildren = [&](const LayoutBox& box, float x, float y, const DOMElement* owner) {
+    auto pushChildren = [&](const LayoutBox& box, float x, float y, const DOMElement* owner, int container) {
         for (auto it = box.children.rbegin(); it != box.children.rend(); ++it) {
-            stack.push_back({&*it, x + it->x, y + it->y, owner});
+            stack.push_back({&*it, x + it->x, y + it->y, owner, container});
         }
     };
-    pushChildren(*page.root, rootX, rootY, rootOwner);
+    pushChildren(*page.root, rootX, rootY, rootOwner, -1);
     while (!stack.empty()) {
         Item item = stack.back();
         stack.pop_back();
@@ -69,10 +55,35 @@ void LayoutGeometryIndex::build(const PageLayout& page) {
         if (box.type == LayoutType::None) continue;
         const DOMElement* owner = box.domElement;
         if (owner && !box.anonymous && owner != item.parentOwner) {
-            boxes_[owner].push_back({item.box, item.x, item.y});
+            boxes_[owner].push_back({item.box, item.x, item.y, item.container});
         }
-        pushChildren(box, item.x, item.y, owner);
+        int inner = item.container;
+        if (isScrollContainer(box)) {
+            containers_.push_back({item.box, item.container});
+            inner = (int)containers_.size() - 1;
+        }
+        pushChildren(box, item.x, item.y, owner, inner);
     }
+}
+
+ScrollOffset LayoutGeometryIndex::scrollAround(int container) const {
+    ScrollOffset sum;
+    for (int c = container; c >= 0; c = containers_[c].parent) {
+        ScrollOffset o = scrollOffsetOf(*containers_[c].box);
+        sum.x += o.x;
+        sum.y += o.y;
+    }
+    return sum;
+}
+
+const LayoutBox* LayoutGeometryIndex::principalBox(const DOMElement* element) const {
+    auto found = boxes_.find(element);
+    return found == boxes_.end() || found->second.empty() ? nullptr : found->second.front().box;
+}
+
+ScrollOffset LayoutGeometryIndex::ancestorScroll(const DOMElement* element) const {
+    auto found = boxes_.find(element);
+    return found == boxes_.end() || found->second.empty() ? ScrollOffset{} : scrollAround(found->second.front().container);
 }
 
 ElementGeometry LayoutGeometryIndex::geometryOf(const PageLayout& page, const DOMElement* element,
@@ -93,7 +104,8 @@ ElementGeometry LayoutGeometryIndex::geometryOf(const PageLayout& page, const DO
     const float left = page.originX - page.scrollX, top = page.originY - page.scrollY;
     g.hasBox = true;
     for (const Placed& p : found->second) {
-        g.rects.push_back({left + p.x, top + p.y, p.box->width, p.box->height});
+        ScrollOffset s = scrollAround(p.container);
+        g.rects.push_back({left + p.x - s.x, top + p.y - s.y, p.box->width, p.box->height});
     }
     const Placed& first = found->second.front();
     const LayoutBox& box = *first.box;
@@ -103,17 +115,20 @@ ElementGeometry LayoutGeometryIndex::geometryOf(const PageLayout& page, const DO
     g.borderRight = box.borderRight;
     g.borderBottom = box.borderBottom;
     g.borderLeft = box.borderLeft;
+    g.scrollContainer = isScrollContainer(box);
+    if (g.scrollContainer) {
+        ScrollOffset at = scrollOffsetOf(box);
+        g.scrollLeft = at.x;
+        g.scrollTop = at.y;
+    }
     if (!withScrollSize) return g;
 
     // Scrollable size: the padding box, grown to reach the furthest
     // descendant plus the end padding
-    float padX = first.x + box.borderLeft, padY = first.y + box.borderTop;
-    float padW = std::max(0.0f, box.width - box.borderLeft - box.borderRight);
-    float padH = std::max(0.0f, box.height - box.borderTop - box.borderBottom);
-    float right = padX, bottom = padY;
-    contentExtent(box, first.x, first.y, right, bottom);
-    g.scrollWidth = std::max(padW, right - padX + (right > padX ? box.paddingRight : 0));
-    g.scrollHeight = std::max(padH, bottom - padY + (bottom > padY ? box.paddingBottom : 0));
+    float w = 0, h = 0;
+    scrollableSize(box, w, h);
+    g.scrollWidth = w;
+    g.scrollHeight = h;
     return g;
 }
 
@@ -128,8 +143,11 @@ void placeBoxes(const LayoutBox& root, float x, float y, float scrollY) {
         stack.pop_back();
         item.box->screenX = item.x;
         item.box->screenY = item.y;
+        // paintBox draws a scroll container's content moved by its position
+        ScrollOffset s = scrollOffsetOf(*item.box);
         for (const LayoutBox& child : item.box->children) {
-            if (child.type != LayoutType::None) stack.push_back({&child, item.x + child.x, item.y + child.y});
+            if (child.type != LayoutType::None)
+                stack.push_back({&child, item.x + child.x - s.x, item.y + child.y - s.y});
         }
     }
 }

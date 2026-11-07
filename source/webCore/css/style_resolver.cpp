@@ -817,25 +817,24 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     // =====================================================================
     // Overflow & Box
     // =====================================================================
-    else if (property == "overflow") {
-        OverflowValue ov = OverflowValue::Visible;
-        if (value == "hidden") ov = OverflowValue::Hidden;
-        else if (value == "scroll") ov = OverflowValue::Scroll;
-        else if (value == "auto") ov = OverflowValue::Auto;
-        else if (value == "clip") ov = OverflowValue::Clip;
-        style.overflowX = ov; style.overflowY = ov;
-    }
-    else if (property == "overflow-x") {
-        if (value == "hidden") style.overflowX = OverflowValue::Hidden;
-        else if (value == "scroll") style.overflowX = OverflowValue::Scroll;
-        else if (value == "auto") style.overflowX = OverflowValue::Auto;
-        else style.overflowX = OverflowValue::Visible;
-    }
-    else if (property == "overflow-y") {
-        if (value == "hidden") style.overflowY = OverflowValue::Hidden;
-        else if (value == "scroll") style.overflowY = OverflowValue::Scroll;
-        else if (value == "auto") style.overflowY = OverflowValue::Auto;
-        else style.overflowY = OverflowValue::Visible;
+    else if (property == "overflow" || property == "overflow-x" || property == "overflow-y") {
+        auto keyword = [](const std::string& v) {
+            if (v == "hidden") return OverflowValue::Hidden;
+            if (v == "scroll") return OverflowValue::Scroll;
+            if (v == "auto" || v == "overlay") return OverflowValue::Auto;
+            if (v == "clip") return OverflowValue::Clip;
+            return OverflowValue::Visible;
+        };
+        if (property == "overflow-x") style.overflowX = keyword(value);
+        else if (property == "overflow-y") style.overflowY = keyword(value);
+        else {
+            // One value for both axes, or "x y" (CSS Overflow 3, 3.1)
+            std::istringstream in(value);
+            std::string first, second;
+            in >> first >> second;
+            style.overflowX = keyword(first);
+            style.overflowY = second.empty() ? style.overflowX : keyword(second);
+        }
     }
     else if (property == "box-sizing") {
         if (value == "border-box") style.boxSizing = BoxSizing::BorderBox;

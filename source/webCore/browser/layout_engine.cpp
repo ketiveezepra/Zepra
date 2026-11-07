@@ -47,6 +47,178 @@ void setLayoutClipCallbacks(void (*push_clip)(float, float, float, float), void 
     s_pop_clip = pop_clip;
 }
 
+// =============================================================================
+// OVERFLOW AND SCROLL CONTAINERS
+// =============================================================================
+
+namespace {
+
+bool clipsAxis(int overflow) { return overflow != kOverflowVisible; }
+
+// Visible computes to auto when the other axis is neither visible nor clip
+// (CSS Overflow 3, 3.1)
+int usedOverflow(int self, int other) {
+    if (self == kOverflowVisible && other != kOverflowVisible && other != kOverflowClip) return kOverflowAuto;
+    return self;
+}
+
+// The paint clip in force (screen coordinates), for link hit boxes: a link
+// scrolled out of its container must not be clickable where it would be
+struct ClipRect {
+    float x0, y0, x1, y1;
+};
+thread_local std::vector<ClipRect> t_clipStack;
+
+bool insideClip(float& x, float& y, float& w, float& h) {
+    if (t_clipStack.empty()) return true;
+    const ClipRect& c = t_clipStack.back();
+    float x0 = std::max(x, c.x0), y0 = std::max(y, c.y0);
+    float x1 = std::min(x + w, c.x1), y1 = std::min(y + h, c.y1);
+    if (x1 <= x0 || y1 <= y0) return false;
+    x = x0; y = y0; w = x1 - x0; h = y1 - y0;
+    return true;
+}
+
+// Bottom-right corner of the furthest border box in `box`'s content,
+// relative to `box`'s border-box origin. A clipping box counts with its own
+// size: its content is scrolled inside it.
+void contentExtent(const LayoutBox& box, float x, float y, float& right, float& bottom) {
+    for (const LayoutBox& child : box.children) {
+        if (child.type == LayoutType::None) continue;
+        float cx = x + child.x, cy = y + child.y;
+        right = std::max(right, cx + child.width);
+        bottom = std::max(bottom, cy + child.height);
+        if (!clipsContent(child)) contentExtent(child, cx, cy, right, bottom);
+    }
+}
+
+}  // namespace
+
+bool clipsContent(const LayoutBox& box) {
+    if (!box.domElement || box.anonymous) return false;
+    if (box.type == LayoutType::Inline || box.type == LayoutType::Text || box.type == LayoutType::None ||
+        box.type == LayoutType::TableRow || box.type == LayoutType::TableRowGroup) return false;
+    return clipsAxis(box.overflowX) || clipsAxis(box.overflowY);
+}
+
+bool isScrollContainer(const LayoutBox& box) {
+    return clipsContent(box) && !(box.overflowX == kOverflowClip && box.overflowY == kOverflowClip);
+}
+
+bool userScrollableX(const LayoutBox& box) {
+    int o = usedOverflow(box.overflowX, box.overflowY);
+    return isScrollContainer(box) && (o == kOverflowScroll || o == kOverflowAuto);
+}
+
+bool userScrollableY(const LayoutBox& box) {
+    int o = usedOverflow(box.overflowY, box.overflowX);
+    return isScrollContainer(box) && (o == kOverflowScroll || o == kOverflowAuto);
+}
+
+ScrollOffset ElementScrollOffsets::get(const Zepra::WebCore::DOMElement* element) const {
+    for (const auto& [el, offset] : offsets_) {
+        if (el == element) return offset;
+    }
+    return {};
+}
+
+void ElementScrollOffsets::set(const Zepra::WebCore::DOMElement* element, ScrollOffset offset) {
+    for (auto& entry : offsets_) {
+        if (entry.first == element) {
+            entry.second = offset;
+            return;
+        }
+    }
+    if (offset.x != 0 || offset.y != 0) offsets_.push_back({element, offset});
+}
+
+void ElementScrollOffsets::prune(const LayoutBox& root) {
+    if (offsets_.empty()) return;
+    std::vector<const Zepra::WebCore::DOMElement*> live;
+    std::vector<const LayoutBox*> stack{&root};
+    while (!stack.empty()) {
+        const LayoutBox* box = stack.back();
+        stack.pop_back();
+        if (isScrollContainer(*box)) live.push_back(box->domElement);
+        for (const LayoutBox& child : box->children) stack.push_back(&child);
+    }
+    offsets_.erase(std::remove_if(offsets_.begin(), offsets_.end(),
+                                  [&](const auto& entry) {
+                                      return std::find(live.begin(), live.end(), entry.first) == live.end();
+                                  }),
+                   offsets_.end());
+}
+
+ElementScrollOffsets& elementScrollOffsets() {
+    static ElementScrollOffsets offsets;
+    return offsets;
+}
+
+void scrollableSize(const LayoutBox& box, float& width, float& height) {
+    float padX = box.borderLeft, padY = box.borderTop;
+    float padW = std::max(0.0f, box.width - box.borderLeft - box.borderRight);
+    float padH = std::max(0.0f, box.height - box.borderTop - box.borderBottom);
+    float right = padX, bottom = padY;
+    contentExtent(box, 0, 0, right, bottom);
+    width = std::max(padW, right - padX + (right > padX ? box.paddingRight : 0));
+    height = std::max(padH, bottom - padY + (bottom > padY ? box.paddingBottom : 0));
+}
+
+ScrollOffset maxScrollOffset(const LayoutBox& box) {
+    if (!isScrollContainer(box)) return {};
+    float w = 0, h = 0;
+    scrollableSize(box, w, h);
+    float padW = std::max(0.0f, box.width - box.borderLeft - box.borderRight);
+    float padH = std::max(0.0f, box.height - box.borderTop - box.borderBottom);
+    // Only the axes that clip scroll (overflow-x: hidden; overflow-y: visible
+    // still makes y auto, see usedOverflow)
+    ScrollOffset max;
+    if (usedOverflow(box.overflowX, box.overflowY) != kOverflowVisible) max.x = std::max(0.0f, w - padW);
+    if (usedOverflow(box.overflowY, box.overflowX) != kOverflowVisible) max.y = std::max(0.0f, h - padH);
+    return max;
+}
+
+ScrollOffset scrollOffsetOf(const LayoutBox& box) {
+    if (!isScrollContainer(box)) return {};
+    ScrollOffset stored = elementScrollOffsets().get(box.domElement);
+    if (stored.x == 0 && stored.y == 0) return stored;
+    ScrollOffset max = maxScrollOffset(box);
+    return {std::clamp(stored.x, 0.0f, max.x), std::clamp(stored.y, 0.0f, max.y)};
+}
+
+bool scrollContainerTo(const LayoutBox& box, float x, float y) {
+    if (!isScrollContainer(box)) return false;
+    if (!std::isfinite(x)) x = 0;
+    if (!std::isfinite(y)) y = 0;
+    ScrollOffset max = maxScrollOffset(box);
+    elementScrollOffsets().set(box.domElement, {std::clamp(x, 0.0f, max.x), std::clamp(y, 0.0f, max.y)});
+    return true;
+}
+
+const LayoutBox* userScrollContainerAt(const LayoutBox& root, float x, float y, float dx, float dy) {
+    const LayoutBox* found = nullptr;
+    // Depth-first along every box under the point; a deeper match wins, and
+    // the content of a clipping box is only reached through the box itself
+    std::vector<const LayoutBox*> stack{&root};
+    while (!stack.empty()) {
+        const LayoutBox* box = stack.back();
+        stack.pop_back();
+        if (box->type == LayoutType::None) continue;
+        bool inside = x >= box->screenX && x < box->screenX + box->width &&
+                      y >= box->screenY && y < box->screenY + box->height;
+        if (clipsContent(*box) && !inside) continue;
+        if (inside && box != &root && isScrollContainer(*box)) {
+            ScrollOffset at = scrollOffsetOf(*box), max = maxScrollOffset(*box);
+            bool canX = userScrollableX(*box) && ((dx > 0 && at.x < max.x) || (dx < 0 && at.x > 0));
+            bool canY = userScrollableY(*box) && ((dy > 0 && at.y < max.y) || (dy < 0 && at.y > 0));
+            if (canX || canY) found = box;
+        }
+        // Later siblings paint on top: visit them last so they win
+        for (auto it = box->children.rbegin(); it != box->children.rend(); ++it) stack.push_back(&*it);
+    }
+    return found;
+}
+
 std::string cssUrl(const std::string& value) {
     size_t start = value.find("url(");
     if (start == std::string::npos) return "";
@@ -300,6 +472,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     
     // Layout children
     float childY = box.paddingTop + box.borderTop;
+    float floatBottom = 0;  // lowest float margin edge of the block flow below
     float childX = box.paddingLeft + box.borderLeft;
     float lineHeight = 0;
     float lineWidth = 0;
@@ -737,11 +910,13 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 child.y = childY + child.marginTop;
                 floatLeftX += child.width + child.marginLeft + child.marginRight;
                 floatLeftBottom = std::max(floatLeftBottom, child.y + child.height + child.marginBottom);
+                floatBottom = std::max(floatBottom, floatLeftBottom);
             } else { // float:right
                 child.x = childX + floatRightX - child.width - child.marginRight;
                 child.y = childY + child.marginTop;
                 floatRightX -= child.width + child.marginLeft + child.marginRight;
                 floatRightBottom = std::max(floatRightBottom, child.y + child.height + child.marginBottom);
+                floatBottom = std::max(floatBottom, floatRightBottom);
             }
             continue;
         }
@@ -913,6 +1088,9 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     // Calculate height from children (auto height)
     // For auto-height boxes, use children's computed height but never shrink below
     // a pre-resolved min-height (e.g. flex column pre-resolve sets height from min-height)
+    // A box that clips its overflow starts a block formatting context, which
+    // grows to contain its floats (CSS 2.1 §10.6.7)
+    if (clipsContent(box)) childY = std::max(childY, floatBottom);
     float computedHeight = childY + box.paddingBottom + box.borderBottom;
     if (box.cssHeight.isAuto() || !box.cssHeight.isSet()) {
         if (box.height <= 0) {
@@ -1275,6 +1453,8 @@ static void dumpLayoutTree(const LayoutBox& box, int depth = 0) {
     }
 }
 
+static void paintChildren(const LayoutBox& box, float screenX, float screenY, float viewportHeight);
+
 void paintBox(const LayoutBox& box, float offsetX, float offsetY,
               float viewportHeight, float scrollY) {
     // Budget: limit total painted boxes per frame to prevent UI hang on complex pages
@@ -1294,11 +1474,7 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
         float screenY2 = offsetY + box.y - scrollY;
         box.screenX = screenX2;
         box.screenY = screenY2;
-        for (const auto& child : box.children) {
-            paintBox(child, screenX2,
-                     screenY2,
-                     viewportHeight, 0);
-        }
+        paintChildren(box, screenX2, screenY2, viewportHeight);
         return;
     }
     
@@ -1444,15 +1620,56 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
         
         // Register link hit box
         if (box.isLink && !box.href.empty() && s_register_link) {
-            s_register_link(screenX, screenY, box.width, box.height, box.href, box.target);
+            float lx = screenX, ly = screenY, lw = box.width, lh = box.height;
+            if (insideClip(lx, ly, lw, lh)) s_register_link(lx, ly, lw, lh, box.href, box.target);
         }
     }
     
-    // Paint children
+    paintChildren(box, screenX, screenY, viewportHeight);
+}
+
+// A box's children at its screen position. A clipping box (overflow other
+// than visible) keeps them inside its padding box and draws them moved by
+// its scroll position, with a scroll thumb when the user can scroll it.
+static void paintChildren(const LayoutBox& box, float screenX, float screenY, float viewportHeight) {
+    if (box.children.empty()) return;
+    if (!clipsContent(box)) {
+        for (const auto& child : box.children) paintBox(child, screenX, screenY, viewportHeight, 0);
+        return;
+    }
+    const float padX = screenX + box.borderLeft, padY = screenY + box.borderTop;
+    const float padW = std::max(0.0f, box.width - box.borderLeft - box.borderRight);
+    const float padH = std::max(0.0f, box.height - box.borderTop - box.borderBottom);
+    ClipRect clip{padX, padY, padX + padW, padY + padH};
+    if (!t_clipStack.empty()) {
+        const ClipRect& outer = t_clipStack.back();
+        clip = {std::max(clip.x0, outer.x0), std::max(clip.y0, outer.y0),
+                std::min(clip.x1, outer.x1), std::min(clip.y1, outer.y1)};
+    }
+    t_clipStack.push_back(clip);
+    if (s_push_clip) s_push_clip(padX, padY, padW, padH);
+    ScrollOffset offset = scrollOffsetOf(box);
     for (const auto& child : box.children) {
-        paintBox(child, screenX,
-                 screenY,
-                 viewportHeight, 0);
+        paintBox(child, screenX - offset.x, screenY - offset.y, viewportHeight, 0);
+    }
+    if (s_pop_clip) s_pop_clip();
+    t_clipStack.pop_back();
+
+    // Overlay scroll thumbs (no gutter: layout keeps the full padding box)
+    if (!s_gfx_rect) return;
+    ScrollOffset max = maxScrollOffset(box);
+    const float thick = 6, inset = 2, minThumb = 16;
+    if (userScrollableY(box) && max.y > 0.5f && padH > minThumb + 2 * inset) {
+        float track = padH - 2 * inset;
+        float thumb = std::max(minThumb, track * padH / (padH + max.y));
+        float y = padY + inset + (track - thumb) * (offset.y / max.y);
+        s_gfx_rect(padX + padW - thick - inset, y, thick, thumb, 0x9AA0A6);
+    }
+    if (userScrollableX(box) && max.x > 0.5f && padW > minThumb + 2 * inset) {
+        float track = padW - 2 * inset;
+        float thumb = std::max(minThumb, track * padW / (padW + max.x));
+        float x = padX + inset + (track - thumb) * (offset.x / max.x);
+        s_gfx_rect(x, padY + padH - thick - inset, thumb, thick, 0x9AA0A6);
     }
 }
 
