@@ -856,25 +856,8 @@ void ScriptContext::setupWindowGlobals() {
     windowObj->set("history", Value::object(historyObj));
     
     
-    // MutationObserver — React uses this to track DOM mutations
-    auto* mutObsCtor = createNativeFunction("MutationObserver",
-        [](Context*, const std::vector<Value>&) -> Value {
-            auto* obs = new Object();
-            obs->set("observe", Value::object(createNativeFunction("observe",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 2)));
-            obs->set("disconnect", Value::object(createNativeFunction("disconnect",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 0)));
-            obs->set("takeRecords", Value::object(createNativeFunction("takeRecords",
-                [](Context*, const std::vector<Value>&) -> Value {
-                    auto* arr = new Object(ObjectType::Array);
-                    arr->set("length", Value::number(0));
-                    return Value::object(arr);
-                }, 0)));
-            return Value::object(obs);
-        }, 1);
-    vm_->setGlobal("MutationObserver", Value::object(mutObsCtor));
-    windowObj->set("MutationObserver", Value::object(mutObsCtor));
-    
+    // MutationObserver is live (scripting/mutation_observer.cpp, set up by DOMBindings)
+
     // IntersectionObserver — lazy loading, viewport detection
     auto* intObsCtor = createNativeFunction("IntersectionObserver",
         [](Context*, const std::vector<Value>&) -> Value {
