@@ -1463,6 +1463,16 @@ void parseWithWebCore(const std::string& html) {
             }
             return pageCss->getComputedStyle(element);
         });
+    g_scriptContext->setPseudoElementStyleSource(
+        [pageCss, styledVersion = g_layoutDomVersion](DOMElement* element, const std::string& pseudo) mutable
+            -> const CSSComputedStyle* {
+            uint64_t version = Zepra::WebCore::domMutationVersion();
+            if (version != g_layoutDomVersion && version != styledVersion) {
+                pageCss->computeStyles();
+                styledVersion = version;
+            }
+            return pageCss->getPseudoElementStyle(element, pseudo);
+        });
 
     // fetch()/XMLHttpRequest: the request runs on its own thread and is
     // recorded in this tab's Network panel; the script context settles the

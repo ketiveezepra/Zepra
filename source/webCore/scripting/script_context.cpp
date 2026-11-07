@@ -617,6 +617,12 @@ void ScriptContext::setComputedStyleSource(std::function<const CSSComputedStyle*
     if (domBindings_) domBindings_->setComputedStyleSource(computedStyleSource_);
 }
 
+void ScriptContext::setPseudoElementStyleSource(
+    std::function<const CSSComputedStyle*(DOMElement*, const std::string&)> source) {
+    pseudoStyleSource_ = std::move(source);
+    if (domBindings_) domBindings_->setPseudoElementStyleSource(pseudoStyleSource_);
+}
+
 void ScriptContext::setupGlobals() {
     if (vm_) {
         // The window object and the DOM interfaces (EventTarget, Node, Event, ...)
@@ -624,6 +630,7 @@ void ScriptContext::setupGlobals() {
             emitConsole("error", message);
         });
         domBindings_->setComputedStyleSource(computedStyleSource_);
+        domBindings_->setPseudoElementStyleSource(pseudoStyleSource_);
         domBindings_->setSubmitHandler([this](const FormSubmission& submission) {
             if (submitHandler_) submitHandler_(submission);
         });

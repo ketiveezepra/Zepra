@@ -408,20 +408,24 @@ bool isComputedProperty(const std::string& key) {
 
 class ComputedStyleObject final : public Object {
 public:
-    ComputedStyleObject(VM* vm, const DOMBindings* bindings, NodeWrapper* owner, bool pseudoElement, Object* methods)
+    /// `pseudo`: the pseudo-element ("before"), empty for the element, or
+    /// kInvalidPseudo for an argument that names no pseudo-element
+    ComputedStyleObject(VM* vm, const DOMBindings* bindings, NodeWrapper* owner, std::string pseudo, Object* methods)
         : Object(ObjectType::Proxy), vm_(vm), bindings_(bindings), owner_(owner),
-          pseudoElement_(pseudoElement), methods_(methods) {}
+          pseudo_(std::move(pseudo)), methods_(methods) {}
+
+    static constexpr const char* kInvalidPseudo = ":invalid";
 
     using Object::get;
     using Object::set;
     using Object::has;
 
     /// Read again on every access, so the object follows style changes.
-    /// Pseudo-elements have no computed style here: they read as empty.
+    /// An argument that names no pseudo-element reads as empty.
     std::vector<std::pair<std::string, std::string>> values() const {
         DOMElement* el = asElement(owner_->node);
-        if (!el || pseudoElement_) return {};
-        return bindings_->computedValues(el);
+        if (!el || pseudo_ == kInvalidPseudo) return {};
+        return bindings_->computedValues(el, pseudo_);
     }
 
     std::string value(const std::string& property) const {
@@ -470,7 +474,7 @@ private:
     VM* vm_;
     const DOMBindings* bindings_;
     NodeWrapper* owner_;
-    bool pseudoElement_;
+    std::string pseudo_;
     Object* methods_;
 };
 
@@ -2125,9 +2129,25 @@ void DOMBindings::installComputedStyle() {
         if (!w || !asElement(w->node)) {
             throw JSError("TypeError", "Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
         }
-        Value pseudo = info.argument(1);
-        bool pseudoElement = !pseudo.isNullOrUndefined() && !pseudo.toString().empty();
-        auto* style = new ComputedStyleObject(vm_, this, w, pseudoElement, methods);
+        // The second argument (CSSOM 9.1): one not starting with a colon
+        // means the element itself; "::name" (or the legacy ":before",
+        // ":after", ":first-line", ":first-letter") a pseudo-element; any
+        // other value an empty, read-only declaration (as Chrome gives)
+        std::string pseudo;
+        Value pseudoArg = info.argument(1);
+        if (!pseudoArg.isNullOrUndefined()) {
+            std::string text = pseudoArg.toString();
+            if (!text.empty() && text[0] == ':') {
+                bool doubleColon = text.size() > 1 && text[1] == ':';
+                std::string name = text.substr(doubleColon ? 2 : 1);
+                for (char& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                static const std::unordered_set<std::string> kNames = {
+                    "before", "after", "marker", "first-line", "first-letter", "placeholder", "selection"};
+                bool legacy = name == "before" || name == "after" || name == "first-line" || name == "first-letter";
+                pseudo = (kNames.count(name) && (doubleColon || legacy)) ? name : ComputedStyleObject::kInvalidPseudo;
+            }
+        }
+        auto* style = new ComputedStyleObject(vm_, this, w, pseudo, methods);
         style->setPrototype(styleDeclarationProto_);
         return Value::object(style);
     }, 1);
@@ -2135,8 +2155,14 @@ void DOMBindings::installComputedStyle() {
     vm_->setGlobal("getComputedStyle", Value::object(fn));
 }
 
-std::vector<std::pair<std::string, std::string>> DOMBindings::computedValues(DOMElement* element) const {
-    if (!element || !computedStyleSource_ || !isConnectedTo(element, document_)) return {};
+std::vector<std::pair<std::string, std::string>> DOMBindings::computedValues(DOMElement* element,
+                                                                         const std::string& pseudo) const {
+    if (!element || !isConnectedTo(element, document_)) return {};
+    if (!pseudo.empty()) {
+        const CSSComputedStyle* style = pseudoStyleSource_ ? pseudoStyleSource_(element, pseudo) : nullptr;
+        return style ? computedStyleProperties(*style) : std::vector<std::pair<std::string, std::string>>{};
+    }
+    if (!computedStyleSource_) return {};
     const CSSComputedStyle* style = computedStyleSource_(element);
     if (!style) return {};
     return computedStyleProperties(*style);

@@ -256,6 +256,9 @@ public:
      * styles were computed. Without one every computed value is "".
      */
     void setComputedStyleSource(std::function<const CSSComputedStyle*(DOMElement*)> source);
+    /// Where getComputedStyle(element, '::before') reads a pseudo-element's
+    /// style ("before", "after", ...). Without one pseudo-elements read empty.
+    void setPseudoElementStyleSource(std::function<const CSSComputedStyle*(DOMElement*, const std::string&)> source);
     /// The page's layout, for element geometry, the viewport size and
     /// scrolling (see page_geometry.hpp); null: no boxes, no scrolling
     void setPageGeometry(PageGeometry* geometry);
@@ -359,6 +362,7 @@ private:
     Zepra::Runtime::Value makeScriptError(const std::string& type, const std::string& message);
 
     std::function<const CSSComputedStyle*(DOMElement*)> computedStyleSource_;
+    std::function<const CSSComputedStyle*(DOMElement*, const std::string&)> pseudoStyleSource_;
     SubmitHandler submitHandler_;
 
     // Dialog handlers

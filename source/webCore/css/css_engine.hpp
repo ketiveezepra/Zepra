@@ -143,6 +143,20 @@ public:
     /// Invalidate selector index (call when stylesheets change)
     void invalidateIndex() { indexed_ = false; }
 
+    /// Which pseudo-element the matching is for ("before", "after", ...;
+    /// empty = the element itself). With one set, a selector group matches
+    /// only when it ends in that pseudo-element and the rest of the group
+    /// matches the element; without one, groups ending in a pseudo-element
+    /// never match.
+    void setMatchPseudoElement(std::string name) { pseudoElement_ = std::move(name); }
+    const std::string& matchPseudoElement() const { return pseudoElement_; }
+
+    /// Splits a trailing pseudo-element off one selector group:
+    /// "p.note::before" -> "p.note" and "before" (also the legacy one-colon
+    /// :before/:after/:first-line/:first-letter). Returns "" when the group
+    /// does not end in a pseudo-element; `rest` then holds the group as is.
+    static std::string splitPseudoElement(const std::string& group, std::string& rest);
+
 private:
     /// Per-rule entry for the selector index
     struct IndexedRule {
@@ -166,6 +180,7 @@ private:
     void indexSelector(const std::string& selector, size_t ruleIdx);
 
     bool indexed_ = false;
+    std::string pseudoElement_;
     SelectorIndex index_;
     std::vector<IndexedRule> indexedRules_;
 };
@@ -201,6 +216,14 @@ public:
     /// Get computed style (cached)
     const CSSComputedStyle* getComputedStyle(DOMElement* element);
 
+    /// The computed style of one of an element's pseudo-elements ("before",
+    /// "after", "marker", "first-line", "first-letter", "placeholder",
+    /// "selection"), cached like getComputedStyle. It inherits from the
+    /// element and takes the rules whose selectors end in that pseudo-element.
+    /// ::before/::after without a `content` compute it as "none".
+    /// nullptr for a name that is not one of these.
+    const CSSComputedStyle* getPseudoElementStyle(DOMElement* element, const std::string& pseudo);
+
     /// Invalidate cached styles
     void invalidateElement(DOMElement* element);
     void invalidateAll();
@@ -211,6 +234,7 @@ private:
 
     std::vector<StyleSheetEntry> stylesheets_;
     std::unordered_map<DOMElement*, CSSComputedStyle> styleCache_;
+    std::unordered_map<DOMElement*, std::unordered_map<std::string, CSSComputedStyle>> pseudoStyleCache_;
     CSSCascade cascade_;
     SelectorMatcher matcher_;
 
@@ -296,6 +320,11 @@ public:
 
     /// Get computed style for element
     const CSSComputedStyle* getComputedStyle(DOMElement* element);
+
+    /// Computed style of an element's pseudo-element (see StyleResolver)
+    const CSSComputedStyle* getPseudoElementStyle(DOMElement* element, const std::string& pseudo) {
+        return resolver_.getPseudoElementStyle(element, pseudo);
+    }
 
     /// Invalidate styles
     void invalidate(DOMElement* element = nullptr);

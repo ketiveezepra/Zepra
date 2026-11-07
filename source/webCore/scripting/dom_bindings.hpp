@@ -57,6 +57,10 @@ public:
     using FunctionCompiler = std::function<bool(const std::string& source, Zepra::Runtime::Value& out)>;
     /// An element's computed style, current with the DOM; null when it has none
     using ComputedStyleSource = std::function<const CSSComputedStyle*(DOMElement* element)>;
+    /// The computed style of an element's pseudo-element ("before", "after",
+    /// ...), current with the DOM; null when it has none
+    using PseudoElementStyleSource =
+        std::function<const CSSComputedStyle*(DOMElement* element, const std::string& pseudo)>;
 
     /// Makes the window object and the DOM interfaces (Node, Element,
     /// Event, ...), and puts the interfaces on the global object and window
@@ -84,10 +88,16 @@ public:
     /// Where getComputedStyle() reads styles (the browser's CSS engine).
     /// Without one every computed value is "".
     void setComputedStyleSource(ComputedStyleSource source) { computedStyleSource_ = std::move(source); }
+    /// Where getComputedStyle(element, '::before') reads styles. Without one
+    /// pseudo-elements read as an empty declaration.
+    void setPseudoElementStyleSource(PseudoElementStyleSource source) { pseudoStyleSource_ = std::move(source); }
 
-    /// The values getComputedStyle(element) reads, by CSS property name;
-    /// empty for an element outside the document or without a style
-    std::vector<std::pair<std::string, std::string>> computedValues(DOMElement* element) const;
+    /// The values getComputedStyle(element[, pseudo]) reads, by CSS property
+    /// name; empty for an element outside the document or without a style.
+    /// `pseudo` is a pseudo-element name without colons ("before"), empty
+    /// for the element itself.
+    std::vector<std::pair<std::string, std::string>> computedValues(DOMElement* element,
+                                                                    const std::string& pseudo = "") const;
 
     /// The JS object of a node: made on first use, the same one afterwards
     Zepra::Runtime::Value wrap(DOMNode* node);
@@ -154,6 +164,7 @@ private:
     DOMDocument* document_ = nullptr;
     CanvasRegistry* canvases_ = nullptr;
     ComputedStyleSource computedStyleSource_;
+    PseudoElementStyleSource pseudoStyleSource_;
     PageGeometry* geometry_ = nullptr;
     std::string readyState_ = "loading";
     SubmitHandler submitHandler_;
