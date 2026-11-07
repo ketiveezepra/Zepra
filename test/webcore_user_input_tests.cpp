@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "browser/dom.hpp"
+#include "css/css_engine.hpp"
 #include "dom/form_controls.hpp"
 #include "html/html_parser.hpp"
 #include "scripting/dom_bindings.hpp"
@@ -37,6 +38,10 @@ struct Page {
     std::vector<FormSubmission> submissions;
 
     explicit Page(const std::string& html) {
+        // Focus, hover and press are process-wide: a test's freed elements
+        // must not look focused to the next test's document (an allocator
+        // can hand the same address to one of its elements)
+        interactionState() = {};
         HTMLParser parser;
         doc = parser.parse(html);
         script = std::make_unique<ScriptContext>();
@@ -54,6 +59,8 @@ struct Page {
     }
 
     DOMElement* byId(const std::string& id) { return doc->getElementById(id); }
+
+    ~Page() { interactionState() = {}; }
 };
 
 KeyEventInit key(const std::string& k, const std::string& code, int keyCode) {
