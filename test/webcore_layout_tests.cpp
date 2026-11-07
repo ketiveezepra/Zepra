@@ -645,3 +645,114 @@ TEST(BackgroundImage, CoverAndLengthSizes) {
     EXPECT_FLOAT_EQ(sized[0].x, 68);
     EXPECT_FLOAT_EQ(sized[0].y, 84);
 }
+
+// ---------------------------------------------------------------------------
+// Borders paint inside the border box
+// ---------------------------------------------------------------------------
+
+struct Stroke {
+    float x, y, w, h, thickness;
+};
+std::vector<Tile> g_rects;
+std::vector<Stroke> g_strokes;
+
+/// Paints one box at (10, 20) and returns the rectangles drawn (the
+/// background first, when it has one)
+void paintBorderBox(LayoutBox& box) {
+    g_rects.clear();
+    g_strokes.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float x, float y, float w, float h, uint32_t) { g_rects.push_back({x, y, w, h}); },
+        [](float x, float y, float w, float h, uint32_t, float t) { g_strokes.push_back({x, y, w, h, t}); },
+        nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(
+        [](float x, float y, float w, float h, float, uint32_t, uint8_t) { g_rects.push_back({x, y, w, h}); },
+        nullptr);
+    ZepraBrowser::paintBox(box, 10, 20, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(nullptr, nullptr);
+}
+
+/// Whether every rectangle stays inside [x, x+w] x [y, y+h]
+bool allInside(const std::vector<Tile>& rects, float x, float y, float w, float h) {
+    for (const auto& r : rects) {
+        if (r.x < x || r.y < y || r.x + r.w > x + w || r.y + r.h > y + h) return false;
+    }
+    return true;
+}
+
+TEST(Borders, UniformBorderStaysInsideTheBox) {
+    LayoutBox box;
+    box.width = 100;
+    box.height = 50;
+    box.borderTop = box.borderRight = box.borderBottom = box.borderLeft = 4;
+    paintBorderBox(box);
+    EXPECT_TRUE(g_strokes.empty());  // no centered stroke spilling 2px outside
+    ASSERT_EQ(g_rects.size(), 4u);
+    EXPECT_TRUE(allInside(g_rects, 10, 20, 100, 50));
+    // Top and bottom span the width; the sides fill the height between them
+    EXPECT_FLOAT_EQ(g_rects[0].x, 10);
+    EXPECT_FLOAT_EQ(g_rects[0].y, 20);
+    EXPECT_FLOAT_EQ(g_rects[0].w, 100);
+    EXPECT_FLOAT_EQ(g_rects[0].h, 4);
+    EXPECT_FLOAT_EQ(g_rects[1].y, 66);
+    EXPECT_FLOAT_EQ(g_rects[2].x, 10);
+    EXPECT_FLOAT_EQ(g_rects[2].y, 24);
+    EXPECT_FLOAT_EQ(g_rects[2].w, 4);
+    EXPECT_FLOAT_EQ(g_rects[2].h, 42);
+    EXPECT_FLOAT_EQ(g_rects[3].x, 106);
+    // The four pieces cover the border area exactly once: 2 * 100 * 4 + 2 * 42 * 4
+    float area = 0;
+    for (const auto& r : g_rects) area += r.w * r.h;
+    EXPECT_FLOAT_EQ(area, 1136);
+}
+
+TEST(Borders, MixedWidthsAndOneSide) {
+    LayoutBox box;
+    box.width = 80;
+    box.height = 30;
+    box.borderTop = 1;
+    box.borderLeft = 6;
+    paintBorderBox(box);
+    ASSERT_EQ(g_rects.size(), 2u);
+    EXPECT_TRUE(allInside(g_rects, 10, 20, 80, 30));
+    EXPECT_FLOAT_EQ(g_rects[1].w, 6);
+    EXPECT_FLOAT_EQ(g_rects[1].h, 29);
+}
+
+TEST(Borders, BorderWiderThanTheBoxIsClamped) {
+    LayoutBox box;
+    box.width = 6;
+    box.height = 6;
+    box.borderTop = box.borderRight = box.borderBottom = box.borderLeft = 5;
+    paintBorderBox(box);
+    EXPECT_TRUE(allInside(g_rects, 10, 20, 6, 6));
+}
+
+TEST(Borders, RoundedBorderStrokeIsInsetByHalfItsWidth) {
+    LayoutBox box;
+    box.width = 100;
+    box.height = 50;
+    box.borderRadius = 8;
+    box.borderTop = box.borderRight = box.borderBottom = box.borderLeft = 4;
+    paintBorderBox(box);
+    ASSERT_EQ(g_strokes.size(), 1u);
+    const Stroke& s = g_strokes[0];
+    EXPECT_FLOAT_EQ(s.thickness, 4);
+    // The stroke's outer edge is the border box edge
+    EXPECT_FLOAT_EQ(s.x - s.thickness / 2, 10);
+    EXPECT_FLOAT_EQ(s.y - s.thickness / 2, 20);
+    EXPECT_FLOAT_EQ(s.x + s.w + s.thickness / 2, 110);
+    EXPECT_FLOAT_EQ(s.y + s.h + s.thickness / 2, 70);
+}
+
+TEST(Borders, TransparentBorderPaintsNothing) {
+    LayoutBox box;
+    box.width = 40;
+    box.height = 40;
+    box.borderTop = box.borderRight = box.borderBottom = box.borderLeft = 3;
+    box.borderVisible = false;
+    paintBorderBox(box);
+    EXPECT_TRUE(g_rects.empty());
+    EXPECT_TRUE(g_strokes.empty());
+}

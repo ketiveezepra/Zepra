@@ -1343,22 +1343,33 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
     }
     if (box.bgTextureId > 0 || !box.bgSvgData.empty()) paintBackgroundImage(box, screenX, screenY);
     
-    // Draw border
+    // Draw border, inside the border box (CSS Backgrounds 3, 4): each side is
+    // a rectangle of its own width along that edge. Strokes are centered on
+    // their path, so a stroke is only used for rounded boxes, inset by half
+    // its width so it stays inside the box too.
     if ((box.borderTop > 0 || box.borderRight > 0 || box.borderBottom > 0 || box.borderLeft > 0) &&
-        box.borderVisible && s_gfx_border) {
-        bool uniform = box.borderTop == box.borderRight && box.borderTop == box.borderBottom &&
-                       box.borderTop == box.borderLeft;
-        if (uniform || box.borderRadius > 0 || !s_gfx_rect) {
+        box.borderVisible && (s_gfx_rect || s_gfx_border)) {
+        if ((box.borderRadius > 0 || !s_gfx_rect) && s_gfx_border) {
             float thickness = std::max({box.borderTop, box.borderRight, box.borderBottom, box.borderLeft});
-            s_gfx_border(screenX, screenY, box.width, box.height, box.borderColor, thickness);
+            float t = std::min({thickness, box.width / 2.0f, box.height / 2.0f});
+            if (t > 0) {
+                s_gfx_border(screenX + t / 2.0f, screenY + t / 2.0f, box.width - t, box.height - t,
+                             box.borderColor, t);
+            }
         } else {
-            // Only the sides that have a width (border-bottom alone is a rule, not a frame)
-            if (box.borderTop > 0) s_gfx_rect(screenX, screenY, box.width, box.borderTop, box.borderColor);
-            if (box.borderBottom > 0)
-                s_gfx_rect(screenX, screenY + box.height - box.borderBottom, box.width, box.borderBottom, box.borderColor);
-            if (box.borderLeft > 0) s_gfx_rect(screenX, screenY, box.borderLeft, box.height, box.borderColor);
-            if (box.borderRight > 0)
-                s_gfx_rect(screenX + box.width - box.borderRight, screenY, box.borderRight, box.height, box.borderColor);
+            // Top and bottom span the full width; left and right fill the
+            // height between them (only the sides that have a width:
+            // border-bottom alone is a rule, not a frame)
+            float top = std::min(box.borderTop, box.height);
+            float bottom = std::min(box.borderBottom, std::max(0.0f, box.height - top));
+            float middle = box.height - top - bottom;
+            float left = std::min(box.borderLeft, box.width);
+            float right = std::min(box.borderRight, std::max(0.0f, box.width - left));
+            if (top > 0) s_gfx_rect(screenX, screenY, box.width, top, box.borderColor);
+            if (bottom > 0) s_gfx_rect(screenX, screenY + box.height - bottom, box.width, bottom, box.borderColor);
+            if (middle > 0 && left > 0) s_gfx_rect(screenX, screenY + top, left, middle, box.borderColor);
+            if (middle > 0 && right > 0)
+                s_gfx_rect(screenX + box.width - right, screenY + top, right, middle, box.borderColor);
         }
     }
     
@@ -1380,7 +1391,8 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
             s_gfx_texture(screenX, screenY, box.width, box.height, box.textureId);
         } else if (s_gfx_rect && s_gfx_border) {
             s_gfx_rect(screenX, screenY, box.width, box.height, box.bgColor);
-            s_gfx_border(screenX, screenY, box.width, box.height, 0x000000, 1.0f);
+            // A 1px frame just inside the box (the stroke is centered on its path)
+            s_gfx_border(screenX + 0.5f, screenY + 0.5f, box.width - 1.0f, box.height - 1.0f, 0x000000, 1.0f);
         }
     }
 
