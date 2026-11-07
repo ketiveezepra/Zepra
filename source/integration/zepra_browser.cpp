@@ -66,6 +66,7 @@
 #include "scripting/script_context.hpp"
 #include "scripting/canvas_bindings.hpp"
 #include "scripting/dom_bindings.hpp"
+#include "scripting/web_storage.hpp"
 #include "dom/form_controls.hpp"
 #include "page_keys.hpp"
 #include "nxgfx/canvas2d/canvas_context.h"
@@ -1522,7 +1523,7 @@ void parseWithWebCore(const std::string& html) {
     });
     
     // Set location globals from current URL
-    g_scriptContext->setGlobal("__pageUrl__", g_currentUrl);
+    g_scriptContext->setPageUrl(g_currentUrl);
     
     // Execute page scripts (inline + external). The document's text is kept
     // for the DevTools source view (inline scripts point into it).
@@ -4018,6 +4019,8 @@ void render() {
     if (g_layoutRoot && Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
         relayoutDocument();
     }
+    // localStorage changes reach the disk (at most once a second per origin)
+    Zepra::WebCore::flushLocalStorage();
     // A form submitted during the last script task
     if (!g_pendingSubmission.url.empty()) {
         PendingSubmission submission = std::move(g_pendingSubmission);
@@ -5766,6 +5769,12 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
         g_currentUrl = startArg;
     }
 
+    // localStorage is kept per origin under the user's config directory
+    if (std::string config = Zepra::Platform::getUserConfigDirectory(); !config.empty()) {
+        Zepra::WebCore::setLocalStorageDirectory(
+            (std::filesystem::path(config) / "localStorage").string());
+    }
+
     // Create initial tab (CRITICAL: Must be done before entering main loop)
     std::cout << "[Init] Creating initial tab..." << std::flush;
     if (g_tabs.empty()) {
@@ -5810,6 +5819,7 @@ int zepra_main(int argc, char** argv) { // Clean Main - callable from main.cpp
     // Start Main Loop via NXRender
     std::cout << "Entering main loop..." << std::endl;
     NXRender::run();
+    Zepra::WebCore::flushLocalStorage(true);
 
     // Cleanup
     NXRender::shutdown();

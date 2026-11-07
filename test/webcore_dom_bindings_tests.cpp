@@ -3,8 +3,8 @@
 /**
  * webcore_dom_bindings_tests.cpp - Page scripts change the real DOM: live
  * wrappers (one object per node), every mutation reaching the C++ tree,
- * DOM events, the lifetime of nodes scripts remove, and window as the
- * global object.
+ * DOM events, the lifetime of nodes scripts remove, window as the global
+ * object, and localStorage/sessionStorage.
  */
 
 #include <gtest/gtest.h>
@@ -13,6 +13,9 @@
 #include "html/html_parser.hpp"
 #include "scripting/dom_bindings.hpp"
 #include "scripting/script_context.hpp"
+#include "scripting/web_storage.hpp"
+#include <filesystem>
+#include <fstream>
 
 #include <memory>
 #include <string>
@@ -493,4 +496,132 @@ TEST(FetchBindings, WithoutAHandlerFetchRejects) {
     page.script->processTimers();
     ASSERT_EQ(page.console.size(), 1u);
     EXPECT_EQ(page.console[0], "log: no net: Failed to fetch: No network available to scripts");
+}
+
+// ----------------------------------------------------------------------------
+// Web Storage
+// ----------------------------------------------------------------------------
+
+TEST(WebStorage, AreaOrderQuotaAndFileFormat) {
+    StorageArea area(20);
+    EXPECT_TRUE(area.setItem("b", "1"));
+    EXPECT_TRUE(area.setItem("a", "2"));
+    EXPECT_TRUE(area.setItem("b", "3"));   // keeps its place
+    EXPECT_EQ(*area.key(0), "b");
+    EXPECT_EQ(*area.key(1), "a");
+    EXPECT_FALSE(area.key(2).has_value());
+    EXPECT_EQ(area.usedBytes(), 4u);
+    EXPECT_FALSE(area.setItem("big", std::string(17, 'x')));   // 4 + 3 + 17 > 20
+    EXPECT_FALSE(area.getItem("big").has_value());
+    EXPECT_TRUE(area.setItem("b", std::string(16, 'y')));      // replacing frees the old value
+    area.removeItem("b");
+    EXPECT_EQ(area.length(), 1u);
+    EXPECT_EQ(area.usedBytes(), 2u);
+
+    // Any bytes survive a round trip
+    StorageArea odd;
+    std::string weird = std::string("tab\there\nline 12:34 ") + std::string(1, '\0') + "end";
+    odd.setItem(weird, weird + "!");
+    odd.setItem("", "");
+    odd.setItem("\xc3\xa9t\xc3\xa9", "\xf0\x9f\x98\x80");
+    auto back = StorageArea::deserialize(odd.serialize());
+    ASSERT_TRUE(back.has_value());
+    EXPECT_FALSE(back->dirty);
+    EXPECT_EQ(back->length(), 3u);
+    EXPECT_EQ(*back->key(0), weird);
+    EXPECT_EQ(*back->getItem(weird), weird + "!");
+    EXPECT_EQ(*back->getItem(""), "");
+    EXPECT_EQ(*back->getItem("\xc3\xa9t\xc3\xa9"), "\xf0\x9f\x98\x80");
+    // Damaged files are refused, not half read
+    std::string bytes = odd.serialize();
+    EXPECT_FALSE(StorageArea::deserialize(bytes.substr(0, bytes.size() - 2)).has_value());
+    EXPECT_FALSE(StorageArea::deserialize("k\tv\n").has_value());
+}
+
+TEST(WebStorage, Origins) {
+    EXPECT_EQ(storageOriginOf("https://Example.COM/a/b?c#d"), "https://example.com");
+    EXPECT_EQ(storageOriginOf("https://example.com:443/"), "https://example.com");
+    EXPECT_EQ(storageOriginOf("http://example.com:80"), "http://example.com");
+    EXPECT_EQ(storageOriginOf("http://example.com:8080/x"), "http://example.com:8080");
+    EXPECT_EQ(storageOriginOf("https://user:pw@example.com/"), "https://example.com");
+    EXPECT_EQ(storageOriginOf("http://[::1]:8000/"), "http://[::1]:8000");
+    EXPECT_EQ(storageOriginOf("http://[::1]/"), "http://[::1]");
+    EXPECT_EQ(storageOriginOf("file:///home/a/page.html"), "file://");
+    EXPECT_EQ(storageOriginOf("zepra://start"), "zepra://start");
+    EXPECT_EQ(storageOriginOf("about:blank"), "");
+    EXPECT_EQ(storageOriginOf("data:text/html,hi"), "");
+    EXPECT_EQ(storageOriginOf(""), "");
+}
+
+TEST(WebStorage, LocalStorageIsPerOriginAndSessionStorageIsPerPage) {
+    resetLocalStorageForTesting();
+    Page a(kPage), b(kPage), other(kPage);
+    a.script->setPageUrl("https://site.test/one");
+    b.script->setPageUrl("https://site.test:443/two");
+    other.script->setPageUrl("https://other.test/");
+    a.eval("localStorage.setItem('k', 1); localStorage.setItem('obj', {}); sessionStorage.setItem('s', 'a')");
+    EXPECT_EQ(b.eval("localStorage.getItem('k') + '|' + localStorage.getItem('obj') + '|' + localStorage.length"),
+              "1|[object Object]|2");
+    EXPECT_EQ(b.eval("String(sessionStorage.getItem('s'))"), "null");
+    EXPECT_EQ(other.eval("String(localStorage.getItem('k')) + localStorage.length"), "null0");
+    EXPECT_EQ(b.eval("localStorage.key(0) + ',' + localStorage.key(1) + ',' + localStorage.key(2)"), "k,obj,null");
+    b.eval("localStorage.removeItem('k')");
+    EXPECT_EQ(a.eval("localStorage.length + localStorage.key(0)"), "1obj");
+    EXPECT_EQ(a.eval("window.localStorage === localStorage"), "true");
+
+    // Spec errors
+    EXPECT_EQ(a.eval("var r = 'no'; try { localStorage.setItem('x') } catch (e) { r = e.name } r"), "TypeError");
+    EXPECT_EQ(a.eval("r = 'no'; try { localStorage.setItem('big', 'x'.repeat(6 * 1024 * 1024)) }"
+                     " catch (e) { r = e.name + ' ' + e.code + ' ' + (e instanceof Error) } r"),
+              "QuotaExceededError 22 true");
+    EXPECT_EQ(a.eval("String(localStorage.getItem('big'))"), "null");
+    a.eval("localStorage.clear()");
+    EXPECT_EQ(b.eval("localStorage.length"), "0");
+
+    // A page without an origin still has a working storage, its own
+    Page blank(kPage);
+    blank.script->setPageUrl("about:blank");
+    blank.eval("localStorage.setItem('mine', 'y')");
+    EXPECT_EQ(blank.eval("localStorage.getItem('mine')"), "y");
+    EXPECT_EQ(other.eval("String(localStorage.getItem('mine'))"), "null");
+    resetLocalStorageForTesting();
+}
+
+TEST(WebStorage, LocalStorageIsKeptOnDisk) {
+    namespace fs = std::filesystem;
+    fs::path dir = fs::temp_directory_path() / ("zepra-storage-test-" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    fs::remove_all(dir);
+    setLocalStorageDirectory(dir.string());
+    {
+        Page page(kPage);
+        page.script->setPageUrl("http://127.0.0.1:8000/app");
+        page.eval("localStorage.setItem('theme', 'dark'); localStorage.setItem('multi\\nline', 'a\\tb')");
+        flushLocalStorage(true);
+    }
+    EXPECT_TRUE(fs::exists(dir / "http%3A%2F%2F127.0.0.1%3A8000.localstorage"));
+    // A fresh start (another browser run) reads it back
+    resetLocalStorageForTesting();
+    {
+        Page page(kPage);
+        page.script->setPageUrl("http://127.0.0.1:8000/other-page");
+        EXPECT_EQ(page.eval("localStorage.getItem('theme') + '|' + JSON.stringify(localStorage.getItem('multi\\nline'))"),
+                  "dark|\"a\\tb\"");
+        page.eval("localStorage.removeItem('theme')");
+        flushLocalStorage(true);
+    }
+    resetLocalStorageForTesting();
+    {
+        Page page(kPage);
+        page.script->setPageUrl("http://127.0.0.1:8000/");
+        EXPECT_EQ(page.eval("String(localStorage.getItem('theme')) + localStorage.length"), "null1");
+    }
+    // A damaged file starts the origin empty instead of failing
+    { std::ofstream(dir / "https%3A%2F%2Fbroken.test.localstorage") << "garbage"; }
+    {
+        Page page(kPage);
+        page.script->setPageUrl("https://broken.test/");
+        EXPECT_EQ(page.eval("localStorage.length"), "0");
+    }
+    setLocalStorageDirectory("");
+    fs::remove_all(dir);
 }
