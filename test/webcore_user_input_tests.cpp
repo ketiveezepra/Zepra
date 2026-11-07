@@ -198,6 +198,60 @@ TEST(FormData, EncodingAndTheSubmissionUrl) {
     EXPECT_EQ(viaButton.method, "get");
 }
 
+TEST(FormData, PostEncodings) {
+    Page page(R"(<form id="f" action="/a?keep=1" method="post">
+        <input name="who" value="a b">
+        <input name="say" value='x"y'>
+        <input type="file" name="pic">
+        <textarea name="note">l1
+l2</textarea>
+        <button id="mp" formenctype="multipart/form-data">M</button>
+        <button id="tp" formenctype="TEXT/PLAIN">T</button>
+        <button id="g" formmethod="get" formenctype="multipart/form-data">G</button></form>)");
+    DOMElement* form = page.byId("f");
+
+    FormSubmission plain = planFormSubmission(form, nullptr);
+    EXPECT_EQ(plain.enctype, "application/x-www-form-urlencoded");
+    EXPECT_EQ(plain.contentType, "application/x-www-form-urlencoded");
+    EXPECT_EQ(plain.body, "who=a+b&say=x%22y&pic=&note=l1%0D%0Al2");
+
+    FormSubmission text = planFormSubmission(form, page.byId("tp"));
+    EXPECT_EQ(text.enctype, "text/plain");
+    EXPECT_EQ(text.contentType, "text/plain");
+    EXPECT_EQ(text.body, "who=a b\r\nsay=x\"y\r\npic=\r\nnote=l1\r\nl2\r\n");
+
+    FormSubmission multi = planFormSubmission(form, page.byId("mp"));
+    EXPECT_EQ(multi.enctype, "multipart/form-data");
+    const std::string prefix = "multipart/form-data; boundary=";
+    ASSERT_EQ(multi.contentType.rfind(prefix, 0), 0u) << multi.contentType;
+    std::string b = multi.contentType.substr(prefix.size());
+    EXPECT_FALSE(b.empty());
+    EXPECT_EQ(multi.body,
+              "--" + b + "\r\nContent-Disposition: form-data; name=\"who\"\r\n\r\na b\r\n"
+              "--" + b + "\r\nContent-Disposition: form-data; name=\"say\"\r\n\r\nx\"y\r\n"
+              "--" + b + "\r\nContent-Disposition: form-data; name=\"pic\"; filename=\"\"\r\n"
+                         "Content-Type: application/octet-stream\r\n\r\n\r\n"
+              "--" + b + "\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nl1\r\nl2\r\n"
+              "--" + b + "--\r\n");
+
+    // GET ignores the enctype
+    FormSubmission get = planFormSubmission(form, page.byId("g"));
+    EXPECT_EQ(get.method, "get");
+    EXPECT_EQ(get.enctype, "application/x-www-form-urlencoded");
+    EXPECT_EQ(get.body, plain.body);
+
+    // Names are escaped in part headers; the boundary never occurs in the data
+    std::vector<bool> files = {false};
+    EXPECT_EQ(multipartFormData({{"a\"b\r\nc", "v"}}, files, "XX"),
+              "--XX\r\nContent-Disposition: form-data; name=\"a%22b%0D%0Ac\"\r\n\r\nv\r\n--XX--\r\n");
+    page.eval("document.querySelector('[name=who]').value = '" + b + "'");
+    FormSubmission again = planFormSubmission(form, page.byId("mp"));
+    EXPECT_NE(again.contentType, multi.contentType);
+    std::string b2 = again.contentType.substr(prefix.size());
+    EXPECT_NE(again.body.find("\r\n\r\n" + b + "\r\n"), std::string::npos);
+    EXPECT_EQ(b.find(b2), std::string::npos);
+}
+
 // ----------------------------------------------------------------------------
 // Focus
 // ----------------------------------------------------------------------------

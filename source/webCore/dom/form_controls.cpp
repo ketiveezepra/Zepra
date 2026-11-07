@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <functional>
 
 namespace Zepra::WebCore {
@@ -222,8 +223,13 @@ void resetFormControls(const DOMElement* form) {
     for (DOMElement* e : formControls(form)) e->resetControlState();
 }
 
-std::vector<std::pair<std::string, std::string>> formData(const DOMElement* form, const DOMElement* submitter) {
+std::vector<std::pair<std::string, std::string>> formData(const DOMElement* form, const DOMElement* submitter,
+                                                          std::vector<bool>* files) {
     std::vector<std::pair<std::string, std::string>> data;
+    // Marks every pair added so far that has no mark yet
+    auto mark = [&](bool file) {
+        if (files) files->resize(data.size(), file);
+    };
     for (DOMElement* e : formControls(form)) {
         std::string tag = tagOf(e);
         std::string name = e->getAttribute("name");
@@ -240,7 +246,9 @@ std::vector<std::pair<std::string, std::string>> formData(const DOMElement* form
         }
         if (name.empty()) continue;
         if (tag == "input" && inputType(e) == "file") {
+            mark(false);
             data.emplace_back(name, "");
+            mark(true);
             continue;
         }
         if (tag == "select") {
@@ -275,6 +283,7 @@ std::vector<std::pair<std::string, std::string>> formData(const DOMElement* form
         }
         data.emplace_back(name, value);
     }
+    mark(false);
     return data;
 }
 
@@ -303,6 +312,38 @@ std::string urlEncodeFormData(const std::vector<std::pair<std::string, std::stri
     return out;
 }
 
+std::string multipartFormData(const std::vector<std::pair<std::string, std::string>>& data,
+                              const std::vector<bool>& files, const std::string& boundary) {
+    auto escapeName = [](const std::string& s) {
+        std::string out;
+        for (char c : s) {
+            if (c == '"') out += "%22";
+            else if (c == '\r') out += "%0D";
+            else if (c == '\n') out += "%0A";
+            else out += c;
+        }
+        return out;
+    };
+    std::string out;
+    for (size_t i = 0; i < data.size(); i++) {
+        out += "--" + boundary + "\r\n";
+        out += "Content-Disposition: form-data; name=\"" + escapeName(data[i].first) + "\"";
+        if (i < files.size() && files[i]) {
+            out += "; filename=\"\"\r\nContent-Type: application/octet-stream\r\n\r\n\r\n";
+            continue;
+        }
+        out += "\r\n\r\n" + data[i].second + "\r\n";
+    }
+    out += "--" + boundary + "--\r\n";
+    return out;
+}
+
+std::string plainTextFormData(const std::vector<std::pair<std::string, std::string>>& data) {
+    std::string out;
+    for (const auto& [name, value] : data) out += name + "=" + value + "\r\n";
+    return out;
+}
+
 FormSubmission planFormSubmission(const DOMElement* form, const DOMElement* submitter) {
     FormSubmission plan;
     if (!form) return plan;
@@ -314,7 +355,34 @@ FormSubmission planFormSubmission(const DOMElement* form, const DOMElement* subm
     std::string method = lower(pick("formmethod", "method"));
     plan.method = (method == "post" || method == "dialog") ? method : "get";
     plan.target = pick("formtarget", "target");
-    plan.body = urlEncodeFormData(formData(form, submitter));
+    std::string enctype = lower(pick("formenctype", "enctype"));
+    if (plan.method != "post" || (enctype != "multipart/form-data" && enctype != "text/plain")) {
+        enctype = "application/x-www-form-urlencoded";
+    }
+    plan.enctype = enctype;
+    std::vector<bool> files;
+    auto data = formData(form, submitter, &files);
+    if (enctype == "multipart/form-data") {
+        // A boundary that does not occur in the data
+        std::string all;
+        for (const auto& [name, value] : data) all += name + value;
+        uint64_t n = 0x5a657072u ^ (all.size() * 0x9E3779B97F4A7C15ull);
+        std::string boundary;
+        do {
+            static const char kHex[] = "0123456789abcdef";
+            boundary = "----ZepraFormBoundary";
+            for (int i = 0; i < 16; i++) boundary += kHex[(n >> (i * 4)) & 15];
+            n = n * 6364136223846793005ull + 1442695040888963407ull;
+        } while (all.find(boundary) != std::string::npos);
+        plan.body = multipartFormData(data, files, boundary);
+        plan.contentType = "multipart/form-data; boundary=" + boundary;
+    } else if (enctype == "text/plain") {
+        plan.body = plainTextFormData(data);
+        plan.contentType = "text/plain";
+    } else {
+        plan.body = urlEncodeFormData(data);
+        plan.contentType = enctype;
+    }
     return plan;
 }
 

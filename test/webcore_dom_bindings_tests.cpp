@@ -82,6 +82,72 @@ TEST(DomBindings, InterfacesAndInstanceof) {
     EXPECT_EQ(page.eval("Node.ELEMENT_NODE + document.body.TEXT_NODE"), "4");
 }
 
+TEST(MutationObserver, ChildListRecordsArriveInAMicrotask) {
+    Page page(kPage);
+    page.eval("var seen = []; var root = document.getElementById('root');"
+              "var mo = new MutationObserver(function (records, observer) {"
+              "  seen.push(records.length + ':' + (observer === mo) + ':' + (this === mo));"
+              "  records.forEach(function (r) {"
+              "    seen.push(r.type + ' +' + r.addedNodes.length + ' -' + r.removedNodes.length +"
+              "              ' prev=' + (r.previousSibling && r.previousSibling.id) +"
+              "              ' next=' + (r.nextSibling && r.nextSibling.id) + ' ' + (r instanceof MutationRecord));"
+              "  });"
+              "});"
+              "mo.observe(root, { childList: true });"
+              "var p = document.createElement('p'); p.id = 'third'; root.appendChild(p);"
+              "root.removeChild(document.getElementById('first'));"
+              "seen.push('sync done');");
+    // Both records come in one batch, after the script
+    EXPECT_EQ(page.eval("seen.join(' | ')"),
+              "sync done | 2:true:true | childList +1 -0 prev=second next=null true | "
+              "childList +0 -1 prev=null next=second true");
+}
+
+TEST(MutationObserver, SubtreeAttributesAndCharacterData) {
+    Page page(kPage);
+    page.eval("var seen = []; var mo = new MutationObserver(function (records) {"
+              "  records.forEach(function (r) { seen.push(r.type + ':' + (r.target.id || r.target.nodeName) + ':' +"
+              "    r.attributeName + ':' + r.oldValue); }); });"
+              "mo.observe(document.body, { subtree: true, attributeOldValue: true, characterDataOldValue: true,"
+              "                            attributeFilter: ['class', 'title'] });"
+              "var second = document.getElementById('second');"
+              "second.className = 'changed';"
+              "second.setAttribute('data-x', '1');"      // filtered out
+              "second.title = 'hello';"
+              "second.firstChild.data = 'TWO';");
+    EXPECT_EQ(page.eval("seen.join(' ')"),
+              "attributes:second:class:note attributes:second:title:null characterData:#text:null:two");
+    // Without subtree, a change below the target is not seen
+    page.eval("seen = []; mo.disconnect(); mo.observe(document.body, { attributes: true });"
+              "second.className = 'again'; document.body.setAttribute('data-y', '2');");
+    EXPECT_EQ(page.eval("seen.join(' ')"), "attributes:BODY:data-y:null");
+}
+
+TEST(MutationObserver, TakeRecordsDisconnectAndErrors) {
+    Page page(kPage);
+    page.eval("var calls = 0; var mo = new MutationObserver(function () { calls++; });"
+              "mo.observe(document.getElementById('list'), { childList: true });"
+              "document.getElementById('list').appendChild(document.createElement('li'));"
+              "var taken = mo.takeRecords();");
+    // takeRecords() empties the queue, so the callback never runs
+    EXPECT_EQ(page.eval("taken.length + ',' + taken[0].type + ',' + calls"), "1,childList,0");
+    page.eval("mo.disconnect(); document.getElementById('list').appendChild(document.createElement('li'));");
+    EXPECT_EQ(page.eval("calls"), "0");
+    EXPECT_EQ(page.eval("(function () { try { mo.observe(document.body, {}); } catch (e) { return e.name; } })()"),
+              "TypeError");
+    EXPECT_EQ(page.eval("(function () { try { new MutationObserver(1); } catch (e) { return e.name; } })()"),
+              "TypeError");
+    // An error in a callback goes to the console and does not stop other observers
+    page.eval("var ok = 0;"
+              "new MutationObserver(function () { throw new Error('boom'); }).observe(document.body, { attributes: true });"
+              "new MutationObserver(function () { ok++; }).observe(document.body, { attributes: true });"
+              "document.body.setAttribute('x', '1');");
+    EXPECT_EQ(page.eval("ok"), "1");
+    bool reported = false;
+    for (const auto& line : page.console) reported = reported || line.find("boom") != std::string::npos;
+    EXPECT_TRUE(reported);
+}
+
 TEST(DomBindings, WindowIsTheGlobalObject) {
     Page page(kPage);
     // var and function declarations at script level are window properties
