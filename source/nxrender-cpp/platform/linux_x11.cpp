@@ -23,6 +23,7 @@
 #ifdef Always
 #undef Always
 #endif
+#include <clocale>
 #include <iostream>
 #include <cstring>
 #include <sstream>
@@ -109,6 +110,8 @@ public:
                      ButtonPressMask | ButtonReleaseMask |
                      PointerMotionMask | StructureNotifyMask);
         
+        openInputMethod();
+
         // Create Cursors
         cursorArrow_ = XCreateFontCursor(display_, XC_left_ptr);
         cursorHand_ = XCreateFontCursor(display_, XC_hand2);
@@ -121,6 +124,10 @@ public:
     
     void shutdown() override {
         if (display_) {
+            if (inputContext_) XDestroyIC(inputContext_);
+            if (inputMethod_) XCloseIM(inputMethod_);
+            inputContext_ = nullptr;
+            inputMethod_ = nullptr;
             glXMakeCurrent(display_, 0, nullptr);
             if (glContext_) glXDestroyContext(display_, glContext_);
             if (window_) XDestroyWindow(display_, window_);
@@ -133,6 +140,9 @@ public:
         while (XPending(display_) > 0) {
             XEvent ev;
             XNextEvent(display_, &ev);
+            // The input method takes the keys of dead-key and compose
+            // sequences, and sends back the character they make
+            if (XFilterEvent(&ev, 0)) continue;
             
             if (ev.type == ClientMessage) {
                 if ((Atom)ev.xclient.data.l[0] == wmDeleteMessage_) {
@@ -205,10 +215,31 @@ public:
                 event.mouse.modifiers = getModifiers(ev.xbutton.state);
                 NXRender::dispatchEvent(event);
             } else if (ev.type == KeyPress) {
-                // Standard browser approach: Use XLookupString to get both KeySym and character
-                char textBuffer[32];
-                KeySym keysym;
-                int charCount = XLookupString(&ev.xkey, textBuffer, sizeof(textBuffer), &keysym, nullptr);
+                // The key and the text it types, as UTF-8: through the input
+                // method when there is one (any layout, compose and dead
+                // keys), else Latin-1 from XLookupString
+                char textBuffer[64];
+                KeySym keysym = NoSymbol;
+                std::string typed;
+                if (inputContext_) {
+                    Status status = 0;
+                    int count = Xutf8LookupString(inputContext_, &ev.xkey, textBuffer, sizeof(textBuffer) - 1,
+                                                  &keysym, &status);
+                    if (status != XLookupKeySym && status != XLookupBoth) keysym = NoSymbol;
+                    if ((status == XLookupChars || status == XLookupBoth) && count > 0) typed.assign(textBuffer, count);
+                } else {
+                    int count = XLookupString(&ev.xkey, textBuffer, sizeof(textBuffer), &keysym, nullptr);
+                    for (int i = 0; i < count; i++) {
+                        unsigned char c = static_cast<unsigned char>(textBuffer[i]);
+                        if (c < 0x80) {
+                            typed += static_cast<char>(c);
+                        } else {
+                            typed += static_cast<char>(0xC0 | (c >> 6));
+                            typed += static_cast<char>(0x80 | (c & 0x3F));
+                        }
+                    }
+                }
+                if (keysym == NoSymbol) keysym = XLookupKeysym(&ev.xkey, 0);
                 
                 // Dispatch KeyDown event with the KeySym
                 Event keyEvent;
@@ -216,9 +247,9 @@ public:
                 keyEvent.key.key = mapKey(keysym);
                 keyEvent.key.modifiers = getModifiers(ev.xkey.state);
                 
-                // If XLookupString gave us a printable character, store it
-                if (charCount > 0 && textBuffer[0] >= 32 && textBuffer[0] < 127) {
-                    keyEvent.textInput = std::string(textBuffer, charCount);
+                // Printable text only: Ctrl+letter gives control characters
+                if (!typed.empty() && static_cast<unsigned char>(typed[0]) >= 32 && typed[0] != 0x7F) {
+                    keyEvent.textInput = typed;
                 }
                 
                 NXRender::dispatchEvent(keyEvent);
@@ -332,6 +363,8 @@ public:
 private:
     Display* display_ = nullptr;
     Window window_ = 0;
+    XIM inputMethod_ = nullptr;
+    XIC inputContext_ = nullptr;
     GLXContext glContext_ = nullptr;
     Atom wmDeleteMessage_ = 0;
     Cursor cursorArrow_, cursorHand_, cursorText_;
@@ -360,6 +393,22 @@ private:
         }
     }
     
+    /// An input method for typing text in the user's layout and locale;
+    /// without one, keys type Latin-1 only
+    void openInputMethod() {
+        if (!std::setlocale(LC_CTYPE, "")) std::setlocale(LC_CTYPE, "C.UTF-8");
+        XSetLocaleModifiers("");
+        inputMethod_ = XOpenIM(display_, nullptr, nullptr, nullptr);
+        if (!inputMethod_) {
+            XSetLocaleModifiers("@im=none");
+            inputMethod_ = XOpenIM(display_, nullptr, nullptr, nullptr);
+        }
+        if (!inputMethod_) return;
+        inputContext_ = XCreateIC(inputMethod_, XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
+                                  XNClientWindow, window_, XNFocusWindow, window_, nullptr);
+        if (inputContext_) XSetICFocus(inputContext_);
+    }
+
     KeyCode mapKey(KeySym key) {
         // Simplified mapping for common keys
         if (key >= XK_a && key <= XK_z) return (KeyCode)((int)KeyCode::A + (key - XK_a));

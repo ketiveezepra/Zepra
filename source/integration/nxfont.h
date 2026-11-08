@@ -81,6 +81,9 @@ public:
         }
         glyphs_.clear();
         
+        for (FT_Face face : fallbacks_) FT_Done_Face(face);
+        fallbacks_.clear();
+        fallbacksLoaded_ = false;
         if (face_) { FT_Done_Face(face_); face_ = nullptr; }
         if (ft_) { FT_Done_FreeType(ft_); ft_ = nullptr; }
     }
@@ -101,21 +104,12 @@ public:
         
         float startX = x;
         
-        for (unsigned char c : text) {
-            if (c < 32 || c > 126) {
-                if (c == ' ') x += size_ * 0.3f;
-                continue;
-            }
-            
-            // Get or cache glyph
-            auto it = glyphs_.find(c);
-            if (it == glyphs_.end()) {
-                cacheGlyph(c);
-                it = glyphs_.find(c);
-                if (it == glyphs_.end()) continue;
-            }
-            
-            const Glyph& glyph = it->second;
+        for (size_t i = 0; i < text.size();) {
+            uint32_t c = nextCodepoint(text, i);
+            if (c == ' ') { x += spaceAdvance(); continue; }
+            const Glyph* found = glyphFor(c);
+            if (!found) continue;
+            const Glyph& glyph = *found;
             
             if (glyph.textureId && glyph.width > 0 && glyph.height > 0) {
                 // Calculate position
@@ -160,15 +154,10 @@ public:
     // Measure text width
     float measureText(const std::string& text) {
         float width = 0;
-        for (unsigned char c : text) {
-            if (c == ' ') {
-                width += size_ * 0.3f;
-                continue;
-            }
-            auto it = glyphs_.find(c);
-            if (it != glyphs_.end()) {
-                width += it->second.advance;
-            }
+        for (size_t i = 0; i < text.size();) {
+            uint32_t c = nextCodepoint(text, i);
+            if (c == ' ') { width += spaceAdvance(); continue; }
+            if (const Glyph* glyph = glyphFor(c)) width += glyph->advance;
         }
         return width;
     }
@@ -177,16 +166,116 @@ public:
     int getSize() const { return size_; }
 
 private:
-    void cacheGlyph(unsigned char c) {
+    /// The next character of UTF-8 `text` at `i` (advanced past it); a
+    /// broken sequence gives U+FFFD and moves one byte
+    static uint32_t nextCodepoint(const std::string& text, size_t& i) {
+        unsigned char lead = static_cast<unsigned char>(text[i]);
+        int extra = lead < 0x80 ? 0 : (lead >> 5) == 0x6 ? 1 : (lead >> 4) == 0xE ? 2 : (lead >> 3) == 0x1E ? 3 : -1;
+        if (extra == 0) {
+            i++;
+            return lead;
+        }
+        if (extra < 0 || i + extra >= text.size()) {
+            i++;
+            return 0xFFFD;
+        }
+        uint32_t c = lead & (0x3F >> extra);
+        for (int k = 1; k <= extra; k++) {
+            unsigned char b = static_cast<unsigned char>(text[i + k]);
+            if ((b & 0xC0) != 0x80) {
+                i++;
+                return 0xFFFD;
+            }
+            c = (c << 6) | (b & 0x3F);
+        }
+        i += extra + 1;
+        return c;
+    }
+
+    float spaceAdvance() const { return size_ * 0.3f; }
+
+    /// The glyph for a character: from this font, else from the first
+    /// fallback font that has it, else the font's missing-glyph box. Null
+    /// for control characters, which draw nothing.
+    const Glyph* glyphFor(uint32_t c) {
+        if (c < 32 || c == 0x7F || (c >= 0x80 && c < 0xA0)) return nullptr;
+        auto it = glyphs_.find(c);
+        if (it == glyphs_.end()) {
+            cacheGlyph(c);
+            it = glyphs_.find(c);
+            if (it == glyphs_.end()) return nullptr;
+        }
+        return &it->second;
+    }
+
+    /// Fonts tried for characters this one lacks (symbols, scripts it does
+    /// not cover), opened at this size the first time one is needed
+    FT_Face faceWith(uint32_t c) {
+        if (FT_Get_Char_Index(face_, c)) return face_;
+        if (!fallbacksLoaded_) {
+            fallbacksLoaded_ = true;
+            static const char* const kFallbacks[] = {
+#ifdef _WIN32
+                "C:\\Windows\\Fonts\\seguisym.ttf",
+                "C:\\Windows\\Fonts\\arialuni.ttf",
+                "C:\\Windows\\Fonts\\msyh.ttc",
+                "C:\\Windows\\Fonts\\meiryo.ttc",
+                "C:\\Windows\\Fonts\\malgun.ttf",
+                "C:\\Windows\\Fonts\\Nirmala.ttf",
+#elif defined(__APPLE__)
+                "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+                "/System/Library/Fonts/Apple Symbols.ttf",
+                "/System/Library/Fonts/PingFang.ttc",
+                "/System/Library/Fonts/Hiragino Sans GB.ttc",
+                "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+#else
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+                "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+                "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                "/usr/share/fonts/wenquanyi/wqy-zenhei/wqy-zenhei.ttc",
+                "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf",
+                "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+                "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+                "/usr/share/fonts/truetype/unifont/unifont.ttf",
+                "/usr/share/fonts/opentype/unifont/unifont.otf",
+#endif
+                nullptr
+            };
+            for (int i = 0; kFallbacks[i]; i++) {
+                if (path_ == kFallbacks[i]) continue;
+                FT_Face face = nullptr;
+                if (FT_New_Face(ft_, kFallbacks[i], 0, &face) == 0) {
+                    FT_Set_Pixel_Sizes(face, 0, size_);
+                    fallbacks_.push_back(face);
+                }
+            }
+        }
+        for (FT_Face face : fallbacks_) {
+            if (FT_Get_Char_Index(face, c)) return face;
+        }
+        return nullptr;
+    }
+
+    void cacheGlyph(uint32_t c) {
         if (!face_) return;
         
-        // Load glyph with rendering
-        if (FT_Load_Char(face_, c, FT_LOAD_RENDER)) {
-            std::cerr << "[NxFont] Failed to load glyph: " << (int)c << "\n";
-            return;
-        }
+        // Load glyph with rendering; a character no font has shows the
+        // missing-glyph box rather than vanishing
+        FT_Face face = faceWith(c);
+        FT_Error error = face ? FT_Load_Char(face, c, FT_LOAD_RENDER)
+                              : FT_Load_Glyph(face = face_, 0, FT_LOAD_RENDER);
+        if (error) return;
         
-        FT_GlyphSlot slot = face_->glyph;
+        FT_GlyphSlot slot = face->glyph;
         FT_Bitmap& bitmap = slot->bitmap;
         
         Glyph glyph;
@@ -240,7 +329,9 @@ private:
     FT_Face face_;
     int size_;
     std::string path_;
-    std::unordered_map<unsigned char, Glyph> glyphs_;
+    std::unordered_map<uint32_t, Glyph> glyphs_;
+    std::vector<FT_Face> fallbacks_;
+    bool fallbacksLoaded_ = false;
 };
 
 // FontManager - manages multiple fonts
