@@ -180,6 +180,7 @@ struct LayoutBox {
     LayoutLength cssBottom;
     LayoutLength cssLeft;
     int zIndex = 0;
+    bool zIndexAuto = true;  ///< z-index: auto (no stacking context of its own when positioned)
     
     // Float: 0=none, 1=left, 2=right
     int floatType = 0;
@@ -462,8 +463,15 @@ bool isBlockLevel(LayoutType type);
  * 1. Draw background
  * 2. Draw border
  * 3. Draw text content (if text node)
- * 4. Paint children
+ * 4. Paint children: negative z-index, then in flow, then positioned
+ *    (z-index 0, then positive), so later ones paint on top
  * 5. Register link hit boxes
+ *
+ * position: fixed boxes are painted last, by z-index, at viewport
+ * coordinates (offsetX, offsetY is the viewport origin), unscrolled and
+ * unclipped by their ancestors; negative z-index ones go just above the
+ * root's background. position: sticky boxes are moved to stay inside their
+ * nearest scroll container (or the viewport) while their parent is visible.
  * 
  * @param box The box to paint
  * @param offsetX X offset from viewport origin
@@ -473,6 +481,11 @@ bool isBlockLevel(LayoutType type);
  */
 void paintBox(const LayoutBox& box, float offsetX, float offsetY, 
               float viewportHeight, float scrollY);
+
+/// The position: fixed boxes under `root`, in paint order (bottom first:
+/// by z-index, then tree order). Hit testing checks them, last first,
+/// before the rest of the tree, since they paint on top of it.
+std::vector<const LayoutBox*> fixedBoxesInPaintOrder(const LayoutBox& root);
 
 /**
  * @brief Calculate text width using current font
