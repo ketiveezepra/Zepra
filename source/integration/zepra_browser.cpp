@@ -1213,6 +1213,7 @@ static void rebuildLayoutTree() {
             // Background
             if (!bodyStyle->backgroundColor.isTransparent()) {
                 g_layoutRoot->bgColor = cssColorToRGB(bodyStyle->backgroundColor);
+                g_layoutRoot->bgAlpha = bodyStyle->backgroundColor.a;
                 g_layoutRoot->hasBgColor = true;
             }
             if (!bodyStyle->backgroundImage.empty() && bodyStyle->backgroundImage != "none") {
@@ -2595,6 +2596,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     
                     if (!childStyle->backgroundColor.isTransparent()) {
                         blockBox->bgColor = cssColorToRGB(childStyle->backgroundColor);
+                        blockBox->bgAlpha = childStyle->backgroundColor.a;
                         blockBox->hasBgColor = true;
                     }
                     if (!childStyle->backgroundImage.empty() && childStyle->backgroundImage != "none") {
@@ -2786,6 +2788,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     
                     if (!childStyle->backgroundColor.isTransparent()) {
                         inlineBox->bgColor = cssColorToRGB(childStyle->backgroundColor);
+                        inlineBox->bgAlpha = childStyle->backgroundColor.a;
                         inlineBox->hasBgColor = true;
                     }
                     
