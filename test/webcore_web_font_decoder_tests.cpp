@@ -3,8 +3,8 @@
 /**
  * @file webcore_web_font_decoder_tests.cpp
  * @brief Zepra's own inflate (raw DEFLATE, zlib, gzip) against streams made
- *        by the reference zlib, and WOFF 1.0 unpacking into an sfnt that
- *        FreeType loads.
+ *        by the reference zlib, and WOFF 1.0 and WOFF2 unpacking into an
+ *        sfnt that FreeType loads.
  */
 
 #include <gtest/gtest.h>
@@ -21,7 +21,13 @@
 
 namespace {
 #include "fixtures/web_fonts.inc"
+#include "fixtures/woff2.inc"
 }
+
+#ifdef ZEPRA_HAS_FREETYPE
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#endif
 
 using namespace Zepra::Compress;
 using Zepra::Fonts::decodeWebFont;
@@ -203,7 +209,8 @@ TEST(WebFontDecoder, FormatHints) {
     EXPECT_TRUE(isSupportedFontFormatHint("woff"));
     EXPECT_TRUE(isSupportedFontFormatHint("TrueType"));
     EXPECT_TRUE(isSupportedFontFormatHint("opentype"));
-    EXPECT_FALSE(isSupportedFontFormatHint("woff2"));  // until the Brotli decoder lands
+    EXPECT_TRUE(isSupportedFontFormatHint("woff2"));
+    EXPECT_TRUE(isSupportedFontFormatHint("WOFF2-variations"));
     EXPECT_FALSE(isSupportedFontFormatHint("embedded-opentype"));
     EXPECT_FALSE(isSupportedFontFormatHint("svg"));
 }
@@ -264,14 +271,6 @@ TEST(WebFontDecoder, RejectsBrokenWoff) {
     EXPECT_FALSE(decodeWebFont(reserved).ok);
 }
 
-TEST(WebFontDecoder, Woff2IsReportedNotGuessed) {
-    const uint8_t woff2[] = {'w', 'O', 'F', '2', 0, 1, 0, 0};
-    auto r = decodeWebFont(woff2, sizeof(woff2));
-    EXPECT_FALSE(r.ok);
-    EXPECT_EQ(r.format, WebFontFormat::Woff2);
-    EXPECT_NE(r.error.find("WOFF2"), std::string::npos);
-}
-
 TEST(WebFontDecoder, RealFontSurvivesWoffAndLoadsInFreeType) {
     auto ttf = readFile("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
     if (ttf.empty()) GTEST_SKIP() << "DejaVuSans.ttf is not installed";
@@ -291,4 +290,180 @@ TEST(WebFontDecoder, RealFontSurvivesWoffAndLoadsInFreeType) {
     EXPECT_TRUE(face.hasGlyph(U'A'));
     EXPECT_TRUE(face.hasGlyph(U'é'));
 #endif
+}
+
+// --- WOFF2 ---------------------------------------------------------------
+
+namespace {
+
+struct SfntTable {
+    uint32_t tag, checksum, offset, length;
+};
+
+std::vector<SfntTable> sfntTables(const std::vector<uint8_t>& f, size_t at = 0) {
+    std::vector<SfntTable> out;
+    uint16_t n = static_cast<uint16_t>((f[at + 4] << 8) | f[at + 5]);
+    for (size_t i = 0; i < n; ++i) {
+        const uint8_t* e = f.data() + at + 12 + i * 16;
+        out.push_back({be32(e), be32(e + 4), be32(e + 8), be32(e + 12)});
+    }
+    return out;
+}
+
+uint32_t tagOf(const char* s) {
+    return (uint32_t(uint8_t(s[0])) << 24) | (uint32_t(uint8_t(s[1])) << 16) | (uint32_t(uint8_t(s[2])) << 8) |
+           uint32_t(uint8_t(s[3]));
+}
+
+uint32_t sumWords(const uint8_t* p, size_t n) {
+    uint32_t sum = 0;
+    for (size_t i = 0; i < n; i += 4) {
+        uint8_t w[4] = {0, 0, 0, 0};
+        for (size_t k = 0; k < 4 && i + k < n; ++k) w[k] = p[i + k];
+        sum += be32(w);
+    }
+    return sum;
+}
+
+} // namespace
+
+TEST(Woff2, UnpacksIntoAValidSfnt) {
+    auto r = decodeWebFont(kWoff2Subset, sizeof(kWoff2Subset));
+    ASSERT_TRUE(r.ok) << r.error;
+    EXPECT_EQ(r.format, WebFontFormat::Woff2);
+    const auto& f = r.sfnt;
+    ASSERT_GE(f.size(), 12u);
+    EXPECT_EQ(be32(f.data()), 0x00010000u);
+    auto tables = sfntTables(f);
+    for (size_t i = 0; i < tables.size(); ++i) {
+        const SfntTable& t = tables[i];
+        if (i) EXPECT_LT(tables[i - 1].tag, t.tag);  // sorted for binary search
+        ASSERT_LE(size_t{t.offset} + t.length, f.size());
+        EXPECT_EQ(t.offset % 4, 0u);
+        if (t.tag != tagOf("head")) EXPECT_EQ(sumWords(f.data() + t.offset, t.length), t.checksum);
+    }
+    // Checksums and head.checkSumAdjustment make the whole file sum to the magic
+    EXPECT_EQ(sumWords(f.data(), f.size()), 0xB1B0AFBAu);
+
+    // Tables stored as-is come out byte for byte
+    for (const auto& want : kWoff2Tables) {
+        bool found = false;
+        for (const SfntTable& t : tables)
+            if (t.tag == tagOf(want.tag)) {
+                found = true;
+                EXPECT_EQ(t.length, want.length) << want.tag;
+                EXPECT_EQ(crc32(f.data() + t.offset, t.length), want.crc) << want.tag;
+            }
+        EXPECT_TRUE(found) << want.tag;
+    }
+}
+
+#ifdef ZEPRA_HAS_FREETYPE
+TEST(Woff2, RebuiltGlyphsAndMetricsMatchTheOriginalFont) {
+    // glyf, loca and hmtx were transformed: points from triplets, implicit
+    // bounding boxes, a composite, instructions, side bearings from xMin
+    auto r = decodeWebFont(kWoff2Subset, sizeof(kWoff2Subset));
+    ASSERT_TRUE(r.ok) << r.error;
+    FT_Library lib;
+    ASSERT_EQ(FT_Init_FreeType(&lib), 0);
+    FT_Face face;
+    ASSERT_EQ(FT_New_Memory_Face(lib, r.sfnt.data(), static_cast<FT_Long>(r.sfnt.size()), 0, &face), 0);
+    ASSERT_EQ(face->num_glyphs, static_cast<FT_Long>(std::size(kWoff2Glyphs)));
+    EXPECT_STREQ(face->family_name, "DejaVu Sans");
+    for (FT_UInt g = 0; g < std::size(kWoff2Glyphs); ++g) {
+        const Woff2Glyph& want = kWoff2Glyphs[g];
+        ASSERT_EQ(FT_Load_Glyph(face, g, FT_LOAD_NO_SCALE), 0) << want.name;
+        const FT_Outline& o = face->glyph->outline;
+        EXPECT_EQ(o.n_contours, want.contours) << want.name;
+        ASSERT_EQ(o.n_points, want.points) << want.name;
+        std::vector<uint8_t> packed;
+        for (int i = 0; i < o.n_points; ++i) {
+            auto x = static_cast<uint16_t>(o.points[i].x), y = static_cast<uint16_t>(o.points[i].y);
+            packed.insert(packed.end(), {uint8_t(x >> 8), uint8_t(x), uint8_t(y >> 8), uint8_t(y),
+                                         uint8_t(FT_CURVE_TAG(o.tags[i]) == FT_CURVE_TAG_ON)});
+        }
+        EXPECT_EQ(crc32(packed.data(), packed.size()), want.crc) << want.name;
+        EXPECT_EQ(face->glyph->metrics.horiAdvance, want.advance) << want.name;
+        EXPECT_EQ(face->glyph->metrics.horiBearingX, want.lsb) << want.name;
+        // And the hinting instructions run
+        FT_Set_Pixel_Sizes(face, 0, 16);
+        EXPECT_EQ(FT_Load_Glyph(face, g, FT_LOAD_DEFAULT | FT_LOAD_NO_AUTOHINT), 0) << want.name;
+    }
+    FT_Done_Face(face);
+    FT_Done_FreeType(lib);
+}
+#endif
+
+TEST(Woff2, CollectionFontsShareTables) {
+    auto r = decodeWebFont(kWoff2Collection, sizeof(kWoff2Collection));
+    ASSERT_TRUE(r.ok) << r.error;
+    const auto& f = r.sfnt;
+    ASSERT_GE(f.size(), 20u);
+    EXPECT_EQ(be32(f.data()), tagOf("ttcf"));
+    ASSERT_EQ(be32(f.data() + 8), 2u);  // two fonts
+    auto a = sfntTables(f, be32(f.data() + 12));
+    auto b = sfntTables(f, be32(f.data() + 16));
+    ASSERT_EQ(a.size(), 2u);
+    ASSERT_EQ(b.size(), 3u);
+    auto find = [](const std::vector<SfntTable>& ts, const char* t) {
+        for (const SfntTable& s : ts)
+            if (s.tag == tagOf(t)) return s;
+        return SfntTable{0, 0, 0, 0};
+    };
+    // One copy of the shared table, two different cmaps
+    EXPECT_EQ(find(a, "name").offset, find(b, "name").offset);
+    EXPECT_NE(find(a, "cmap").offset, find(b, "cmap").offset);
+    SfntTable name = find(a, "name");
+    ASSERT_EQ(name.length, 51u);
+    EXPECT_EQ(std::memcmp(f.data() + name.offset, "shared name table", 17), 0);
+    SfntTable cmapB = find(b, "cmap");
+    EXPECT_EQ(std::memcmp(f.data() + cmapB.offset, "\x00\x02" "cmap of font B!", 17), 0);
+}
+
+TEST(Woff2, EveryTruncationFails) {
+    for (size_t cut = 0; cut < sizeof(kWoff2Subset); ++cut)
+        EXPECT_FALSE(decodeWebFont(kWoff2Subset, cut).ok) << "cut at " << cut;
+    for (size_t cut = 0; cut < sizeof(kWoff2Collection); ++cut)
+        EXPECT_FALSE(decodeWebFont(kWoff2Collection, cut).ok) << "cut at " << cut;
+}
+
+TEST(Woff2, CorruptFilesFailCleanly) {
+    // Every single-bit flip either fails or decodes to something; under the
+    // sanitizers this checks no read or write leaves its buffer
+    std::vector<uint8_t> bytes(kWoff2Subset, kWoff2Subset + sizeof(kWoff2Subset));
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        for (int bit = 0; bit < 8; ++bit) {
+            bytes[i] ^= static_cast<uint8_t>(1 << bit);
+            auto r = decodeWebFont(bytes);
+            EXPECT_LE(r.sfnt.size(), Zepra::Fonts::kMaxDecodedFontSize);
+            bytes[i] ^= static_cast<uint8_t>(1 << bit);
+        }
+    }
+}
+
+TEST(Woff2, RejectsBadHeaders) {
+    std::vector<uint8_t> base(kWoff2Subset, kWoff2Subset + sizeof(kWoff2Subset));
+    ASSERT_TRUE(decodeWebFont(base).ok);
+
+    auto reserved = base;
+    reserved[15] = 1;
+    EXPECT_FALSE(decodeWebFont(reserved).ok);
+
+    auto noTables = base;
+    noTables[12] = noTables[13] = 0;
+    EXPECT_FALSE(decodeWebFont(noTables).ok);
+
+    auto longer = base;  // header claims more bytes than the file has
+    put32(longer, 8, static_cast<uint32_t>(base.size() + 1));
+    EXPECT_FALSE(decodeWebFont(longer).ok);
+
+    auto squeezed = base;  // compressed size past the end of the file
+    put32(squeezed, 20, 0x7FFFFFFF);
+    EXPECT_FALSE(decodeWebFont(squeezed).ok);
+
+    const uint8_t stub[] = {'w', 'O', 'F', '2', 0, 1, 0, 0};
+    auto r = decodeWebFont(stub, sizeof(stub));
+    EXPECT_FALSE(r.ok);
+    EXPECT_EQ(r.format, WebFontFormat::Woff2);
+    EXPECT_NE(r.error.find("WOFF2"), std::string::npos);
 }
