@@ -69,6 +69,21 @@ struct MouseUpResult {
 /// Receives a form submission no listener canceled (the browser navigates)
 using SubmitHandler = std::function<void(const FormSubmission& submission)>;
 
+/// What a script asked of the page's URL through `location` or `history`
+enum class NavigationKind {
+    Assign,        ///< location.href = url, location.assign(url): load url, a new history entry
+    Replace,       ///< location.replace(url): load url in place of the current entry
+    Reload,        ///< location.reload(): load the current URL again
+    SameDocument,  ///< a fragment change or history.pushState/replaceState: the URL changed, nothing loads
+};
+struct NavigationRequest {
+    std::string url;   ///< absolute
+    NavigationKind kind = NavigationKind::Assign;
+};
+/// Receives what a script asked for; the browser loads the URL once the script
+/// task is over (a script keeps running after it sets location.href)
+using NavigationHandler = std::function<void(const NavigationRequest& request)>;
+
 /**
  * @brief A request made by fetch() or XMLHttpRequest
  */
@@ -268,6 +283,11 @@ public:
     /// Where submissions go once no listener canceled them (form.submit(),
     /// requestSubmit(), Enter, submit buttons)
     void setSubmitHandler(SubmitHandler handler);
+    /// Navigations scripts ask for through `location` and `history` (location_bindings.cpp)
+    void setNavigationHandler(NavigationHandler handler) { navigationHandler_ = std::move(handler); }
+    /// The URL `location` reports: the last setPageUrl, or a later fragment or
+    /// pushState change ("about:blank" before any)
+    const std::string& pageUrl() const { return pageUrl_; }
 
     /**
      * @brief Free the DOM nodes scripts removed and can no longer reach.
@@ -392,6 +412,17 @@ private:
     std::function<const CSSComputedStyle*(DOMElement*)> computedStyleSource_;
     std::function<const CSSComputedStyle*(DOMElement*, const std::string&)> pseudoStyleSource_;
     SubmitHandler submitHandler_;
+
+    // window.location and window.history (location_bindings.cpp)
+    NavigationHandler navigationHandler_;
+    std::string pageUrl_ = "about:blank";
+    Zepra::Runtime::Object* historyObject_ = nullptr;
+    int historyLength_ = 1;
+    void setupLocationAndHistory(Zepra::Runtime::Object* windowObj);
+    /// Hands `url` (absolute) to the navigation handler; a URL that differs
+    /// from the page's only in its fragment changes the URL in place and
+    /// queues hashchange instead
+    void navigateFromScript(const std::string& url, NavigationKind kind);
 
     // Dialog handlers
     AlertHandler alertHandler_;

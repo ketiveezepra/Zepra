@@ -115,6 +115,9 @@ public:
     /// Fires a plain event at a node, or at the window when `target` is
     /// null; false when a listener canceled it
     bool fireEvent(DOMNode* target, const std::string& type, bool bubbles, bool cancelable);
+    /// The same, with extra fields on the event (hashchange's oldURL/newURL)
+    bool fireEvent(DOMNode* target, const std::string& type, bool bubbles, bool cancelable,
+                   const std::vector<std::pair<std::string, Zepra::Runtime::Value>>& fields);
     /// Fires a mouse event (clientX/clientY) at a connected element
     bool fireMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY);
     bool fireMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY,
