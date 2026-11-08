@@ -73,6 +73,9 @@ jobs:
       - name: Media query tests
         run: ctest --test-dir build/test -R WebCoreMediaQueryTests --output-on-failure
 
+      - name: Custom property tests
+        run: ctest --test-dir build/test -R WebCoreCustomPropertyTests --output-on-failure
+
       # NXNet: URL parsing, HTTP framing, keep-alive and timings against a local
       # server, the DNS cache, request validation, crypto
       - name: Networking tests
@@ -122,7 +125,7 @@ jobs:
           nxhttp_tests nxhttp_security_test nxcrypto_tests parser_robustness_tests
           webcore_dom_bindings_tests webcore_layout_tests webcore_user_input_tests
           webcore_forced_pseudo_tests webcore_console_format_tests computed_style_tests
-          webcore_media_query_tests layout_geometry_tests svg_raster_tests zepra_engine_tests
+          webcore_media_query_tests webcore_custom_property_tests layout_geometry_tests svg_raster_tests zepra_engine_tests
           devtools_style_rules_tests devtools_network_tests devtools_console_input_tests
           devtools_text_field_tests devtools_dom_edit_tests
           zeprascript-unit-tests zeprascript-integration-tests
@@ -139,7 +142,7 @@ jobs:
           for t in nxhttp_tests nxhttp_security_test nxcrypto_tests parser_robustness_tests \
                    webcore_dom_bindings_tests webcore_layout_tests webcore_user_input_tests \
                    webcore_forced_pseudo_tests webcore_console_format_tests computed_style_tests \
-                   webcore_media_query_tests layout_geometry_tests svg_raster_tests zepra_engine_tests \
+                   webcore_media_query_tests webcore_custom_property_tests layout_geometry_tests svg_raster_tests zepra_engine_tests \
                    devtools_style_rules_tests devtools_network_tests devtools_console_input_tests \
                    devtools_text_field_tests devtools_dom_edit_tests zeprascript-integration-tests; do
             echo "::group::$t"
@@ -206,6 +209,9 @@ jobs:
       - name: Media query tests
         run: ctest --test-dir build/test -R WebCoreMediaQueryTests --output-on-failure
 
+      - name: Custom property tests
+        run: ctest --test-dir build/test -R WebCoreCustomPropertyTests --output-on-failure
+
   # ============================================================================
   # macOS — Apple Silicon, AppleClang, Cocoa/NSOpenGL backend
   # ============================================================================
@@ -250,3 +256,6 @@ jobs:
       # Media queries: @media rules as the viewport changes, window.matchMedia()
       - name: Media query tests
         run: ctest --test-dir build/test -R WebCoreMediaQueryTests --output-on-failure
+
+      - name: Custom property tests
+        run: ctest --test-dir build/test -R WebCoreCustomPropertyTests --output-on-failure

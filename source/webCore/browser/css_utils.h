@@ -4,7 +4,6 @@
  * css_utils.h - CSS Processing Utilities for ZepraBrowser
  * 
  * Contains helpers for:
- * - Expanding CSS variables (var(--name))
  * - Polyfilling shorthands (background -> background-color)
  * - Extracting styles from raw HTML (parser workaround)
  * - Color conversion
@@ -23,12 +22,6 @@ namespace ZepraBrowser {
  * @brief Convert WebCore CSSColor to uint32_t RGB (0xRRGGBB)
  */
 uint32_t cssColorToRGB(const Zepra::WebCore::CSSColor& c);
-
-/**
- * @brief Preprocess CSS to expand CSS variables (var(--name))
- * LibWebCore doesn't support CSS variables natively yet.
- */
-std::string expandCSSVariables(const std::string& css);
 
 /**
  * @brief Polyfill CSS shorthands (background -> background-color, etc.)

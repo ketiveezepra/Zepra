@@ -112,7 +112,6 @@ extern "C" {
 
 // Import CSS utilities (avoid Tab namespace collision)
 using ZepraBrowser::cssColorToRGB;
-using ZepraBrowser::expandCSSVariables;
 using ZepraBrowser::polyfillCSSShorthands;
 using ZepraBrowser::extractStylesFromRawHTML;
 using ZepraBrowser::extractBodyInlineStyle;
@@ -1117,11 +1116,6 @@ static void setBackgroundImage(LayoutBox* box, const CSSComputedStyle& style) {
     ZepraBrowser::g_lazyImageLoader.queueBackground(box, resolveUrl(g_currentUrl, url), g_activeTabId);
 }
 
-// Helper: Preprocess CSS to expand CSS variables (var(--name))
-// LibWebCore doesn't support CSS variables, so we expand them manually
-// Helper: Preprocess CSS to expand CSS variables (var(--name))
-// Moved to css_utils.cpp
-
 // Helper: Polyfill CSS shorthands (background -> background-color, etc.)
 // Helper: Polyfill CSS shorthands (background -> background-color, etc.)
 // Moved to css_utils.cpp
@@ -1385,8 +1379,8 @@ void parseWithWebCore(const std::string& html) {
     // Extract <style> elements and load <link rel="stylesheet"> external CSS
     size_t domStyleSheets = 0;
     auto addStyleElement = [&](DOMElement* el) {
-        // :root variables expanded as the raw-HTML fallback below does
-        g_cssEngine->addStyleSheet(expandCSSVariables(el->textContent()), StyleOrigin::Author);
+        // Custom properties and var() are resolved by the cascade
+        g_cssEngine->addStyleSheet(el->textContent(), StyleOrigin::Author);
         domStyleSheets++;
     };
     auto* headEl = g_document->head();

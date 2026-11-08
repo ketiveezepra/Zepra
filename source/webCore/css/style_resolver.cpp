@@ -11,6 +11,7 @@
  * 
  */
 
+#include "css/custom_properties.hpp"
 #include "css/css_engine.hpp"
 #include "browser/dom.hpp"
 #include "css/presentational_hints.hpp"
@@ -91,55 +92,72 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
     // Step 3: Sort by cascade order
     cascade_.sortByCascade(matchedRules);
     
-    // Step 4: Apply the normal declarations of the matched rules in order
-    // (lowest priority first). The element's presentational hints (bgcolor,
-    // width, align...) go after the user-agent and user rules and before the
-    // first author rule.
-    bool hintsApplied = false;
-    auto applyHints = [&]() {
-        hintsApplied = true;
-        std::string hints = presentationalHintStyle(element);
-        if (hints.empty()) return;
+    // The element's presentational hints (bgcolor, width, align...) and its
+    // inline style, parsed once for both cascade passes
+    std::unique_ptr<CSSStyleDeclaration> hintDecl;
+    std::string hints = presentationalHintStyle(element);
+    if (!hints.empty()) {
         CSSParser hintParser;
-        auto decl = hintParser.parseInlineStyle(hints);
-        if (decl) applyDeclarations(computed, decl.get(), parentStyle);
-    };
-    for (const auto& match : matchedRules) {
-        if (!hintsApplied && match.origin != StyleOrigin::UserAgent && match.origin != StyleOrigin::User) {
-            applyHints();
-        }
-        if (match.rule && match.rule->style()) {
-            applyDeclarations(computed, match.rule->style(), parentStyle, Importance::Normal);
-        }
+        hintDecl = hintParser.parseInlineStyle(hints);
     }
-    if (!hintsApplied) applyHints();
-    
-    // Step 5: Apply inline styles (above every normal rule)
     std::unique_ptr<CSSStyleDeclaration> inlineDecl;
     std::string inlineStyle = element->getAttribute("style");
     if (!inlineStyle.empty()) {
         CSSParser parser;
         inlineDecl = parser.parseInlineStyle(inlineStyle);
-        if (inlineDecl) {
-            applyDeclarations(computed, inlineDecl.get(), parentStyle, Importance::Normal);
-        }
     }
 
-    // Step 6: !important declarations, in reverse origin order: author rules,
-    // the inline style, user rules, user-agent rules (CSS Cascade 4, 6.4)
-    auto applyImportant = [&](StyleOrigin origin) {
+    auto runCascade = [&]() {
+        // Step 4: Apply the normal declarations of the matched rules in order
+        // (lowest priority first). The presentational hints go after the
+        // user-agent and user rules and before the first author rule.
+        bool hintsApplied = false;
+        auto applyHints = [&]() {
+            hintsApplied = true;
+            if (hintDecl) applyDeclarations(computed, hintDecl.get(), parentStyle);
+        };
         for (const auto& match : matchedRules) {
-            if (match.origin == origin && match.rule && match.rule->style() && match.rule->style()->hasImportant()) {
-                applyDeclarations(computed, match.rule->style(), parentStyle, Importance::Important);
+            if (!hintsApplied && match.origin != StyleOrigin::UserAgent && match.origin != StyleOrigin::User) {
+                applyHints();
+            }
+            if (match.rule && match.rule->style()) {
+                applyDeclarations(computed, match.rule->style(), parentStyle, Importance::Normal);
             }
         }
+        if (!hintsApplied) applyHints();
+
+        // Step 5: Apply inline styles (above every normal rule)
+        if (inlineDecl) applyDeclarations(computed, inlineDecl.get(), parentStyle, Importance::Normal);
+
+        // Step 6: !important declarations, in reverse origin order: author rules,
+        // the inline style, user rules, user-agent rules (CSS Cascade 4, 6.4)
+        auto applyImportant = [&](StyleOrigin origin) {
+            for (const auto& match : matchedRules) {
+                if (match.origin == origin && match.rule && match.rule->style() && match.rule->style()->hasImportant()) {
+                    applyDeclarations(computed, match.rule->style(), parentStyle, Importance::Important);
+                }
+            }
+        };
+        applyImportant(StyleOrigin::Author);
+        if (inlineDecl && inlineDecl->hasImportant()) {
+            applyDeclarations(computed, inlineDecl.get(), parentStyle, Importance::Important);
+        }
+        applyImportant(StyleOrigin::User);
+        applyImportant(StyleOrigin::UserAgent);
     };
-    applyImportant(StyleOrigin::Author);
-    if (inlineDecl && inlineDecl->hasImportant()) {
-        applyDeclarations(computed, inlineDecl.get(), parentStyle, Importance::Important);
-    }
-    applyImportant(StyleOrigin::User);
-    applyImportant(StyleOrigin::UserAgent);
+
+    // Custom properties first: the cascade picks each one's winning value,
+    // then they are resolved against each other and the inherited ones
+    CustomPropertyMap declared;
+    pass_ = Pass::CustomOnly;
+    declaredCustom_ = &declared;
+    runCascade();
+    declaredCustom_ = nullptr;
+    computed.customProperties = resolveCustomProperties(computed.customProperties, declared);
+    // Then every other property, with var() substituted from them
+    pass_ = Pass::SkipCustom;
+    runCascade();
+    pass_ = Pass::All;
 
     // <center> and align="center" stop at tables: a table doesn't pass the
     // legacy -webkit-* alignment on to its cells (cells use their own align)
@@ -288,10 +306,20 @@ void StyleResolver::applyDeclarations(CSSComputedStyle& style,
             if (important != (importance == Importance::Important)) continue;
         }
         std::string value = decl->getPropertyValue(property);
-        
-        if (!value.empty()) {
-            applyProperty(style, property, value, parentStyle);
+        if (value.empty()) continue;
+
+        if (isCustomPropertyName(property)) {
+            if (pass_ == Pass::SkipCustom) continue;
+            if (declaredCustom_) {
+                (*declaredCustom_)[property] = value;  // later declarations win
+            } else {
+                // A single pass (pseudo-elements): resolve as it comes
+                style.customProperties = resolveCustomProperties(style.customProperties, {{property, value}});
+            }
+            continue;
         }
+        if (pass_ == Pass::CustomOnly) continue;
+        applyProperty(style, property, value, parentStyle);
     }
 }
 
@@ -344,38 +372,30 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         return;
     }
     
-    // Handle CSS custom properties: var(--name) or var(--name, fallback)
-    // We don't track custom property values yet, so extract the fallback.
-    // If no fallback, skip — leave inherited/default value intact.
-    std::string resolvedValue = rawValue;
-    if (rawValue.find("var(") != std::string::npos) {
-        // Extract fallback from var(--name, fallback)
-        size_t varStart = rawValue.find("var(");
-        size_t commaPos = rawValue.find(',', varStart);
-        size_t closePos = rawValue.rfind(')');
-        
-        if (commaPos != std::string::npos && closePos != std::string::npos && commaPos < closePos) {
-            // Has fallback: var(--x, red) → "red"
-            resolvedValue = rawValue.substr(commaPos + 1, closePos - commaPos - 1);
-            // Trim whitespace
-            size_t s = resolvedValue.find_first_not_of(" \t");
-            size_t e = resolvedValue.find_last_not_of(" \t");
-            if (s != std::string::npos) {
-                resolvedValue = resolvedValue.substr(s, e - s + 1);
-            }
-            // If fallback itself contains var(), give up
-            if (resolvedValue.find("var(") != std::string::npos) return;
-        } else {
-            // No fallback: var(--x) — skip this property entirely
+    // var(): substitute the element's custom properties, then apply the
+    // result as if written directly. A var() that can't be resolved makes the
+    // value invalid at computed-value time: the property stays as inherited
+    // or initial.
+    if (containsVarFunction(rawValue)) {
+        static const CustomPropertyMap kNoCustomProperties;
+        std::string substituted;
+        if (!substituteVarFunctions(rawValue, style.customProperties ? *style.customProperties : kNoCustomProperties,
+                                    substituted) ||
+            substituted.empty() || containsVarFunction(substituted)) {
+            // Behaves as unset: inherited properties take the parent's value
+            static const std::unordered_set<std::string> kInherited = {
+                "color", "font-family", "font-size", "font-weight", "font-style", "line-height",
+                "text-align", "letter-spacing", "word-spacing", "white-space", "visibility",
+                "cursor", "border-spacing", "border-collapse"};
+            applyProperty(style, property, kInherited.count(property) && parentStyle ? "inherit" : "initial",
+                          parentStyle);
             return;
         }
+        applyProperty(style, property, substituted, parentStyle);
+        return;
     }
-    
-    // Handle calc() with var() — skip (can't resolve)
-    if (resolvedValue.find("var(") != std::string::npos) return;
-    
     // Use resolved value for all property checks below
-    const std::string& value = resolvedValue;
+    const std::string& value = rawValue;
 
     // =====================================================================
     // Display
