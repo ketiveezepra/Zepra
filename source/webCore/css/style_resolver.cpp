@@ -28,6 +28,16 @@ namespace Zepra::WebCore {
 // Helpers
 // ============================================================================
 
+// A border whose style is none or hidden computes to a width of 0
+// (CSS Backgrounds 3 §3.3)
+static void zeroUnstyledBorders(CSSComputedStyle& style) {
+    auto none = [](BorderStyle b) { return b == BorderStyle::None || b == BorderStyle::Hidden; };
+    if (none(style.borderTopStyle)) style.borderTopWidth = 0;
+    if (none(style.borderRightStyle)) style.borderRightWidth = 0;
+    if (none(style.borderBottomStyle)) style.borderBottomWidth = 0;
+    if (none(style.borderLeftStyle)) style.borderLeftWidth = 0;
+}
+
 static std::vector<std::string> splitValues(const std::string& value) {
     std::vector<std::string> parts;
     std::istringstream ss(value);
@@ -185,6 +195,7 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
                            &computed.paddingBottom, &computed.paddingLeft}) {
         resolveFontRelative(*len);
     }
+    zeroUnstyledBorders(computed);
     
     return computed;
 }
@@ -258,6 +269,8 @@ const CSSComputedStyle* StyleResolver::getPseudoElementStyle(DOMElement* element
             *len = CSSLength::px(len->toPx(computed.fontSize, 16.0f, 0, 0, 0));
         }
     }
+
+    zeroUnstyledBorders(computed);
 
     // `content: normal` computes to none on ::before/::after (CSS Content 3, 2)
     if ((pseudo == "before" || pseudo == "after") && (computed.content.empty() || computed.content == "normal")) {
@@ -659,15 +672,15 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
              property == "border-left") {
         // Shorthand: "1px solid #000"
         // Parse width, style, color from space-separated values
+        // Omitted parts take their initial values: medium, none, currentColor
+        // (CSS Backgrounds 3 §3.5); a side without a style draws nothing
         std::istringstream ss(value);
         std::string token;
-        float bw = 0;
-        CSSColor bc = CSSColor::black();
+        float bw = 3;
+        BorderStyle bs = BorderStyle::None;
+        CSSColor bc = style.color;
         while (ss >> token) {
-            if (token == "none") { bw = 0; break; }
-            if (token == "solid" || token == "dashed" || token == "dotted" || 
-                token == "double" || token == "groove" || token == "ridge" ||
-                token == "inset" || token == "outset") continue;
+            if (parseBorderStyle(token, bs)) continue;
             if (token == "thin") { bw = 1; continue; }
             if (token == "medium") { bw = 3; continue; }
             if (token == "thick") { bw = 5; continue; }
@@ -690,10 +703,38 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
             style.borderBottomWidth = bw; style.borderLeftWidth = bw;
             style.borderTopColor = bc; style.borderRightColor = bc;
             style.borderBottomColor = bc; style.borderLeftColor = bc;
-        } else if (property == "border-top") { style.borderTopWidth = bw; style.borderTopColor = bc; }
-        else if (property == "border-right") { style.borderRightWidth = bw; style.borderRightColor = bc; }
-        else if (property == "border-bottom") { style.borderBottomWidth = bw; style.borderBottomColor = bc; }
-        else if (property == "border-left") { style.borderLeftWidth = bw; style.borderLeftColor = bc; }
+            style.borderTopStyle = bs; style.borderRightStyle = bs;
+            style.borderBottomStyle = bs; style.borderLeftStyle = bs;
+        } else if (property == "border-top") { style.borderTopWidth = bw; style.borderTopColor = bc; style.borderTopStyle = bs; }
+        else if (property == "border-right") { style.borderRightWidth = bw; style.borderRightColor = bc; style.borderRightStyle = bs; }
+        else if (property == "border-bottom") { style.borderBottomWidth = bw; style.borderBottomColor = bc; style.borderBottomStyle = bs; }
+        else if (property == "border-left") { style.borderLeftWidth = bw; style.borderLeftColor = bc; style.borderLeftStyle = bs; }
+    }
+    else if (property == "border-style") {
+        // One to four values: top, right, bottom, left (like margin)
+        auto parts = splitValues(value);
+        std::vector<BorderStyle> v;
+        for (const auto& p : parts) {
+            BorderStyle b;
+            if (!parseBorderStyle(p, b)) { v.clear(); break; }
+            v.push_back(b);
+        }
+        if (!v.empty() && v.size() <= 4) {
+            style.borderTopStyle = v[0];
+            style.borderRightStyle = v.size() > 1 ? v[1] : v[0];
+            style.borderBottomStyle = v.size() > 2 ? v[2] : v[0];
+            style.borderLeftStyle = v.size() > 3 ? v[3] : style.borderRightStyle;
+        }
+    }
+    else if (property == "border-top-style" || property == "border-right-style" ||
+             property == "border-bottom-style" || property == "border-left-style") {
+        BorderStyle b;
+        if (parseBorderStyle(value, b)) {
+            if (property == "border-top-style") style.borderTopStyle = b;
+            else if (property == "border-right-style") style.borderRightStyle = b;
+            else if (property == "border-bottom-style") style.borderBottomStyle = b;
+            else style.borderLeftStyle = b;
+        }
     }
 
     // =====================================================================

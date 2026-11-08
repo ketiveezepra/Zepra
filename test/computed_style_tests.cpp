@@ -287,3 +287,19 @@ TEST(ComputedStyle, WithoutAStyleSourceValuesAreEmpty) {
                         "JSON.stringify([cs.width, cs.getPropertyValue('color'), cs.length])"),
               "[\"\",\"\",0]");
 }
+
+TEST(ComputedStyle, BorderStyleAndUnstyledWidths) {
+    Page page(kPage);
+    page.eval("var box = document.getElementById('box'); var cs = getComputedStyle(box)");
+    EXPECT_EQ(page.eval("box.style.border = '2px dashed red'; [cs.borderTopWidth, cs.borderTopStyle].join(' ')"),
+              "2px dashed");
+    // A border without a style has no width (CSS Backgrounds 3 §3.3)
+    EXPECT_EQ(page.eval("box.style.border = ''; box.style.borderWidth = '3px'; cs.borderTopWidth"), "0px");
+    EXPECT_EQ(page.eval("box.style.borderStyle = 'dotted solid'; [cs.borderTopStyle, cs.borderRightStyle,"
+                        " cs.borderBottomStyle, cs.borderLeftStyle, cs.borderTopWidth].join(' ')"),
+              "dotted solid dotted solid 3px");
+    // The shorthand's omitted width is medium
+    EXPECT_EQ(page.eval("box.removeAttribute('style'); box.style.border = 'solid'; cs.borderLeftWidth"), "3px");
+    EXPECT_EQ(page.eval("box.style.borderLeftStyle = 'none'; [cs.borderLeftWidth, cs.borderRightWidth].join(' ')"),
+              "0px 3px");
+}

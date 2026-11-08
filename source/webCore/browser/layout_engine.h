@@ -137,6 +137,7 @@ struct LayoutBox {
     uint32_t bgColor = 0x00000000;
     uint32_t borderColor = 0x000000;
     bool borderVisible = true;   // false for a transparent border colour (it still takes space)
+    int borderStyle = 2;         // Zepra::WebCore::BorderStyle of the painted sides: 2 solid, 3 dashed, 4 dotted, 5 double
     float fontSize = 16.0f;
     bool bold = false;
     bool italic = false;
@@ -375,6 +376,10 @@ void setLayoutCallbacks2(
 /// Clip callbacks: painting between push and pop stays inside the rectangle
 /// (intersected with any enclosing clip). Used for background-image tiles.
 void setLayoutClipCallbacks(void (*push_clip)(float x, float y, float w, float h), void (*pop_clip)());
+
+/// Fills a convex polygon of `count` points (x, y pairs in `xy`): the pieces
+/// of styled and rounded borders
+void setPolygonCallback(void (*gfx_polygon)(const float* xy, int count, uint32_t color, uint8_t alpha));
 
 /// The text field with keyboard focus (null: none), whose selection and
 /// caret are painted; `caretVisible` blinks the caret

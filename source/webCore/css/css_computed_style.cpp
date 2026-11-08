@@ -158,6 +158,21 @@ CSSColor CSSColor::fromHex(const std::string& hex) {
     return c;
 }
 
+bool parseBorderStyle(const std::string& keyword, BorderStyle& out) {
+    static const std::unordered_map<std::string, BorderStyle> styles = {
+        {"none", BorderStyle::None},     {"hidden", BorderStyle::Hidden}, {"solid", BorderStyle::Solid},
+        {"dashed", BorderStyle::Dashed}, {"dotted", BorderStyle::Dotted}, {"double", BorderStyle::Double},
+        {"groove", BorderStyle::Groove}, {"ridge", BorderStyle::Ridge},   {"inset", BorderStyle::Inset},
+        {"outset", BorderStyle::Outset},
+    };
+    std::string k = keyword;
+    std::transform(k.begin(), k.end(), k.begin(), ::tolower);
+    auto it = styles.find(k);
+    if (it == styles.end()) return false;
+    out = it->second;
+    return true;
+}
+
 CSSColor CSSColor::fromRGB(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     return {r, g, b, a};
 }

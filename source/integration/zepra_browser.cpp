@@ -1736,6 +1736,14 @@ static Zepra::WebCore::CSSColor usedBorderColor(const CSSComputedStyle& style) {
     return style.borderLeftColor;
 }
 
+// ... and one border style, the same side's
+static int usedBorderStyle(const CSSComputedStyle& style) {
+    if (style.borderTopWidth > 0) return (int)style.borderTopStyle;
+    if (style.borderRightWidth > 0) return (int)style.borderRightStyle;
+    if (style.borderBottomWidth > 0) return (int)style.borderBottomStyle;
+    return (int)style.borderLeftStyle;
+}
+
 // Table display values → table box types (CSS 2.1 §17.2)
 static void applyTableDisplay(LayoutBox* box, DOMElement* element, const std::string& tag,
                               const CSSComputedStyle* style) {
@@ -2645,6 +2653,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         Zepra::WebCore::CSSColor borderColor = usedBorderColor(*childStyle);
                         blockBox->borderColor = cssColorToRGB(borderColor);
                         blockBox->borderVisible = borderColor.a > 0;
+                        blockBox->borderStyle = usedBorderStyle(*childStyle);
                     }
                     blockBox->borderRadius = childStyle->borderTopLeftRadius;
                     
@@ -2803,6 +2812,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         Zepra::WebCore::CSSColor borderColor = usedBorderColor(*childStyle);
                         inlineBox->borderColor = cssColorToRGB(borderColor);
                         inlineBox->borderVisible = borderColor.a > 0;
+                        inlineBox->borderStyle = usedBorderStyle(*childStyle);
                     }
                     inlineBox->borderRadius = childStyle->borderTopLeftRadius;
                     inlineBox->opacity = childStyle->opacity;
@@ -3175,6 +3185,12 @@ static void initLayoutEngine() {
         [](float x, float y, float w, float h) { g_nxGpu.pushClip(NXRender::Rect(x, y, w, h)); },
         [] { g_nxGpu.popClip(); });
     ZepraBrowser::setCanvasPaintCallback(layout_gfx_canvas);
+    ZepraBrowser::setPolygonCallback([](const float* xy, int count, uint32_t color, uint8_t alpha) {
+        std::vector<NXRender::Point> points;
+        points.reserve((size_t)count);
+        for (int i = 0; i < count; i++) points.push_back(NXRender::Point(xy[2 * i], xy[2 * i + 1]));
+        g_nxGpu.fillPath(points, NXRender::Color(color).withAlpha(alpha));
+    });
     
     std::cout << "[Layout] Layout engine initialized (rounded rect + gradient support)" << std::endl;
     

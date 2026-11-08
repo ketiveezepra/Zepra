@@ -48,6 +48,12 @@ void setLayoutClipCallbacks(void (*push_clip)(float, float, float, float), void 
     s_pop_clip = pop_clip;
 }
 
+static void (*s_gfx_polygon)(const float* xy, int count, uint32_t color, uint8_t alpha) = nullptr;
+
+void setPolygonCallback(void (*gfx_polygon)(const float* xy, int count, uint32_t color, uint8_t alpha)) {
+    s_gfx_polygon = gfx_polygon;
+}
+
 // =============================================================================
 // TEXT FIELDS: the value (masked for passwords), the selection and the caret
 // =============================================================================
@@ -1633,6 +1639,200 @@ static void dumpLayoutTree(const LayoutBox& box, int depth = 0) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Styled and rounded borders (CSS Backgrounds 3 §4): dashes, dots, double
+// lines and rings around rounded corners, drawn as rectangles, circles and
+// convex quads
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr int kBorderSolid = 2, kBorderDashed = 3, kBorderDotted = 4, kBorderDouble = 5;
+
+// A point of a border's centre line: position, outward normal, distance
+// along the line from its start
+struct LinePoint {
+    float x, y, nx, ny, s;
+};
+
+// The centre line of a rounded rectangle, clockwise from the start of the
+// top edge, closed (the last point repeats the first)
+std::vector<LinePoint> roundedLine(float x, float y, float w, float h, float r) {
+    r = std::max(0.0f, std::min({r, w / 2, h / 2}));
+    int seg = std::max(2, (int)std::ceil(r * 1.5707963f / 2.0f));  // ~2px pieces
+    struct Corner { float cx, cy, from; };
+    const Corner corners[4] = {{x + w - r, y + r, -90}, {x + w - r, y + h - r, 0},
+                               {x + r, y + h - r, 90}, {x + r, y + r, 180}};
+    std::vector<LinePoint> pts;
+    for (const Corner& c : corners) {
+        for (int k = 0; k <= seg; k++) {
+            float a = (c.from + 90.0f * (float)k / (float)seg) * 3.14159265f / 180.0f;
+            float nx = std::cos(a), ny = std::sin(a);
+            pts.push_back({c.cx + r * nx, c.cy + r * ny, nx, ny, 0});
+        }
+    }
+    // Start at the top edge's left end (the top-left arc's last point)
+    pts.insert(pts.begin(), pts.back());
+    pts.pop_back();
+    pts.push_back(pts.front());
+    for (size_t i = 1; i < pts.size(); i++)
+        pts[i].s = pts[i - 1].s + std::hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    return pts;
+}
+
+LinePoint pointAt(const std::vector<LinePoint>& line, float s) {
+    float total = line.back().s;
+    s = std::fmod(std::fmod(s, total) + total, total);
+    for (size_t i = 1; i < line.size(); i++) {
+        if (line[i].s < s) continue;
+        const LinePoint& a = line[i - 1];
+        const LinePoint& b = line[i];
+        float t = b.s > a.s ? (s - a.s) / (b.s - a.s) : 0;
+        float nx = a.nx + (b.nx - a.nx) * t, ny = a.ny + (b.ny - a.ny) * t;
+        float len = std::hypot(nx, ny);
+        if (len > 0) { nx /= len; ny /= len; }
+        return {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, nx, ny, s};
+    }
+    return line.back();
+}
+
+// A band of `thickness` along the line from distance `from` to `to`
+void strokeRange(const std::vector<LinePoint>& line, float from, float to, float thickness, uint32_t color) {
+    if (!s_gfx_polygon || to <= from) return;
+    float total = line.back().s;
+    if (to - from >= total) { from = 0; to = total; }
+    std::vector<LinePoint> pts{pointAt(line, from)};
+    float base = std::floor(from / total) * total;
+    // Line vertices inside the range, going round past the start if needed
+    for (float lap = base; lap < to; lap += total) {
+        for (const LinePoint& p : line) {
+            float s = lap + p.s;
+            if (s > from && s < to) pts.push_back({p.x, p.y, p.nx, p.ny, s});
+        }
+    }
+    pts.push_back(pointAt(line, to));
+    float h = thickness / 2;
+    for (size_t i = 0; i + 1 < pts.size(); i++) {
+        const LinePoint& a = pts[i];
+        const LinePoint& b = pts[i + 1];
+        float quad[8] = {a.x + a.nx * h, a.y + a.ny * h, b.x + b.nx * h, b.y + b.ny * h,
+                         b.x - b.nx * h, b.y - b.ny * h, a.x - a.nx * h, a.y - a.ny * h};
+        s_gfx_polygon(quad, 4, color, 255);
+    }
+}
+
+void dot(float cx, float cy, float d, uint32_t color) {
+    if (d <= 2.0f || !s_gfx_rrect) {
+        if (s_gfx_rect) s_gfx_rect(cx - d / 2, cy - d / 2, d, d, color);
+    } else {
+        s_gfx_rrect(cx - d / 2, cy - d / 2, d, d, d / 2, color, 255);
+    }
+}
+
+// Dashes: about three times as long as the border is wide, with gaps as
+// long, fitted so the pattern divides the length evenly
+float dashLength(float t) { return std::max(3.0f * t, 3.0f); }
+
+// One side of a square-cornered box, from corner to corner along its centre
+// line: dashes start and end at the corners, dots sit at both ends
+void styledSide(float x0, float y0, float x1, float y1, float t, int style, uint32_t color) {
+    if (!s_gfx_rect) return;
+    bool horizontal = y0 == y1;
+    float length = horizontal ? x1 - x0 : y1 - y0;
+    if (length <= 0) return;
+    auto piece = [&](float a, float b) {
+        if (horizontal) s_gfx_rect(x0 + a, y0 - t / 2, b - a, t, color);
+        else s_gfx_rect(x0 - t / 2, y0 + a, t, b - a, color);
+    };
+    if (style == kBorderDotted) {
+        int n = std::max(1, (int)std::lround(length / (2 * t)));
+        float span = length - t;
+        for (int i = 0; i <= n; i++) {
+            float c = t / 2 + (n > 0 ? span * (float)i / (float)n : 0);
+            if (horizontal) dot(x0 + c, y0, t, color);
+            else dot(x0, y0 + c, t, color);
+        }
+        return;
+    }
+    float dash = dashLength(t);
+    int n = std::max(1, (int)std::lround((length + dash) / (2 * dash)));
+    if (n == 1) { piece(0, length); return; }
+    float gap = (length - n * dash) / (float)(n - 1);
+    if (gap < 0) { dash = length / (2 * n - 1); gap = dash; }
+    for (int i = 0; i < n; i++) {
+        float a = i * (dash + gap);
+        piece(a, std::min(length, a + dash));
+    }
+}
+
+} // namespace
+
+// Paints a border whose style is not plain solid on square corners: dashed,
+// dotted and double, and any style around rounded corners. False when it
+// left the border to the solid painter.
+static bool paintStyledBorder(const LayoutBox& box, float x, float y) {
+    float t = std::max({box.borderTop, box.borderRight, box.borderBottom, box.borderLeft});
+    t = std::min({t, box.width / 2.0f, box.height / 2.0f});
+    if (t <= 0) return true;
+    int style = box.borderStyle;
+    if (style != kBorderDashed && style != kBorderDotted && style != kBorderDouble) style = kBorderSolid;
+    float radius = std::min({box.borderRadius, box.width / 2.0f, box.height / 2.0f});
+    uint32_t color = box.borderColor;
+    float w = box.width, h = box.height;
+
+    if (radius <= 0) {
+        if (style == kBorderSolid) return false;
+        if (style == kBorderDouble) {
+            // Two lines a third of the width each, with a third between
+            float third = t / 3.0f;
+            if (!s_gfx_rect) return false;
+            for (float inset : {0.0f, 2 * third}) {
+                float bx = x + inset, by = y + inset, bw = w - 2 * inset, bh = h - 2 * inset;
+                if (bw <= 0 || bh <= 0) continue;
+                if (box.borderTop > 0) s_gfx_rect(bx, by, bw, third, color);
+                if (box.borderBottom > 0) s_gfx_rect(bx, by + bh - third, bw, third, color);
+                if (box.borderLeft > 0) s_gfx_rect(bx, by + third, third, bh - 2 * third, color);
+                if (box.borderRight > 0) s_gfx_rect(bx + bw - third, by + third, third, bh - 2 * third, color);
+            }
+            return true;
+        }
+        float h2 = t / 2;
+        if (box.borderTop > 0) styledSide(x, y + h2, x + w, y + h2, t, style, color);
+        if (box.borderBottom > 0) styledSide(x, y + h - h2, x + w, y + h - h2, t, style, color);
+        if (box.borderLeft > 0) styledSide(x + h2, y, x + h2, y + h, t, style, color);
+        if (box.borderRight > 0) styledSide(x + w - h2, y, x + w - h2, y + h, t, style, color);
+        return true;
+    }
+
+    if (!s_gfx_polygon && style != kBorderDotted) return false;
+    if (style == kBorderDouble) {
+        float third = t / 3.0f;
+        for (float inset : {third / 2, t - third / 2}) {
+            auto line = roundedLine(x + inset, y + inset, w - 2 * inset, h - 2 * inset, radius - inset);
+            strokeRange(line, 0, line.back().s, third, color);
+        }
+        return true;
+    }
+    auto line = roundedLine(x + t / 2, y + t / 2, w - t, h - t, radius - t / 2);
+    float total = line.back().s;
+    if (total <= 0) return true;
+    if (style == kBorderSolid) {
+        strokeRange(line, 0, total, t, color);
+    } else if (style == kBorderDotted) {
+        int n = std::max(4, (int)std::lround(total / (2 * t)));
+        for (int i = 0; i < n; i++) {
+            LinePoint p = pointAt(line, total * (float)i / (float)n);
+            dot(p.x, p.y, t, color);
+        }
+    } else {
+        float dash = dashLength(t);
+        int n = std::max(2, (int)std::lround(total / (2 * dash)));
+        float period = total / (float)n, len = period / 2;
+        for (int i = 0; i < n; i++) strokeRange(line, i * period - len / 2, i * period + len / 2, t, color);
+    }
+    return true;
+}
+
 static void paintChildren(const LayoutBox& box, float screenX, float screenY, float viewportHeight);
 
 void paintBox(const LayoutBox& box, float offsetX, float offsetY,
@@ -1705,7 +1905,9 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
     // its width so it stays inside the box too.
     if ((box.borderTop > 0 || box.borderRight > 0 || box.borderBottom > 0 || box.borderLeft > 0) &&
         box.borderVisible && (s_gfx_rect || s_gfx_border)) {
-        if ((box.borderRadius > 0 || !s_gfx_rect) && s_gfx_border) {
+        if (paintStyledBorder(box, screenX, screenY)) {
+            // dashed, dotted, double, or around rounded corners
+        } else if ((box.borderRadius > 0 || !s_gfx_rect) && s_gfx_border) {
             float thickness = std::max({box.borderTop, box.borderRight, box.borderBottom, box.borderLeft});
             float t = std::min({thickness, box.width / 2.0f, box.height / 2.0f});
             if (t > 0) {
