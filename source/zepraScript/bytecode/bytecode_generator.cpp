@@ -218,22 +218,16 @@ std::unique_ptr<BytecodeChunk> BytecodeGenerator::compile(const Frontend::Progra
     for (const auto& name : varNames) emitNameOperand(Opcode::OP_DECLARE_GLOBAL, name);
     hoistFunctionDeclarations(body);
 
-    // The value of a final expression statement is the script's result
-    bool lastWasExpression = false;
-    for (size_t i = 0; i < body.size(); i++) {
-        const Frontend::Statement* stmt = body[i].get();
+    // The script's result is its completion value: the value of the last
+    // expression statement that ran, kept in a slot below everything else
+    // (`1; var x;` is 1, `try { 2 } catch {}` is 2)
+    emitConstant(Runtime::Value::undefined());
+    mainState.completionSlot = addTemporary("completion");
+    for (const auto& stmt : body) {
         if (stmt->type() == Frontend::NodeType::FunctionDeclaration) continue;  // Hoisted
-        if (i + 1 == body.size() && stmt->type() == Frontend::NodeType::ExpressionStatement) {
-            currentLine_ = stmt->location().line;
-            compileExpression(static_cast<const Frontend::ExprStmt*>(stmt)->expression());
-            lastWasExpression = true;
-        } else {
-            compileStatement(stmt);
-        }
+        compileStatement(stmt.get());
     }
-    if (!lastWasExpression) {
-        emitConstant(Runtime::Value::undefined());
-    }
+    emitLocal(Opcode::OP_GET_LOCAL, mainState.completionSlot);
     emit(Opcode::OP_RETURN);
 
     current_ = nullptr;
@@ -475,6 +469,23 @@ void BytecodeGenerator::compileStatement(const Frontend::Statement* stmt) {
 
     currentLine_ = stmt->location().line;
 
+    // These statements complete with undefined when their body leaves no
+    // value (`1; if (x) {}` is undefined, not 1), so they start from it
+    switch (stmt->type()) {
+        case Frontend::NodeType::IfStatement:
+        case Frontend::NodeType::WhileStatement:
+        case Frontend::NodeType::DoWhileStatement:
+        case Frontend::NodeType::ForStatement:
+        case Frontend::NodeType::ForInStatement:
+        case Frontend::NodeType::ForOfStatement:
+        case Frontend::NodeType::SwitchStatement:
+        case Frontend::NodeType::TryStatement:
+            resetCompletion();
+            break;
+        default:
+            break;
+    }
+
     switch (stmt->type()) {
         case Frontend::NodeType::ExpressionStatement:
             compileExpressionStatement(static_cast<const Frontend::ExprStmt*>(stmt));
@@ -673,6 +684,16 @@ void BytecodeGenerator::compileBlockStatement(const Frontend::BlockStmt* stmt) {
 
 void BytecodeGenerator::compileExpressionStatement(const Frontend::ExprStmt* stmt) {
     compileExpression(stmt->expression());
+    if (current_->completionSlot >= 0) {
+        emitLocal(Opcode::OP_SET_LOCAL, current_->completionSlot);
+    }
+    emit(Opcode::OP_POP);
+}
+
+void BytecodeGenerator::resetCompletion() {
+    if (current_->completionSlot < 0) return;
+    emitConstant(Runtime::Value::undefined());
+    emitLocal(Opcode::OP_SET_LOCAL, current_->completionSlot);
     emit(Opcode::OP_POP);
 }
 
@@ -1035,11 +1056,13 @@ void BytecodeGenerator::compileTryStatement(const Frontend::TryStmt* stmt) {
         } else {
             declareVariable(handler->param, false);
         }
+        // The catch block's completion replaces the try block's
+        resetCompletion();
         compileStatementList(handler->body->body());
     } else {
         // try/finally: run the finally block, then rethrow
         int exceptionSlot = addTemporary("exception");
-        if (stmt->finalizer()) compileBlockStatement(stmt->finalizer());
+        if (stmt->finalizer()) compileFinalizer(stmt->finalizer());
         emitLocal(Opcode::OP_GET_LOCAL, exceptionSlot);
         emit(Opcode::OP_THROW);
     }
@@ -1047,8 +1070,17 @@ void BytecodeGenerator::compileTryStatement(const Frontend::TryStmt* stmt) {
 
     patchJump(skipHandler);
     if (stmt->finalizer()) {
-        compileBlockStatement(stmt->finalizer());
+        compileFinalizer(stmt->finalizer());
     }
+}
+
+// A finally block that completes normally leaves the completion value of
+// the try statement as it was: `try { 1 } finally { 2 }` is 1
+void BytecodeGenerator::compileFinalizer(const Frontend::BlockStmt* block) {
+    int saved = current_->completionSlot;
+    current_->completionSlot = -1;
+    compileBlockStatement(block);
+    current_->completionSlot = saved;
 }
 
 void BytecodeGenerator::compileSwitchStatement(const Frontend::SwitchStmt* stmt) {

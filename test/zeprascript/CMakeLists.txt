@@ -78,6 +78,7 @@ set(ZEPRASCRIPT_INTEGRATION_TEST_SOURCES
     integration/indexeddb_tests.cpp
     integration/browser_vm_integration_test.cpp
     integration/js_execution_test.cpp
+    integration/completion_value_test.cpp
     integration/script_context_test.cpp
     integration/canvas_bindings_test.cpp
     integration/webgl_bindings_test.cpp

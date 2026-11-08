@@ -125,6 +125,7 @@ struct CompilerState {
     std::vector<JumpContext> jumps;  // break/continue targets; never cross a function
     size_t tryDepth = 0;             // Try blocks open at the current point
     std::string pendingLabel;        // Label for the loop being compiled next
+    int completionSlot = -1;         // Script only: slot holding the completion value so far
 };
 
 /**
@@ -157,6 +158,7 @@ private:
     void compileStatement(const Frontend::Statement* stmt);
     void compileBlockStatement(const Frontend::BlockStmt* stmt);
     void compileExpressionStatement(const Frontend::ExprStmt* stmt);
+    void resetCompletion();
     void compileVariableDeclaration(const Frontend::VariableDecl* decl);
     void compileFunctionDeclaration(const Frontend::FunctionDecl* decl);
     void compileIfStatement(const Frontend::IfStmt* stmt);
@@ -168,6 +170,7 @@ private:
     void compileContinueStatement(const Frontend::ContinueStmt* stmt);
     void compileThrowStatement(const Frontend::ThrowStmt* stmt);
     void compileTryStatement(const Frontend::TryStmt* stmt);
+    void compileFinalizer(const Frontend::BlockStmt* block);
     void compileImportDeclaration(const Frontend::ImportDecl* decl);
     void compileExportDeclaration(const Frontend::ExportDecl* decl);
     void compileClassDeclaration(const Frontend::ClassDecl* decl);
