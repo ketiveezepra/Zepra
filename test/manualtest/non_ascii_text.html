@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Text beyond ASCII</title>
+<style>
+  body { font-family: sans-serif; background: #ffffff; color: #1d2330; margin: 16px; }
+  h1 { font-size: 20px; margin: 0 0 8px 0; }
+  p.hint { color: #556; font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>Text beyond ASCII</h1>
+<p class="hint">Every line should show its letters; none should vanish. CJK needs a CJK font on the system
+(Noto Sans CJK, WenQuanYi, IPA Gothic); without one it shows boxes. Type accented letters (or use a
+compose key) into the field: they should appear and Backspace should remove one letter at a time.</p>
+<p>Français: déjà vu, naïve, ça coûte 5€</p>
+<p>Deutsch: Grüße aus München</p>
+<p>Español: ¿Qué tal? ¡Mañana!</p>
+<p>Ελληνικά, Русский</p>
+<p>Symbols: ✓ → ★ © ™ … “quotes” — dash, password dots •••</p>
+<p>CJK: 日本語 中文 한국어</p>
+<p><input id="q" placeholder="type café here"> <input type="password" value="secret"></p>
+<p id="echo">value:</p>
+<script>
+  var q = document.getElementById('q');
+  q.addEventListener('input', function () {
+    document.getElementById('echo').textContent = 'value: ' + q.value;
+  });
+</script>
+</body>
+</html>

@@ -5142,7 +5142,7 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
             }
         } else if (key == NXRender::KeyCode::Backspace) {
             if (!activeInput->empty()) {
-                activeInput->pop_back();
+                Zepra::WebCore::eraseLastCharacter(*activeInput);  // a whole UTF-8 character
             }
         } else if (key == NXRender::KeyCode::Escape) {
             // Cancel editing
