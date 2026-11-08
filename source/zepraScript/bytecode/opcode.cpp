@@ -77,6 +77,9 @@ const char* opcodeName(Opcode op) {
         case Opcode::OP_DEFINE_GLOBAL: return "DEFINE_GLOBAL";
         case Opcode::OP_GET_GLOBAL_TYPEOF: return "GET_GLOBAL_TYPEOF";
         case Opcode::OP_DECLARE_GLOBAL: return "DECLARE_GLOBAL";
+        case Opcode::OP_DECLARE_LEXICAL: return "DECLARE_LEXICAL";
+        case Opcode::OP_INIT_LEXICAL: return "INIT_LEXICAL";
+        case Opcode::OP_INIT_CONST: return "INIT_CONST";
         case Opcode::OP_GET_UPVALUE: return "GET_UPVALUE";
         case Opcode::OP_SET_UPVALUE: return "SET_UPVALUE";
         case Opcode::OP_CLOSE_UPVALUE: return "CLOSE_UPVALUE";
@@ -156,6 +159,9 @@ int opcodeOperandCount(Opcode op) {
         case Opcode::OP_SET_GLOBAL:
         case Opcode::OP_DEFINE_GLOBAL:
         case Opcode::OP_DECLARE_GLOBAL:
+        case Opcode::OP_DECLARE_LEXICAL:
+        case Opcode::OP_INIT_LEXICAL:
+        case Opcode::OP_INIT_CONST:
         case Opcode::OP_GET_PROPERTY:
         case Opcode::OP_SET_PROPERTY:
         case Opcode::OP_DELETE_PROPERTY:
@@ -222,6 +228,8 @@ int opcodeStackEffect(Opcode op) {
             return 1;
         case Opcode::OP_POP:
         case Opcode::OP_DEFINE_GLOBAL:
+        case Opcode::OP_INIT_LEXICAL:
+        case Opcode::OP_INIT_CONST:
         case Opcode::OP_CLOSE_UPVALUE:
         case Opcode::OP_THROW:
         case Opcode::OP_EXPORT:

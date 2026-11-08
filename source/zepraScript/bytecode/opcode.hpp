@@ -172,6 +172,9 @@ enum class Opcode : uint8 {
     OP_INIT_FIELDS,    // [this, ctor] -> [result]: runs ctor's field initializer on this, if any
     OP_GET_GLOBAL_TYPEOF, // u16 name: like OP_GET_GLOBAL, but undefined (not a ReferenceError) when undeclared
     OP_DECLARE_GLOBAL,    // u16 name: a script's hoisted `var`; defines it as undefined unless it exists
+    OP_DECLARE_LEXICAL,   // u16 name: a script's top-level let/const/class, uninitialized until its INIT
+    OP_INIT_LEXICAL,      // u16 name: [value] -> []; initializes a top-level let/class binding
+    OP_INIT_CONST,        // u16 name: [value] -> []; initializes a top-level const binding
 
     // End marker
     OP_END

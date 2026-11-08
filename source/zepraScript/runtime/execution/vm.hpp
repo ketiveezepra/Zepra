@@ -241,6 +241,8 @@ public:
      * Reads the stored value: an accessor on the global object is not run.
      */
     Value getGlobal(const std::string& name) const {
+        auto lexical = lexicalGlobals_.find(name);
+        if (lexical != lexicalGlobals_.end()) return lexical->second.value;
         auto it = globals_.find(name);
         if (it != globals_.end()) return it->second;
         if (globalObject_) return globalObject_->get(name);
@@ -249,8 +251,12 @@ public:
 
     /** True when a global of that name exists (declared, or a property of the global object) */
     bool hasGlobal(const std::string& name) const {
-        return globals_.count(name) != 0 || (globalObject_ && globalObject_->has(name));
+        return lexicalGlobals_.count(name) != 0 || globals_.count(name) != 0 ||
+               (globalObject_ && globalObject_->has(name));
     }
+
+    /** True when a top-level let/const/class of that name exists */
+    bool hasLexicalGlobal(const std::string& name) const { return lexicalGlobals_.count(name) != 0; }
 
     /**
      * @brief Make `object` the global object (a page's `window`)
@@ -267,7 +273,8 @@ public:
     /** The names of every global variable (unordered) */
     std::vector<std::string> globalNames() const {
         std::vector<std::string> names;
-        names.reserve(globals_.size());
+        names.reserve(globals_.size() + lexicalGlobals_.size());
+        for (const auto& entry : lexicalGlobals_) names.push_back(entry.first);
         for (const auto& entry : globals_) names.push_back(entry.first);
         if (globalObject_) {
             for (const std::string& name : globalObject_->getOwnPropertyNames()) names.push_back(name);
@@ -553,6 +560,18 @@ private:
     // Global variable access for the interpreter (runs accessors)
     bool lookupGlobal(const std::string& name, Value& out);
     void assignGlobal(const std::string& name, const Value& value);
+
+    // let/const/class declared at the top level of a script: globals every
+    // script sees, but not properties of the global object (ECMA-262's
+    // global declarative environment record)
+    struct LexicalGlobal {
+        Value value;
+        bool initialized = false;  // false: in its temporal dead zone
+        bool isConst = false;
+    };
+    std::unordered_map<std::string, LexicalGlobal> lexicalGlobals_;
+    void declareLexicalGlobal(const std::string& name);
+    void initializeLexicalGlobal(const std::string& name, const Value& value, bool isConst);
     
     // Open upvalues (linked list, ordered by stack slot)
     RuntimeUpvalue* openUpvalues_ = nullptr;

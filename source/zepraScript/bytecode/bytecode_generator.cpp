@@ -212,6 +212,23 @@ std::unique_ptr<BytecodeChunk> BytecodeGenerator::compile(const Frontend::Progra
     current_ = &mainState;
 
     const auto& body = program->body();
+    // Its top-level let/const/class names are declared first, in their
+    // temporal dead zone until their declaration runs (a name an earlier
+    // script declared the same way stops the script before anything runs)
+    std::vector<std::string> lexicalNames;
+    for (const auto& stmt : body) {
+        if (stmt->type() == Frontend::NodeType::VariableDeclaration) {
+            const auto* decl = static_cast<const Frontend::VariableDecl*>(stmt.get());
+            if (decl->kind() == Frontend::VariableDecl::Kind::Var) continue;
+            for (const auto& declarator : decl->declarators()) {
+                collectPatternNames(declarator.id.get(), lexicalNames);
+            }
+        } else if (stmt->type() == Frontend::NodeType::ClassDeclaration) {
+            lexicalNames.push_back(static_cast<const Frontend::ClassDecl*>(stmt.get())->name());
+        }
+    }
+    for (const auto& name : lexicalNames) emitNameOperand(Opcode::OP_DECLARE_LEXICAL, name);
+
     // A script's `var` names exist (as undefined) before any of it runs
     std::vector<std::string> varNames;
     for (const auto& stmt : body) collectVarNames(stmt.get(), varNames);
@@ -1521,11 +1538,12 @@ void BytecodeGenerator::emitVarStore(const std::string& name) {
     emit(Opcode::OP_POP);
 }
 
-// let/const/class binding: a global at script top level, else a new local in
-// the current block (or a slot reserved for it ahead of time).
+// let/const/class binding: at script top level a global that is not a
+// property of the global object (declared when the script starts), else a
+// new local in the current block (or a slot reserved for it ahead of time).
 void BytecodeGenerator::emitLexicalBinding(const std::string& name, bool isConst) {
     if (current_->isScript && current_->scopeDepth == 0) {
-        emitNameOperand(Opcode::OP_DEFINE_GLOBAL, name);
+        emitNameOperand(isConst ? Opcode::OP_INIT_CONST : Opcode::OP_INIT_LEXICAL, name);
         return;
     }
     int slot = resolveLocal(name);
@@ -2433,7 +2451,7 @@ void BytecodeGenerator::compileClassDeclaration(const Frontend::ClassDecl* decl)
     emit(Opcode::OP_DUP);                           // One copy for the static fields
 
     if (slot < 0) {
-        emitNameOperand(Opcode::OP_DEFINE_GLOBAL, className);
+        emitNameOperand(Opcode::OP_INIT_LEXICAL, className);
     } else {
         emitLocal(Opcode::OP_SET_LOCAL, slot);
         emit(Opcode::OP_POP);
