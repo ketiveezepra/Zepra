@@ -442,6 +442,15 @@ void VM::setGlobalObject(Object* object) {
 }
 
 bool VM::lookupGlobal(const std::string& name, Value& out) {
+    auto lexical = lexicalGlobals_.find(name);
+    if (lexical != lexicalGlobals_.end()) {
+        if (!lexical->second.initialized) {
+            throw ThrownException(makeError("ReferenceError",
+                "Cannot access '" + name + "' before initialization"));
+        }
+        out = lexical->second.value;
+        return true;
+    }
     auto it = globals_.find(name);
     if (it != globals_.end()) {
         out = it->second;
@@ -455,6 +464,18 @@ bool VM::lookupGlobal(const std::string& name, Value& out) {
 }
 
 void VM::assignGlobal(const std::string& name, const Value& value) {
+    auto lexical = lexicalGlobals_.find(name);
+    if (lexical != lexicalGlobals_.end()) {
+        if (!lexical->second.initialized) {
+            throw ThrownException(makeError("ReferenceError",
+                "Cannot access '" + name + "' before initialization"));
+        }
+        if (lexical->second.isConst) {
+            throw ThrownException(makeError("TypeError", "Assignment to constant variable."));
+        }
+        lexical->second.value = value;
+        return;
+    }
     auto it = globals_.find(name);
     if (it != globals_.end()) {
         it->second = value;
@@ -465,6 +486,23 @@ void VM::assignGlobal(const std::string& name, const Value& value) {
         return;
     }
     globals_[name] = value;
+}
+
+void VM::declareLexicalGlobal(const std::string& name) {
+    // Each script's top-level names are new: a second `let x` in a later
+    // script is a SyntaxError. A global property of that name (a var,
+    // window.name, a built-in) is shadowed, as in browsers
+    if (lexicalGlobals_.count(name)) {
+        throw ThrownException(makeError("SyntaxError", "redeclaration of let " + name));
+    }
+    lexicalGlobals_[name] = LexicalGlobal{};
+}
+
+void VM::initializeLexicalGlobal(const std::string& name, const Value& value, bool isConst) {
+    LexicalGlobal& binding = lexicalGlobals_[name];
+    binding.value = value;
+    binding.initialized = true;
+    binding.isConst = isConst;
 }
 
 Value VM::makeError(const std::string& type, const std::string& message) {
@@ -585,7 +623,21 @@ void VM::dispatch(Opcode op) {
             // A script's hoisted `var x`: undefined until assigned, an existing
             // global keeps its value
             const std::string& name = constantString(readShort());
+            if (lexicalGlobals_.count(name)) {
+                throw ThrownException(makeError("SyntaxError", "redeclaration of let " + name));
+            }
             if (!hasGlobal(name)) assignGlobal(name, Value::undefined());
+            break;
+        }
+
+        case Opcode::OP_DECLARE_LEXICAL:
+            declareLexicalGlobal(constantString(readShort()));
+            break;
+
+        case Opcode::OP_INIT_LEXICAL:
+        case Opcode::OP_INIT_CONST: {
+            const std::string& name = constantString(readShort());
+            initializeLexicalGlobal(name, pop(), op == Opcode::OP_INIT_CONST);
             break;
         }
 

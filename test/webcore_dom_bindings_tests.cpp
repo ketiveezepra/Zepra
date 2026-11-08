@@ -177,6 +177,38 @@ TEST(DomBindings, WindowIsTheGlobalObject) {
               "0");
 }
 
+TEST(DomBindings, TopLevelLetConstAndClassAreNotWindowProperties) {
+    Page page(kPage);
+    // Globals every later script sees, but not properties of window
+    page.eval("let counter = 1; const LIMIT = 3; class Widget { static make() { return new Widget(); } }");
+    EXPECT_EQ(page.eval("[counter, LIMIT, typeof Widget, Widget.make() instanceof Widget].join()"),
+              "1,3,function,true");
+    EXPECT_EQ(page.eval("[window.counter, window.LIMIT, window.Widget, 'counter' in window,"
+                        " Object.keys(window).indexOf('LIMIT')].join()"),
+              ",,,false,-1");
+    // Functions from an earlier script read and write them
+    page.eval("function bump() { counter++; return counter; }");
+    EXPECT_EQ(page.eval("bump(); bump() + ',' + counter"), "3,3");
+    // A let shadows a window property of the same name without changing it
+    page.eval("window.shadowed = 'prop'; let shadowed = 'let';");
+    EXPECT_EQ(page.eval("shadowed + ',' + window.shadowed"), "let,prop");
+    // const cannot be assigned; the binding keeps its value
+    EXPECT_EQ(page.eval("(function () { try { LIMIT = 4; return 'no'; } catch (e) { return e.name; } })() + ',' + LIMIT"),
+              "TypeError,3");
+    // Before its declaration runs the name is in its temporal dead zone
+    EXPECT_EQ(page.eval("function early() { try { return lateLet; } catch (e) { return e.name + ': ' + e.message; } }"
+                        " var r = early(); let lateLet = 'ok'; r + ' / ' + early()"),
+              "ReferenceError: Cannot access 'lateLet' before initialization / ok");
+    // Declaring the same name again in a later script stops that script before it runs
+    ScriptResult again = page.script->evaluate("var ranAgain = true; let counter = 9;", "again.js");
+    EXPECT_FALSE(again.success);
+    EXPECT_NE(again.error.find("SyntaxError"), std::string::npos) << again.error;
+    EXPECT_EQ(page.eval("[counter, typeof ranAgain].join()"), "3,undefined");
+    // Destructuring declares every name
+    page.eval("const { first: firstName, rest = 'r' } = { first: 'f' }; let [one, , three] = [1, 2, 3];");
+    EXPECT_EQ(page.eval("[firstName, rest, one, three, 'one' in window].join()"), "f,r,1,3,false");
+}
+
 TEST(DomBindings, AppendChildReachesTheDom) {
     Page page(kPage);
     uint64_t before = domMutationVersion();
