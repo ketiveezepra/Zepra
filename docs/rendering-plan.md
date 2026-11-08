@@ -101,7 +101,7 @@ Gate: home, single post, archive, search, comment form and shop page of all six 
 ### Phase 2: React and SPAs run (6 weeks)
 
 1. ES modules: fetch the module graph, link, evaluate in order, `import.meta`, top-level await, dynamic `import()`, `<script type="importmap">`, `modulepreload`.
-2. Regex engine: a backtracking matcher on UTF-16 with lookahead/lookbehind, `{n,m}`, named groups, backreferences, `u`/`v`/`y`/`s`/`d` flags, `lastIndex`, `source`/`flags`. Porting QuickJS's MIT-licensed `libregexp` is faster than a rewrite.
+2. Regex engine: a backtracking matcher on UTF-16 with lookahead/lookbehind, `{n,m}`, named groups, backreferences, `u`/`v`/`y`/`s`/`d` flags, `lastIndex`, `source`/`flags`. Zepra's own engine, rebuilt from zero and tuned for Zepra (decided 2026-11-08): compile to bytecode, literal-prefix and first-character scans before backtracking, and test262 `built-ins/RegExp` as the conformance target.
 3. UTF-16 strings in the engine (or a Latin-1/UTF-16 dual representation), so `length`, `charCodeAt` and surrogate pairs match other browsers.
 4. Language: private fields and methods (`#x`), class static blocks, BigInt literals, async generators, `for await`, real WeakMap/FinalizationRegistry, `Object.defineProperty` checks, Proxy traps on all paths, ISO date parsing.
 5. Built-ins bundles need: `Intl` (NumberFormat, DateTimeFormat, PluralRules, Collator with an ICU subset), `DataView`, `eval` and `new Function` (behind a per-site policy rather than off everywhere).
@@ -130,7 +130,7 @@ Gate: the YouTube home page shows its grid of thumbnails, titles and sidebar wit
 ### Phase 4: YouTube plays (6 weeks)
 
 1. HTMLMediaElement: `src`, `play()` returning a Promise, `pause`, `currentTime`, `duration`, `buffered`, `readyState`, `seeking`, volume, the full event sequence, `canPlayType`.
-2. Decoders behind the `nxvideo` interface: H.264, VP9 and AV1 video, AAC and Opus audio (see the codec decision below); YUV frames uploaded to GL textures and converted in a shader.
+2. Decoders behind the `nxvideo` interface: H.264, VP9 and AV1 video, AAC and Opus audio (see the codec decision below). The free codecs come first: they are enough for YouTube, which serves VP9 or AV1 to browsers that support them. YUV frames uploaded to GL textures and converted in a shader.
 3. Demuxers: MP4/fMP4 and WebM.
 4. Media Source Extensions: `MediaSource`, `SourceBuffer` (`appendBuffer`, `remove`, `timestampOffset`, segments mode), `isTypeSupported`, `MediaCapabilities.decodingInfo`.
 5. Playback clock: audio through nxaudio as the master clock, video frames presented on vsync, dropped-frame counting (`getVideoPlaybackQuality`).
@@ -161,14 +161,14 @@ Every work item lands as its own PR against `main` with a manual test page and a
 
 ## Risks and decisions
 
-The codec choice is the one decision that changes the schedule; the rest are risks with a known fallback.
+The codec and regex choices are decided; the rest are risks with a known fallback. Zepra's own code is built from zero for full control; the codec libraries are the one exception, because owning them would not remove H.264's patent fees.
 
 | Item | Why it matters | Recommendation |
 | --- | --- | --- |
-| Codecs: own decoders or a library | Writing H.264, VP9, AV1, AAC and Opus decoders is years of work; FFmpeg's libavcodec (LGPL, linked dynamically) or dav1d + libvpx + libopus give all five now | Use libavcodec behind `nxvideo` for Phase 4; replace one codec at a time later if Zepra must own them |
+| Codecs (decided 2026-11-08) | NeolyxOS has no OS media framework to borrow (Firefox uses Media Foundation, VideoToolbox, MediaCodec or the system FFmpeg). H.264 and AAC carry patent fees; VP9, AV1 and Opus do not. Writing our own H.264 decoder would not remove the fees | `nxvideo` becomes the NeolyxOS media framework, shared by every app. It ships dav1d (AV1), libvpx (VP9) and libopus by default, which is enough for YouTube. H.264/AAC: GPU hardware decode (VA-API, V4L2), plus an optional user-installed FFmpeg codec pack for machines without it. On Linux/Windows/macOS builds, use the OS decoders as Firefox does. Check the H.264 pool terms before a commercial launch |
 | DRM (Widevine) | Some YouTube content (films, some music) needs EME; Widevine licences are hard for a small browser to get | Leave EME out; most YouTube videos play without it |
 | YouTube serves a reduced page to unknown browsers | It sniffs the User-Agent and features | Send a Firefox-compatible UA token and pass `MediaSource.isTypeSupported` honestly |
 | Two CSS engines in the tree | `nxrender-cpp/web/css` (cascade, custom properties, typed OM) is built but the page path uses `webCore/css` | Pick `webCore/css` as the one engine; borrow `custom_properties.cpp` and `css_math.cpp` from nxrender for Phase 1, then delete the unused copy |
 | Scripts on the UI thread | YouTube and big React apps run long tasks; the 10 s guard stops them | Phase 3 moves parsing off-thread; a full script thread is a later project |
-| Regex rewrite size | Every bundle uses regexes; a home-grown engine takes months to reach conformance | Port QuickJS `libregexp` (MIT) in Phase 2 |
+| Regex engine size (decided 2026-11-08) | Every bundle uses regexes; reaching conformance takes months | Rebuild Zepra's own engine from zero, tuned for our use, in Phase 2; start it early and track test262 `built-ins/RegExp` weekly |
 | Memory goal vs heavy sites | The 50 to 150 MB target from `claude.md` cannot hold for a YouTube watch page | Keep the target for light pages; set 500 MB for YouTube |
