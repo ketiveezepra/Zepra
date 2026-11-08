@@ -907,3 +907,172 @@ TEST(Cascade, OverflowShorthandTakesOneOrTwoValues) {
     EXPECT_EQ(d.style("c")->overflowY, OverflowValue::Clip);
     EXPECT_EQ(d.style("d")->overflowY, OverflowValue::Auto);
 }
+
+// ---------------------------------------------------------------------------
+// position: fixed and sticky, and z-index paint order
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct PaintedRect {
+    float x, y, w, h;
+    uint32_t color;
+};
+std::vector<PaintedRect> g_rects;
+
+// Paints `root` at (0, 0) in a 1280x800 viewport and returns its background
+// rectangles in the order they were drawn
+std::vector<PaintedRect> paintRects(const LayoutBox& root, float scrollY = 0) {
+    g_rects.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float x, float y, float w, float h, uint32_t c) { g_rects.push_back({x, y, w, h, c}); },
+        [](float, float, float, float, uint32_t, float) {}, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::paintBox(root, 0, 0, 800, scrollY);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    return g_rects;
+}
+
+std::vector<uint32_t> colors(const std::vector<PaintedRect>& rects) {
+    std::vector<uint32_t> out;
+    for (const auto& r : rects) out.push_back(r.color);
+    return out;
+}
+
+const PaintedRect* rectOf(const std::vector<PaintedRect>& rects, uint32_t color) {
+    for (const auto& r : rects)
+        if (r.color == color) return &r;
+    return nullptr;
+}
+
+LayoutBox& coloured(LayoutBox& parent, uint32_t color, float height, int position = 0) {
+    LayoutBox& b = addBox(parent, LayoutType::Block);
+    b.hasBgColor = true;
+    b.bgColor = color;
+    b.cssHeight = LayoutLength{height, LayoutLength::Unit::Px};
+    b.height = height;
+    b.positionType = position;
+    return b;
+}
+
+LayoutLength px(float v) { return LayoutLength{v, LayoutLength::Unit::Px}; }
+
+} // namespace
+
+TEST(FixedPosition, LaidOutAgainstTheViewport) {
+    LayoutBox root;
+    root.type = LayoutType::Block;
+    root.paddingLeft = root.paddingTop = 30;
+    LayoutBox& wrapper = addBox(root, LayoutType::Block);
+    wrapper.marginTop = 200;
+    LayoutBox& header = coloured(wrapper, 0x1111, 50, 3);  // top: 0; left: 0; right: 0
+    header.cssTop = px(0);
+    header.cssLeft = px(0);
+    header.cssRight = px(0);
+    LayoutBox& fab = addBox(wrapper, LayoutType::Block);  // right: 20px; bottom: 10px
+    fab.positionType = 3;
+    fab.cssRight = px(20);
+    fab.cssBottom = px(10);
+    addBox(fab, LayoutType::Inline).text = "abcdefghij";  // 80px wide
+    LayoutBox& overlay = addBox(wrapper, LayoutType::Block);  // inset: 0
+    overlay.positionType = 3;
+    overlay.cssTop = overlay.cssRight = overlay.cssBottom = overlay.cssLeft = px(0);
+    coloured(wrapper, 0x2222, 40);  // in flow
+    ZepraBrowser::layoutBlock(root, 1280, 0);
+
+    EXPECT_FLOAT_EQ(header.x, 0);
+    EXPECT_FLOAT_EQ(header.y, 0);
+    EXPECT_FLOAT_EQ(header.width, 1280);
+    EXPECT_FLOAT_EQ(fab.width, 80);  // shrinks to its content
+    EXPECT_FLOAT_EQ(fab.x, 1280 - 20 - 80);
+    EXPECT_FLOAT_EQ(fab.y, 800 - 10 - fab.height);
+    EXPECT_FLOAT_EQ(overlay.width, 1280);
+    EXPECT_FLOAT_EQ(overlay.height, 800);
+    // Out of flow: the in-flow box is the wrapper's first child as far as layout goes
+    EXPECT_FLOAT_EQ(child(wrapper, 3)->y, 0);
+    EXPECT_FLOAT_EQ(wrapper.height, 40);
+}
+
+TEST(FixedPosition, PaintedLastAtTheViewportWhateverTheScroll) {
+    LayoutBox root;
+    root.type = LayoutType::Block;
+    LayoutBox& header = coloured(root, 0xAAAA, 50, 3);
+    header.cssTop = px(0);
+    header.cssLeft = px(0);
+    header.cssRight = px(0);
+    coloured(root, 0xBBBB, 2000);
+    ZepraBrowser::layoutBlock(root, 1280, 0);
+
+    for (float scroll : {0.0f, 700.0f}) {
+        auto rects = paintRects(root, scroll);
+        ASSERT_EQ(colors(rects), (std::vector<uint32_t>{0xBBBB, 0xAAAA})) << scroll;
+        EXPECT_FLOAT_EQ(rectOf(rects, 0xAAAA)->y, 0) << scroll;
+        EXPECT_FLOAT_EQ(rectOf(rects, 0xBBBB)->y, -scroll) << scroll;
+    }
+    auto fixed = ZepraBrowser::fixedBoxesInPaintOrder(root);
+    ASSERT_EQ(fixed.size(), 1u);
+    EXPECT_EQ(fixed[0], &header);
+}
+
+TEST(ZIndex, PositionedBoxesPaintByZIndex) {
+    LayoutBox root;
+    root.type = LayoutType::Block;
+    LayoutBox& a = coloured(root, 0xA, 10, 1);
+    a.zIndex = 2;
+    a.zIndexAuto = false;
+    LayoutBox& b = coloured(root, 0xB, 10, 1);
+    b.zIndex = 1;
+    b.zIndexAuto = false;
+    coloured(root, 0xC, 10, 1);  // z-index: auto
+    coloured(root, 0xD, 10);     // in flow
+    ZepraBrowser::layoutBlock(root, 1280, 0);
+    EXPECT_EQ(colors(paintRects(root)), (std::vector<uint32_t>{0xD, 0xC, 0xB, 0xA}));
+}
+
+TEST(ZIndex, NegativeZIndexGoesUnderInFlowContentThroughAutoAncestors) {
+    // <div style="position: relative">       (z-index: auto: no stacking context)
+    //   <div style="position: absolute; z-index: -1">grey</div>
+    // </div>
+    // <div>blue</div>                          grey paints under blue
+    LayoutBox root;
+    root.type = LayoutType::Block;
+    LayoutBox& stack = coloured(root, 0x5, 10, 1);
+    LayoutBox& grey = coloured(stack, 0x6, 10, 2);
+    grey.zIndex = -1;
+    grey.zIndexAuto = false;
+    coloured(root, 0x7, 10);
+    ZepraBrowser::layoutBlock(root, 1280, 0);
+    EXPECT_EQ(colors(paintRects(root)), (std::vector<uint32_t>{0x6, 0x7, 0x5}));
+
+    // A z-index on the wrapper makes it a stacking context: grey stays inside it
+    stack.zIndex = 0;
+    stack.zIndexAuto = false;
+    EXPECT_EQ(colors(paintRects(root)), (std::vector<uint32_t>{0x7, 0x5, 0x6}));
+}
+
+TEST(ZIndex, FlexItemsUseZIndexWithoutPositioning) {
+    LayoutBox flex = makeFlex(0, 0);
+    LayoutBox& first = coloured(flex, 0x1, 10);
+    first.zIndex = 1;
+    first.zIndexAuto = false;
+    coloured(flex, 0x2, 10);
+    ZepraBrowser::layoutBlock(flex, 1280, 0);
+    EXPECT_EQ(colors(paintRects(flex)), (std::vector<uint32_t>{0x2, 0x1}));
+}
+
+TEST(StickyPosition, SticksUntilItsParentEnds) {
+    LayoutBox root;
+    root.type = LayoutType::Block;
+    coloured(root, 0x1, 300);  // spacer
+    LayoutBox& section = coloured(root, 0x2, 500);
+    LayoutBox& title = coloured(section, 0x3, 40, 4);
+    title.cssTop = px(10);
+    coloured(root, 0x4, 2000);  // more page
+    ZepraBrowser::layoutBlock(root, 1280, 0);
+
+    auto titleY = [&](float scroll) { return rectOf(paintRects(root, scroll), 0x3)->y; };
+    EXPECT_FLOAT_EQ(titleY(0), 300);      // in flow
+    EXPECT_FLOAT_EQ(titleY(200), 100);    // still in flow
+    EXPECT_FLOAT_EQ(titleY(400), 10);     // stuck 10px from the top
+    EXPECT_FLOAT_EQ(titleY(700), 10);
+    EXPECT_FLOAT_EQ(titleY(780), -20);    // pushed out with the section's end (800 - 780 - 40)
+}

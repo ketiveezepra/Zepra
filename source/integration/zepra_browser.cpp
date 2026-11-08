@@ -2674,6 +2674,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     if (!childStyle->bottom.isAuto()) blockBox->cssBottom = cssToLayout(childStyle->bottom);
                     if (!childStyle->left.isAuto()) blockBox->cssLeft = cssToLayout(childStyle->left);
                     blockBox->zIndex = childStyle->zIndex;
+                    blockBox->zIndexAuto = childStyle->zIndexAuto;
                     
                     // Float
                     blockBox->floatType = childStyle->cssFloat;
@@ -4934,6 +4935,15 @@ static bool boxContains(const LayoutBox* box, float x, float y) {
 
 LayoutBox* findBoxAt(LayoutBox* box, float x, float y) {
     if (!box) return nullptr;
+    // position: fixed boxes paint over the rest of the page, so they are hit
+    // first, topmost first
+    if (box == g_layoutRoot.get()) {
+        auto fixed = ZepraBrowser::fixedBoxesInPaintOrder(*box);
+        for (auto it = fixed.rbegin(); it != fixed.rend(); ++it) {
+            if (*it == box) continue;
+            if (LayoutBox* found = findBoxAt(const_cast<LayoutBox*>(*it), x, y)) return found;
+        }
+    }
     // A clipping box's content is only visible (and hit) inside it
     if (ZepraBrowser::clipsContent(*box) && !boxContains(box, x, y)) return nullptr;
     
@@ -4968,7 +4978,9 @@ PagePress g_pagePress;
 // Follows the link under (mx, my) when the press at (pressX, pressY) was on
 // that same link; true when one was followed
 bool followLinkAt(float mx, float my, float pressX, float pressY) {
-    for (const auto& linkBox : g_linkHitBoxes) {
+    // Last painted is on top (fixed headers and overlays paint last)
+    for (auto it = g_linkHitBoxes.rbegin(); it != g_linkHitBoxes.rend(); ++it) {
+        const auto& linkBox = *it;
         auto inside = [&](float x, float y) {
             return x >= linkBox.x && x <= linkBox.x + linkBox.w && y >= linkBox.y && y <= linkBox.y + linkBox.h;
         };

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Fixed, sticky and z-index</title>
+<style>
+  body { margin: 0; font-family: sans-serif; font-size: 18px; }
+  /* Fixed header across the top, stretched between left and right */
+  .header { position: fixed; top: 0; left: 0; right: 0; height: 56px; background: #1a73e8; color: white; z-index: 10; }
+  .header p { margin: 0; padding: 16px 24px; }
+  /* Fixed button in the corner: shrinks to its text */
+  .fab { position: fixed; right: 24px; bottom: 24px; background: #e8453c; color: white; padding: 12px 18px; border-radius: 24px; }
+  main { padding: 80px 24px 24px; }
+  .card { background: #f1f3f4; margin: 12px 0; padding: 12px; }
+  /* Sticky section titles stick under the header */
+  .section { background: #fbe9e7; }
+  .section h2 { position: sticky; top: 56px; margin: 0; padding: 8px; background: #ff7043; color: white; }
+  /* z-index: the later yellow box would cover the green one, but green has z-index 2 */
+  .stack { position: relative; height: 120px; }
+  .a { position: absolute; left: 0; top: 0; width: 200px; height: 80px; background: #34a853; z-index: 2; color: white; }
+  .b { position: absolute; left: 100px; top: 30px; width: 200px; height: 80px; background: #fbbc04; z-index: 1; }
+  .c { position: absolute; left: 340px; top: 0; width: 200px; height: 80px; background: #9e9e9e; z-index: -1; }
+  .d { position: static; margin-left: 380px; margin-top: -70px; width: 200px; height: 40px; background: #4285f4; color: white; }
+</style>
+</head>
+<body>
+<div class="header"><p>Fixed header (stays put when the page scrolls)</p></div>
+<main>
+  <div class="stack">
+    <div class="a">green, z-index 2</div>
+    <div class="b">yellow, z-index 1</div>
+    <div class="c">grey, z-index -1</div>
+  </div>
+  <div class="d">blue, in flow, over grey</div>
+  <div class="section">
+    <h2>Sticky title one</h2>
+    <div class="card">Card 1</div><div class="card">Card 2</div><div class="card">Card 3</div>
+    <div class="card">Card 4</div><div class="card">Card 5</div><div class="card">Card 6</div>
+  </div>
+  <div class="section">
+    <h2>Sticky title two</h2>
+    <div class="card">Card 7</div><div class="card">Card 8</div><div class="card">Card 9</div>
+    <div class="card">Card 10</div><div class="card">Card 11</div><div class="card">Card 12</div>
+    <div class="card">Card 13</div><div class="card">Card 14</div><div class="card">Card 15</div>
+    <div class="card">Card 16</div><div class="card">Card 17</div><div class="card">Card 18</div>
+    <div class="card">Card 19</div><div class="card">Card 20</div><div class="card">Card 21</div>
+  </div>
+</main>
+<div class="fab">Fixed button</div>
+<script>
+  // ?scroll=N scrolls the page once loaded, for screenshots
+  var m = /scroll=(\d+)/.exec(location.search);
+  if (m) setTimeout(function () { window.scrollTo(0, +m[1]); }, 300);
+</script>
+</body>
+</html>

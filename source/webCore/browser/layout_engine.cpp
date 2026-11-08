@@ -264,7 +264,7 @@ bool insideClip(float& x, float& y, float& w, float& h) {
 // size: its content is scrolled inside it.
 void contentExtent(const LayoutBox& box, float x, float y, float& right, float& bottom) {
     for (const LayoutBox& child : box.children) {
-        if (child.type == LayoutType::None) continue;
+        if (child.type == LayoutType::None || child.positionType == 3) continue;  // fixed: viewport's
         float cx = x + child.x, cy = y + child.y;
         right = std::max(right, cx + child.width);
         bottom = std::max(bottom, cy + child.height);
@@ -564,6 +564,41 @@ void imageSize(const LayoutBox& img, float containingWidth, float& width, float&
     height = h + edgesH;
 }
 
+// A position: fixed box, laid out against the viewport (CSS 2.1 §10.3.7,
+// §10.6.4). x and y are viewport coordinates; paintBox draws it there.
+static void layoutFixed(LayoutBox& box, float vpW, float vpH) {
+    auto given = [](const LayoutLength& l) { return l.isSet() && !l.isAuto(); };
+    bool hasL = given(box.cssLeft), hasR = given(box.cssRight);
+    bool hasT = given(box.cssTop), hasB = given(box.cssBottom);
+    float left = hasL ? box.cssLeft.resolve(vpW, box.fontSize, vpW, vpH) : 0;
+    float right = hasR ? box.cssRight.resolve(vpW, box.fontSize, vpW, vpH) : 0;
+    float top = hasT ? box.cssTop.resolve(vpH, box.fontSize, vpW, vpH) : 0;
+    float bottom = hasB ? box.cssBottom.resolve(vpH, box.fontSize, vpW, vpH) : 0;
+
+    bool autoWidth = !box.cssWidth.isSet() || box.cssWidth.isAuto();
+    if (autoWidth && hasL && hasR) {
+        layoutBlock(box, std::max(0.0f, vpW - left - right), 0);  // stretched between the insets
+    } else if (autoWidth && !box.isImage) {
+        // Shrink-to-fit within the space the insets leave
+        float minW, maxW;
+        intrinsicWidths(box, minW, maxW);
+        float available = vpW - left - right - box.marginLeft - box.marginRight;
+        layoutAtWidth(box, std::max(0.0f, std::min(maxW, std::max(minW, available))));
+    } else {
+        layoutBlock(box, vpW, 0);
+    }
+    bool autoHeight = !box.cssHeight.isSet() || box.cssHeight.isAuto();
+    if (autoHeight && hasT && hasB)
+        box.height = std::max(box.height, vpH - top - bottom - box.marginTop - box.marginBottom);
+
+    if (hasL) box.x = left + box.marginLeft;
+    else if (hasR) box.x = vpW - right - box.width - box.marginRight;
+    else box.x = box.marginLeft;
+    if (hasT) box.y = top + box.marginTop;
+    else if (hasB) box.y = vpH - bottom - box.height - box.marginBottom;
+    else box.y = box.marginTop;
+}
+
 bool isBlockLevel(LayoutType type) {
     switch (type) {
         case LayoutType::Block:
@@ -722,6 +757,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         std::vector<FlexChild> allItems;
         for (auto& child : box.children) {
             if (child.type == LayoutType::None) continue;
+            if (child.positionType == 2 || child.positionType == 3) continue;  // out of flow
             
             float childAvailableWidth = contentWidth > 0 ? contentWidth : 200;
 
@@ -1321,6 +1357,9 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 child.y = contH - box.paddingBottom - box.borderBottom - child.height - child.cssBottom.resolve(contH, child.fontSize, vpW, vpH);
             }
         }
+        else if (child.positionType == 3) {
+            layoutFixed(child, vpW, vpH);
+        }
         else if (child.positionType == 1) {
             // Relative: offset from normal flow position
             if (child.cssTop.isSet() && !child.cssTop.isAuto())
@@ -1635,15 +1674,234 @@ static void dumpLayoutTree(const LayoutBox& box, int depth = 0) {
 
 static void paintChildren(const LayoutBox& box, float screenX, float screenY, float viewportHeight);
 
+namespace {
+
+// A box painted out of tree order by its stacking context: where it goes on
+// screen and the clip in force where it sits in the tree
+struct PaintLayer {
+    const LayoutBox* box;
+    float x, y;                      // paintBox offset (its parent's origin)
+    bool clipped;
+    ClipRect clip;
+    std::vector<ClipRect> scrollports;
+    bool context;                    // starts a stacking context of its own
+};
+
+// One frame's paint: the viewport fixed boxes are placed in, the scroll
+// containers sticky boxes stick to, and the box budget
+struct PaintFrame {
+    bool active = false;
+    float viewX = 0, viewY = 0, viewW = 0, viewBottom = 0;
+    const LayoutBox* root = nullptr;
+    const LayoutBox* contextLayer = nullptr;  // the layer being painted, when it starts a context
+    std::vector<ClipRect> scrollports;        // innermost last; empty: the viewport
+    int count = 0;
+    int depth = 0;
+};
+thread_local PaintFrame t_frame;
+
+void collectFixed(const LayoutBox& box, std::vector<const LayoutBox*>& out) {
+    for (const LayoutBox& child : box.children) {
+        if (child.type == LayoutType::None || child.opacity <= 0.001f) continue;
+        if (child.positionType == 3) out.push_back(&child);
+        collectFixed(child, out);
+    }
+}
+
+// Painted by its stacking context, not in tree order: positioned boxes, and
+// flex items with a z-index (CSS Flexbox §4.3)
+bool isLayered(const LayoutBox& child, const LayoutBox& parent) {
+    return child.positionType != 0 || (parent.type == LayoutType::Flex && !child.zIndexAuto);
+}
+
+// Starts a stacking context: its layered descendants paint inside it
+// (CSS 2.1 §9.9.1; fixed, sticky and opacity from CSS Positioned Layout 3
+// and CSS Color 4)
+bool startsContext(const LayoutBox& box, bool flexItem) {
+    if (box.positionType == 3 || box.positionType == 4) return true;
+    if (!box.zIndexAuto && (box.positionType != 0 || flexItem)) return true;
+    return box.opacity < 0.999f;
+}
+
+int layerZ(const LayoutBox& box) { return box.zIndexAuto ? 0 : box.zIndex; }
+
+// How far a position: sticky child moves from its in-flow place so it stays
+// `top`/`bottom`/`left`/`right` inside its scrollport, without leaving its
+// parent's content box (CSS Positioned Layout 3, §3.4)
+void stickyShift(const LayoutBox& child, const LayoutBox& parent, float parentX, float parentY,
+                 const std::vector<ClipRect>& scrollports, float& dx, float& dy) {
+    dx = dy = 0;
+    ClipRect port = scrollports.empty()
+        ? ClipRect{t_frame.viewX, t_frame.viewY, t_frame.viewX + t_frame.viewW, t_frame.viewBottom}
+        : scrollports.back();
+    float vpW = layoutViewportWidth(), vpH = layoutViewportHeight();
+    float parentW = parent.width, parentH = parent.height;
+    if (isScrollContainer(parent)) scrollableSize(parent, parentW, parentH);
+    float cbLeft = parentX + parent.borderLeft + parent.paddingLeft;
+    float cbTop = parentY + parent.borderTop + parent.paddingTop;
+    float cbRight = parentX + parentW - parent.borderRight - parent.paddingRight;
+    float cbBottom = parentY + parentH - parent.borderBottom - parent.paddingBottom;
+    float x = parentX + child.x, y = parentY + child.y;
+    auto given = [](const LayoutLength& l) { return l.isSet() && !l.isAuto(); };
+
+    if (given(child.cssTop)) {
+        float want = port.y0 + child.cssTop.resolve(port.y1 - port.y0, child.fontSize, vpW, vpH) - y;
+        if (want > 0) dy = std::max(0.0f, std::min(want, cbBottom - child.marginBottom - (y + child.height)));
+    }
+    if (dy == 0 && given(child.cssBottom)) {
+        float want = port.y1 - child.cssBottom.resolve(port.y1 - port.y0, child.fontSize, vpW, vpH) - (y + child.height);
+        if (want < 0) dy = std::min(0.0f, std::max(want, cbTop + child.marginTop - y));
+    }
+    if (given(child.cssLeft)) {
+        float want = port.x0 + child.cssLeft.resolve(port.x1 - port.x0, child.fontSize, vpW, vpH) - x;
+        if (want > 0) dx = std::max(0.0f, std::min(want, cbRight - child.marginRight - (x + child.width)));
+    }
+    if (dx == 0 && given(child.cssRight)) {
+        float want = port.x1 - child.cssRight.resolve(port.x1 - port.x0, child.fontSize, vpW, vpH) - (x + child.width);
+        if (want < 0) dx = std::min(0.0f, std::max(want, cbLeft + child.marginLeft - x));
+    }
+}
+
+// The layered descendants a stacking context paints, in tree order, with
+// where each sits. It walks the same offsets, scrolling and clips as
+// paintChildren, and passes through positioned boxes with z-index: auto
+// (their layered descendants belong to this context), but not into boxes
+// that start a context of their own.
+struct LayerWalk {
+    std::vector<PaintLayer>& out;
+    std::vector<ClipRect> clips;
+    std::vector<ClipRect> ports;
+
+    void children(const LayoutBox& box, float x, float y) {
+        for (const LayoutBox& child : box.children) {
+            if (child.type == LayoutType::None || child.opacity <= 0.001f) continue;
+            if (child.positionType == 3) continue;  // fixed: the frame's root paints them
+            float dx = 0, dy = 0;
+            if (child.positionType == 4) stickyShift(child, box, x, y, ports, dx, dy);
+            bool flexItem = box.type == LayoutType::Flex;
+            bool layered = isLayered(child, box);
+            bool context = startsContext(child, flexItem);
+            if (layered) {
+                PaintLayer layer{&child, x + dx, y + dy, !clips.empty(), {}, ports, layered && context};
+                if (layer.clipped) layer.clip = clips.back();
+                out.push_back(std::move(layer));
+            }
+            if (!context) descend(child, x + dx + child.x, y + dy + child.y);
+        }
+    }
+
+    void descend(const LayoutBox& box, float x, float y) {
+        if (box.children.empty()) return;
+        if (!clipsContent(box)) {
+            children(box, x, y);
+            return;
+        }
+        const float padX = x + box.borderLeft, padY = y + box.borderTop;
+        ClipRect clip{padX, padY, padX + std::max(0.0f, box.width - box.borderLeft - box.borderRight),
+                      padY + std::max(0.0f, box.height - box.borderTop - box.borderBottom)};
+        bool port = isScrollContainer(box);
+        if (port) ports.push_back(clip);
+        if (!clips.empty()) {
+            const ClipRect& o = clips.back();
+            clip = {std::max(clip.x0, o.x0), std::max(clip.y0, o.y0), std::min(clip.x1, o.x1), std::min(clip.y1, o.y1)};
+        }
+        clips.push_back(clip);
+        ScrollOffset offset = scrollOffsetOf(box);
+        children(box, x - offset.x, y - offset.y);
+        clips.pop_back();
+        if (port) ports.pop_back();
+    }
+};
+
+void paintLayer(const PaintLayer& layer) {
+    std::vector<ClipRect> clips, ports = layer.scrollports;
+    clips.swap(t_clipStack);
+    ports.swap(t_frame.scrollports);
+    if (layer.clipped) {
+        t_clipStack.push_back(layer.clip);
+        if (s_push_clip) s_push_clip(layer.clip.x0, layer.clip.y0, std::max(0.0f, layer.clip.x1 - layer.clip.x0),
+                                     std::max(0.0f, layer.clip.y1 - layer.clip.y0));
+    }
+    const LayoutBox* outer = t_frame.contextLayer;
+    t_frame.contextLayer = layer.context ? layer.box : nullptr;
+    paintBox(*layer.box, layer.x, layer.y, t_frame.viewBottom, 0);
+    t_frame.contextLayer = outer;
+    if (layer.clipped && s_pop_clip) s_pop_clip();
+    clips.swap(t_clipStack);
+    ports.swap(t_frame.scrollports);
+}
+
+// Paints `box`'s children whose top-left is relative to (x, y). In-flow
+// children paint in tree order; layered ones are left to their stacking
+// context. When `box` starts a context, it paints its layers around its
+// in-flow content (CSS 2.1 Appendix E): negative z-index first, then the
+// rest by z-index, z-index: auto counting as 0. The frame's root also
+// paints the fixed boxes, at the viewport, unscrolled and unclipped.
+void paintChildBoxes(const LayoutBox& box, float x, float y, float viewportHeight, bool context) {
+    std::vector<PaintLayer> layers;
+    if (context) {
+        LayerWalk walk{layers, {}, t_frame.scrollports};
+        if (!t_clipStack.empty()) walk.clips.push_back(t_clipStack.back());
+        walk.children(box, x, y);
+        if (&box == t_frame.root) {
+            std::vector<const LayoutBox*> fixed;
+            collectFixed(box, fixed);
+            for (const LayoutBox* f : fixed)
+                layers.push_back({f, t_frame.viewX, t_frame.viewY, false, {}, {}, true});
+        }
+        std::stable_sort(layers.begin(), layers.end(),
+                         [](const PaintLayer& a, const PaintLayer& b) { return layerZ(*a.box) < layerZ(*b.box); });
+    }
+    size_t next = 0;
+    for (; next < layers.size() && layerZ(*layers[next].box) < 0; ++next) paintLayer(layers[next]);
+    for (const auto& child : box.children) {
+        if (isLayered(child, box)) continue;
+        paintBox(child, x, y, viewportHeight, 0);
+    }
+    for (; next < layers.size(); ++next) paintLayer(layers[next]);
+}
+
+} // namespace
+
+std::vector<const LayoutBox*> fixedBoxesInPaintOrder(const LayoutBox& root) {
+    std::vector<const LayoutBox*> out;
+    if (root.positionType == 3) out.push_back(&root);
+    collectFixed(root, out);
+    std::stable_sort(out.begin(), out.end(),
+                     [](const LayoutBox* a, const LayoutBox* b) { return layerZ(*a) < layerZ(*b); });
+    return out;
+}
+
+static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY, float viewportHeight, float scrollY);
+
 void paintBox(const LayoutBox& box, float offsetX, float offsetY,
               float viewportHeight, float scrollY) {
+    if (t_frame.active) {
+        paintBoxImpl(box, offsetX, offsetY, viewportHeight, scrollY);
+        return;
+    }
+    // A new frame: (offsetX, offsetY) is the viewport origin
+    t_frame.active = true;
+    t_frame.viewX = offsetX;
+    t_frame.viewY = offsetY;
+    t_frame.viewW = layoutViewportWidth();
+    t_frame.viewBottom = viewportHeight;
+    t_frame.root = &box;
+    t_frame.contextLayer = nullptr;
+    t_frame.scrollports.clear();
+    t_frame.count = 0;
+    t_frame.depth = 0;
+    paintBoxImpl(box, offsetX, offsetY, viewportHeight, scrollY);
+    t_frame.active = false;
+    t_frame.root = nullptr;
+}
+
+static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
+                         float viewportHeight, float scrollY) {
     // Budget: limit total painted boxes per frame to prevent UI hang on complex pages
-    static thread_local int s_paintCount = 0;
-    static thread_local int s_paintDepth = 0;
-    if (s_paintDepth == 0) s_paintCount = 0;  // Reset at top-level call
-    if (s_paintCount++ > 4000 || s_paintDepth > 64) return;
-    s_paintDepth++;
-    struct PaintGuard { ~PaintGuard() { --s_paintDepth; } } pg;
+    if (t_frame.count++ > 4000 || t_frame.depth > 64) return;
+    t_frame.depth++;
+    struct PaintGuard { ~PaintGuard() { --t_frame.depth; } } pg;
     
     if (box.type == LayoutType::None) return;
     if (box.opacity <= 0.001f) return;
@@ -1828,8 +2086,12 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
 // its scroll position, with a scroll thumb when the user can scroll it.
 static void paintChildren(const LayoutBox& box, float screenX, float screenY, float viewportHeight) {
     if (box.children.empty()) return;
+    // The frame's root, a layer that starts a context, or an in-flow box
+    // that does (opacity) paints its own layers
+    bool context = &box == t_frame.root || &box == t_frame.contextLayer ||
+                   (box.positionType == 0 && startsContext(box, false));
     if (!clipsContent(box)) {
-        for (const auto& child : box.children) paintBox(child, screenX, screenY, viewportHeight, 0);
+        paintChildBoxes(box, screenX, screenY, viewportHeight, context);
         return;
     }
     const float padX = screenX + box.borderLeft, padY = screenY + box.borderTop;
@@ -1844,9 +2106,10 @@ static void paintChildren(const LayoutBox& box, float screenX, float screenY, fl
     t_clipStack.push_back(clip);
     if (s_push_clip) s_push_clip(padX, padY, padW, padH);
     ScrollOffset offset = scrollOffsetOf(box);
-    for (const auto& child : box.children) {
-        paintBox(child, screenX - offset.x, screenY - offset.y, viewportHeight, 0);
-    }
+    bool scrollport = isScrollContainer(box);
+    if (scrollport) t_frame.scrollports.push_back({padX, padY, padX + padW, padY + padH});
+    paintChildBoxes(box, screenX - offset.x, screenY - offset.y, viewportHeight, context);
+    if (scrollport) t_frame.scrollports.pop_back();
     if (s_pop_clip) s_pop_clip();
     t_clipStack.pop_back();
 
