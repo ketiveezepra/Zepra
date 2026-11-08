@@ -143,6 +143,30 @@ TEST(HtmlParserRobustness, ShallowNestingIsUnchanged) {
     EXPECT_EQ(treeDepth(doc.get()), 103u);
 }
 
+// "&name" that isn't a character reference stays in the attribute it was in.
+// It used to leave the attribute and land in the page text, so Google Fonts
+// links ("?family=A&family=B") lost every family after the first.
+TEST(HtmlParserRobustness, AmpersandsInAttributesThatAreNotReferencesStay) {
+    HTMLParser parser;
+    auto doc = parser.parse(
+        "<html><body>"
+        "<a id='q' href='/css2?family=Lobster&family=Roboto+Slab:wght@700&display=swap'>x</a>"
+        "<a id='semi' href='/x?a=1&bogus;b=2'>y</a>"
+        "<a id='unq' href=/x?a=1&zzz=2>z</a>"
+        "<a id='real' title='Fish &amp; chips &lt;3 &#x41;&#66;'>w</a>"
+        "<p id='text'>Tom &zzz; Jerry &amp; co</p>"
+        "</body></html>");
+    ASSERT_NE(doc, nullptr);
+    EXPECT_EQ(doc->getElementById("q")->getAttribute("href"),
+              "/css2?family=Lobster&family=Roboto+Slab:wght@700&display=swap");
+    EXPECT_EQ(doc->getElementById("semi")->getAttribute("href"), "/x?a=1&bogus;b=2");
+    EXPECT_EQ(doc->getElementById("unq")->getAttribute("href"), "/x?a=1&zzz=2");
+    EXPECT_EQ(doc->getElementById("real")->getAttribute("title"), "Fish & chips <3 AB");
+    EXPECT_EQ(doc->getElementById("text")->textContent(), "Tom &zzz; Jerry & co");
+    // Nothing leaked out of the attributes into the page text
+    EXPECT_EQ(doc->getElementById("q")->textContent(), "x");
+}
+
 // ---------------------------------------------------------------------------
 // JavaScript
 // ---------------------------------------------------------------------------

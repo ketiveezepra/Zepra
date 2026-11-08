@@ -1307,6 +1307,15 @@ void HTML5Tokenizer::processCDATASectionEnd(char32_t c) {
 
 void HTML5Tokenizer::processCharacterReference(char32_t c) {
     temporaryBuffer_ = "&";
+    // Text that turned out not to be a reference goes back where it came from:
+    // the attribute value being read, or the document text
+    bool inAttribute = returnState_ == TokenizerState::AttributeValueDoubleQuoted ||
+                       returnState_ == TokenizerState::AttributeValueSingleQuoted ||
+                       returnState_ == TokenizerState::AttributeValueUnquoted;
+    auto flushLiteral = [&](const std::string& text) {
+        if (inAttribute) currentAttrValue_ += text;
+        else emitString(text);
+    };
     if (isASCIIAlphaNum(c)) {
         // Named character reference — start collecting
         state_ = TokenizerState::NamedCharacterReference;
@@ -1331,8 +1340,7 @@ void HTML5Tokenizer::processCharacterReference(char32_t c) {
                         }
                     }
                 } else {
-                    // Emit as-is
-                    emitString("&" + name + ";");
+                    flushLiteral("&" + name + ";");  // unknown name: kept as written
                 }
                 state_ = returnState_;
                 return;
@@ -1346,7 +1354,9 @@ void HTML5Tokenizer::processCharacterReference(char32_t c) {
                                returnState_ == TokenizerState::RCDATA)) {
                     for (char32_t cp : *result) emitCharacter(cp);
                 } else {
-                    emitString("&" + name);
+                    // In an attribute "&name" without ';' stays literal, so URLs
+                    // like "?a=1&family=x" keep their parameters
+                    flushLiteral("&" + name);
                 }
                 state_ = returnState_;
                 reconsume(nc);
@@ -1354,7 +1364,7 @@ void HTML5Tokenizer::processCharacterReference(char32_t c) {
             }
         }
         state_ = returnState_;
-        emitString("&" + name);
+        flushLiteral("&" + name);
     } else if (c == '#') {
         temporaryBuffer_ += '#';
         charRefCode_ = 0;
