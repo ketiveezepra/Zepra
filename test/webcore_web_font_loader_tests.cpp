@@ -40,6 +40,8 @@ using Zepra::Fonts::WebFontResponse;
 
 namespace {
 
+#include "fixtures/woff2.inc"
+
 const char* kSans = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
 const char* kSerif = "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf";
 const char* kMono = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
@@ -211,13 +213,15 @@ TEST_F(WebFonts, LoaderFollowsSrcFallbacksAndRanges) {
         "@font-face { font-family: Inline; font-weight: 700; src: url(" + dataUrl + ") format('truetype'); }"
         "@font-face { font-family: Missing; src: url(https://cdn.test/404.ttf), url(f/also-missing.ttf); }"
         "@font-face { font-family: Shared; src: url(f/good.woff); }"
-        "@font-face { font-family: Old; src: url(f/old.eot) format('embedded-opentype'); }");
-    ASSERT_EQ(faces.size(), 7u);
+        "@font-face { font-family: Old; src: url(f/old.eot) format('embedded-opentype'); }"
+        "@font-face { font-family: Packed; src: url(f/packed.woff2) format('woff2'); }");
+    ASSERT_EQ(faces.size(), 8u);
 
     std::map<std::string, std::vector<uint8_t>> files = {
         {"https://site.test/css/f/broken.woff", {'w', 'O', 'F', 'F', 0, 0, 0, 0}},
         {"https://site.test/css/f/good.woff", asWoff(readFile(kSans))},
         {"https://site.test/css/f/cyr.woff", asWoff(readFile(kSerif))},
+        {"https://site.test/css/f/packed.woff2", std::vector<uint8_t>(kWoff2Subset, kWoff2Subset + sizeof(kWoff2Subset))},
     };
     std::vector<std::vector<std::string>> rounds;
     auto fetch = [&](const std::vector<std::string>& urls) {
@@ -241,19 +245,22 @@ TEST_F(WebFonts, LoaderFollowsSrcFallbacksAndRanges) {
     text.addUtf8("Hello, world");
     auto result = Zepra::Fonts::loadWebFonts(faces, &text, resolve, fetch);
 
-    EXPECT_EQ(result.loaded, 4u);   // Fallback, Local, Inline, Shared
+    EXPECT_EQ(result.loaded, 5u);   // Fallback, Local, Inline, Shared, Packed
     EXPECT_EQ(result.failed, 2u);   // Missing, Old
     EXPECT_EQ(result.skipped, 1u);  // CyrillicOnly: the text has no Cyrillic
     EXPECT_EQ(result.messages.size(), 2u);
 
-    // Round 1 fetches every face's first usable source at once; the woff2,
-    // the .eot and the data: URL never reach the network, and good.woff is
-    // fetched once for two faces
+    // Round 1 fetches every face's first usable source at once; the .eot
+    // and the data: URL never reach the network. Fallback walks next.woff2
+    // (404), broken.woff, then good.woff, which round 1 already fetched for
+    // Shared, so it is not downloaded twice
     ASSERT_EQ(rounds.size(), 2u);
-    EXPECT_EQ(rounds[0], (std::vector<std::string>{"https://site.test/css/f/broken.woff",
+    EXPECT_EQ(rounds[0], (std::vector<std::string>{"https://site.test/css/f/next.woff2",
                                                    "https://cdn.test/404.ttf",
-                                                   "https://site.test/css/f/good.woff"}));
-    EXPECT_EQ(rounds[1], (std::vector<std::string>{"https://site.test/css/f/also-missing.ttf"}));
+                                                   "https://site.test/css/f/good.woff",
+                                                   "https://site.test/css/f/packed.woff2"}));
+    EXPECT_EQ(rounds[1], (std::vector<std::string>{"https://site.test/css/f/broken.woff",
+                                                   "https://site.test/css/f/also-missing.ttf"}));
 
     auto& fm = FontManager::instance();
     const RegisteredFont* f = fm.match("Fallback", 400, false);
@@ -274,6 +281,13 @@ TEST_F(WebFonts, LoaderFollowsSrcFallbacksAndRanges) {
     EXPECT_EQ(fm.match("Missing", 400, false), nullptr);
     EXPECT_EQ(fm.match("CyrillicOnly", 400, false), nullptr);
     ASSERT_NE(fm.match("Shared", 400, false), nullptr);
+
+    const RegisteredFont* packed = fm.match("Packed", 400, false);  // WOFF2, unpacked
+    ASSERT_NE(packed, nullptr);
+    EXPECT_FALSE(packed->isSystem);
+    ASSERT_GE(packed->data.size(), 4u);
+    EXPECT_EQ(std::vector<uint8_t>(packed->data.begin(), packed->data.begin() + 4),
+              (std::vector<uint8_t>{0, 1, 0, 0}));
 }
 
 TEST_F(WebFonts, NoTextLoadsEveryFace) {

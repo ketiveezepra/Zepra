@@ -325,6 +325,39 @@ LayoutBox& addImage(LayoutBox& parent, float naturalW, float naturalH) {
     return img;
 }
 
+TEST(AbsoluteLayout, InsetsStretchAnAutoSizedBox) {
+    LayoutBox parent;
+    parent.type = LayoutType::Block;
+    parent.positionType = 1;
+    parent.cssWidth = LayoutLength::px(120);
+    parent.cssHeight = LayoutLength::px(80);
+    parent.borderLeft = parent.borderTop = 2;
+    parent.paddingLeft = parent.paddingTop = 10;
+    parent.boxSizing = 1;
+    LayoutBox& cover = addBox(parent, LayoutType::Block);
+    cover.positionType = 2;
+    cover.cssTop = cover.cssRight = cover.cssBottom = cover.cssLeft = LayoutLength::px(0);
+    LayoutBox& inset = addBox(parent, LayoutType::Block);
+    inset.positionType = 2;
+    inset.cssTop = LayoutLength::px(5);
+    inset.cssBottom = LayoutLength::px(15);
+    inset.cssLeft = LayoutLength::px(4);
+    inset.cssRight = LayoutLength::px(6);
+    inset.paddingLeft = 3;  // content-box: the padding stays inside the stretched size
+    ZepraBrowser::layoutBlock(parent, 1000, 0);
+    // inset: 0 covers the padding box (inside the border, over the padding)
+    EXPECT_FLOAT_EQ(cover.x, 2);
+    EXPECT_FLOAT_EQ(cover.y, 2);
+    EXPECT_FLOAT_EQ(cover.width, 118);
+    EXPECT_FLOAT_EQ(cover.height, 78);
+    EXPECT_FLOAT_EQ(inset.x, 6);
+    EXPECT_FLOAT_EQ(inset.y, 7);
+    EXPECT_FLOAT_EQ(inset.width, 108);
+    EXPECT_FLOAT_EQ(inset.height, 58);
+    // The specified (auto) sizes are kept for the next layout pass
+    EXPECT_FALSE(cover.cssWidth.isSet() && !cover.cssWidth.isAuto());
+}
+
 TEST(FlexLayout, ColumnAlignCenterCentresHorizontally) {
     LayoutBox flex = makeFlex(1, 3);
     LayoutBox& item = addBox(flex, LayoutType::Block);
@@ -682,6 +715,47 @@ TEST(GradientRaster, OnlyGradientLayersAreDrawn) {
     ZepraBrowser::gradientPixelSize(4000, 4000, w, h);
     EXPECT_LE((double)w * h, 2.6e6);
     EXPECT_EQ(w, h);
+// Background colour alpha
+// ---------------------------------------------------------------------------
+
+struct FillCall {
+    uint32_t color;
+    int alpha;  // -1: an opaque rectangle (no alpha argument)
+};
+std::vector<FillCall> g_fills;
+
+std::vector<FillCall> paintFilledBox(uint8_t bgAlpha, float opacity) {
+    g_fills.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t c) { g_fills.push_back({c, -1}); },
+        [](float, float, float, float, uint32_t, float) {}, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(
+        [](float, float, float, float, float, uint32_t c, uint8_t a) { g_fills.push_back({c, a}); }, nullptr);
+    LayoutBox box;
+    box.width = box.height = 10;
+    box.hasBgColor = true;
+    box.bgColor = 0xFF0000;
+    box.bgAlpha = bgAlpha;
+    box.opacity = opacity;
+    ZepraBrowser::paintBox(box, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(nullptr, nullptr);
+    return g_fills;
+}
+
+TEST(Backgrounds, ColorAlphaAndOpacityReachTheFill) {
+    auto opaque = paintFilledBox(255, 1.0f);
+    ASSERT_EQ(opaque.size(), 1u);
+    EXPECT_EQ(opaque[0].alpha, -1);
+    // rgba(255, 0, 0, 0.5)
+    auto half = paintFilledBox(128, 1.0f);
+    ASSERT_EQ(half.size(), 1u);
+    EXPECT_EQ(half[0].color, 0xFF0000u);
+    EXPECT_EQ(half[0].alpha, 128);
+    // opacity multiplies the colour's own alpha
+    auto both = paintFilledBox(128, 0.5f);
+    ASSERT_EQ(both.size(), 1u);
+    EXPECT_EQ(both[0].alpha, 64);
 }
 
 // ---------------------------------------------------------------------------

@@ -49,6 +49,7 @@
 #include <nxgfx/context.h>
 #include <nxgfx/primitives.h>
 #include <nxgfx/text.h>
+#include <platform/display_info.h>
 #include "nxrender_cpp.h"
 #include "nxfont.h"
 #include "reox_nxrender_bridge.h"
@@ -1214,6 +1215,7 @@ static void rebuildLayoutTree() {
             // Background
             if (!bodyStyle->backgroundColor.isTransparent()) {
                 g_layoutRoot->bgColor = cssColorToRGB(bodyStyle->backgroundColor);
+                g_layoutRoot->bgAlpha = bodyStyle->backgroundColor.a;
                 g_layoutRoot->hasBgColor = true;
             }
             if (!bodyStyle->backgroundImage.empty() && bodyStyle->backgroundImage != "none") {
@@ -2596,6 +2598,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     
                     if (!childStyle->backgroundColor.isTransparent()) {
                         blockBox->bgColor = cssColorToRGB(childStyle->backgroundColor);
+                        blockBox->bgAlpha = childStyle->backgroundColor.a;
                         blockBox->hasBgColor = true;
                     }
                     if (!childStyle->backgroundImage.empty() && childStyle->backgroundImage != "none") {
@@ -2787,6 +2790,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     
                     if (!childStyle->backgroundColor.isTransparent()) {
                         inlineBox->bgColor = cssColorToRGB(childStyle->backgroundColor);
+                        inlineBox->bgAlpha = childStyle->backgroundColor.a;
                         inlineBox->hasBgColor = true;
                     }
                     
@@ -3307,6 +3311,9 @@ public:
     }
     double viewportWidth() override { return g_width - getSidebarOffset(); }
     double viewportHeight() override { return pageViewportHeight(); }
+    // The monitor's resolution, asked of the OS once (the window when unknown)
+    double screenWidth() override { return screenSize().first; }
+    double screenHeight() override { return screenSize().second; }
     double scrollX() override { return 0; }
     double scrollY() override {
         Tab* tab = activeTab();
@@ -3327,6 +3334,17 @@ public:
 
 private:
     ZepraBrowser::LayoutGeometryIndex index_;
+
+    static std::pair<double, double> screenSize() {
+        static std::pair<double, double> size = [] {
+            NXRender::DisplayInfo& info = NXRender::DisplayInfo::instance();
+            if (info.screenWidth() <= 0) info.queryFromOS();
+            if (info.screenWidth() > 0 && info.screenHeight() > 0)
+                return std::make_pair((double)info.screenWidth(), (double)info.screenHeight());
+            return std::make_pair((double)g_width, (double)g_height);
+        }();
+        return size;
+    }
     const LayoutBox* indexedRoot_ = nullptr;
     uint64_t indexedPass_ = 0;
 

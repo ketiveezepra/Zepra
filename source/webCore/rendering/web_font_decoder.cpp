@@ -1,6 +1,7 @@
 /**
  * @file web_font_decoder.cpp
  * @brief WOFF 1.0 unpacking (https://www.w3.org/TR/WOFF/) and font sniffing.
+ *        WOFF2 is in woff2_decoder.cpp.
  */
 
 #include "web_font_decoder.hpp"
@@ -146,8 +147,8 @@ bool isSupportedFontFormatHint(const std::string& format) {
     for (char c : format) f += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     if (f.empty()) return true;
     static const char* const kSupported[] = {
-        "truetype", "opentype", "woff", "collection",
-        "truetype-variations", "opentype-variations", "woff-variations",
+        "truetype", "opentype", "woff", "woff2", "collection",
+        "truetype-variations", "opentype-variations", "woff-variations", "woff2-variations",
     };
     for (const char* s : kSupported)
         if (f == s) return true;
@@ -168,7 +169,7 @@ WebFontDecodeResult decodeWebFont(const uint8_t* data, size_t size) {
             return r;
         }
         case WebFontFormat::Woff: return decodeWoff(data, size);
-        case WebFontFormat::Woff2: return fail(format, "WOFF2 fonts are not supported yet");
+        case WebFontFormat::Woff2: return decodeWoff2(data, size);
         case WebFontFormat::Unknown: break;
     }
     return fail(format, "not a font file");
