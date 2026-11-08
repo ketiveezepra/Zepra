@@ -28,8 +28,8 @@ namespace ZepraBrowser {
 // These are set by the main browser code to connect layout to rendering
 static void (*s_gfx_rect)(float, float, float, float, uint32_t) = nullptr;
 static void (*s_gfx_border)(float, float, float, float, uint32_t, float) = nullptr;
-static void (*s_text_render)(const std::string&, float, float, uint32_t, float) = nullptr;
-static float (*s_text_width)(const std::string&, float) = nullptr;
+static void (*s_text_render)(const std::string&, float, float, uint32_t, float, const LayoutBox*) = nullptr;
+static float (*s_text_width)(const std::string&, float, const LayoutBox*) = nullptr;
 static void (*s_register_link)(float, float, float, float, const std::string&, const std::string&) = nullptr;
 static void (*s_gfx_texture)(float, float, float, float, uint32_t) = nullptr;
 static void (*s_gfx_line)(float, float, float, float, uint32_t, float) = nullptr;
@@ -122,7 +122,7 @@ std::vector<std::pair<size_t, size_t>> fieldLines(const std::string& value, bool
 
 float prefixWidth(const LayoutBox& box, const std::string& value, size_t lineStart, size_t offset) {
     if (!s_text_width || offset <= lineStart) return 0;
-    return s_text_width(shownText(box, value.substr(lineStart, offset - lineStart)), box.fontSize);
+    return s_text_width(shownText(box, value.substr(lineStart, offset - lineStart)), box.fontSize, &box);
 }
 
 /// Paints a text control: placeholder or value, the selection behind it and
@@ -156,13 +156,13 @@ bool paintTextField(const LayoutBox& box) {
         std::string placeholder = element->getAttribute("placeholder");
         if (placeholder.empty() && !Zepra::WebCore::supportsTextSelection(element)) placeholder = box.placeholder;
         if (s_text_render && !placeholder.empty() && !g.multiline) {
-            s_text_render(placeholder, g.textX, g.baseline, 0x999999, box.fontSize);
+            s_text_render(placeholder, g.textX, g.baseline, 0x999999, box.fontSize, &box);
         } else if (s_text_render && !placeholder.empty()) {
             auto placeholderLines = fieldLines(placeholder, true);
             for (size_t i = 0; i < placeholderLines.size(); i++) {
                 const auto& [a, b] = placeholderLines[i];
                 s_text_render(placeholder.substr(a, b - a), g.textX, g.baseline + i * g.lineHeight, 0x999999,
-                              box.fontSize);
+                              box.fontSize, &box);
             }
         }
     }
@@ -181,7 +181,7 @@ bool paintTextField(const LayoutBox& box) {
             if (s_gfx_rrect) s_gfx_rrect(x0, top, x1 - x0, box.fontSize + 5, 0, kSelectionColor, 90);
             else if (s_gfx_rect) s_gfx_rect(x0, top, x1 - x0, box.fontSize + 5, 0xB4D5FE);
         }
-        if (s_text_render && b > a) s_text_render(shownText(box, value.substr(a, b - a)), g.textX - dx, baseline, box.color, box.fontSize);
+        if (s_text_render && b > a) s_text_render(shownText(box, value.substr(a, b - a)), g.textX - dx, baseline, box.color, box.fontSize, &box);
         // The caret
         size_t caret = selection.caret();
         bool onLine = caret >= a && caret <= b && (caret < b || i + 1 == lines.size() || caret != lines[i + 1].first);
@@ -415,8 +415,8 @@ std::string cssUrl(const std::string& value) {
 void setLayoutCallbacks(
     void (*gfx_rect)(float, float, float, float, uint32_t),
     void (*gfx_border)(float, float, float, float, uint32_t, float),
-    void (*text_render)(const std::string&, float, float, uint32_t, float),
-    float (*text_width)(const std::string&, float),
+    void (*text_render)(const std::string&, float, float, uint32_t, float, const LayoutBox*),
+    float (*text_width)(const std::string&, float, const LayoutBox*),
     void (*register_link)(float, float, float, float, const std::string&, const std::string&),
     void (*gfx_texture)(float, float, float, float, uint32_t),
     void (*gfx_line)(float, float, float, float, uint32_t, float)
@@ -533,7 +533,7 @@ void imageSize(const LayoutBox& img, float containingWidth, float& width, float&
             h = img.naturalHeight;
         } else if (!img.text.empty()) {
             // Not loaded (or failed): as big as its placeholder text
-            w = measureTextWidth(img.text, img.fontSize);
+            w = measureTextWidth(img.text, img.fontSize, &img);
             h = img.fontSize + 4;
         }
     } else if (!hasW) {
@@ -749,7 +749,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                     maxChildRight = std::max(maxChildRight, right);
                 }
                 if (!child.text.empty()) {
-                    float tw = measureTextWidth(child.text, child.fontSize);
+                    float tw = measureTextWidth(child.text, child.fontSize, &child);
                     maxChildRight = std::max(maxChildRight, tw);
                 }
                 float shrinkWidth = maxChildRight + child.paddingRight + child.borderRight;
@@ -1176,7 +1176,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 if (contentW > 0 && contentW < availWidth)
                     child.width = contentW;
             } else {
-                float textW = measureTextWidth(child.text, child.fontSize);
+                float textW = measureTextWidth(child.text, child.fontSize, &child);
                 child.width = textW;
                 child.height = child.fontSize + 4;
             }
@@ -1761,7 +1761,7 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
         float midY = screenY + box.height / 2;
         if (s_push_clip) s_push_clip(x0, screenY, std::max(0.0f, x1 - x0), box.height);
         if (s_text_render && !box.text.empty())
-            s_text_render(box.text, x0, midY + box.fontSize * 0.35f, box.color, box.fontSize);
+            s_text_render(box.text, x0, midY + box.fontSize * 0.35f, box.color, box.fontSize, &box);
         if (s_pop_clip) s_pop_clip();
         // The arrow: a small chevron in the padding on the right
         float ax = screenX + box.width - box.borderRight - 13, ay = midY - 2;
@@ -1785,16 +1785,16 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
         }
         
         if (box.textAlign > 0 && s_text_width && !drawText.empty()) {
-            float textW = s_text_width(drawText, box.fontSize);
+            float textW = s_text_width(drawText, box.fontSize, &box);
             if (box.textAlign == 1) textX = screenX + (box.width - textW) / 2.0f;
             else if (box.textAlign == 2) textX = screenX + box.width - box.paddingRight - textW;
         }
         
-        if (s_text_render && !drawText.empty()) s_text_render(drawText, textX, textY, drawColor, box.fontSize);
+        if (s_text_render && !drawText.empty()) s_text_render(drawText, textX, textY, drawColor, box.fontSize, &box);
         
         // Text decoration
         if (!drawText.empty()) {
-            float textW = s_text_width ? s_text_width(drawText, box.fontSize) : (drawText.length() * box.fontSize * 0.5f);
+            float textW = s_text_width ? s_text_width(drawText, box.fontSize, &box) : (drawText.length() * box.fontSize * 0.5f);
             
             // Links underline unless their text-decoration says otherwise
             bool underline = box.textDecoration.find("underline") != std::string::npos ||
@@ -1872,9 +1872,9 @@ static void paintChildren(const LayoutBox& box, float screenX, float screenY, fl
 // TEXT MEASUREMENT
 // =============================================================================
 
-float measureTextWidth(const std::string& text, float fontSize) {
+float measureTextWidth(const std::string& text, float fontSize, const LayoutBox* font) {
     // Use callback if set, otherwise estimate
-    if (s_text_width) return s_text_width(text, fontSize);
+    if (s_text_width) return s_text_width(text, fontSize, font);
     return text.length() * fontSize * 0.5f;  // Rough estimate
 }
 

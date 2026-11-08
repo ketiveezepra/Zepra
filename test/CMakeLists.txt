@@ -234,6 +234,14 @@ if(TARGET webcore)
     endif()
     add_test(NAME WebCoreCssImportTests COMMAND webcore_css_import_tests)
 
+    # Fonts for CSS text: family lists, generic families, weight and style
+    add_executable(webcore_font_matching_tests webcore_font_matching_tests.cpp)
+    target_link_libraries(webcore_font_matching_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(webcore_font_matching_tests pthread)
+    endif()
+    add_test(NAME WebCoreFontMatchingTests COMMAND webcore_font_matching_tests)
+
     # Keys, typing, focus and forms: control values, key/input/focus/change/submit
     # events, click activation, and the browser's platform-key to DOM-key mapping
     add_executable(webcore_user_input_tests webcore_user_input_tests.cpp
