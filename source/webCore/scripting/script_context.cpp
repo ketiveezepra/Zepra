@@ -515,6 +515,11 @@ void ScriptContext::runAnimationFrames() {
     }
 }
 
+void ScriptContext::evaluateMediaQueries() {
+    if (!vm_ || !domBindings_) return;
+    runTask([this] { domBindings_->evaluateMediaQueries(); }, "media query listener");
+}
+
 void ScriptContext::callStoredCallback(const std::string& key, bool passTimestamp, double timestampMs) {
     using namespace Zepra::Runtime;
     if (!vm_ || !callbackStore_ || !callbackStore_->has(key)) return;

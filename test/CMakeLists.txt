@@ -202,6 +202,14 @@ if(TARGET webcore)
     endif()
     add_test(NAME WebCoreDomBindingsTests COMMAND webcore_dom_bindings_tests)
 
+    # Media queries: parsing and matching, @media rules as the viewport changes, matchMedia()
+    add_executable(webcore_media_query_tests webcore_media_query_tests.cpp)
+    target_link_libraries(webcore_media_query_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(webcore_media_query_tests pthread)
+    endif()
+    add_test(NAME WebCoreMediaQueryTests COMMAND webcore_media_query_tests)
+
     # :hover / :active / :focus forced by DevTools, alongside the real interaction state
     add_executable(webcore_forced_pseudo_tests webcore_forced_pseudo_tests.cpp)
     target_link_libraries(webcore_forced_pseudo_tests webcore GTest::gtest GTest::gtest_main)

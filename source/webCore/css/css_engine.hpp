@@ -266,6 +266,8 @@ public:
 private:
     size_t pos_ = 0;
     std::string input_;
+    /// Query lists of the `@media` blocks being parsed, outermost first
+    std::vector<std::shared_ptr<const MediaQueryList>> mediaStack_;
 
     void skipWhitespace();
     void skipComment();

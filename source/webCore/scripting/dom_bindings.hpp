@@ -119,6 +119,10 @@ public:
     /// The same, with extra fields on the event (hashchange's oldURL/newURL)
     bool fireEvent(DOMNode* target, const std::string& type, bool bubbles, bool cancelable,
                    const std::vector<std::pair<std::string, Zepra::Runtime::Value>>& fields);
+    /// Re-matches every MediaQueryList made by window.matchMedia() and fires
+    /// `change` at each whose result changed since it was last reported, in
+    /// creation order. Call from a script task (listeners run here).
+    void evaluateMediaQueries();
     /// Fires a mouse event (clientX/clientY) at a connected element
     bool fireMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY);
     bool fireMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY,
@@ -240,6 +244,11 @@ private:
     void installEvents();
     void installComputedStyle();
     void installGeometry();
+    void installMediaQueries();
+
+    // window.matchMedia(): the lists made, in creation order
+    std::vector<Zepra::Runtime::Object*> mediaQueryLists_;
+    Zepra::Runtime::Object* mediaQueryListEventProto_ = nullptr;
 
     // Layout geometry
     static constexpr double kDefaultViewportWidth = 1280, kDefaultViewportHeight = 720;

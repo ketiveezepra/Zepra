@@ -120,7 +120,12 @@ private:
             CSSRuleList* rules = sheet->cssRules();
             for (size_t i = 0; i < rules->length(); i++) {
                 if (auto* styleRule = dynamic_cast<const CSSStyleRule*>(rules->item(i))) {
-                    labels_[styleRule] = name + ", rule " + std::to_string(i + 1);
+                    std::string label = name + ", rule " + std::to_string(i + 1);
+                    // Inside @media: say which query, as Firefox's Rules view does
+                    for (const auto& media : styleRule->media()) {
+                        if (media) label += " @media " + media->mediaText();
+                    }
+                    labels_[styleRule] = label;
                 }
             }
         }

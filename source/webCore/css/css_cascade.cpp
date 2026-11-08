@@ -132,7 +132,7 @@ std::vector<MatchedRule> CSSCascade::collectMatchingRules(
             if (!styleRule) continue;
             
             // Check if selector matches this element
-            if (selectorMatches(element, styleRule->selectorText())) {
+            if (styleRule->mediaMatches() && selectorMatches(element, styleRule->selectorText())) {
                 MatchedRule match;
                 match.rule = styleRule;
                 match.origin = origin;
@@ -166,7 +166,7 @@ std::vector<MatchedRule> CSSCascade::collectMatchingRulesWithOrigins(
         if (idx >= indexedRules_.size() || checked[idx]) return;
         checked[idx] = true;
         const auto& ir = indexedRules_[idx];
-        if (selectorMatches(element, ir.rule->selectorText())) {
+        if (ir.rule->mediaMatches() && selectorMatches(element, ir.rule->selectorText())) {
             MatchedRule match;
             match.rule = ir.rule;
             match.origin = ir.origin;

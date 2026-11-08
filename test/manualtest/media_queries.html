@@ -1,0 +1,43 @@
+<!doctype html>
+<!-- @media rules and window.matchMedia(). Every box is green except B and D (red by design).
+     Resize the window below 900px wide (page area) and back: box R turns green/red and the
+     log lists one "change" per crossing. --><html><head><style>
+body{font:16px sans-serif}
+.box{padding:6px;margin:4px 0;color:#fff;background:#c00}
+@media (min-width: 600px){ #a{background:#080} }
+@media screen and (max-width: 300px){ #b{background:#080} }
+@media not print { #c{background:#080} }
+@media print { #d{background:#080} }
+@media (width >= 800px) and (orientation: landscape){ #e{background:#080} }
+@media (400px <= width <= 5000px){ #f{background:#080} }
+@media (prefers-color-scheme: light), print { #g{background:#080} }
+@media (min-width: 100px) { @media (max-width: 99px) { #h{background:#c00 !important} } }
+@media (hover: hover) and (pointer: fine) { #i{background:#080} }
+@media (foo-bar: 1) { #j{background:#080} }
+#j{background:#080}
+@media (foo-bar: 1) { #j{background:#c00} }
+@media (max-width: 900px){ #r{background:#080} }
+</style></head><body>
+<div id=a class=box>A min-width 600px should be green</div>
+<div id=b class=box>B max-width 300px stays red (expected red)</div>
+<div id=c class=box>C not print should be green</div>
+<div id=d class=box>D print stays red (expected red)</div>
+<div id=e class=box>E range width &gt;= 800 landscape green</div>
+<div id=f class=box>F 400 &lt;= width &lt;= 5000 green</div>
+<div id=g class=box>G prefers light, print green</div>
+<div id=i class=box>I hover+pointer fine green</div>
+<div id=j class=box>J unknown feature never matches: green</div>
+<div id=r class=box>R narrow page (max-width 900px) is green, wide is red</div>
+<div id=out></div>
+<script>
+var o=document.getElementById('out');
+function line(t){var d=document.createElement('div');d.textContent=t;o.appendChild(d)}
+var m=matchMedia('(min-width: 600px)');
+line('matchMedia min-width 600: '+m.matches+' media="'+m.media+'" '+(m instanceof MediaQueryList)+' '+(m instanceof EventTarget));
+line('matchMedia max-width 300: '+matchMedia('(max-width:300px)').matches);
+line('matchMedia print: '+matchMedia('print').matches+', dark: '+matchMedia('(prefers-color-scheme: dark)').matches);
+line('innerWidth '+innerWidth+' x '+innerHeight);
+var n=0, mm=matchMedia('(max-width: 900px)');
+mm.addEventListener('change',function(e){n++;line('change #'+n+': matches='+e.matches+' innerWidth='+innerWidth)});
+line('getComputedStyle A: '+getComputedStyle(document.getElementById('a')).backgroundColor);
+</script></body></html>
