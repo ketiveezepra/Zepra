@@ -8,6 +8,7 @@
 #pragma once
 
 #include "css/css_style_declaration.hpp"
+#include "css/media_query.hpp"
 #include <string>
 #include <vector>
 #include <memory>
@@ -85,9 +86,16 @@ public:
     std::string cssText() const override;
     void setCssText(const std::string& text) override;
 
+    /// The `@media` query lists this rule sits inside, outermost first. The
+    /// cascade uses the rule only while all of them match (empty: always).
+    const std::vector<std::shared_ptr<const MediaQueryList>>& media() const { return media_; }
+    void setMedia(std::vector<std::shared_ptr<const MediaQueryList>> media) { media_ = std::move(media); }
+    bool mediaMatches() const { return allMediaMatch(media_); }
+
 private:
     std::string selectorText_;
     std::unique_ptr<CSSStyleDeclaration> style_;
+    std::vector<std::shared_ptr<const MediaQueryList>> media_;
 };
 
 /**

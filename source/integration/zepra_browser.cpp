@@ -64,6 +64,7 @@
 #include "browser/dom.hpp"
 #include "css/css_engine.hpp"
 #include "css/ua_stylesheet.h"
+#include "css/media_query.hpp"
 #include "scripting/script_context.hpp"
 #include "scripting/canvas_bindings.hpp"
 #include "scripting/dom_bindings.hpp"
@@ -1306,8 +1307,11 @@ static void relayoutDocument(bool releaseNodes = true) {
 
 // Element geometry, viewport and scrolling for page scripts (defined below)
 static Zepra::WebCore::PageGeometry* pageGeometry();
+// Media queries match the page viewport's size (defined below)
+static void updateMediaViewport();
 
 void parseWithWebCore(const std::string& html) {
+    updateMediaViewport();
     // CRITICAL: Cancel this tab's pending image loads before clearing its layout boxes
     // Prevents use-after-free when worker threads hold stale pointers; other
     // tabs keep their boxes (and their loads) in Tab::layoutRoot
@@ -3151,6 +3155,16 @@ static PageFrame pageFrame() {
     return isStart ? PageFrame{0, 0, contentW} : PageFrame{20, 20, contentW - 40};
 }
 
+// Tells media queries the page viewport's size (what window.innerWidth/innerHeight
+// report). When a query of the page now matches differently, the DOM version is
+// bumped and the next frame restyles the page.
+static void updateMediaViewport() {
+    Zepra::WebCore::MediaEnvironment env = Zepra::WebCore::mediaEnvironment();
+    env.width = std::max(0.0f, (float)g_width - getSidebarOffset());
+    env.height = std::max(0.0f, pageViewportHeight());
+    Zepra::WebCore::setMediaEnvironment(env);
+}
+
 static void layoutPage() {
     ZepraBrowser::setLayoutViewport(g_width - getSidebarOffset(), pageViewportHeight());
     ZepraBrowser::layoutBlock(*g_layoutRoot, pageFrame().layoutWidth, 0);
@@ -4058,6 +4072,9 @@ void render() {
         }
         syncPageFocus();
     }
+    // A resized window (or opened DevTools) can change which @media rules apply
+    updateMediaViewport();
+    if (g_scriptContext) g_scriptContext->evaluateMediaQueries();
     // DevTools edits pages without scripts too
     if (g_layoutRoot && Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
         relayoutDocument();

@@ -340,6 +340,7 @@ std::unique_ptr<CSSStyleSheet> CSSParser::parse(const std::string& css) {
     input_ = css;
     pos_ = 0;
     
+    mediaStack_.clear();
     auto sheet = std::make_unique<CSSStyleSheet>();
     parseRulesInto(sheet.get(), 0);
     return sheet;
@@ -363,6 +364,22 @@ void CSSParser::parseRulesInto(CSSStyleSheet* sheet, int depth) {
             consume();
             std::string atWord = parseIdentifier();
             
+            // @media: its rules are kept (in source order) with the query
+            // list, which the cascade matches against the viewport
+            if (atWord == "media") {
+                std::string prelude;
+                while (!eof() && peek() != '{' && peek() != ';') prelude += consume();
+                if (peek() == ';') { consume(); continue; }
+                if (peek() == '{') {
+                    consume();
+                    mediaStack_.push_back(MediaQueryList::parse(prelude));
+                    parseRulesInto(sheet, depth + 1);
+                    mediaStack_.pop_back();
+                    continue;
+                }
+                continue;  // end of input
+            }
+
             if (atWord == "layer" || atWord == "supports" || 
                 atWord == "theme" || atWord == "property") {
                 // Skip name/condition
@@ -384,6 +401,9 @@ void CSSParser::parseRulesInto(CSSStyleSheet* sheet, int depth) {
         
         size_t before = pos_;
         auto rule = parseRule();
+        if (rule && !mediaStack_.empty()) {
+            if (auto* styleRule = dynamic_cast<CSSStyleRule*>(rule.get())) styleRule->setMedia(mediaStack_);
+        }
         if (rule && sheet->cssRules()) {
             sheet->cssRules()->add(std::move(rule));
         }

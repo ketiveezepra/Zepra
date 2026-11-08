@@ -26,6 +26,8 @@
 #include <cstring>
 #include <unordered_set>
 
+#include "css/media_query.hpp"
+
 namespace Zepra::WebCore {
 
 using namespace Zepra::Runtime;
@@ -47,6 +49,15 @@ struct Listener {
 class EventTargetObject : public Object {
 public:
     std::vector<std::shared_ptr<Listener>> listeners;
+};
+
+/// A MediaQueryList from window.matchMedia(): its query, and the result its
+/// last `change` event (or its creation) reported
+class MediaQueryListObject final : public EventTargetObject {
+public:
+    std::shared_ptr<MediaQueryList> list;
+    bool reportedMatches = false;
+    Value onchange = Value::null();   // the `onchange` event handler
 };
 
 class NodeWrapper final : public EventTargetObject, public NodeBinding {
@@ -637,6 +648,7 @@ DOMBindings::DOMBindings(VM* vm, ErrorReporter reportError) : vm_(vm), reportErr
     installDocumentInterface();
     installEvents();
     installComputedStyle();
+    installMediaQueries();
     installForms();
 
     // Bare addEventListener(...) and friends act on the window
@@ -2449,6 +2461,88 @@ void DOMBindings::installComputedStyle() {
     vm_->setGlobal("getComputedStyle", Value::object(fn));
 }
 
+// ----------------------------------------------------------------------------
+// window.matchMedia(), MediaQueryList, MediaQueryListEvent
+// ----------------------------------------------------------------------------
+
+void DOMBindings::installMediaQueries() {
+    Object* proto = makeInterface("MediaQueryList", eventTargetProto_);
+    mediaQueryListEventProto_ = makeInterface("MediaQueryListEvent", eventProto_);
+    auto thisList = [](const FunctionCallInfo& info, const char* what) -> MediaQueryListObject* {
+        Value t = info.thisValue();
+        auto* list = t.isObject() ? dynamic_cast<MediaQueryListObject*>(t.asObject()) : nullptr;
+        if (!list) throw JSError("TypeError", std::string("Illegal invocation: ") + what);
+        return list;
+    };
+    accessor(proto, "media", [thisList](const FunctionCallInfo& info) -> Value {
+        return str(thisList(info, "media")->list->mediaText());
+    });
+    accessor(proto, "matches", [thisList](const FunctionCallInfo& info) -> Value {
+        return Value::boolean(thisList(info, "matches")->list->matches());
+    });
+    // The legacy addListener/removeListener: addEventListener('change', ...)
+    auto forward = [this, thisList](const char* legacy, const char* method) {
+        return [this, thisList, legacy, method](const FunctionCallInfo& info) -> Value {
+            MediaQueryListObject* list = thisList(info, legacy);
+            Value callback = info.argument(0);
+            if (!callback.isObject()) return Value::undefined();
+            Value fn = vm_->getMember(Value::object(list), method);
+            if (isFunction(fn)) {
+                vm_->call(static_cast<Function*>(fn.asObject()), Value::object(list), {str("change"), callback});
+            }
+            return Value::undefined();
+        };
+    };
+    accessor(proto, "onchange",
+        [thisList](const FunctionCallInfo& info) -> Value { return thisList(info, "onchange")->onchange; },
+        [thisList](const FunctionCallInfo& info) -> Value {
+            Value v = info.argument(0);
+            thisList(info, "onchange")->onchange = isFunction(v) ? v : Value::null();
+            return Value::undefined();
+        });
+    method(proto, "addListener", 1, forward("addListener", "addEventListener"));
+    method(proto, "removeListener", 1, forward("removeListener", "removeEventListener"));
+    auto* fn = new Function("matchMedia", [this, proto](const FunctionCallInfo& info) -> Value {
+        if (info.argumentCount() < 1) {
+            throw JSError("TypeError", "Failed to execute 'matchMedia' on 'Window': 1 argument required, but only 0 present.");
+        }
+        auto* list = new MediaQueryListObject();
+        list->setPrototype(proto);
+        list->list = MediaQueryList::parse(info.argument(0).toString());
+        list->reportedMatches = list->list->matches();
+        mediaQueryLists_.push_back(list);
+        return Value::object(list);
+    }, 1);
+    global_->set("matchMedia", Value::object(fn));
+    vm_->setGlobal("matchMedia", Value::object(fn));
+}
+
+void DOMBindings::evaluateMediaQueries() {
+    // Results first, then events: a listener that changes the viewport does
+    // not change what the others are told in this round
+    std::vector<MediaQueryListObject*> changed;
+    for (Object* o : mediaQueryLists_) {
+        auto* list = static_cast<MediaQueryListObject*>(o);
+        bool now = list->list->matches();
+        if (now != list->reportedMatches) {
+            list->reportedMatches = now;
+            changed.push_back(list);
+        }
+    }
+    for (MediaQueryListObject* list : changed) {
+        EventObject* e = newEvent(mediaQueryListEventProto_, "change", Value::undefined());
+        e->trusted = true;
+        // Read-only like the interface's attributes
+        PropertyDescriptor media, matches;
+        media.value = str(list->list->mediaText());
+        matches.value = Value::boolean(list->reportedMatches);
+        media.attributes = matches.attributes = PropertyAttribute::Enumerable | PropertyAttribute::Configurable;
+        e->defineProperty("media", media);
+        e->defineProperty("matches", matches);
+        dispatch(list, e);
+    }
+}
+
 std::vector<std::pair<std::string, std::string>> DOMBindings::computedValues(DOMElement* element,
                                                                          const std::string& pseudo) const {
     if (!element || !isConnectedTo(element, document_)) return {};
@@ -3005,6 +3099,9 @@ void DOMBindings::callHandler(Object* target, EventObject* e, bool) {
     const std::string name = "on" + e->type;
     Value handler = Value::undefined();
     if (auto own = target->getOwnPropertyDescriptor(name); own && isFunction(own->value)) handler = own->value;
+    if (auto* mql = dynamic_cast<MediaQueryListObject*>(target); mql && handler.isUndefined() && isFunction(mql->onchange)) {
+        if (e->type == "change") handler = mql->onchange;
+    }
     if (handler.isUndefined() && target == global_) {
         Value global = vm_->getGlobal(name);
         if (isFunction(global)) handler = global;

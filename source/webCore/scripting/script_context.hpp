@@ -193,6 +193,9 @@ public:
     /// Runs the requestAnimationFrame callbacks registered before this frame,
     /// passing the performance.now() timestamp
     void runAnimationFrames();
+    /// Fires `change` at window.matchMedia() lists whose result changed
+    /// (after the browser updated the media environment), as one task
+    void evaluateMediaQueries();
     
     // Global variables
     void setGlobal(const std::string& name, const std::string& value);
