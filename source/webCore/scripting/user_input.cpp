@@ -120,6 +120,7 @@ bool ScriptContext::pressElement(DOMElement* target, double clientX, double clie
 bool ScriptContext::mouseDown(DOMElement* target, double clientX, double clientY) {
     if (!vm_ || !domBindings_) return true;
     domBindings_->setPressedElement(nullptr);
+    endDrag();
     if (!target) return true;
     bool notCanceled = true;
     runTask([&] {
@@ -134,6 +135,8 @@ bool ScriptContext::mouseDown(DOMElement* target, double clientX, double clientY
     // The mousedown gave the element a wrapper, which keeps it alive if a
     // listener removes it before the release
     if (domBindings_->isConnected(target)) domBindings_->setPressedElement(target);
+    // A press on a draggable element that nobody canceled may become a drag
+    if (notCanceled) noteDragPress(target, clientX, clientY);
     return notCanceled;
 }
 
@@ -142,6 +145,8 @@ MouseUpResult ScriptContext::mouseUp(DOMElement* target, double clientX, double 
     if (!vm_ || !domBindings_) return result;
     DOMElement* pressed = domBindings_->pressedElement();
     domBindings_->setPressedElement(nullptr);
+    // A drag ends with drop/dragend instead of mouseup and click
+    if (drag_ && dragRelease(target, clientX, clientY)) return result;
     if (!target) return result;
     runTask([&] {
         MouseEventInit init;
@@ -163,6 +168,7 @@ MouseUpResult ScriptContext::mouseUp(DOMElement* target, double clientX, double 
 
 void ScriptContext::mouseMove(DOMElement* target, double clientX, double clientY, bool buttonDown) {
     if (!vm_ || !domBindings_) return;
+    if (drag_ && dragMove(target, clientX, clientY, buttonDown)) return;
     DOMElement* old = domBindings_->pointerElement();
     if (old && !domBindings_->isConnected(old)) old = nullptr;
     if (target && !domBindings_->isConnected(target)) target = nullptr;

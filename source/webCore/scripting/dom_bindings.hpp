@@ -59,6 +59,7 @@ struct MouseEventInit {
     DOMElement* relatedTarget = nullptr; // mouseover/out/enter/leave: the other element
     bool bubbles = true;
     bool cancelable = true;
+    Zepra::Runtime::Object* dataTransfer = nullptr; // drag events: the event is a DragEvent carrying it
 };
 
 class DOMBindings {
@@ -207,6 +208,7 @@ private:
     Zepra::Runtime::Object* tokenListProto_ = nullptr;
     Zepra::Runtime::Object* eventProto_ = nullptr;
     Zepra::Runtime::Object* mouseEventProto_ = nullptr;
+    Zepra::Runtime::Object* dragEventProto_ = nullptr;
     Zepra::Runtime::Object* styleDeclarationProto_ = nullptr;   // CSSStyleDeclaration
     Zepra::Runtime::Object* domRectProto_ = nullptr;
     Zepra::Runtime::Object* keyboardEventProto_ = nullptr;
