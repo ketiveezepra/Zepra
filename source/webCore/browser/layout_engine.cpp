@@ -14,6 +14,7 @@
 
 #include "../css/css_computed_style.hpp"
 #include "../dom/form_controls.hpp"
+#include "gradient_raster.h"
 
 // Viewport dimensions (defined in zepra_browser.cpp)
 extern int g_width;
@@ -40,6 +41,7 @@ static void (*s_gfx_gradient)(float, float, float, float, uint32_t, uint32_t) = 
 static void (*s_gfx_svg)(float, float, float, float, const std::string&, const std::string&, uint32_t) = nullptr;
 static void (*s_gfx_canvas)(float, float, float, float, Zepra::WebCore::DOMElement*) = nullptr;
 static void (*s_gfx_hgradient)(float, float, float, float, uint32_t, uint32_t) = nullptr;
+static void (*s_gfx_gradient_bg)(float, float, const GradientBackground&) = nullptr;
 static void (*s_push_clip)(float, float, float, float) = nullptr;
 static void (*s_pop_clip)() = nullptr;
 
@@ -440,6 +442,10 @@ void setLayoutCallbacks2(
     s_gfx_gradient = gfx_gradient;
     s_gfx_svg = gfx_svg;
     s_gfx_hgradient = gfx_hgradient;
+}
+
+void setGradientPaintCallback(void (*gfx_gradient_bg)(float, float, const GradientBackground&)) {
+    s_gfx_gradient_bg = gfx_gradient_bg;
 }
 
 void setCanvasPaintCallback(void (*gfx_canvas)(float, float, float, float, Zepra::WebCore::DOMElement*)) {
@@ -1687,14 +1693,34 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
             for (const auto& row : box.children)
                 paintCells(row, screenX + row.x, screenY + row.y);
         }
-    } else if (box.hasBgColor) {
-        if (box.backgroundImage.find("gradient(") != std::string::npos && box.backgroundImage.find("url(") == std::string::npos &&
-            s_gfx_gradient && s_gfx_rect) {
-            paintGradient(box.backgroundImage, screenX, screenY, box.width, box.height, box.bgColor);
+    } else if (box.hasBgColor && !s_gfx_gradient_bg && isGradientBackground(box.backgroundImage) &&
+               s_gfx_gradient && s_gfx_rect) {
+        // Without a gradient painter: linear gradients as bands of the GPU's
+        // two-colour fills (the top layer only)
+        paintGradient(box.backgroundImage, screenX, screenY, box.width, box.height, box.bgColor);
+    } else {
+        if (!box.hasBgColor) {
+            // no colour of its own
         } else if (box.borderRadius > 0 && s_gfx_rrect) {
             s_gfx_rrect(screenX, screenY, box.width, box.height, box.borderRadius, box.bgColor, alpha);
         } else if (s_gfx_rect) {
             s_gfx_rect(screenX, screenY, box.width, box.height, box.bgColor);
+        }
+        // Gradient layers over the colour (CSS Backgrounds 3 §2.11.1)
+        if ((box.hasBgGradient || box.hasBgColor) && s_gfx_gradient_bg && isGradientBackground(box.backgroundImage)) {
+            GradientBackground bg;
+            bg.image = box.backgroundImage;
+            bg.size = box.bgSize;
+            bg.position = box.bgPosition;
+            bg.repeat = box.bgRepeat;
+            bg.width = box.width;
+            bg.height = box.height;
+            bg.borderTop = box.borderTop;
+            bg.borderRight = box.borderRight;
+            bg.borderBottom = box.borderBottom;
+            bg.borderLeft = box.borderLeft;
+            bg.radius = box.borderRadius;
+            s_gfx_gradient_bg(screenX, screenY, bg);
         }
     }
     if (box.bgTextureId > 0 || !box.bgSvgData.empty()) paintBackgroundImage(box, screenX, screenY);

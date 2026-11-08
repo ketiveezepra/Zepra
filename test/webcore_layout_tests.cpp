@@ -10,7 +10,10 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+
 #include "browser/dom.hpp"
+#include "browser/gradient_raster.h"
 #include "browser/layout_engine.h"
 #include "css/css_engine.hpp"
 #include "css/presentational_hints.hpp"
@@ -543,6 +546,142 @@ TEST(Gradients, OnlyTheTopLayerAndRadialShapes) {
     ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
     ZepraBrowser::setLayoutCallbacks2(nullptr, nullptr);
     EXPECT_EQ(solid, 0xFF6B6Bu);
+}
+
+// ---------------------------------------------------------------------------
+// Gradient backgrounds drawn on the CPU (gradient_raster.cpp)
+// ---------------------------------------------------------------------------
+
+struct Raster {
+    int w = 0, h = 0;
+    std::vector<uint8_t> px;
+    std::array<int, 4> at(int x, int y) const {
+        const uint8_t* p = &px[((size_t)y * w + x) * 4];
+        return {p[0], p[1], p[2], p[3]};
+    }
+};
+
+Raster raster(const std::string& image, float w, float h, const std::string& size = "",
+              const std::string& position = "", const std::string& repeat = "", float radius = 0) {
+    ZepraBrowser::GradientBackground bg;
+    bg.image = image;
+    bg.size = size;
+    bg.position = position;
+    bg.repeat = repeat;
+    bg.width = w;
+    bg.height = h;
+    bg.radius = radius;
+    Raster r;
+    ZepraBrowser::gradientPixelSize(w, h, r.w, r.h);
+    EXPECT_TRUE(ZepraBrowser::rasterizeGradientBackground(bg, r.w, r.h, r.px)) << image;
+    if (r.px.empty()) r.px.assign((size_t)r.w * r.h * 4, 0);
+    return r;
+}
+
+using RGBA = std::array<int, 4>;
+
+::testing::AssertionResult near(const RGBA& actual, const RGBA& expected, int tolerance) {
+    for (int i = 0; i < 4; i++) {
+        if (std::abs(actual[i] - expected[i]) > tolerance) {
+            return ::testing::AssertionFailure() << "(" << actual[0] << "," << actual[1] << "," << actual[2] << ","
+                                                 << actual[3] << ") is not within " << tolerance << " of ("
+                                                 << expected[0] << "," << expected[1] << "," << expected[2] << ","
+                                                 << expected[3] << ")";
+        }
+    }
+    return ::testing::AssertionSuccess();
+}
+
+using RGBA = std::array<int, 4>;
+
+TEST(GradientRaster, LinearRunsAlongItsAngle) {
+    Raster r = raster("linear-gradient(to right, #000, #fff)", 100, 10);
+    EXPECT_TRUE(near(r.at(0, 5), RGBA{1, 1, 1, 255}, 4));
+    EXPECT_TRUE(near(r.at(50, 5), RGBA{129, 129, 129, 255}, 4));
+    EXPECT_TRUE(near(r.at(99, 5), RGBA{254, 254, 254, 255}, 4));
+    // to top right: the bottom-left corner starts, the top-right corner ends
+    Raster corner = raster("linear-gradient(to top right, #f00, #00f)", 200, 50);
+    EXPECT_TRUE(near(corner.at(0, 49), RGBA{253, 0, 2, 255}, 6));
+    EXPECT_TRUE(near(corner.at(199, 0), RGBA{2, 0, 253, 255}, 6));
+}
+
+TEST(GradientRaster, TransparentStopsFadeWithoutDarkening) {
+    // Premultiplied interpolation: half way is red at half alpha, not grey
+    Raster r = raster("linear-gradient(to right, red, transparent)", 101, 1);
+    RGBA mid = r.at(50, 0);
+    EXPECT_EQ(mid[0], 255);
+    EXPECT_NEAR(mid[3], 128, 4);
+}
+
+TEST(GradientRaster, RadialCircleAndEllipse) {
+    Raster r = raster("radial-gradient(circle closest-side, #fff, #000)", 100, 60);
+    EXPECT_TRUE(near(r.at(50, 30), RGBA{253, 253, 253, 255}, 6));
+    // closest-side is 30px: 30px right of the centre is the end colour
+    EXPECT_TRUE(near(r.at(81, 30), RGBA{0, 0, 0, 255}, 6));
+    // An ellipse reaches its end at each side (farthest-side here)
+    Raster e = raster("radial-gradient(farthest-side at 0 0, #fff, #000)", 100, 40);
+    EXPECT_TRUE(near(e.at(99, 0), RGBA{0, 0, 0, 255}, 8));
+    EXPECT_TRUE(near(e.at(0, 39), RGBA{0, 0, 0, 255}, 8));
+    EXPECT_TRUE(near(e.at(49, 0), RGBA{128, 128, 128, 255}, 8));
+}
+
+TEST(GradientRaster, ConicTurnsClockwiseFromItsStart) {
+    Raster r = raster("conic-gradient(#f00 0 25%, #0f0 0 50%, #00f 0 75%, #ff0 0)", 100, 100);
+    EXPECT_TRUE(near(r.at(80, 20), RGBA{255, 0, 0, 255}, 0));    // top right
+    EXPECT_TRUE(near(r.at(80, 80), RGBA{0, 255, 0, 255}, 0));    // bottom right
+    EXPECT_TRUE(near(r.at(20, 80), RGBA{0, 0, 255, 255}, 0));    // bottom left
+    EXPECT_TRUE(near(r.at(20, 20), RGBA{255, 255, 0, 255}, 0));  // top left
+    Raster from = raster("conic-gradient(from 90deg, #f00 0 50%, #00f 0)", 100, 100);
+    EXPECT_TRUE(near(from.at(50, 90), RGBA{255, 0, 0, 255}, 0));  // right half turns to the bottom
+    EXPECT_TRUE(near(from.at(50, 10), RGBA{0, 0, 255, 255}, 0));
+}
+
+TEST(GradientRaster, RepeatingStripes) {
+    Raster r = raster("repeating-linear-gradient(to right, #000 0 10px, #fff 10px 20px)", 60, 1);
+    EXPECT_EQ(r.at(5, 0)[0], 0);
+    EXPECT_EQ(r.at(15, 0)[0], 255);
+    EXPECT_EQ(r.at(45, 0)[0], 0);
+    EXPECT_EQ(r.at(55, 0)[0], 255);
+}
+
+TEST(GradientRaster, LayersWithSizePositionAndRepeat) {
+    // The checkerboard of zepracolor.html: four layers, 16px tiles
+    Raster r = raster("linear-gradient(45deg, #333 25%, transparent 25%),"
+                      "linear-gradient(-45deg, #333 25%, transparent 25%),"
+                      "linear-gradient(45deg, transparent 75%, #333 75%),"
+                      "linear-gradient(-45deg, transparent 75%, #333 75%)",
+                      64, 32, "16px 16px", "0 0, 0 8px, 8px -8px, -8px 0px");
+    // Alternating 8px squares, the top-left one clear, and no gaps on the
+    // diagonals where two layers' triangles meet
+    for (int y = 0; y < 32; y++) {
+        for (int x = 0; x < 64; x++) {
+            bool filled = ((x / 8) + (y / 8)) % 2 == 1;
+            ASSERT_EQ(r.at(x, y)[3], filled ? 255 : 0) << x << "," << y;
+            if (filled) ASSERT_TRUE(near(r.at(x, y), RGBA{0x33, 0x33, 0x33, 255}, 0));
+        }
+    }
+    // The first layer is on top; no-repeat leaves the rest of the box empty
+    Raster top = raster("linear-gradient(#f00, #f00), linear-gradient(#00f, #00f)", 40, 10, "10px 10px, auto",
+                        "right center, 0 0", "no-repeat");
+    EXPECT_TRUE(near(top.at(35, 5), RGBA{255, 0, 0, 255}, 0));
+    EXPECT_TRUE(near(top.at(5, 5), RGBA{0, 0, 255, 255}, 0));
+}
+
+TEST(GradientRaster, RoundedCornersAreClipped) {
+    Raster r = raster("linear-gradient(#f00, #f00)", 40, 40, "", "", "", 10);
+    EXPECT_EQ(r.at(0, 0)[3], 0);
+    EXPECT_EQ(r.at(20, 20)[3], 255);
+    EXPECT_EQ(r.at(20, 0)[3], 255);
+}
+
+TEST(GradientRaster, OnlyGradientLayersAreDrawn) {
+    EXPECT_TRUE(ZepraBrowser::isGradientBackground("radial-gradient(red, blue)"));
+    EXPECT_FALSE(ZepraBrowser::isGradientBackground("url(a.png), linear-gradient(red, blue)"));
+    EXPECT_FALSE(ZepraBrowser::isGradientBackground("none"));
+    int w = 0, h = 0;
+    ZepraBrowser::gradientPixelSize(4000, 4000, w, h);
+    EXPECT_LE((double)w * h, 2.6e6);
+    EXPECT_EQ(w, h);
 }
 
 // ---------------------------------------------------------------------------
