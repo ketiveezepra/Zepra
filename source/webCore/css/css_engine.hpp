@@ -322,6 +322,17 @@ public:
     /// The stylesheets in cascade order, with their origins (sheet->href() is set for <link> sheets)
     const std::vector<StyleResolver::StyleSheetEntry>& styleSheets() const { return resolver_.styleSheets(); }
 
+    /// A usable @font-face rule. Its src URLs resolve against baseUrl: the
+    /// URL of the sheet it came from, or the document URL for a <style> sheet.
+    struct WebFontFace {
+        FontFaceDescriptors descriptors;
+        std::string baseUrl;
+        StyleOrigin origin;
+    };
+    /// Every valid @font-face of the loaded sheets whose media match now, in
+    /// cascade order (a later face for the same family and style wins)
+    std::vector<WebFontFace> fontFaces() const;
+
     /// The style rules that match an element, sorted by the cascade (lowest priority first)
     std::vector<MatchedRule> matchedRules(DOMElement* element) { return resolver_.matchedRules(element); }
 

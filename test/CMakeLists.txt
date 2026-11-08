@@ -210,6 +210,14 @@ if(TARGET webcore)
     endif()
     add_test(NAME WebCoreMediaQueryTests COMMAND webcore_media_query_tests)
 
+    # @font-face: descriptor parsing and the faces CSSEngine hands the font loader
+    add_executable(webcore_font_face_rule_tests webcore_font_face_rule_tests.cpp)
+    target_link_libraries(webcore_font_face_rule_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(webcore_font_face_rule_tests pthread)
+    endif()
+    add_test(NAME WebCoreFontFaceRuleTests COMMAND webcore_font_face_rule_tests)
+
     # CSS custom properties: var() substitution, inheritance, cycles, the cascade, getComputedStyle()
     add_executable(webcore_custom_property_tests webcore_custom_property_tests.cpp)
     target_link_libraries(webcore_custom_property_tests webcore GTest::gtest GTest::gtest_main)

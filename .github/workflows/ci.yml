@@ -77,6 +77,10 @@ jobs:
       - name: Media query tests
         run: ctest --test-dir build/test -R WebCoreMediaQueryTests --output-on-failure
 
+      # @font-face rules: descriptors, and the faces handed to the font loader
+      - name: Font face rule tests
+        run: ctest --test-dir build/test -R WebCoreFontFaceRuleTests --output-on-failure
+
       - name: Custom property tests
         run: ctest --test-dir build/test -R WebCoreCustomPropertyTests --output-on-failure
 
@@ -126,7 +130,7 @@ jobs:
       - name: Build test targets
         run: >
           cmake --build build --parallel $(nproc) -- -k 0
-          nxhttp_tests nxhttp_security_test nxcrypto_tests parser_robustness_tests
+          nxhttp_tests nxhttp_security_test nxcrypto_tests parser_robustness_tests webcore_font_face_rule_tests
           webcore_dom_bindings_tests webcore_layout_tests webcore_user_input_tests
           webcore_forced_pseudo_tests webcore_console_format_tests computed_style_tests
           webcore_media_query_tests webcore_custom_property_tests layout_geometry_tests svg_raster_tests zepra_engine_tests
@@ -143,7 +147,7 @@ jobs:
         run: |
           set -e
           cd build/bin
-          for t in nxhttp_tests nxhttp_security_test nxcrypto_tests parser_robustness_tests \
+          for t in nxhttp_tests nxhttp_security_test nxcrypto_tests parser_robustness_tests webcore_font_face_rule_tests \
                    webcore_dom_bindings_tests webcore_layout_tests webcore_user_input_tests \
                    webcore_forced_pseudo_tests webcore_console_format_tests computed_style_tests \
                    webcore_media_query_tests webcore_custom_property_tests layout_geometry_tests svg_raster_tests zepra_engine_tests \
@@ -217,6 +221,10 @@ jobs:
       - name: Media query tests
         run: ctest --test-dir build/test -R WebCoreMediaQueryTests --output-on-failure
 
+      # @font-face rules: descriptors, and the faces handed to the font loader
+      - name: Font face rule tests
+        run: ctest --test-dir build/test -R WebCoreFontFaceRuleTests --output-on-failure
+
       - name: Custom property tests
         run: ctest --test-dir build/test -R WebCoreCustomPropertyTests --output-on-failure
 
@@ -268,6 +276,10 @@ jobs:
       # Media queries: @media rules as the viewport changes, window.matchMedia()
       - name: Media query tests
         run: ctest --test-dir build/test -R WebCoreMediaQueryTests --output-on-failure
+
+      # @font-face rules: descriptors, and the faces handed to the font loader
+      - name: Font face rule tests
+        run: ctest --test-dir build/test -R WebCoreFontFaceRuleTests --output-on-failure
 
       - name: Custom property tests
         run: ctest --test-dir build/test -R WebCoreCustomPropertyTests --output-on-failure
