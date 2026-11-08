@@ -48,23 +48,130 @@ bool isListedElement(const DOMElement* e) {
     return std::find_if(std::begin(kListed), std::end(kListed), [&](const char* t) { return tag == t; }) != std::end(kListed);
 }
 
-/// The selected <option> of a <select> (the first one when none is selected)
+/// The option a single-choice <select> shows (null when none)
 DOMElement* selectedOption(const DOMElement* select) {
-    DOMElement* first = nullptr;
-    DOMElement* selected = nullptr;
-    forEachElement(const_cast<DOMElement*>(select), [&](DOMElement* e) {
-        if (tagOf(e) != "option") return;
-        if (!first) first = e;
-        if (!selected && e->hasAttribute("selected")) selected = e;
-    });
-    return selected ? selected : first;
+    long index = selectedIndex(select);
+    if (index < 0) return nullptr;
+    return selectOptions(select)[static_cast<size_t>(index)];
 }
 
 std::string optionValue(const DOMElement* option) {
-    return option->hasAttribute("value") ? option->getAttribute("value") : option->textContent();
+    return option->hasAttribute("value") ? option->getAttribute("value") : optionText(option);
 }
 
 }  // namespace
+
+std::vector<DOMElement*> selectOptions(const DOMElement* select) {
+    std::vector<DOMElement*> options;
+    if (!select) return options;
+    // Children, and children of child <optgroup>s (HTML: the list of options)
+    for (const auto& child : select->childNodes()) {
+        DOMElement* e = asElement(child.get());
+        if (!e) continue;
+        if (tagOf(e) == "option") {
+            options.push_back(e);
+        } else if (tagOf(e) == "optgroup") {
+            for (const auto& grandchild : e->childNodes()) {
+                DOMElement* option = asElement(grandchild.get());
+                if (option && tagOf(option) == "option") options.push_back(option);
+            }
+        }
+    }
+    return options;
+}
+
+DOMElement* optionOwner(const DOMElement* option) {
+    DOMNode* parent = option ? option->parentNode() : nullptr;
+    DOMElement* e = asElement(parent);
+    if (e && tagOf(e) == "optgroup") e = asElement(e->parentNode());
+    return e && tagOf(e) == "select" ? e : nullptr;
+}
+
+bool isSingleSelect(const DOMElement* select) {
+    return select && tagOf(select) == "select" && !select->hasAttribute("multiple");
+}
+
+bool optionSelected(const DOMElement* option) {
+    if (!option) return false;
+    return option->checkedDirty() ? option->checked() : option->hasAttribute("selected");
+}
+
+bool isOptionDisabled(const DOMElement* option) {
+    if (!option) return true;
+    if (option->hasAttribute("disabled")) return true;
+    DOMElement* parent = asElement(option->parentNode());
+    return parent && tagOf(parent) == "optgroup" && parent->hasAttribute("disabled");
+}
+
+std::string optionText(const DOMElement* option) {
+    // White space stripped and collapsed (HTML: the option's text)
+    std::string text, raw = option ? option->textContent() : "";
+    for (char c : raw) {
+        bool space = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+        if (space) {
+            if (!text.empty() && text.back() != ' ') text += ' ';
+        } else {
+            text += c;
+        }
+    }
+    if (!text.empty() && text.back() == ' ') text.pop_back();
+    return text;
+}
+
+std::string optionLabel(const DOMElement* option) {
+    if (option && option->hasAttribute("label") && !option->getAttribute("label").empty())
+        return option->getAttribute("label");
+    return optionText(option);
+}
+
+long selectedIndex(const DOMElement* select) {
+    std::vector<DOMElement*> options = selectOptions(select);
+    bool single = isSingleSelect(select);
+    long found = -1;
+    bool touched = false;
+    for (size_t i = 0; i < options.size(); i++) {
+        touched = touched || options[i]->checkedDirty();
+        if (!optionSelected(options[i])) continue;
+        // Several selected attributes in a single select: the last one wins
+        found = static_cast<long>(i);
+        if (!single) return found;
+    }
+    // Nothing selected yet: a drop-down shows its first enabled option
+    if (found < 0 && single && !touched) {
+        for (size_t i = 0; i < options.size(); i++) {
+            if (!isOptionDisabled(options[i])) return static_cast<long>(i);
+        }
+    }
+    return found;
+}
+
+void setOptionSelected(DOMElement* option, bool selected) {
+    if (!option) return;
+    DOMElement* select = optionOwner(option);
+    if (selected && isSingleSelect(select)) {
+        for (DOMElement* other : selectOptions(select)) other->setDirtyChecked(other == option);
+        return;
+    }
+    // Remember every option's state, so none falls back to its attribute
+    if (select) {
+        for (DOMElement* other : selectOptions(select)) other->setDirtyChecked(optionSelected(other));
+    }
+    option->setDirtyChecked(selected);
+    // A drop-down without a selected option shows its first enabled one
+    if (!selected && isSingleSelect(select) && selectedIndex(select) < 0) {
+        for (DOMElement* other : selectOptions(select)) {
+            if (!isOptionDisabled(other)) {
+                other->setDirtyChecked(true);
+                break;
+            }
+        }
+    }
+}
+
+void setSelectedIndex(DOMElement* select, long index) {
+    std::vector<DOMElement*> options = selectOptions(select);
+    for (size_t i = 0; i < options.size(); i++) options[i]->setDirtyChecked(static_cast<long>(i) == index);
+}
 
 std::string inputType(const DOMElement* element) {
     std::string type = element ? lower(element->getAttribute("type")) : std::string();
@@ -137,8 +244,8 @@ DOMElement* focusableSelfOrAncestor(DOMElement* element) {
 
 std::string formControlValue(const DOMElement* element) {
     if (!element) return "";
-    if (element->valueDirty()) return element->dirtyValue();
     std::string tag = tagOf(element);
+    if (element->valueDirty() && tag != "select") return element->dirtyValue();
     if (tag == "textarea") return element->textContent();
     if (tag == "select") {
         DOMElement* option = selectedOption(element);
@@ -271,7 +378,13 @@ std::vector<DOMElement*> radioGroup(const DOMElement* radio) {
 }
 
 void resetFormControls(const DOMElement* form) {
-    for (DOMElement* e : formControls(form)) e->resetControlState();
+    for (DOMElement* e : formControls(form)) {
+        e->resetControlState();
+        // A select goes back to its options' selected attributes
+        if (tagOf(e) == "select") {
+            for (DOMElement* option : selectOptions(e)) option->resetControlState();
+        }
+    }
 }
 
 std::vector<std::pair<std::string, std::string>> formData(const DOMElement* form, const DOMElement* submitter,
@@ -303,15 +416,14 @@ std::vector<std::pair<std::string, std::string>> formData(const DOMElement* form
             continue;
         }
         if (tag == "select") {
-            bool any = false;
-            forEachElement(e, [&](DOMElement* option) {
-                if (tagOf(option) != "option" || !option->hasAttribute("selected")) return;
-                if (!e->hasAttribute("multiple") && any) return;
-                data.emplace_back(name, optionValue(option));
-                any = true;
-            });
-            if (!any && !e->hasAttribute("multiple")) {
-                if (DOMElement* option = selectedOption(e)) data.emplace_back(name, optionValue(option));
+            // Each selected option that is not disabled
+            if (isSingleSelect(e)) {
+                DOMElement* option = selectedOption(e);
+                if (option && !isOptionDisabled(option)) data.emplace_back(name, optionValue(option));
+            } else {
+                for (DOMElement* option : selectOptions(e)) {
+                    if (optionSelected(option) && !isOptionDisabled(option)) data.emplace_back(name, optionValue(option));
+                }
             }
             continue;
         }

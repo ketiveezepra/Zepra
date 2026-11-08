@@ -84,6 +84,33 @@ bool formControlChecked(const DOMElement* element);
 /// (same name, same form owner)
 void setFormControlChecked(DOMElement* element, bool checked);
 
+/// A <select>'s options in tree order: its <option> children and those of
+/// its <optgroup> children (select.options)
+std::vector<DOMElement*> selectOptions(const DOMElement* select);
+/// The <select> an option belongs to (its parent, or its optgroup's)
+DOMElement* optionOwner(const DOMElement* option);
+/// A <select> without the multiple attribute (a drop-down)
+bool isSingleSelect(const DOMElement* select);
+/// An option's selectedness: the selected attribute until a user or a
+/// script chose (option.selected; defaultSelected is the attribute)
+bool optionSelected(const DOMElement* option);
+/// Selects or deselects an option. Selecting one in a single select
+/// deselects the rest; deselecting the last one of a drop-down selects its
+/// first enabled option.
+void setOptionSelected(DOMElement* option, bool selected);
+/// select.selectedIndex: the selected option (the last one when several are
+/// marked in a single select); an untouched drop-down without one shows its
+/// first enabled option; -1 when none
+long selectedIndex(const DOMElement* select);
+/// Selects option `index` alone; -1 (or out of range) deselects all
+void setSelectedIndex(DOMElement* select, long index);
+/// Disabled itself or inside a disabled <optgroup>
+bool isOptionDisabled(const DOMElement* option);
+/// option.text: its text with white space collapsed
+std::string optionText(const DOMElement* option);
+/// What a drop-down lists: the label attribute, else the text
+std::string optionLabel(const DOMElement* option);
+
 /// The <form> a control belongs to: the one its form attribute names, else
 /// the nearest <form> ancestor; null when there is none
 DOMElement* formOwner(const DOMElement* control);

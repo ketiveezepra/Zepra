@@ -156,6 +156,10 @@ public:
     /// The focused control's value counts as committed (Enter in a text
     /// field fires change without a blur)
     void commitFocusedValue();
+    /// The user picks option `index` of a <select> (from its drop-down or
+    /// with a key): input and change follow when the selection changed.
+    /// False when nothing changed.
+    bool pickOption(DOMElement* select, long index);
     /// What a form submission does once it is not canceled (the browser
     /// navigates); without a handler a submission does nothing
     using SubmitHandler = std::function<void(const FormSubmission& submission)>;

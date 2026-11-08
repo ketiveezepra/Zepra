@@ -226,6 +226,7 @@ struct LayoutBox {
     
     // Input properties
     bool isInput = false;
+    bool isSelect = false;      // a drop-down <select>: its label and an arrow
     std::string inputType;
     std::string placeholder;
     

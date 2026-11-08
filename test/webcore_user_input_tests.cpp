@@ -18,6 +18,7 @@
 #include "scripting/dom_bindings.hpp"
 #include "scripting/script_context.hpp"
 #include "page_keys.hpp"
+#include "select_popup.hpp"
 
 #include <memory>
 #include <string>
@@ -580,6 +581,149 @@ TEST(Caret, MaxlengthCountsTheSelectionAsRoom) {
     setFormControlSelection(q, 0, 3);
     page.script->insertText("wxyz");
     EXPECT_EQ(marked(q), "wxy|");
+}
+
+// ----------------------------------------------------------------------------
+// <select>: the live selection, keys and the drop-down's picks
+// ----------------------------------------------------------------------------
+
+namespace {
+
+const char* kSelectPage = R"(<form id="f">
+<select id="s" name="size">
+  <option value="s">Small</option>
+  <option value="m" selected>Medium</option>
+  <option value="x" disabled>Extra</option>
+  <optgroup label="Big"><option value="l">Large</option><option>  Huge
+    one </option></optgroup>
+</select>
+<select id="none" name="none"><option disabled>Pick one</option><option>A</option></select>
+<select id="multi" name="multi" multiple><option selected>a</option><option>b</option><option selected>c</option></select>
+</form>)";
+
+KeyResult pressKey(Page& page, const std::string& name, const std::string& text = "", bool alt = false) {
+    KeyEventInit init = key(name, name, 0);
+    init.altKey = alt;
+    return page.script->keyDown(init, text);
+}
+
+}  // namespace
+
+TEST(Select, LiveSelectionApartFromTheSelectedAttribute) {
+    Page page(kSelectPage);
+    page.eval("var s = document.getElementById('s');");
+    EXPECT_EQ(page.eval("s.selectedIndex + ' ' + s.value + ' ' + s.options.length + ' ' + s.type"), "1 m 5 select-one");
+    EXPECT_EQ(page.eval("s.options[4].text + '|' + s.options[4].value + '|' + s.options[4].index"), "Huge one|Huge one|4");
+    page.eval("s.selectedIndex = 3");
+    EXPECT_EQ(page.eval("s.value + ' ' + s.options[3].selected + ' ' + s.options[1].selected + ' ' + s.options[1].defaultSelected"),
+              "l true false true");
+    page.eval("s.value = 's'");
+    EXPECT_EQ(page.eval("s.selectedIndex"), "0");
+    page.eval("s.value = 'nope'");
+    EXPECT_EQ(page.eval("s.selectedIndex + '|' + s.value + '|'"), "-1||") << "an unknown value selects nothing";
+    page.eval("s.options[4].selected = true");
+    EXPECT_EQ(page.eval("s.value"), "Huge one");
+    page.eval("s.options[4].selected = false");
+    EXPECT_EQ(page.eval("s.selectedIndex"), "0") << "a drop-down never shows nothing after a deselect";
+    // Without a selected attribute: the first enabled option
+    EXPECT_EQ(page.eval("document.getElementById('none').selectedIndex"), "1");
+    EXPECT_EQ(page.eval("var m = document.getElementById('multi'); m.type + ' ' + m.selectedIndex + ' ' + m.selectedOptions.length"),
+              "select-multiple 0 2");
+    // Form data and reset follow the live selection
+    page.eval("s.selectedIndex = 3; m.options[0].selected = false");
+    std::vector<std::pair<std::string, std::string>> data = formData(page.byId("f"), nullptr);
+    ASSERT_EQ(data.size(), 3u);
+    EXPECT_EQ(data[0], std::make_pair(std::string("size"), std::string("l")));
+    EXPECT_EQ(data[1], std::make_pair(std::string("none"), std::string("A")));
+    EXPECT_EQ(data[2], std::make_pair(std::string("multi"), std::string("c")));
+    page.eval("document.getElementById('f').reset()");
+    EXPECT_EQ(page.eval("s.value + ' ' + m.selectedOptions.length"), "m 2");
+}
+
+TEST(Select, AddRemoveAndTheOptionConstructor) {
+    Page page(kSelectPage);
+    page.eval("var s = document.getElementById('s');");
+    page.eval("s.add(new Option('Tiny', 't'), 0); s.add(new Option('Giant', 'g', true, true))");
+    EXPECT_EQ(page.eval("s.length + ' ' + s.options[0].value + ' ' + s.value + ' ' + s.options[6].defaultSelected"), "7 t g true");
+    page.eval("s.remove(0)");
+    EXPECT_EQ(page.eval("s.options[0].text + ' ' + s.length"), "Small 6");
+    EXPECT_EQ(page.eval("s.item(1).value + ' ' + s.item(99)"), "m null");
+    page.eval("document.getElementById('none').remove()");
+    EXPECT_EQ(page.byId("none"), nullptr) << "remove() without an index removes the select itself";
+}
+
+TEST(Select, KeysPickOptionsAndFireInputAndChange) {
+    Page page(kSelectPage);
+    page.eval("var s = document.getElementById('s'); var log = [];"
+              "['input', 'change'].forEach(function (t) { s.addEventListener(t, function () { log.push(t + ':' + s.value); }); });");
+    page.script->focusElement(page.byId("s"));
+    EXPECT_TRUE(pressKey(page, "ArrowDown").consumed);
+    EXPECT_EQ(page.eval("s.value"), "l") << "the disabled option is skipped";
+    pressKey(page, "ArrowUp");
+    pressKey(page, "ArrowUp");
+    EXPECT_EQ(page.eval("s.value"), "s");
+    pressKey(page, "ArrowUp");
+    EXPECT_EQ(page.eval("log.join(' ')"), "input:l change:l input:m change:m input:s change:s")
+        << "nothing fires at the first option";
+    pressKey(page, "End");
+    EXPECT_EQ(page.eval("s.selectedIndex"), "4");
+    pressKey(page, "h", "h");
+    EXPECT_EQ(page.eval("s.selectedIndex"), "4") << "type-ahead wraps to the same option";
+    pressKey(page, "m", "M");
+    EXPECT_EQ(page.eval("s.value"), "m");
+    EXPECT_TRUE(pressKey(page, " ", " ").openPicker);
+    EXPECT_TRUE(pressKey(page, "ArrowDown", "", true).openPicker);
+    // The drop-down's pick
+    page.eval("log = []");
+    EXPECT_TRUE(page.script->chooseOption(page.byId("s"), 0));
+    EXPECT_FALSE(page.script->chooseOption(page.byId("s"), 0)) << "the same option again changes nothing";
+    EXPECT_FALSE(page.script->chooseOption(page.byId("s"), 2)) << "a disabled option cannot be picked";
+    EXPECT_EQ(page.eval("log.join(' ')"), "input:s change:s");
+}
+
+TEST(Select, TheDropDownList) {
+    Page page(kSelectPage);
+    ZepraBrowser::SelectPopup popup;
+    auto width = [](const std::string& text, float size) { return text.size() * size * 0.5f; };
+    // A select at (100, 50), 80x24, in a viewport from 0 to 600
+    popup.open(page.byId("s"), 100, 50, 80, 24, 0, 600, 14, width);
+    ASSERT_TRUE(popup.isOpen());
+    ASSERT_EQ(popup.items().size(), 6u) << "five options and the group's label";
+    EXPECT_EQ(popup.items()[3].label, "Big");
+    EXPECT_EQ(popup.items()[3].option, -1);
+    EXPECT_EQ(popup.items()[4].label, "    Large");
+    EXPECT_TRUE(popup.items()[2].disabled);
+    EXPECT_EQ(popup.highlightedOption(), 1) << "it opens on the selected option";
+    EXPECT_FLOAT_EQ(popup.y(), 74) << "under the select";
+    EXPECT_GE(popup.width(), 80);
+    // Keys skip the disabled option and the label
+    EXPECT_EQ(popup.key("ArrowDown"), ZepraBrowser::SelectPopup::KeyAction::Moved);
+    EXPECT_EQ(popup.highlightedOption(), 3);
+    popup.key("End");
+    EXPECT_EQ(popup.highlightedOption(), 4);
+    popup.key("Home");
+    EXPECT_EQ(popup.highlightedOption(), 0);
+    EXPECT_EQ(popup.key("Enter"), ZepraBrowser::SelectPopup::KeyAction::Pick);
+    EXPECT_EQ(popup.key("Escape"), ZepraBrowser::SelectPopup::KeyAction::Close);
+    // The pointer: rows, the label row and outside
+    float row = popup.itemHeight();
+    EXPECT_EQ(popup.itemAt(110, 75 + row * 4 + 2), 4);
+    EXPECT_EQ(popup.itemAt(110, 75 + row * 3 + 2), -1) << "the group label is not an option";
+    EXPECT_EQ(popup.itemAt(10, 80), -1);
+    popup.hover(110, 75 + row * 2 + 2);
+    EXPECT_EQ(popup.highlightedOption(), 0) << "hovering a disabled option keeps the highlight";
+    // No room below: it opens above
+    popup.open(page.byId("s"), 100, 560, 80, 24, 0, 600, 14, width);
+    EXPECT_LT(popup.y() + popup.height(), 561.0f);
+    // Long lists scroll to keep the highlight in view
+    page.eval("var s = document.getElementById('s'); for (var i = 0; i < 30; i++) s.add(new Option('n' + i));"
+              "s.selectedIndex = 30");
+    popup.open(page.byId("s"), 100, 50, 80, 24, 0, 600, 14, width);
+    EXPECT_EQ(popup.visibleRows(), 12);
+    EXPECT_GT(popup.firstVisible(), 0);
+    EXPECT_EQ(popup.highlightedOption(), 30);
+    popup.close();
+    EXPECT_FALSE(popup.isOpen());
 }
 
 // ----------------------------------------------------------------------------

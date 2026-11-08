@@ -70,6 +70,7 @@
 #include "scripting/web_storage.hpp"
 #include "dom/form_controls.hpp"
 #include "page_keys.hpp"
+#include "select_popup.hpp"
 #include "nxgfx/canvas2d/canvas_context.h"
 #include "nxgfx/webgl/webgl_context.h"
 using namespace Zepra::WebCore;
@@ -478,6 +479,8 @@ using ZepraBrowser::LayoutType;
 static DOMElement* g_layoutOwner = nullptr;
 
 // Helper to add child (using std::list for stable pointers)
+float textWidth(const std::string& str, float size);
+
 static LayoutBox* addChild(LayoutBox* parent) {
     if (!parent) return nullptr;
     parent->children.emplace_back();
@@ -2246,47 +2249,45 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 LayoutBox* selBox = addChild(parentBox);
                 selBox->type = LayoutType::InlineBlock;
                 
-                // Get first <option> text as display value
+                // The selected option's label (a user's or script's choice)
                 std::string displayText;
-                for (DOMNode* opt = childElement->firstChild(); opt; opt = opt->nextSibling()) {
-                    if (auto* optEl = dynamic_cast<DOMElement*>(opt)) {
-                        if (optEl->hasAttribute("selected")) {
-                            displayText = optEl->textContent();
-                            break;
-                        }
-                        if (displayText.empty()) displayText = optEl->textContent();
-                    }
+                {
+                    long index = Zepra::WebCore::selectedIndex(childElement);
+                    auto options = Zepra::WebCore::selectOptions(childElement);
+                    if (index >= 0) displayText = Zepra::WebCore::optionLabel(options[static_cast<size_t>(index)]);
                 }
-                if (displayText.empty()) displayText = "Select...";
-                selBox->text = displayText + " \xE2\x96\xBE"; // ▾ dropdown arrow
+                if (displayText.empty() && Zepra::WebCore::selectOptions(childElement).empty()) displayText = "Select...";
+                selBox->text = displayText;
                 
+                // Looks like the browser's own control unless the page styles it
                 const CSSComputedStyle* style = g_cssEngine->getComputedStyle(childElement);
-                if (style) {
-                    selBox->fontSize = style->fontSize;
-                    selBox->color = cssColorToRGB(style->color);
-                    if (!style->backgroundColor.isTransparent())
-                        selBox->bgColor = cssColorToRGB(style->backgroundColor);
-                    else
-                        selBox->bgColor = 0x2D2D2D;
-                    selBox->hasBgColor = true;
-                    selBox->paddingTop = style->paddingTop.value > 0 ? style->paddingTop.value : 4;
-                    selBox->paddingBottom = style->paddingBottom.value > 0 ? style->paddingBottom.value : 4;
-                    selBox->paddingLeft = style->paddingLeft.value > 0 ? style->paddingLeft.value : 8;
-                    selBox->paddingRight = style->paddingRight.value > 0 ? style->paddingRight.value : 20;
-                    selBox->borderRadius = style->borderTopLeftRadius > 0 ? style->borderTopLeftRadius : 4;
-                    selBox->borderTop = style->borderTopWidth > 0 ? style->borderTopWidth : 1;
-                    selBox->borderColor = cssColorToRGB(style->borderTopColor);
-                } else {
-                    selBox->fontSize = 14;
-                    selBox->color = 0xCCCCCC;
-                    selBox->bgColor = 0x2D2D2D;
-                    selBox->hasBgColor = true;
-                    selBox->paddingTop = 4; selBox->paddingBottom = 4;
-                    selBox->paddingLeft = 8; selBox->paddingRight = 20;
-                    selBox->borderRadius = 4;
-                    selBox->borderTop = 1;
-                    selBox->borderColor = 0x555555;
+                selBox->fontSize = style && style->fontSize > 0 ? style->fontSize : 14;
+                selBox->color = style ? cssColorToRGB(style->color) : 0x1D2330;
+                selBox->bgColor = style && !style->backgroundColor.isTransparent() ? cssColorToRGB(style->backgroundColor)
+                                                                                 : 0xFFFFFF;
+                selBox->hasBgColor = true;
+                selBox->paddingTop = style && style->paddingTop.value > 0 ? style->paddingTop.value : 3;
+                selBox->paddingBottom = style && style->paddingBottom.value > 0 ? style->paddingBottom.value : 3;
+                selBox->paddingLeft = style && style->paddingLeft.value > 0 ? style->paddingLeft.value : 6;
+                // Room on the right for the arrow
+                selBox->paddingRight = (style && style->paddingRight.value > 0 ? style->paddingRight.value : 6) + 16;
+                selBox->borderRadius = style && style->borderTopLeftRadius > 0 ? style->borderTopLeftRadius : 3;
+                float border = style && style->borderTopWidth > 0 ? style->borderTopWidth : 1;
+                selBox->borderTop = selBox->borderRight = selBox->borderBottom = selBox->borderLeft = border;
+                selBox->borderColor = style && style->borderTopWidth > 0 ? cssColorToRGB(style->borderTopColor) : 0x8A8F98;
+                // As wide as its longest option, as tall as a line
+                float widest = 0;
+                for (DOMElement* option : Zepra::WebCore::selectOptions(childElement)) {
+                    widest = std::max(widest, textWidth(Zepra::WebCore::optionLabel(option), selBox->fontSize));
                 }
+                widest = std::max(widest, textWidth(displayText, selBox->fontSize));
+                selBox->width = widest + selBox->paddingLeft + selBox->paddingRight + 2 * border;
+                if (style && !style->width.isAuto() && style->width.value > 0 &&
+                    style->width.unit == Zepra::WebCore::CSSLength::Unit::Px) {
+                    selBox->width = style->width.value;
+                }
+                selBox->height = selBox->fontSize + 4 + selBox->paddingTop + selBox->paddingBottom + 2 * border;
+                selBox->isSelect = true;
                 
                 StyledTextLine line;
                 line.text = selBox->text;
@@ -2934,6 +2935,8 @@ static ZepraBrowser::DevTools::Painter devToolsPainter() {
     return p;
 }
 
+
+
 static ZepraBrowser::DevTools::Page devToolsPage() {
     ZepraBrowser::DevTools::Page page;
     page.document = g_document.get();
@@ -3245,6 +3248,47 @@ static void placeUnpaintedBoxes() {
     ZepraBrowser::placeBoxes(*g_layoutRoot, getSidebarOffset() + frame.originX, TOPBAR_HEIGHT + frame.originY,
                              tab ? tab->scrollY : 0);
     g_layoutPainted = true;
+}
+
+// The open drop-down of a <select>, if any
+static ZepraBrowser::SelectPopup g_selectPopup;
+
+// Where the page's content area is on screen (the popup stays inside it)
+static float pageViewportTop() { return TOPBAR_HEIGHT; }
+static float pageViewportBottom() {
+    return g_devTools.visible() ? g_height - g_devTools.height() : (float)g_height;
+}
+
+static void openSelectPopup(DOMElement* select) {
+    if (!g_layoutRoot || !Zepra::WebCore::isSingleSelect(select) || Zepra::WebCore::isDisabledControl(select)) return;
+    LayoutBox* box = findBoxForElement(g_layoutRoot.get(), select);
+    if (!box) return;
+    g_selectPopup.open(select, box->screenX, box->screenY, box->width, box->height, pageViewportTop(),
+                       pageViewportBottom(), box->fontSize > 0 ? box->fontSize : 14,
+                       [](const std::string& s, float size) { return textWidth(s, size); });
+}
+
+// Picks the highlighted option (input and change fire when it changed)
+static void pickFromSelectPopup() {
+    DOMElement* select = g_selectPopup.select();
+    long option = g_selectPopup.highlightedOption();
+    g_selectPopup.close();
+    if (select && option >= 0 && g_scriptContext) {
+        g_scriptContext->chooseOption(select, option);
+        placeUnpaintedBoxes();
+    }
+}
+
+// Follows the select's box each frame; closes when the select is gone
+static void paintSelectPopup() {
+    if (!g_selectPopup.isOpen()) return;
+    LayoutBox* box = g_layoutRoot ? findBoxForElement(g_layoutRoot.get(), g_selectPopup.select()) : nullptr;
+    if (!box || box->screenY + box->height < pageViewportTop() || box->screenY > pageViewportBottom()) {
+        g_selectPopup.close();
+        return;
+    }
+    g_selectPopup.place(box->screenX, box->screenY, box->width, box->height, pageViewportTop(), pageViewportBottom());
+    g_selectPopup.paint(devToolsPainter());
 }
 
 // Sidebar panel enum (matches reference image)
@@ -4162,6 +4206,8 @@ void render() {
         }
     }
     
+    paintSelectPopup();
+
     // Draw scrollbar
     const Tab* activeTabPtr = nullptr;
     for (const auto& t : g_tabs) { if (t.id == g_activeTabId) { activeTabPtr = &t; break; } }
@@ -4969,8 +5015,15 @@ void handleClick(float mx, float my) {
     // relayout, so the boxes below are safe.
     if (my > TOPBAR_HEIGHT && g_layoutRoot && g_scriptContext) {
         DOMElement* target = findElementAt(g_layoutRoot.get(), mx, my);
-        if (target) g_scriptContext->mouseDown(target, mx - getSidebarOffset(), my - TOPBAR_HEIGHT);
+        bool pressed = false;
+        if (target) pressed = g_scriptContext->mouseDown(target, mx - getSidebarOffset(), my - TOPBAR_HEIGHT);
         else g_scriptContext->focusElement(nullptr);
+        // A drop-down opens on the press (unless a listener canceled it)
+        DOMElement* control = pressed ? Zepra::WebCore::focusableSelfOrAncestor(target) : nullptr;
+        if (Zepra::WebCore::isSingleSelect(control)) {
+            placeUnpaintedBoxes();
+            openSelectPopup(control);
+        }
         // A listener that read geometry after changing the DOM left a box
         // tree that was never painted: place it for the hit-tests below
         placeUnpaintedBoxes();
@@ -5020,6 +5073,20 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
         return;
     }
     
+    // An open drop-down takes the keys: arrows move, Enter picks, Escape closes
+    if (g_selectPopup.isOpen()) {
+        NXRender::Modifiers mods;
+        mods.ctrl = ctrl; mods.shift = shift; mods.alt = alt; mods.meta = meta;
+        std::string domKey = ZepraBrowser::domKeyFor(key, text, mods, repeat).key;
+        if (alt && (domKey == "ArrowUp" || domKey == "ArrowDown")) domKey = "Enter";
+        switch (g_selectPopup.key(domKey)) {
+            case ZepraBrowser::SelectPopup::KeyAction::Pick: pickFromSelectPopup(); break;
+            case ZepraBrowser::SelectPopup::KeyAction::Close: g_selectPopup.close(); break;
+            default: break;
+        }
+        return;
+    }
+
     // DevTools text fields (console input, Network filter) take the keys while focused
     if (g_devTools.onKey(key, text, ctrl, shift, devToolsPage())) return;
 
@@ -5038,6 +5105,7 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
             result = g_scriptContext->keyDown(ZepraBrowser::domKeyFor(key, text, mods, repeat), text);
         }
         syncPageFocus();
+        if (result.openPicker) openSelectPopup(g_scriptContext->focusedElement());
         bool reserved = (ctrl && (key == NXRender::KeyCode::T || key == NXRender::KeyCode::W ||
                                   key == NXRender::KeyCode::Tab)) ||
                         key == NXRender::KeyCode::F12 || (ctrl && shift && key == NXRender::KeyCode::I);
@@ -5517,6 +5585,7 @@ void handleNXEvent(const NXRender::Event& event) {
         float y = event.mouse.y;
         
         if (event.type == NXRender::EventType::MouseMove) {
+             if (g_selectPopup.isOpen()) g_selectPopup.hover(x, y);
              ::g_mouseHandler.handleMouseMove(x, y, g_mouseDown); 
              g_mouseX = x; 
              g_mouseY = y;
@@ -5553,7 +5622,23 @@ void handleNXEvent(const NXRender::Event& event) {
              g_mouseX = x;
              g_mouseY = y;
              
-             if (event.mouse.button == NXRender::MouseButton::Left) {
+             // A press on the open drop-down picks; anywhere else closes it
+             bool pickedFromPopup = false;
+             if (g_selectPopup.isOpen()) {
+                 if (event.mouse.button == NXRender::MouseButton::Left && g_selectPopup.contains(x, y)) {
+                     int item = g_selectPopup.itemAt(x, y);
+                     if (item >= 0 && !g_selectPopup.items()[item].disabled) {
+                         g_selectPopup.hover(x, y);
+                         pickFromSelectPopup();
+                     }
+                     pickedFromPopup = true;
+                 } else {
+                     g_selectPopup.close();
+                 }
+             }
+             if (pickedFromPopup) {
+                 // the press stays with the list
+             } else if (event.mouse.button == NXRender::MouseButton::Left) {
                  if (g_devTools.onMouseDown(x, y, devToolsPage())) {
                      // Click inside the DevTools panel
                      g_mouseDown = true;
@@ -5618,6 +5703,10 @@ void handleNXEvent(const NXRender::Event& event) {
                  }
              }
         } else if (event.type == NXRender::EventType::MouseWheel) {
+             if (g_selectPopup.contains(x, y)) {
+                 g_selectPopup.wheel(-event.mouse.wheelDelta);
+                 return;
+             }
              if (g_devTools.onMouseWheel(x, y, event.mouse.wheelDelta)) return;
              // The innermost scroll container under the pointer that can
              // still move that way scrolls; otherwise the page does
