@@ -322,6 +322,39 @@ LayoutBox& addImage(LayoutBox& parent, float naturalW, float naturalH) {
     return img;
 }
 
+TEST(AbsoluteLayout, InsetsStretchAnAutoSizedBox) {
+    LayoutBox parent;
+    parent.type = LayoutType::Block;
+    parent.positionType = 1;
+    parent.cssWidth = LayoutLength::px(120);
+    parent.cssHeight = LayoutLength::px(80);
+    parent.borderLeft = parent.borderTop = 2;
+    parent.paddingLeft = parent.paddingTop = 10;
+    parent.boxSizing = 1;
+    LayoutBox& cover = addBox(parent, LayoutType::Block);
+    cover.positionType = 2;
+    cover.cssTop = cover.cssRight = cover.cssBottom = cover.cssLeft = LayoutLength::px(0);
+    LayoutBox& inset = addBox(parent, LayoutType::Block);
+    inset.positionType = 2;
+    inset.cssTop = LayoutLength::px(5);
+    inset.cssBottom = LayoutLength::px(15);
+    inset.cssLeft = LayoutLength::px(4);
+    inset.cssRight = LayoutLength::px(6);
+    inset.paddingLeft = 3;  // content-box: the padding stays inside the stretched size
+    ZepraBrowser::layoutBlock(parent, 1000, 0);
+    // inset: 0 covers the padding box (inside the border, over the padding)
+    EXPECT_FLOAT_EQ(cover.x, 2);
+    EXPECT_FLOAT_EQ(cover.y, 2);
+    EXPECT_FLOAT_EQ(cover.width, 118);
+    EXPECT_FLOAT_EQ(cover.height, 78);
+    EXPECT_FLOAT_EQ(inset.x, 6);
+    EXPECT_FLOAT_EQ(inset.y, 7);
+    EXPECT_FLOAT_EQ(inset.width, 108);
+    EXPECT_FLOAT_EQ(inset.height, 58);
+    // The specified (auto) sizes are kept for the next layout pass
+    EXPECT_FALSE(cover.cssWidth.isSet() && !cover.cssWidth.isAuto());
+}
+
 TEST(FlexLayout, ColumnAlignCenterCentresHorizontally) {
     LayoutBox flex = makeFlex(1, 3);
     LayoutBox& item = addBox(flex, LayoutType::Block);

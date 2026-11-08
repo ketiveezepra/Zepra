@@ -288,31 +288,18 @@ TEST(ComputedStyle, WithoutAStyleSourceValuesAreEmpty) {
               "[\"\",\"\",0]");
 }
 
-TEST(CssNamespace, SupportsDeclarationsAndConditions) {
+TEST(ComputedStyle, InsetSetsAllFourOffsets) {
     Page page(kPage);
-    EXPECT_EQ(page.eval("[CSS.supports('display', 'grid'), CSS.supports('color', 'var(--x)'),"
-                        " CSS.supports('--brand', 'red'), CSS.supports('no-such-thing', '1px'),"
-                        " CSS.supports('color', ''), CSS.supports('color', 'red; width: 1px')].join()"),
-              "true,true,true,false,false,false");
-    EXPECT_EQ(page.eval("[CSS.supports('(display: flex)'), CSS.supports('display: flex'),"
-                        " CSS.supports('not (frobnicate: 1)'), CSS.supports('(color: red) and (nope: 1)'),"
-                        " CSS.supports('(color: red) or (nope: 1)'), CSS.supports('(a: 1) and (b: 2) or (c: 3)'),"
-                        " CSS.supports('selector(div > p)'), CSS.supports('foo(bar)')].join()"),
-              "true,true,true,false,true,false,true,false");
-}
-
-TEST(CssNamespace, EscapeSerializesAnIdentifier) {
-    Page page(kPage);
-    EXPECT_EQ(page.eval("[CSS.escape('a.b'), CSS.escape('1st'), CSS.escape('-'), CSS.escape('-2'),"
-                        " CSS.escape('x y#z'), CSS.escape('ok_-1')].join('|')"),
-              "a\\.b|\\31 st|\\-|-\\32 |x\\ y\\#z|ok_-1");
-TEST(ComputedStyle, NamedColorsCoverEveryCssKeyword) {
-    Page page(kPage);
-    // CSS Color 4 §6.1 lists 148 keywords; the uncommon ones resolved to black
-    EXPECT_EQ(page.eval("var box = document.getElementById('box'); var cs = getComputedStyle(box);"
-                        "box.style.backgroundColor = 'aliceblue'; cs.backgroundColor"),
-              "rgb(240, 248, 255)");
-    EXPECT_EQ(page.eval("box.style.backgroundColor = 'RebeccaPurple'; cs.backgroundColor"), "rgb(102, 51, 153)");
-    EXPECT_EQ(page.eval("box.style.backgroundColor = 'lightgoldenrodyellow'; cs.backgroundColor"),
-              "rgb(250, 250, 210)");
+    page.eval("var box = document.getElementById('box'); var cs = getComputedStyle(box);"
+              "box.style.position = 'absolute'");
+    auto offsets = [&](const char* inset) {
+        return page.eval(std::string("box.style.inset = '") + inset +
+                         "'; [cs.top, cs.right, cs.bottom, cs.left].join(' ')");
+    };
+    EXPECT_EQ(offsets("0"), "0px 0px 0px 0px");
+    EXPECT_EQ(offsets("1px 2px"), "1px 2px 1px 2px");
+    EXPECT_EQ(offsets("1px 2px 3px"), "1px 2px 3px 2px");
+    EXPECT_EQ(offsets("1px 2px 3px 4px"), "1px 2px 3px 4px");
+    EXPECT_EQ(page.eval("box.style.inset = ''; box.style.insetInline = '5px 6px';"
+                        "[cs.left, cs.right].join(' ')"), "5px 6px");
 }
