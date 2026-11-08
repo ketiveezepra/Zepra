@@ -11,6 +11,7 @@
 #include "css/computed_style_values.hpp"
 #include "css/css_engine.hpp"
 #include "css/css_style_declaration.hpp"
+#include "css/css_supports.hpp"
 #include "html/html_parser.hpp"
 
 #include "runtime/execution/vm.hpp"
@@ -1749,6 +1750,22 @@ void DOMBindings::installGeometry() {
     accessor(h, "offsetHeight", on<DOMElement>("offsetHeight", [this](DOMElement& e, const Info&) {
         return Value::number(roundPx(geometryOf(&e).bounds().height));
     }));
+
+    // The CSS namespace: feature queries and identifier escaping
+    auto* css = new Object();
+    method(css, "supports", 1, [](const Info& info) -> Value {
+        if (info.argumentCount() >= 2) {
+            return Value::boolean(cssSupportsDeclaration(info.argument(0).toString(), info.argument(1).toString()));
+        }
+        if (info.argumentCount() == 0) throw JSError("TypeError", "Failed to execute 'supports' on 'CSS': 1 argument required");
+        return Value::boolean(cssSupportsCondition(info.argument(0).toString()));
+    });
+    method(css, "escape", 1, [](const Info& info) -> Value {
+        if (info.argumentCount() == 0) throw JSError("TypeError", "Failed to execute 'escape' on 'CSS': 1 argument required");
+        return str(cssEscapeIdentifier(info.argument(0).toString()));
+    });
+    vm_->setGlobal("CSS", Value::object(css));
+    defineHidden(global_, "CSS", Value::object(css));
 
     // Window: viewport size and the page's scroll position. These are
     // [Replaceable]: assigning one (or `var scrollY = ...` at script level)
