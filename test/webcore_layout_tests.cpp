@@ -715,6 +715,9 @@ TEST(GradientRaster, OnlyGradientLayersAreDrawn) {
     ZepraBrowser::gradientPixelSize(4000, 4000, w, h);
     EXPECT_LE((double)w * h, 2.6e6);
     EXPECT_EQ(w, h);
+}
+
+// ---------------------------------------------------------------------------
 // Background colour alpha
 // ---------------------------------------------------------------------------
 

@@ -302,6 +302,8 @@ TEST(ComputedStyle, BorderStyleAndUnstyledWidths) {
     EXPECT_EQ(page.eval("box.removeAttribute('style'); box.style.border = 'solid'; cs.borderLeftWidth"), "3px");
     EXPECT_EQ(page.eval("box.style.borderLeftStyle = 'none'; [cs.borderLeftWidth, cs.borderRightWidth].join(' ')"),
               "0px 3px");
+}
+
 TEST(ComputedStyle, InsetSetsAllFourOffsets) {
     Page page(kPage);
     page.eval("var box = document.getElementById('box'); var cs = getComputedStyle(box);"

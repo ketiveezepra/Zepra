@@ -2197,7 +2197,9 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     } else {
         if (!box.hasBgColor) {
             // no colour of its own
-        } else if (box.borderRadius > 0 && s_gfx_rrect) {
+        } else if ((box.borderRadius > 0 || alpha < 255) && s_gfx_rrect) {
+            // Translucent fills go through the rounded-rect path, the one that
+            // takes an alpha (a radius of 0 is a plain rectangle)
             s_gfx_rrect(screenX, screenY, box.width, box.height, box.borderRadius, box.bgColor, alpha);
         } else if (s_gfx_rect) {
             s_gfx_rect(screenX, screenY, box.width, box.height, box.bgColor);
