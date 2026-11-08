@@ -1622,60 +1622,6 @@ void parseWithWebCore(const std::string& html) {
 // DIRECT DOM → LAYOUT (Firefox Frame Tree Pattern)
 // =============================================================================
 
-// Helper to check if text looks like JavaScript code
-static bool looksLikeJavaScript(const std::string& text) {
-    if (text.length() < 50) return false;
-    
-    int specialChars = 0, assignOps = 0;
-    for (size_t i = 0; i + 1 < text.length(); i++) {
-        char c = text[i], n = text[i + 1];
-        if (c == '{' || c == '}' || c == ';' || c == '(' || c == ')') specialChars++;
-        if ((c == '=' && n != '=') || (c == ':' && n == ':')) assignOps++;
-    }
-    if (specialChars > 10 || assignOps > 5) return true;
-    
-    return text.find("function(") != std::string::npos ||
-           text.find("=>") != std::string::npos ||
-           text.find("var ") != std::string::npos ||
-           text.find("const ") != std::string::npos ||
-           text.find("window.") != std::string::npos ||
-           text.find("document.") != std::string::npos ||
-           text.find("__webpack") != std::string::npos ||
-           text.find("base64,") != std::string::npos;
-}
-
-// Filter HTML attribute-like content that shouldn't be displayed
-static bool looksLikeHTMLAttributes(const std::string& text) {
-    // Skip if too short
-    if (text.length() < 20) return false;
-    
-    // Check for common HTML attribute patterns
-    if (text.find("class=") != std::string::npos ||
-        text.find("data-") != std::string::npos ||
-        text.find("aria-") != std::string::npos ||
-        text.find("role=") != std::string::npos ||
-        text.find("style=") != std::string::npos ||
-        text.find("href=") != std::string::npos ||
-        text.find("src=") != std::string::npos ||
-        text.find("id=\"") != std::string::npos ||
-        text.find("data-t-l") != std::string::npos ||
-        text.find("gnt_") != std::string::npos) {
-        return true;
-    }
-    
-    // Count quotes and equals signs - too many suggests attribute content
-    int quotes = 0, equals = 0;
-    for (char c : text) {
-        if (c == '"' || c == '\'') quotes++;
-        if (c == '=') equals++;
-    }
-    if (quotes > 4 || equals > 3) return true;
-    
-    return false;
-}
-
-
-
 // Boxes paint one border colour: the colour of the first side that has a width
 static int overflowKind(Zepra::WebCore::OverflowValue value) {
     using Zepra::WebCore::OverflowValue;
@@ -1863,8 +1809,9 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
             if (!normalized.empty() && normalized.back() == ' ') normalized.pop_back();
             if (!normalized.empty() && normalized.front() == ' ') normalized = normalized.substr(1);
             
-            // Skip empty, code-like, or HTML attribute-like content
-            if (normalized.empty() || looksLikeJavaScript(normalized) || looksLikeHTMLAttributes(normalized)) continue;
+            // Every text node is page text: <script>, <style> and the like
+            // never get here, so nothing is guessed away by its content
+            if (normalized.empty()) continue;
             
             // Decode HTML entities (&nbsp; &amp; etc.)
             normalized = decodeHtmlEntities(normalized);
