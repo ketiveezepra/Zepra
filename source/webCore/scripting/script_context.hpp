@@ -60,6 +60,7 @@ struct FormSubmission;
 struct KeyResult {
     bool canceled = false;   ///< a listener called preventDefault(): no default action
     bool consumed = false;   ///< the focused control used the key (typing, Backspace, Enter, arrows)
+    bool openPicker = false; ///< the key opens the focused <select>'s drop-down (Space, Alt+Down, F4)
 };
 /// What releasing the primary button did on the page (ScriptContext::mouseUp)
 struct MouseUpResult {
@@ -260,6 +261,12 @@ public:
      * @return false when there is no such control or a listener canceled it
      */
     bool insertText(const std::string& text, const std::string& inputType = "insertText");
+    /**
+     * @brief The user picked option `index` of a <select> from its
+     * drop-down: the selection changes, then input and change fire
+     * @return false when nothing changed (same option, disabled, gone)
+     */
+    bool chooseOption(DOMElement* select, long index);
     /// The element with keyboard focus; null when the page itself has it
     DOMElement* focusedElement() const;
     /// Moves focus as focus() does (blur/focusout, focus/focusin; change when

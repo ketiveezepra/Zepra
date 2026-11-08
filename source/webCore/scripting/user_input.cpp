@@ -187,6 +187,38 @@ void deleteText(DOMBindings& bindings, DOMElement* field, bool forward, bool wor
     bindings.fireInputEvent(field, "input", inputType, "");
 }
 
+/// The option a key moves a closed drop-down to: the next or previous
+/// enabled one (arrows), the first or last (Home, End, Page keys), or the
+/// next whose label starts with the typed character. -1 when the key is the
+/// select's but there is nowhere to go; -2 when the key is not the select's.
+long optionForKey(const DOMElement* select, const KeyEventInit& key, const std::string& text) {
+    std::vector<DOMElement*> options = selectOptions(select);
+    long count = static_cast<long>(options.size());
+    long current = selectedIndex(select);
+    auto enabled = [&](long i) { return i >= 0 && i < count && !isOptionDisabled(options[i]); };
+    auto step = [&](long from, long direction) {
+        for (long i = from + direction; i >= 0 && i < count; i += direction) {
+            if (enabled(i)) return i;
+        }
+        return -1L;
+    };
+    if (key.key == "ArrowDown" || key.key == "ArrowRight") return step(current, 1);
+    if (key.key == "ArrowUp" || key.key == "ArrowLeft") return current < 0 ? step(count, -1) : step(current, -1);
+    if (key.key == "Home" || key.key == "PageUp") return step(-1, 1);
+    if (key.key == "End" || key.key == "PageDown") return step(count, -1);
+    if (text.empty() || key.altKey || static_cast<unsigned char>(text[0]) < 0x20) return -2;
+    // Type-ahead: the next option (after the current one, wrapping) whose
+    // label starts with the character
+    std::string typed = lower(text);
+    for (long k = 1; k <= count; k++) {
+        long i = ((current < 0 ? -1 : current) + k) % count;
+        if (!enabled(i)) continue;
+        std::string label = lower(optionLabel(options[i]));
+        if (label.compare(0, typed.size(), typed) == 0) return i;
+    }
+    return -1;
+}
+
 }  // namespace
 
 DOMElement* ScriptContext::focusedElement() const {
@@ -358,6 +390,18 @@ KeyResult ScriptContext::keyDown(const KeyEventInit& key, const std::string& tex
             }
             return;
         }
+        if (isSingleSelect(focused) && !isDisabledControl(focused) && !key.ctrlKey && !key.metaKey) {
+            if (key.key == " " || key.key == "F4" || (key.altKey && (key.key == "ArrowDown" || key.key == "ArrowUp"))) {
+                result.consumed = result.openPicker = true;
+                return;
+            }
+            long next = optionForKey(focused, key, text);
+            if (next != -2) {
+                result.consumed = true;
+                if (next >= 0) domBindings_->pickOption(focused, next);
+            }
+            return;
+        }
         // Enter clicks a focused button; Space clicks buttons, checkboxes and radios
         if (isButtonLike(focused) && !key.ctrlKey && !key.metaKey && !key.altKey &&
             ((key.key == "Enter" && !isCheckable(focused)) || key.key == " ")) {
@@ -376,6 +420,13 @@ void ScriptContext::keyUp(const KeyEventInit& key) {
         if (!target) target = document_->documentElement();
         domBindings_->fireKeyboardEvent(target, "keyup", key);
     }, "event listener");
+}
+
+bool ScriptContext::chooseOption(DOMElement* select, long index) {
+    if (!vm_ || !domBindings_) return false;
+    bool changed = false;
+    runTask([&] { changed = domBindings_->pickOption(select, index); }, "event listener");
+    return changed;
 }
 
 bool ScriptContext::insertText(const std::string& text, const std::string& inputType) {

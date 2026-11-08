@@ -213,7 +213,8 @@ if(TARGET webcore)
     # Keys, typing, focus and forms: control values, key/input/focus/change/submit
     # events, click activation, and the browser's platform-key to DOM-key mapping
     add_executable(webcore_user_input_tests webcore_user_input_tests.cpp
-                   ${PROJECT_SOURCE_DIR}/source/integration/page_keys.cpp)
+                   ${PROJECT_SOURCE_DIR}/source/integration/page_keys.cpp
+                   ${PROJECT_SOURCE_DIR}/source/integration/select_popup.cpp)
     target_include_directories(webcore_user_input_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/source/integration ${PROJECT_SOURCE_DIR}/source/nxrender-cpp)
     target_link_libraries(webcore_user_input_tests webcore GTest::gtest GTest::gtest_main)

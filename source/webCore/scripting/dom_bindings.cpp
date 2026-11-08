@@ -1259,7 +1259,16 @@ void DOMBindings::installElement() {
         on<DOMElement>("value", [this](DOMElement& e, const Info& info) {
             std::string v = info.argument(0).isNull() ? "" : info.argument(0).toString();
             std::string tag = lower(e.tagName());
-            if (tag == "input" || tag == "textarea" || tag == "select") {
+            if (tag == "select") {
+                // The first option with that value, else none
+                std::vector<DOMElement*> options = selectOptions(&e);
+                long index = -1;
+                for (size_t i = 0; i < options.size() && index < 0; i++) {
+                    if (formControlValue(options[i]) == v) index = static_cast<long>(i);
+                }
+                setSelectedIndex(&e, index);
+                noteDomMutation();
+            } else if (tag == "input" || tag == "textarea") {
                 setFormControlValue(&e, v);
                 // A script's change is not the user's: no change event for it
                 if (focusedElement() == &e) valueAtFocus_ = v;
@@ -1962,6 +1971,136 @@ void DOMBindings::installForms() {
             return owner ? wrap(owner) : Value::null();
         }));
     }
+    // <select> and <option>: the live selection (not the selected attribute)
+    Object* select = tagInterfaces_["select"].second;
+    Object* option = tagInterfaces_["option"].second;
+    accessor(select, "selectedIndex",
+        on<DOMElement>("selectedIndex", [](DOMElement& e, const Info&) {
+            return Value::number(static_cast<double>(selectedIndex(&e)));
+        }),
+        on<DOMElement>("selectedIndex", [this](DOMElement& e, const Info& info) {
+            double n = info.argument(0).toNumber();
+            setSelectedIndex(&e, std::isfinite(n) ? static_cast<long>(n) : -1);
+            noteDomMutation();
+            return Value::undefined();
+        }));
+    accessor(select, "options", on<DOMElement>("options", [this](DOMElement& e, const Info&) {
+        return elementList(selectOptions(&e));
+    }));
+    accessor(select, "length", on<DOMElement>("length", [](DOMElement& e, const Info&) {
+        return Value::number(static_cast<double>(selectOptions(&e).size()));
+    }));
+    accessor(select, "type", on<DOMElement>("type", [](DOMElement& e, const Info&) {
+        return str(isSingleSelect(&e) ? "select-one" : "select-multiple");
+    }));
+    accessor(select, "selectedOptions", on<DOMElement>("selectedOptions", [this](DOMElement& e, const Info&) {
+        std::vector<DOMElement*> selected;
+        if (isSingleSelect(&e)) {
+            long index = selectedIndex(&e);
+            if (index >= 0) selected.push_back(selectOptions(&e)[static_cast<size_t>(index)]);
+        } else {
+            for (DOMElement* o : selectOptions(&e)) if (optionSelected(o)) selected.push_back(o);
+        }
+        return elementList(selected);
+    }));
+    method(select, "item", 1, on<DOMElement>("item", [this](DOMElement& e, const Info& info) {
+        std::vector<DOMElement*> options = selectOptions(&e);
+        double n = info.argument(0).toNumber();
+        if (!(n >= 0) || n >= static_cast<double>(options.size())) return Value::null();
+        return wrap(options[static_cast<size_t>(n)]);
+    }));
+    // add(option, before): before is an element, an index, or null (the end)
+    method(select, "add", 1, on<DOMElement>("add", [this](DOMElement& e, const Info& info) {
+        DOMNode* child = nodeArg(info, 0, "add", false);
+        DOMNode* before = nullptr;
+        Value b = info.argument(1);
+        if (b.isNumber()) {
+            std::vector<DOMElement*> options = selectOptions(&e);
+            double n = b.asNumber();
+            if (n >= 0 && n < static_cast<double>(options.size())) before = options[static_cast<size_t>(n)];
+        } else if (b.isObject()) {
+            before = nodeArg(info, 1, "add", true);
+        }
+        DOMNode* parent = before ? before->parentNode() : &e;
+        insert(parent ? parent : &e, child, before, "add");
+        return Value::undefined();
+    }));
+    // remove(): the select itself; remove(index): that option
+    method(select, "remove", 0, on<DOMElement>("remove", [this](DOMElement& e, const Info& info) {
+        DOMElement* target = &e;
+        if (info.argumentCount() > 0) {
+            std::vector<DOMElement*> options = selectOptions(&e);
+            double n = info.argument(0).toNumber();
+            if (!(n >= 0) || n >= static_cast<double>(options.size())) return Value::undefined();
+            target = options[static_cast<size_t>(n)];
+        }
+        if (DOMNode* parent = target->parentNode()) wrapperOf(target)->owned = parent->removeChild(target);
+        return Value::undefined();
+    }));
+    accessor(option, "selected",
+        on<DOMElement>("selected", [](DOMElement& e, const Info&) {
+            DOMElement* owner = optionOwner(&e);
+            if (owner && isSingleSelect(owner)) {
+                long index = selectedIndex(owner);
+                return Value::boolean(index >= 0 && selectOptions(owner)[static_cast<size_t>(index)] == &e);
+            }
+            return Value::boolean(optionSelected(&e));
+        }),
+        on<DOMElement>("selected", [this](DOMElement& e, const Info& info) {
+            setOptionSelected(&e, info.argument(0).toBoolean());
+            noteDomMutation();
+            return Value::undefined();
+        }));
+    accessor(option, "defaultSelected",
+        on<DOMElement>("defaultSelected", [](DOMElement& e, const Info&) { return Value::boolean(e.hasAttribute("selected")); }),
+        on<DOMElement>("defaultSelected", [](DOMElement& e, const Info& info) {
+            if (info.argument(0).toBoolean()) e.setAttribute("selected", "");
+            else e.removeAttribute("selected");
+            return Value::undefined();
+        }));
+    accessor(option, "index", on<DOMElement>("index", [](DOMElement& e, const Info&) {
+        std::vector<DOMElement*> options = selectOptions(optionOwner(&e));
+        auto it = std::find(options.begin(), options.end(), &e);
+        return Value::number(it == options.end() ? 0 : static_cast<double>(it - options.begin()));
+    }));
+    accessor(option, "text",
+        on<DOMElement>("text", [](DOMElement& e, const Info&) { return str(optionText(&e)); }),
+        on<DOMElement>("text", [this](DOMElement& e, const Info& info) {
+            setText(&e, argString(info, 0));
+            return Value::undefined();
+        }));
+    accessor(option, "label",
+        on<DOMElement>("label", [](DOMElement& e, const Info&) { return str(optionLabel(&e)); }),
+        on<DOMElement>("label", [](DOMElement& e, const Info& info) {
+            e.setAttribute("label", info.argument(0).toString());
+            return Value::undefined();
+        }));
+    accessor(option, "form", on<DOMElement>("form", [this](DOMElement& e, const Info&) {
+        DOMElement* owner = formOwner(optionOwner(&e));
+        return owner ? wrap(owner) : Value::null();
+    }));
+    // new Option(text, value, defaultSelected, selected)
+    {
+        auto* ctor = new Function("Option", [this](const FunctionCallInfo& info) -> Value {
+            if (!document_) throw JSError("TypeError", "Illegal constructor: Option");
+            std::unique_ptr<DOMNode> el = document_->createElement("option");
+            auto* e = static_cast<DOMElement*>(el.get());
+            if (info.argumentCount() > 0 && !info.argument(0).isUndefined()) {
+                std::string text = info.argument(0).toString();
+                if (!text.empty()) e->appendChild(document_->createTextNode(text));
+            }
+            if (info.argumentCount() > 1 && !info.argument(1).isUndefined()) e->setAttribute("value", info.argument(1).toString());
+            if (info.argument(2).toBoolean()) e->setAttribute("selected", "");
+            if (info.argumentCount() > 3) e->setDirtyChecked(info.argument(3).toBoolean());
+            NodeWrapper* w = wrapperOf(e);
+            w->owned = std::move(el);
+            return Value::object(w);
+        }, 0);
+        ctor->set("prototype", Value::object(option));
+        vm_->setGlobal("Option", Value::object(ctor));
+        if (global_) defineHidden(global_, "Option", Value::object(ctor));
+    }
+
     // The text selection: selectionStart/End/Direction, select(),
     // setSelectionRange() and setRangeText(), indexed as page strings are
     auto noSelection = [this](const char* what) {
@@ -2514,6 +2653,19 @@ Value DOMBindings::elementList(const std::vector<DOMElement*>& elements) {
 
 void DOMBindings::throwDOMException(const std::string& name, const std::string& message) {
     throwDOMError(vm_, name, message);
+}
+
+bool DOMBindings::pickOption(DOMElement* select, long index) {
+    if (!select || !isConnected(select) || isDisabledControl(select)) return false;
+    std::vector<DOMElement*> options = selectOptions(select);
+    if (index < 0 || index >= static_cast<long>(options.size()) || isOptionDisabled(options[index])) return false;
+    if (isSingleSelect(select) && selectedIndex(select) == index) return false;
+    if (isSingleSelect(select)) setSelectedIndex(select, index);
+    else setOptionSelected(options[index], !optionSelected(options[index]));
+    noteDomMutation();
+    fireEvent(select, "input", true, false);
+    fireEvent(select, "change", true, false);
+    return true;
 }
 
 void DOMBindings::releaseDetachedNodes() {
