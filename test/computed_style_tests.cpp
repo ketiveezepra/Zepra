@@ -287,3 +287,23 @@ TEST(ComputedStyle, WithoutAStyleSourceValuesAreEmpty) {
                         "JSON.stringify([cs.width, cs.getPropertyValue('color'), cs.length])"),
               "[\"\",\"\",0]");
 }
+
+TEST(CssNamespace, SupportsDeclarationsAndConditions) {
+    Page page(kPage);
+    EXPECT_EQ(page.eval("[CSS.supports('display', 'grid'), CSS.supports('color', 'var(--x)'),"
+                        " CSS.supports('--brand', 'red'), CSS.supports('no-such-thing', '1px'),"
+                        " CSS.supports('color', ''), CSS.supports('color', 'red; width: 1px')].join()"),
+              "true,true,true,false,false,false");
+    EXPECT_EQ(page.eval("[CSS.supports('(display: flex)'), CSS.supports('display: flex'),"
+                        " CSS.supports('not (frobnicate: 1)'), CSS.supports('(color: red) and (nope: 1)'),"
+                        " CSS.supports('(color: red) or (nope: 1)'), CSS.supports('(a: 1) and (b: 2) or (c: 3)'),"
+                        " CSS.supports('selector(div > p)'), CSS.supports('foo(bar)')].join()"),
+              "true,true,true,false,true,false,true,false");
+}
+
+TEST(CssNamespace, EscapeSerializesAnIdentifier) {
+    Page page(kPage);
+    EXPECT_EQ(page.eval("[CSS.escape('a.b'), CSS.escape('1st'), CSS.escape('-'), CSS.escape('-2'),"
+                        " CSS.escape('x y#z'), CSS.escape('ok_-1')].join('|')"),
+              "a\\.b|\\31 st|\\-|-\\32 |x\\ y\\#z|ok_-1");
+}
