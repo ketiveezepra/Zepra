@@ -345,6 +345,17 @@ TEST(ScriptGeometry, ClientAndScrollSizes) {
     EXPECT_EQ(page.eval("[window.innerWidth, window.innerHeight, innerWidth].join()"), "1240,700,1240");
 }
 
+TEST(ScriptGeometry, ScreenReportsTheMonitor) {
+    Page page;
+    // Without a monitor size of its own the geometry reports the viewport
+    EXPECT_EQ(page.eval("[screen.width, screen.height, window.screen.availWidth, screen.availHeight,"
+                        " screen.colorDepth, screen.pixelDepth, screen.availLeft].join()"),
+              "1240,700,1240,700,24,24,0");
+    EXPECT_EQ(page.eval("screen instanceof Screen && screen === window.screen"), "true");
+    // [Replaceable], like innerWidth
+    EXPECT_EQ(page.eval("var screen = 5; screen"), "5");
+}
+
 TEST(ScriptGeometry, WindowAndDocumentScrolling) {
     Page page;
     EXPECT_EQ(page.eval("window.scrollTo(0, 250); [scrollY, window.scrollY, window.pageYOffset,"

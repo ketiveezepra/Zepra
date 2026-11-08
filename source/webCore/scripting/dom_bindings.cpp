@@ -1770,6 +1770,28 @@ void DOMBindings::installGeometry() {
     accessor(w, "innerHeight", [this](const Info&) -> Value {
         return Value::number(geometry_ ? geometry_->viewportHeight() : kDefaultViewportHeight);
     }, replaceable("innerHeight"));
+    // window.screen: the monitor's size (CSSOM View §4.3). There is no
+    // taskbar to leave out, so the available area is the whole screen.
+    Object* screenProto = makeInterface("Screen", nullptr);
+    auto* screen = new Object();
+    screen->setPrototype(screenProto);
+    auto screenSize = [this](bool width) -> double {
+        if (!geometry_) return width ? kDefaultViewportWidth : kDefaultViewportHeight;
+        return width ? geometry_->screenWidth() : geometry_->screenHeight();
+    };
+    for (const char* name : {"width", "availWidth"}) {
+        accessor(screenProto, name, [screenSize](const Info&) { return Value::number(screenSize(true)); });
+    }
+    for (const char* name : {"height", "availHeight"}) {
+        accessor(screenProto, name, [screenSize](const Info&) { return Value::number(screenSize(false)); });
+    }
+    for (const char* name : {"colorDepth", "pixelDepth"}) {
+        accessor(screenProto, name, [](const Info&) { return Value::number(24); });
+    }
+    for (const char* name : {"availLeft", "availTop"}) {
+        accessor(screenProto, name, [](const Info&) { return Value::number(0); });
+    }
+    accessor(w, "screen", [screen](const Info&) { return Value::object(screen); }, replaceable("screen"));
     for (const char* name : {"scrollX", "pageXOffset"}) {
         accessor(w, name, [this](const Info&) -> Value { return Value::number(geometry_ ? geometry_->scrollX() : 0); },
                  replaceable(name));
