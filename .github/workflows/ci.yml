@@ -65,6 +65,10 @@ jobs:
       - name: CSS @import tests
         run: ctest --test-dir build/test -R WebCoreCssImportTests --output-on-failure
 
+      # Fonts for CSS text: family lists, generic families, weight and style
+      - name: Font matching tests
+        run: ctest --test-dir build/test -R WebCoreFontMatchingTests --output-on-failure
+
       # Layout geometry page scripts read (getBoundingClientRect, offset*, scrolling)
       - name: Script geometry tests
         run: ctest --test-dir build/test -R LayoutGeometryTests --output-on-failure
@@ -131,7 +135,7 @@ jobs:
           webcore_forced_pseudo_tests webcore_console_format_tests computed_style_tests
           webcore_media_query_tests webcore_custom_property_tests layout_geometry_tests svg_raster_tests zepra_engine_tests
           devtools_style_rules_tests devtools_network_tests devtools_console_input_tests
-          devtools_text_field_tests devtools_dom_edit_tests webcore_css_import_tests
+          devtools_text_field_tests devtools_dom_edit_tests webcore_css_import_tests webcore_font_matching_tests
           zeprascript-unit-tests zeprascript-integration-tests
 
       # Leak reports are off for now: the engine's GC heap is torn down at exit only
@@ -148,7 +152,7 @@ jobs:
                    webcore_forced_pseudo_tests webcore_console_format_tests computed_style_tests \
                    webcore_media_query_tests webcore_custom_property_tests layout_geometry_tests svg_raster_tests zepra_engine_tests \
                    devtools_style_rules_tests devtools_network_tests devtools_console_input_tests \
-                   devtools_text_field_tests devtools_dom_edit_tests webcore_css_import_tests zeprascript-integration-tests; do
+                   devtools_text_field_tests devtools_dom_edit_tests webcore_css_import_tests webcore_font_matching_tests zeprascript-integration-tests; do
             echo "::group::$t"
             timeout 900 ./$t
             echo "::endgroup::"
@@ -205,6 +209,10 @@ jobs:
       - name: CSS @import tests
         run: ctest --test-dir build/test -R WebCoreCssImportTests --output-on-failure
 
+      # Fonts for CSS text: family lists, generic families, weight and style
+      - name: Font matching tests
+        run: ctest --test-dir build/test -R WebCoreFontMatchingTests --output-on-failure
+
       # Layout geometry page scripts read (getBoundingClientRect, offset*, scrolling)
       - name: Script geometry tests
         run: ctest --test-dir build/test -R LayoutGeometryTests --output-on-failure
@@ -256,6 +264,10 @@ jobs:
       # CSS @import: loading imported sheets, their media queries and cascade order
       - name: CSS @import tests
         run: ctest --test-dir build/test -R WebCoreCssImportTests --output-on-failure
+
+      # Fonts for CSS text: family lists, generic families, weight and style
+      - name: Font matching tests
+        run: ctest --test-dir build/test -R WebCoreFontMatchingTests --output-on-failure
 
       # Layout geometry page scripts read (getBoundingClientRect, offset*, scrolling)
       - name: Script geometry tests

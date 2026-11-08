@@ -140,6 +140,8 @@ struct LayoutBox {
     float fontSize = 16.0f;
     bool bold = false;
     bool italic = false;
+    std::string fontFamily;      // CSS font-family list ("" = the system font)
+    int fontWeight = 400;        // 100..900; bold is set too at 600 and above
     bool hasBgColor = false;
     
     // Border radius (uniform for now)
@@ -352,8 +354,9 @@ const LayoutBox* userScrollContainerAt(const LayoutBox& root, float x, float y, 
 void setLayoutCallbacks(
     void (*gfx_rect)(float x, float y, float w, float h, uint32_t color),
     void (*gfx_border)(float x, float y, float w, float h, uint32_t color, float thickness),
-    void (*text_render)(const std::string& text, float x, float y, uint32_t color, float fontSize),
-    float (*text_width)(const std::string& text, float fontSize),
+    void (*text_render)(const std::string& text, float x, float y, uint32_t color, float fontSize,
+                        const LayoutBox* font),
+    float (*text_width)(const std::string& text, float fontSize, const LayoutBox* font),
     void (*register_link)(float x, float y, float w, float h, const std::string& href, const std::string& target),
     void (*gfx_texture)(float x, float y, float w, float h, uint32_t textureId),
     void (*gfx_line)(float x1, float y1, float x2, float y2, uint32_t color, float thickness) = nullptr
@@ -464,9 +467,10 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
  * 
  * @param text Text to measure
  * @param fontSize Font size in pixels
+ * @param font The box whose font family, weight and style to use (null: the system font)
  * @return Width in pixels
  */
-float measureTextWidth(const std::string& text, float fontSize);
+float measureTextWidth(const std::string& text, float fontSize, const LayoutBox* font = nullptr);
 
 /**
  * @brief Extract all text from the layout tree

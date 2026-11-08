@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Font matching</title>
+<style>
+  body { margin: 24px; font-size: 20px; }
+  p { margin: 6px 0; }
+  .sans { font-family: sans-serif; }
+  .serif { font-family: serif; }
+  .mono { font-family: monospace; }
+  .named { font-family: "Liberation Serif", serif; }
+  .missing { font-family: "No Such Font", "Another Missing", monospace; }
+  .stack { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+  .bold { font-weight: bold; }
+  .w600 { font-weight: 600; }
+  .light { font-weight: 300; }
+  .italic { font-style: italic; }
+  .jet { font-family: "JetBrains Mono"; }
+</style>
+</head>
+<body>
+<p class="sans">sans-serif: The quick brown fox jumps over the lazy dog 0123456789</p>
+<p class="serif">serif: The quick brown fox jumps over the lazy dog 0123456789</p>
+<p class="mono">monospace: iiiii WWWWW 0123456789 (columns line up)</p>
+<p class="mono">monospace: WWWWW iiiii 9876543210 (columns line up)</p>
+<p class="named">"Liberation Serif": The quick brown fox</p>
+<p class="missing">missing families fall back to monospace: iiiii WWWWW</p>
+<p class="stack">system font stack (WordPress/GitHub): The quick brown fox</p>
+<p class="sans bold">sans-serif bold: The quick brown fox</p>
+<p class="sans w600">sans-serif 600: The quick brown fox</p>
+<p class="sans italic">sans-serif italic: The quick brown fox</p>
+<p class="serif bold italic">serif bold italic: The quick brown fox</p>
+<p class="jet italic">"JetBrains Mono" italic: The quick brown fox</p>
+<p>Inline: normal <b>bold</b> <i>italic</i> <code>code</code> <strong><em>both</em></strong> normal again</p>
+<h2>A heading (bold from the UA stylesheet)</h2>
+</body>
+</html>

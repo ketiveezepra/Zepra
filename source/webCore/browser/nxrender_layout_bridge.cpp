@@ -88,7 +88,7 @@ void NXRenderLayoutBridge::gfxBorder(float x, float y, float w, float h,
 }
 
 void NXRenderLayoutBridge::textRender(const std::string& text, float x, float y,
-                                       uint32_t color, float fontSize) {
+                                       uint32_t color, float fontSize, const LayoutBox*) {
     if (!gpu_) return;
     
     NXRender::Color c(
@@ -101,7 +101,7 @@ void NXRenderLayoutBridge::textRender(const std::string& text, float x, float y,
     gpu_->drawText(text, x, y, c, fontSize);
 }
 
-float NXRenderLayoutBridge::textWidth(const std::string& text, float fontSize) {
+float NXRenderLayoutBridge::textWidth(const std::string& text, float fontSize, const LayoutBox*) {
     if (!gpu_) {
         // Fallback estimate
         return text.length() * fontSize * 0.5f;

@@ -27,6 +27,8 @@ namespace NXRender {
 
 namespace ZepraBrowser {
 
+struct LayoutBox;
+
 /**
  * @brief Bridges layout engine to NXRender graphics
  */
@@ -76,8 +78,9 @@ private:
     // Static callback functions (match setLayoutCallbacks signature)
     static void gfxRect(float x, float y, float w, float h, uint32_t color);
     static void gfxBorder(float x, float y, float w, float h, uint32_t color, float thickness);
-    static void textRender(const std::string& text, float x, float y, uint32_t color, float fontSize);
-    static float textWidth(const std::string& text, float fontSize);
+    static void textRender(const std::string& text, float x, float y, uint32_t color, float fontSize,
+                           const LayoutBox* font);
+    static float textWidth(const std::string& text, float fontSize, const LayoutBox* font);
     static void registerLink(float x, float y, float w, float h, 
                             const std::string& href, const std::string& target);
     static void gfxTexture(float x, float y, float w, float h, uint32_t textureId);

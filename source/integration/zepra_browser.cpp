@@ -479,7 +479,7 @@ using ZepraBrowser::LayoutType;
 static DOMElement* g_layoutOwner = nullptr;
 
 // Helper to add child (using std::list for stable pointers)
-float textWidth(const std::string& str, float size);
+float textWidth(const std::string& str, float size, const LayoutBox* style);
 
 static LayoutBox* addChild(LayoutBox* parent) {
     if (!parent) return nullptr;
@@ -1741,6 +1741,8 @@ static LayoutBox* wrapInAnonymousBox(LayoutBox* parent, std::list<LayoutBox>::it
     box.color = parent->color;
     box.bold = parent->bold;
     box.italic = parent->italic;
+    box.fontFamily = parent->fontFamily;
+    box.fontWeight = parent->fontWeight;
     box.textAlign = parent->textAlign;
     box.alignChildren = parent->alignChildren;
     if (type == LayoutType::Table && style && !style->borderCollapse) {
@@ -1865,7 +1867,9 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 // Typography
                 box->fontSize = style->fontSize;
                 box->color = cssColorToRGB(style->color);
-                box->bold = (style->fontWeight >= FontWeight::Bold);
+                box->fontWeight = static_cast<int>(style->fontWeight);
+                box->fontFamily = style->fontFamily;
+                box->bold = (box->fontWeight >= 600);
                 box->italic = (style->fontStyle == FontStyle::Italic);
                 box->textDecoration = style->textDecoration;
                 
@@ -2214,7 +2218,9 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         btnBox->bgColor = 0x2563EB; // Default button blue
                     }
                     btnBox->hasBgColor = true;
-                    btnBox->bold = (style->fontWeight >= FontWeight::Bold);
+                    btnBox->fontWeight = static_cast<int>(style->fontWeight);
+                    btnBox->fontFamily = style->fontFamily;
+                    btnBox->bold = (btnBox->fontWeight >= 600);
                     btnBox->paddingTop = style->paddingTop.value > 0 ? style->paddingTop.value : 8;
                     btnBox->paddingBottom = style->paddingBottom.value > 0 ? style->paddingBottom.value : 8;
                     btnBox->paddingLeft = style->paddingLeft.value > 0 ? style->paddingLeft.value : 16;
@@ -2290,9 +2296,9 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 // As wide as its longest option, as tall as a line
                 float widest = 0;
                 for (DOMElement* option : Zepra::WebCore::selectOptions(childElement)) {
-                    widest = std::max(widest, textWidth(Zepra::WebCore::optionLabel(option), selBox->fontSize));
+                    widest = std::max(widest, textWidth(Zepra::WebCore::optionLabel(option), selBox->fontSize, selBox));
                 }
-                widest = std::max(widest, textWidth(displayText, selBox->fontSize));
+                widest = std::max(widest, textWidth(displayText, selBox->fontSize, selBox));
                 selBox->width = widest + selBox->paddingLeft + selBox->paddingRight + 2 * border;
                 if (style && !style->width.isAuto() && style->width.value > 0 &&
                     style->width.unit == Zepra::WebCore::CSSLength::Unit::Px) {
@@ -2525,7 +2531,9 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 if (childStyle) {
                     blockBox->fontSize = childStyle->fontSize;
                     blockBox->color = cssColorToRGB(childStyle->color);
-                    blockBox->bold = (childStyle->fontWeight >= FontWeight::Bold);
+                    blockBox->fontWeight = static_cast<int>(childStyle->fontWeight);
+                    blockBox->fontFamily = childStyle->fontFamily;
+                    blockBox->bold = (blockBox->fontWeight >= 600);
                     blockBox->italic = (childStyle->fontStyle == FontStyle::Italic);
                     blockBox->textDecoration = childStyle->textDecoration;
                     
@@ -2714,7 +2722,9 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 if (childStyle) {
                     inlineBox->fontSize = childStyle->fontSize;
                     inlineBox->color = cssColorToRGB(childStyle->color);
-                    inlineBox->bold = (childStyle->fontWeight >= FontWeight::Bold);
+                    inlineBox->fontWeight = static_cast<int>(childStyle->fontWeight);
+                    inlineBox->fontFamily = childStyle->fontFamily;
+                    inlineBox->bold = (inlineBox->fontWeight >= 600);
                     inlineBox->italic = (childStyle->fontStyle == FontStyle::Italic);
                     inlineBox->textDecoration = childStyle->textDecoration;
                     
@@ -2916,13 +2926,24 @@ void svgImage(const std::string& key, const std::string& svgText, float x, float
 // TEXT HELPER
 // ============================================================================
 
-void text(const std::string& str, float x, float y, uint32_t c, float size = 14.0f) {
-    auto* font = nxfont::FontManager::instance().getSystemFont((int)size);
+// The font for text: the browser's own UI uses the system font; page text
+// passes its box, whose CSS font-family, weight and style pick the font
+static nxfont::Font* fontFor(float size, const LayoutBox* style) {
+    auto& fonts = nxfont::FontManager::instance();
+    if (!style || (style->fontFamily.empty() && style->fontWeight < 600 && !style->bold && !style->italic)) {
+        return fonts.getSystemFont((int)size);
+    }
+    int weight = style->bold ? std::max(style->fontWeight, 700) : style->fontWeight;
+    return fonts.getFontFor(style->fontFamily, weight, style->italic, (int)size);
+}
+
+void text(const std::string& str, float x, float y, uint32_t c, float size = 14.0f, const LayoutBox* style = nullptr) {
+    auto* font = fontFor(size, style);
     if (font) font->drawText(str, x, y, R(c), G(c), B(c));
 }
 
-float textWidth(const std::string& str, float size = 14.0f) {
-    auto* font = nxfont::FontManager::instance().getSystemFont((int)size);
+float textWidth(const std::string& str, float size = 14.0f, const LayoutBox* style = nullptr) {
+    auto* font = fontFor(size, style);
     return font ? font->measureText(str) : str.length() * (size * 0.6f);
 }
 
@@ -2994,12 +3015,13 @@ static void layout_gfx_texture(float x, float y, float w, float h, uint32_t text
     gfx::texture(x, y, w, h, ZepraBrowser::g_lazyImageLoader.currentFrame(textureId));
 }
 
-static void layout_text_render(const std::string& str, float x, float y, uint32_t c, float fontSize) {
-    text(str, x, y, c, fontSize);
+static void layout_text_render(const std::string& str, float x, float y, uint32_t c, float fontSize,
+                               const LayoutBox* font) {
+    text(str, x, y, c, fontSize, font);
 }
 
-static float layout_text_width(const std::string& str, float fontSize) {
-    return textWidth(str, fontSize);
+static float layout_text_width(const std::string& str, float fontSize, const LayoutBox* font) {
+    return textWidth(str, fontSize, font);
 }
 
 static void layout_register_link(float x, float y, float w, float h,

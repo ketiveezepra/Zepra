@@ -304,6 +304,33 @@ const RegisteredFont* FontManager::findBestMatch(
     return bestFamily;
 }
 
+const RegisteredFont* FontManager::match(const std::string& families, int weight, bool italic) {
+    if (!initialized_) initialize();
+    FontWeight wanted = weight >= 600 ? FontWeight::Bold : FontWeight::Normal;
+    for (const auto& rawFamily : parseFamilyList(families)) {
+        std::string family = normalizeFamily(rawFamily);
+        auto genericIt = genericFamilies_.find(family);
+        if (genericIt != genericFamilies_.end()) family = normalizeFamily(genericIt->second);
+        const RegisteredFont* best = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            best = findBestMatch(family, wanted, italic);
+            // findBestMatch prefers the weight; a face with the wanted style
+            // but the other weight is closer than one with neither
+            if (best && (best->weight != wanted || best->italic != italic)) {
+                for (const auto& reg : registry_) {
+                    if (reg.family != family) continue;
+                    int score = (reg.weight == wanted ? 2 : 0) + (reg.italic == italic ? 1 : 0);
+                    int bestScore = (best->weight == wanted ? 2 : 0) + (best->italic == italic ? 1 : 0);
+                    if (score > bestScore) best = &reg;
+                }
+            }
+        }
+        if (best) return best;
+    }
+    return nullptr;
+}
+
 std::shared_ptr<FontFace> FontManager::resolveFont(
         const std::string& families,
         int pixelSize,

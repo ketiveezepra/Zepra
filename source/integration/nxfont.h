@@ -18,6 +18,9 @@
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#include FT_OUTLINE_H
+
+#include "rendering/font_manager.hpp"
 
 #ifdef __APPLE__
 #  ifndef GL_SILENCE_DEPRECATION
@@ -46,7 +49,9 @@ public:
     Font() : ft_(nullptr), face_(nullptr), size_(16) {}
     ~Font() { cleanup(); }
 
-    bool load(const std::string& path, int size = 16) {
+    /// `syntheticBold` / `syntheticItalic` draw the face emboldened or slanted,
+    /// for a weight or style the family has no face for
+    bool load(const std::string& path, int size = 16, bool syntheticBold = false, bool syntheticItalic = false) {
         if (FT_Init_FreeType(&ft_)) {
             std::cerr << "[NxFont] Failed to init FreeType\n";
             return false;
@@ -58,10 +63,33 @@ public:
             ft_ = nullptr;
             return false;
         }
-        
+        return finishLoad(path, size, syntheticBold, syntheticItalic);
+    }
+
+    /// A font from bytes in memory (a web font); `data` must outlive the font
+    bool loadMemory(std::shared_ptr<const std::vector<uint8_t>> data, const std::string& name, int size,
+                    bool syntheticBold = false, bool syntheticItalic = false) {
+        if (!data || data->empty() || FT_Init_FreeType(&ft_)) return false;
+        if (FT_New_Memory_Face(ft_, data->data(), static_cast<FT_Long>(data->size()), 0, &face_)) {
+            FT_Done_FreeType(ft_);
+            ft_ = nullptr;
+            return false;
+        }
+        memory_ = std::move(data);
+        return finishLoad(name, size, syntheticBold, syntheticItalic);
+    }
+
+private:
+    bool finishLoad(const std::string& path, int size, bool syntheticBold, bool syntheticItalic) {
         FT_Set_Pixel_Sizes(face_, 0, size);
         size_ = size;
         path_ = path;
+        syntheticBold_ = syntheticBold;
+        syntheticItalic_ = syntheticItalic;
+        // The face's own space width (a monospace font needs it)
+        if (FT_Load_Char(face_, ' ', FT_LOAD_DEFAULT) == 0) {
+            spaceAdvance_ = (face_->glyph->advance.x >> 6) + (syntheticBold_ ? emboldenPx() : 0);
+        }
         
         // Pre-cache ASCII characters
         for (unsigned char c = 32; c < 127; c++) {
@@ -72,6 +100,8 @@ public:
                   << glyphs_.size() << " glyphs)\n";
         return true;
     }
+
+public:
     
     void cleanup() {
         for (auto& pair : glyphs_) {
@@ -86,6 +116,7 @@ public:
         fallbacksLoaded_ = false;
         if (face_) { FT_Done_Face(face_); face_ = nullptr; }
         if (ft_) { FT_Done_FreeType(ft_); ft_ = nullptr; }
+        memory_.reset();
     }
     
     // Draw text at position with color
@@ -163,6 +194,7 @@ public:
     }
     
     int getLineHeight() const { return (int)(size_ * 1.2f); }
+    const std::string& path() const { return path_; }
     int getSize() const { return size_; }
 
 private:
@@ -192,7 +224,9 @@ private:
         return c;
     }
 
-    float spaceAdvance() const { return size_ * 0.3f; }
+    float spaceAdvance() const { return spaceAdvance_ > 0 ? spaceAdvance_ : size_ * 0.3f; }
+    /// How far synthetic bold thickens strokes, in pixels
+    int emboldenPx() const { return std::max(1, size_ / 24); }
 
     /// The glyph for a character: from this font, else from the first
     /// fallback font that has it, else the font's missing-glyph box. Null
@@ -271,11 +305,25 @@ private:
         // Load glyph with rendering; a character no font has shows the
         // missing-glyph box rather than vanishing
         FT_Face face = faceWith(c);
-        FT_Error error = face ? FT_Load_Char(face, c, FT_LOAD_RENDER)
-                              : FT_Load_Glyph(face = face_, 0, FT_LOAD_RENDER);
+        bool synthetic = syntheticBold_ || syntheticItalic_;
+        FT_Int32 flags = synthetic ? (FT_LOAD_DEFAULT | FT_LOAD_NO_BITMAP) : FT_LOAD_RENDER;
+        FT_Error error = face ? FT_Load_Char(face, c, flags)
+                              : FT_Load_Glyph(face = face_, 0, flags);
         if (error) return;
         
         FT_GlyphSlot slot = face->glyph;
+        if (synthetic && slot->format == FT_GLYPH_FORMAT_OUTLINE) {
+            if (syntheticItalic_) {
+                FT_Matrix shear = {0x10000, 0x0366A, 0, 0x10000};  // about 12 degrees
+                FT_Outline_Transform(&slot->outline, &shear);
+            }
+            if (syntheticBold_) {
+                FT_Pos strength = emboldenPx() * 64;
+                FT_Outline_Embolden(&slot->outline, strength);
+                slot->advance.x += strength;
+            }
+        }
+        if (slot->format != FT_GLYPH_FORMAT_BITMAP && FT_Render_Glyph(slot, FT_RENDER_MODE_NORMAL)) return;
         FT_Bitmap& bitmap = slot->bitmap;
         
         Glyph glyph;
@@ -332,6 +380,10 @@ private:
     std::unordered_map<uint32_t, Glyph> glyphs_;
     std::vector<FT_Face> fallbacks_;
     bool fallbacksLoaded_ = false;
+    bool syntheticBold_ = false;
+    bool syntheticItalic_ = false;
+    float spaceAdvance_ = 0;
+    std::shared_ptr<const std::vector<uint8_t>> memory_;  // a memory face's bytes
 };
 
 // FontManager - manages multiple fonts
@@ -400,6 +452,40 @@ public:
         return ok;
     }
     
+    /// The font for CSS text: `families` is the font-family list, matched
+    /// against the installed fonts; a weight of 600 or more is bold. A family
+    /// with no bold or italic face is drawn emboldened or slanted. Text whose
+    /// families aren't installed uses the system font (in the wanted style).
+    Font* getFontFor(const std::string& families, int weight, bool italic, int size) {
+        std::string key = families + '\x1f' + std::to_string(weight) + (italic ? "i" : "n") + std::to_string(size);
+        auto it = styled_.find(key);
+        if (it != styled_.end()) return it->second ? it->second.get() : getSystemFont(size);
+
+        bool bold = weight >= 600;
+        const auto* reg = Zepra::Fonts::FontManager::instance().match(families, weight, italic);
+        std::unique_ptr<Font> font;
+        if (reg) {
+            bool regBold = reg->weight >= Zepra::Fonts::FontWeight::SemiBold;
+            font = std::make_unique<Font>();
+            bool ok = reg->data.empty()
+                ? font->load(reg->path, size, bold && !regBold, italic && !reg->italic)
+                : font->loadMemory(std::make_shared<const std::vector<uint8_t>>(reg->data), reg->displayName,
+                                   size, bold && !regBold, italic && !reg->italic);
+            if (!ok) font.reset();
+        }
+        if (!font && (bold || italic)) {
+            // The system font, emboldened or slanted
+            Font* system = getSystemFont(size);
+            if (system && !system->path().empty()) {
+                font = std::make_unique<Font>();
+                if (!font->load(system->path(), size, bold, italic)) font.reset();
+            }
+        }
+        Font* result = font.get();
+        styled_[key] = std::move(font);  // null: use the system font
+        return result ? result : getSystemFont(size);
+    }
+
     // Get or load system font of specific size
     Font* getSystemFont(int size) {
         std::string key = "sys_" + std::to_string(size);
@@ -418,6 +504,7 @@ private:
     FontManager() = default;
     std::unordered_map<std::string, std::unique_ptr<Font>> fonts_;
     Font* defaultFont_ = nullptr;
+    std::unordered_map<std::string, std::unique_ptr<Font>> styled_;  // getFontFor()
 };
 
 } // namespace nxfont

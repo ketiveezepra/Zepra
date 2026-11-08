@@ -25,6 +25,7 @@
 #include <memory>
 #include <unordered_map>
 #include <list>
+#include <deque>
 #include <functional>
 #include <optional>
 #include <mutex>
@@ -200,6 +201,14 @@ public:
     );
 
     /**
+     * @brief The registered font for a CSS font-family list: the first family
+     *        (generic families included) that has a font, the closest weight
+     *        and style within it. Null when no family in the list is installed.
+     *        Initializes the manager on first use.
+     */
+    const RegisteredFont* match(const std::string& families, int weight, bool italic);
+
+    /**
      * @brief Set the default fallback font (used when nothing else matches)
      */
     void setDefaultFont(const std::string& path);
@@ -268,7 +277,7 @@ private:
     bool initialized_ = false;
 
     // All registered fonts
-    std::vector<RegisteredFont> registry_;
+    std::deque<RegisteredFont> registry_;  // a deque: match() hands out stable pointers
 
     // Generic family map (e.g., "sans-serif" -> "DejaVu Sans")
     std::unordered_map<std::string, std::string> genericFamilies_;

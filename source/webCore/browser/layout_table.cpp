@@ -366,7 +366,7 @@ void intrinsicWidths(const LayoutBox& box, float& minW, float& maxW) {
         float w = fixedBorderBoxWidth(box, box.cssWidth);
         minW = maxW = w < 0 ? box.width : w;
     } else if (box.children.empty()) {
-        float textW = box.text.empty() ? 0 : measureTextWidth(box.text, box.fontSize);
+        float textW = box.text.empty() ? 0 : measureTextWidth(box.text, box.fontSize, &box);
         // Inline-level leaves are exactly as wide as their text in layoutBlock
         minW = maxW = isBlockLevel(box.type) ? textW + edges : textW;
     } else if (box.type == LayoutType::Flex && (box.flexDirection == 0 || box.flexDirection == 2)) {
