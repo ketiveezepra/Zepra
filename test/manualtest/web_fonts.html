@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Web fonts</title>
+<!-- Google Fonts serves TrueType to browsers it doesn't recognise, WOFF2 to Chrome/Firefox -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lobster&amp;family=Roboto+Slab:wght@400;700&amp;family=Pacifico&amp;display=swap">
+<style>
+  /* local(): an installed font under a page-chosen name */
+  @font-face { font-family: "Local Alias"; src: local("DejaVu Serif"), url(missing.woff); }
+  /* A family with only a bold face uses it for every weight, as other browsers do */
+  @font-face { font-family: "Bold Only"; font-weight: 700; src: local("DejaVu Sans Mono"); }
+  /* A Greek-only subset: this page has no Greek text, so it is never downloaded */
+  @font-face { font-family: "Greek Subset"; src: url(https://fonts.test.invalid/greek.woff); unicode-range: U+0370-03FF; }
+  /* No usable source: the next family in the list is used */
+  @font-face { font-family: "Broken"; src: url(https://fonts.test.invalid/broken.woff2) format("woff2"); }
+
+  body { margin: 24px; font-size: 22px; font-family: sans-serif; }
+  p { margin: 8px 0; }
+  .lobster { font-family: Lobster, cursive; font-size: 32px; }
+  .slab { font-family: "Roboto Slab", serif; }
+  .slab-bold { font-family: "Roboto Slab", serif; font-weight: 700; }
+  .pacifico { font-family: Pacifico, cursive; font-size: 28px; }
+  .alias { font-family: "Local Alias", monospace; }
+  .boldonly { font-family: "Bold Only", sans-serif; }
+  .greek { font-family: "Greek Subset", serif; }
+  .broken { font-family: "Broken", monospace; }
+</style>
+</head>
+<body>
+<p class="lobster">Lobster (Google Fonts): The quick brown fox</p>
+<p class="slab">Roboto Slab 400: The quick brown fox jumps over the lazy dog</p>
+<p class="slab-bold">Roboto Slab 700: The quick brown fox jumps over the lazy dog</p>
+<p class="pacifico">Pacifico: Hello from Zepra's own font loader</p>
+<p class="alias">"Local Alias" = local("DejaVu Serif"): serif, not monospace</p>
+<p class="boldonly">"Bold Only", regular weight: still its one (bold mono) face</p>
+<p class="boldonly"><b>"Bold Only", bold: the same face</b></p>
+<p class="greek">"Greek Subset" (not needed, not downloaded): serif</p>
+<p class="broken">"Broken" (woff2 only, not supported yet): monospace fallback</p>
+</body>
+</html>

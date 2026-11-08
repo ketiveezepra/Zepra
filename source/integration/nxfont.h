@@ -457,6 +457,12 @@ public:
     /// with no bold or italic face is drawn emboldened or slanted. Text whose
     /// families aren't installed uses the system font (in the wanted style).
     Font* getFontFor(const std::string& families, int weight, bool italic, int size) {
+        // The page's @font-face fonts changed: what a family maps to may have too
+        uint64_t generation = Zepra::Fonts::FontManager::instance().webFontGeneration();
+        if (generation != webFontGeneration_) {
+            styled_.clear();
+            webFontGeneration_ = generation;
+        }
         std::string key = families + '\x1f' + std::to_string(weight) + (italic ? "i" : "n") + std::to_string(size);
         auto it = styled_.find(key);
         if (it != styled_.end()) return it->second ? it->second.get() : getSystemFont(size);
@@ -505,6 +511,7 @@ private:
     std::unordered_map<std::string, std::unique_ptr<Font>> fonts_;
     Font* defaultFont_ = nullptr;
     std::unordered_map<std::string, std::unique_ptr<Font>> styled_;  // getFontFor()
+    uint64_t webFontGeneration_ = 0;
 };
 
 } // namespace nxfont

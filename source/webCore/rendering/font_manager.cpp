@@ -304,11 +304,82 @@ const RegisteredFont* FontManager::findBestMatch(
     return bestFamily;
 }
 
+bool FontManager::registerWebFont(const WebFontFaceInfo& info, std::vector<uint8_t> data, const std::string& path) {
+    if (!initialized_) initialize();
+    FontFace probe;
+    if (path.empty() ? !probe.loadFromMemory(data) : !probe.load(path)) return false;
+
+    RegisteredFont reg;
+    reg.path        = path;
+    reg.displayName = info.family;
+    reg.family      = normalizeFamily(info.family);
+    reg.weightMin   = std::min(info.weightMin, info.weightMax);
+    reg.weightMax   = std::max(info.weightMin, info.weightMax);
+    // The face's own weight is taken as the bottom of its range: a variable
+    // font's default instance is usually its lightest common weight, so text
+    // asking for bold above it is emboldened rather than left regular
+    reg.weight      = static_cast<FontWeight>(reg.weightMin);
+    reg.italic      = info.italic;
+    reg.isSystem    = false;
+    reg.data        = std::move(data);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        webFonts_.push_back(std::move(reg));
+    }
+    webFontGeneration_++;
+    return true;
+}
+
+void FontManager::clearWebFonts() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (webFonts_.empty()) return;
+        webFonts_.clear();
+    }
+    webFontGeneration_++;
+}
+
+const RegisteredFont* FontManager::findInstalled(const std::string& name, int weight, bool italic) {
+    if (!initialized_) initialize();
+    std::string family = normalizeFamily(name);
+    std::lock_guard<std::mutex> lock(mutex_);
+    return findBestMatch(family, weight >= 600 ? FontWeight::Bold : FontWeight::Normal, italic);
+}
+
+namespace {
+
+// How far a web face is from the wanted weight and style (CSS Fonts 4,
+// font matching, simplified): style mismatches outweigh any weight gap
+int webFaceDistance(const RegisteredFont& f, int weight, bool italic) {
+    int d = 0;
+    if (weight < f.weightMin) d = f.weightMin - weight;
+    else if (weight > f.weightMax) d = weight - f.weightMax;
+    if (f.italic != italic) d += 10000;
+    return d;
+}
+
+} // namespace
+
 const RegisteredFont* FontManager::match(const std::string& families, int weight, bool italic) {
     if (!initialized_) initialize();
     FontWeight wanted = weight >= 600 ? FontWeight::Bold : FontWeight::Normal;
     for (const auto& rawFamily : parseFamilyList(families)) {
         std::string family = normalizeFamily(rawFamily);
+        // A family the page defined with @font-face uses only its own faces
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const RegisteredFont* bestWeb = nullptr;
+            int bestDistance = 0;
+            for (const auto& f : webFonts_) {
+                if (f.family != family) continue;
+                int d = webFaceDistance(f, weight, italic);
+                if (!bestWeb || d <= bestDistance) {  // "<=": the later rule wins a tie
+                    bestWeb = &f;
+                    bestDistance = d;
+                }
+            }
+            if (bestWeb) return bestWeb;
+        }
         auto genericIt = genericFamilies_.find(family);
         if (genericIt != genericFamilies_.end()) family = normalizeFamily(genericIt->second);
         const RegisteredFont* best = nullptr;

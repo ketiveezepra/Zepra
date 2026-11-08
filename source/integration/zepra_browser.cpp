@@ -63,6 +63,7 @@
 #include "html_parser.hpp"
 #include "browser/dom.hpp"
 #include "css/css_engine.hpp"
+#include "rendering/web_font_loader.hpp"
 #include "css/ua_stylesheet.h"
 #include "css/media_query.hpp"
 #include "scripting/script_context.hpp"
@@ -1100,6 +1101,59 @@ std::string resolveUrl(const std::string& base, const std::string& href) {
     return origin + basePath + href;
 }
 
+// The page's @font-face fonts, downloaded in parallel before the first
+// layout so text is laid out once, in its real font (font-display: block)
+static void loadPageWebFonts() {
+    auto& fonts = Zepra::Fonts::FontManager::instance();
+    fonts.clearWebFonts();
+    if (!g_cssEngine || !g_document) return;
+    auto faces = g_cssEngine->fontFaces();
+    if (faces.empty()) return;
+
+    Zepra::Fonts::TextCoverage text;
+    std::function<void(DOMNode*)> collect = [&](DOMNode* node) {
+        if (auto* t = dynamic_cast<DOMText*>(node)) text.addUtf8(t->data());
+        for (const auto& child : node->childNodes()) collect(child.get());
+    };
+    if (g_document->body()) collect(g_document->body());
+    if (auto* head = g_document->head()) {
+        for (const auto& child : head->childNodes()) {
+            auto* el = dynamic_cast<DOMElement*>(child.get());
+            if (!el) continue;
+            std::string tag = el->tagName();
+            std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
+            if (tag == "title") collect(el);
+        }
+    }
+
+    int tabId = g_activeTabId;
+    auto fetch = [tabId](const std::vector<std::string>& urls) {
+        std::vector<std::future<HttpResponse>> inFlight;
+        for (const auto& url : urls) {
+            inFlight.push_back(std::async(std::launch::async, [url, tabId] {
+                HttpRequestOptions options;
+                options.kind = Zepra::WebCore::ResourceKind::Font;
+                options.tabId = tabId;
+                return httpRequest(url, options);
+            }));
+        }
+        std::vector<Zepra::Fonts::WebFontResponse> out;
+        for (auto& f : inFlight) {
+            HttpResponse r = f.get();
+            Zepra::Fonts::WebFontResponse w;
+            w.ok = r.success && (r.statusCode == 0 || (r.statusCode >= 200 && r.statusCode < 300)) && !r.data.empty();
+            w.data.assign(r.data.begin(), r.data.end());
+            w.error = w.ok ? "" : (r.error.empty() ? "HTTP " + std::to_string(r.statusCode) : r.error);
+            out.push_back(std::move(w));
+        }
+        return out;
+    };
+    auto result = Zepra::Fonts::loadWebFonts(faces, &text, resolveUrl, fetch);
+    for (const auto& m : result.messages) std::cerr << "[Fonts] " << m << std::endl;
+    std::cout << "[Fonts] web fonts: " << result.loaded << " loaded, " << result.failed << " failed, "
+              << result.skipped << " not needed by the text" << std::endl;
+}
+
 // background-image on a box: a gradient is painted from the CSS text (over
 // the background colour, which hasBgColor turns on); url() is loaded like an <img>
 static void setBackgroundImage(LayoutBox* box, const CSSComputedStyle& style) {
@@ -1461,6 +1515,8 @@ void parseWithWebCore(const std::string& html) {
         // std::cout << "[CSS] Adding extracted body inline style: " << bodyStyle << std::endl;
         g_cssEngine->addStyleSheet(bodyStyle, StyleOrigin::Author);
     }
+
+    loadPageWebFonts();
     
     rebuildLayoutTree();
     
