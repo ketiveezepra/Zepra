@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <functional>
 #include "css/css_style_sheet.hpp"
 #include "css/css_style_declaration.hpp"
 #include "css/css_rule.hpp"
@@ -268,6 +269,8 @@ private:
     std::string input_;
     /// Query lists of the `@media` blocks being parsed, outermost first
     std::vector<std::shared_ptr<const MediaQueryList>> mediaStack_;
+    /// A rule other than @import was seen (later @import rules are ignored)
+    bool sawRule_ = false;
 
     void skipWhitespace();
     void skipComment();
@@ -315,6 +318,15 @@ public:
     /// The style rules that match an element, sorted by the cascade (lowest priority first)
     std::vector<MatchedRule> matchedRules(DOMElement* element) { return resolver_.matchedRules(element); }
 
+    /// Loads an @import: resolves `href` against `baseUrl`, sets `url` to the
+    /// sheet's final URL and `css` to its text. False when it can't be loaded.
+    using ImportFetcher = std::function<bool(const std::string& href, const std::string& baseUrl,
+                                             std::string& url, std::string& css)>;
+    /// Without a fetcher, @import rules are ignored
+    void setImportFetcher(ImportFetcher fetcher) { importFetcher_ = std::move(fetcher); }
+    /// The document URL: @import in a <style> sheet resolves against it
+    void setBaseUrl(const std::string& url) { baseUrl_ = url; }
+
     /// Add stylesheet from link
     void addStyleSheetFromUrl(const std::string& url, StyleOrigin origin = StyleOrigin::Author);
 
@@ -360,6 +372,15 @@ private:
     bool usesHover_ = false;
     bool usesActive_ = false;
     bool usesFocus_ = false;
+    ImportFetcher importFetcher_;
+    std::string baseUrl_;
+
+    /// Adds a sheet after the sheets its @import rules load. `media` are the
+    /// query lists of the @import rules that led here (applied to every rule);
+    /// `chain` holds the URLs being imported, to stop import cycles.
+    void addSheetWithImports(const std::string& css, StyleOrigin origin, const std::string& href,
+                             const std::vector<std::shared_ptr<const MediaQueryList>>& media,
+                             std::vector<std::string>& chain);
 };
 
 } // namespace Zepra::WebCore

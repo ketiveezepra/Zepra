@@ -218,6 +218,14 @@ if(TARGET webcore)
     endif()
     add_test(NAME WebCoreForcedPseudoTests COMMAND webcore_forced_pseudo_tests)
 
+    # CSS @import: parsing, loading through the engine's fetcher, media queries, cascade order
+    add_executable(webcore_css_import_tests webcore_css_import_tests.cpp)
+    target_link_libraries(webcore_css_import_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(webcore_css_import_tests pthread)
+    endif()
+    add_test(NAME WebCoreCssImportTests COMMAND webcore_css_import_tests)
+
     # Keys, typing, focus and forms: control values, key/input/focus/change/submit
     # events, click activation, and the browser's platform-key to DOM-key mapping
     add_executable(webcore_user_input_tests webcore_user_input_tests.cpp

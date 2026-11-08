@@ -57,7 +57,12 @@ void CSSKeyframeRule::setCssText(const std::string& text) {}
 // CSSImportRule
 CSSImportRule::CSSImportRule() : media_(std::make_unique<MediaList>()) {}
 CSSImportRule::~CSSImportRule() = default;
-std::string CSSImportRule::cssText() const { return "@import url(" + href_ + ");"; }
+std::string CSSImportRule::cssText() const {
+    std::string text = "@import url(\"" + href_ + "\")";
+    if (!supports_.empty()) text += " supports(" + supports_ + ")";
+    if (!mediaText_.empty()) text += " " + mediaText_;
+    return text + ";";
+}
 void CSSImportRule::setCssText(const std::string& text) {}
 
 // CSSSupportsRule
