@@ -242,6 +242,14 @@ if(TARGET webcore)
     endif()
     add_test(NAME WebCoreWebFontLoaderTests COMMAND webcore_web_font_loader_tests)
 
+    # Brotli: Zepra's own decoder against the reference encoder (WOFF2, Content-Encoding: br)
+    add_executable(webcore_brotli_tests webcore_brotli_tests.cpp)
+    target_link_libraries(webcore_brotli_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(webcore_brotli_tests pthread)
+    endif()
+    add_test(NAME WebCoreBrotliTests COMMAND webcore_brotli_tests)
+
     # :hover / :active / :focus forced by DevTools, alongside the real interaction state
     add_executable(webcore_forced_pseudo_tests webcore_forced_pseudo_tests.cpp)
     target_link_libraries(webcore_forced_pseudo_tests webcore GTest::gtest GTest::gtest_main)
