@@ -661,3 +661,158 @@ TEST(Mouse, OverOutEnterLeave) {
     page.script->mouseMove(nullptr, 0, 0, false);
     EXPECT_EQ(page.eval("log.join(' ')"), "mouseout:b mouseout:outer mouseleave:b mouseleave:outer");
 }
+
+// ----------------------------------------------------------------------------
+// Drag and drop
+// ----------------------------------------------------------------------------
+
+namespace {
+const char* kDragPage = R"(<!DOCTYPE html><html><body>
+<div id="card" draggable="true"><span id="label">Card</span></div>
+<div id="lane">lane</div><div id="other">other</div>
+<a id="link" href="/docs/page.html">docs</a><a id="nodrag" href="/x" draggable="false">x</a>
+<input id="field" value="ab"><input id="ro" readonly>
+<p id="plain">plain</p>
+</body></html>)";
+
+const char* kDragLogger = R"(
+var log = [];
+function rec(e) {
+    var t = e.currentTarget.id || e.currentTarget.nodeName;
+    if (e.currentTarget !== e.target) return;
+    log.push(e.type + ':' + t);
+}
+for (var id of ['card', 'lane', 'other', 'link', 'field'])
+    for (var type of ['dragstart', 'drag', 'dragenter', 'dragleave', 'dragover', 'drop', 'dragend',
+                      'mousedown', 'mouseup', 'click', 'mousemove', 'mouseover'])
+        document.getElementById(id).addEventListener(type, rec);
+)";
+}  // namespace
+
+TEST(DragAndDrop, FullSequenceAndData) {
+    Page page(kDragPage);
+    page.eval(kDragLogger);
+    page.eval("var seen = [];"
+              "document.getElementById('card').addEventListener('dragstart', function (e) {"
+              "  e.dataTransfer.setData('text/plain', 'card-1'); e.dataTransfer.setData('application/x-card', '{\"id\":1}');"
+              "  e.dataTransfer.effectAllowed = 'move';"
+              "  seen.push(e instanceof DragEvent, e instanceof MouseEvent, e.dataTransfer instanceof DataTransfer); });"
+              "var lane = document.getElementById('lane');"
+              "lane.addEventListener('dragover', function (e) {"
+              "  seen.push('over:' + e.dataTransfer.types.join('+') + ':' + JSON.stringify(e.dataTransfer.getData('text/plain')));"
+              "  e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });"
+              "lane.addEventListener('drop', function (e) {"
+              "  e.preventDefault(); seen.push('drop:' + e.dataTransfer.getData('text') + ':' + e.dataTransfer.getData('application/x-card'));"
+              "  e.dataTransfer.setData('text/plain', 'changed'); });"
+              "document.getElementById('card').addEventListener('dragend', function (e) {"
+              "  seen.push('end:' + e.dataTransfer.dropEffect + ':' + e.dataTransfer.getData('text/plain')); });");
+    page.script->mouseDown(page.byId("label"), 10, 10);
+    // Within the threshold: a plain mouse move
+    page.script->mouseMove(page.byId("label"), 12, 11, true);
+    EXPECT_FALSE(page.script->dragging());
+    page.eval("log = []");
+    // Past it: dragstart, then the first drag/dragenter/dragover
+    page.script->mouseMove(page.byId("card"), 20, 10, true);
+    EXPECT_TRUE(page.script->dragging());
+    page.script->mouseMove(page.byId("lane"), 30, 40, true);
+    page.script->mouseMove(page.byId("lane"), 31, 41, true);
+    MouseUpResult up = page.script->mouseUp(page.byId("lane"), 31, 41);
+    EXPECT_FALSE(up.clicked);
+    EXPECT_FALSE(page.script->dragging());
+    EXPECT_EQ(page.eval("log.join(' ')"),
+              "dragstart:card drag:card dragenter:card dragover:card "
+              "drag:card dragenter:lane dragleave:card dragover:lane "
+              "drag:card dragover:lane drop:lane dragend:card");
+    // Data is readable in dragstart's listener and drop only; drop cannot change it
+    EXPECT_EQ(page.eval("seen.join(' | ')"),
+              "true | true | true | over:text/plain+application/x-card:\"\" | over:text/plain+application/x-card:\"\" | "
+              "drop:card-1:{\"id\":1} | end:move:");
+}
+
+TEST(DragAndDrop, NoDropWithoutAcceptingTarget) {
+    Page page(kDragPage);
+    page.eval(kDragLogger);
+    page.eval("var effect; document.getElementById('card').addEventListener('dragend', function (e) { effect = e.dataTransfer.dropEffect; });");
+    page.script->mouseDown(page.byId("card"), 0, 0);
+    page.script->mouseMove(page.byId("other"), 0, 30, true);
+    page.eval("log = []");
+    page.script->mouseUp(page.byId("other"), 0, 30);
+    EXPECT_EQ(page.eval("log.join(' ') + ' ' + effect"), "dragleave:other dragend:card none");
+    // Released off the page
+    page.script->mouseDown(page.byId("card"), 0, 0);
+    page.script->mouseMove(page.byId("lane"), 0, 30, true);
+    page.eval("log = []");
+    page.script->mouseUp(nullptr, 0, 900);
+    EXPECT_EQ(page.eval("log.join(' ')"), "dragleave:lane dragend:card");
+    // effectAllowed rules out the dropEffect the target asks for
+    page.eval("document.getElementById('card').addEventListener('dragstart', function (e) { e.dataTransfer.effectAllowed = 'copy'; });"
+              "document.getElementById('lane').addEventListener('dragover', function (e) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });");
+    page.script->mouseDown(page.byId("card"), 0, 0);
+    page.script->mouseMove(page.byId("lane"), 0, 30, true);
+    page.eval("log = []");
+    page.script->mouseUp(page.byId("lane"), 0, 30);
+    EXPECT_EQ(page.eval("log.join(' ') + ' ' + effect"), "dragleave:lane dragend:card none");
+}
+
+TEST(DragAndDrop, WhatStartsADrag) {
+    Page page(kDragPage);
+    page.eval(kDragLogger);
+    // A canceled dragstart: the press goes on as a click
+    page.eval("var stop = function (e) { e.preventDefault(); };"
+              "document.getElementById('card').addEventListener('dragstart', stop);");
+    page.script->mouseDown(page.byId("card"), 0, 0);
+    page.script->mouseMove(page.byId("card"), 30, 0, true);
+    EXPECT_FALSE(page.script->dragging());
+    EXPECT_TRUE(page.script->mouseUp(page.byId("card"), 30, 0).clicked);
+    page.eval("document.getElementById('card').removeEventListener('dragstart', stop)");
+    // A canceled mousedown starts no drag
+    page.eval("document.getElementById('card').addEventListener('mousedown', stop)");
+    page.script->mouseDown(page.byId("card"), 0, 0);
+    page.script->mouseMove(page.byId("card"), 30, 0, true);
+    EXPECT_FALSE(page.script->dragging());
+    page.script->mouseUp(page.byId("card"), 30, 0);
+    // Plain elements and draggable="false" links do not drag; links do, with their URL
+    page.script->mouseDown(page.byId("plain"), 0, 0);
+    page.script->mouseMove(page.byId("plain"), 30, 0, true);
+    EXPECT_FALSE(page.script->dragging());
+    page.script->mouseUp(page.byId("plain"), 30, 0);
+    page.script->mouseDown(page.byId("nodrag"), 0, 0);
+    page.script->mouseMove(page.byId("nodrag"), 30, 0, true);
+    EXPECT_FALSE(page.script->dragging());
+    page.script->mouseUp(page.byId("nodrag"), 30, 0);
+    page.eval("var url; document.getElementById('lane').addEventListener('dragover', function (e) { e.preventDefault(); });"
+              "document.getElementById('lane').addEventListener('drop', function (e) { url = e.dataTransfer.getData('URL') + ' ' + e.dataTransfer.getData('text/uri-list'); });");
+    page.script->mouseDown(page.byId("link"), 0, 0);
+    page.script->mouseMove(page.byId("lane"), 30, 0, true);
+    EXPECT_TRUE(page.script->dragging());
+    MouseUpResult up = page.script->mouseUp(page.byId("lane"), 30, 0);
+    EXPECT_FALSE(up.clicked);   // the link is not followed
+    EXPECT_EQ(page.eval("url"), "/docs/page.html /docs/page.html");
+}
+
+TEST(DragAndDrop, TextFieldsTakePlainText) {
+    Page page(kDragPage);
+    page.eval("var events = []; var f = document.getElementById('field');"
+              "f.addEventListener('beforeinput', function (e) { events.push(e.type + ':' + e.inputType + ':' + e.data); });"
+              "f.addEventListener('input', function (e) { events.push(e.type + ':' + f.value); });"
+              "document.getElementById('card').addEventListener('dragstart', function (e) { e.dataTransfer.setData('text/plain', 'cd'); });");
+    page.script->mouseDown(page.byId("card"), 0, 0);
+    page.script->mouseMove(page.byId("field"), 0, 30, true);
+    page.script->mouseUp(page.byId("field"), 0, 30);
+    EXPECT_EQ(page.eval("events.join(' ') + ' ' + (document.activeElement === f)"),
+              "beforeinput:insertFromDrop:cd input:abcd true");
+    // A read-only field does not
+    page.script->mouseDown(page.byId("card"), 0, 0);
+    page.script->mouseMove(page.byId("ro"), 0, 30, true);
+    page.script->mouseUp(page.byId("ro"), 0, 30);
+    EXPECT_EQ(page.eval("document.getElementById('ro').value"), "");
+}
+
+TEST(DragAndDrop, ScriptMadeDataTransfer) {
+    Page page(kDragPage);
+    EXPECT_EQ(page.eval("var dt = new DataTransfer(); dt.setData('Text', 'x'); dt.setData('text/html', '<b>');"
+                        "dt.clearData('text/html'); var ev = new DragEvent('drop', { dataTransfer: dt });"
+                        "[dt.types.join(), dt.getData('text/plain'), dt.dropEffect, dt.effectAllowed, ev.dataTransfer === dt,"
+                        " new DragEvent('dragover').dataTransfer, dt.files.length].join()"),
+              "text/plain,x,none,uninitialized,true,,0");
+}

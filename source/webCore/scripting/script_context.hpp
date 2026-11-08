@@ -117,6 +117,7 @@ using FetchDone = std::function<void(FetchResponse response)>;
 using FetchHandler = std::function<void(const FetchRequest& request, FetchDone done)>;
 struct FetchInbox;
 struct XhrState;
+struct DragState;   // drag_drop.cpp
 
 using AlertHandler = std::function<void(const std::string& message)>;
 using ConfirmHandler = std::function<bool(const std::string& message)>;
@@ -259,6 +260,12 @@ public:
      * mouseover/mouseenter on the new one; then mousemove
      */
     void mouseMove(DOMElement* target, double clientX, double clientY, bool buttonDown);
+    /**
+     * @brief True while a drag and drop started on the page is under way
+     * (from a dragstart nobody canceled until the release): mouseMove and
+     * mouseUp fire drag events instead of mouse events (drag_drop.cpp)
+     */
+    bool dragging() const;
     /**
      * @brief A key going down: keydown at the focused element (else the body),
      * keypress for keys that make a character, then, unless canceled, the
@@ -435,6 +442,20 @@ private:
     std::string storageOrigin_;
     std::unique_ptr<StorageArea> opaqueStorage_;
     std::unique_ptr<CanvasRegistry> canvasRegistry_;
+
+    // Drag and drop (drag_drop.cpp): the press that may start a drag, then the drag
+    std::shared_ptr<DragState> drag_;
+    Zepra::Runtime::Object* dataTransferProto_ = nullptr;
+    void setupDragAndDrop(Zepra::Runtime::Object* windowObj);
+    void noteDragPress(DOMElement* target, double clientX, double clientY);
+    /// A move with the button down: may start the drag; true when the drag
+    /// took the move (no mouse events)
+    bool dragMove(DOMElement* target, double clientX, double clientY, bool buttonDown);
+    /// The release: drop or not, then dragend; true when a drag ended (no mouseup or click)
+    bool dragRelease(DOMElement* target, double clientX, double clientY);
+    void endDrag();
+    /// The connected element behind a wrapper kept during the drag, else null
+    DOMElement* dragElement(const Zepra::Runtime::Value& wrapper) const;
 };
 
 // ... DevTools classes ...

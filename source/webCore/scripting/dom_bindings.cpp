@@ -2067,6 +2067,7 @@ void DOMBindings::installEvents() {
     mouseEventProto_ = eventInterface("MouseEvent", ui);
     Object* pointer = eventInterface("PointerEvent", mouseEventProto_);
     eventInterface("WheelEvent", mouseEventProto_);
+    dragEventProto_ = eventInterface("DragEvent", mouseEventProto_);
     keyboardEventProto_ = eventInterface("KeyboardEvent", ui);
     focusEventProto_ = eventInterface("FocusEvent", ui);
     inputEventProto_ = eventInterface("InputEvent", ui);
@@ -2111,7 +2112,11 @@ EventObject* DOMBindings::newEvent(Object* proto, const std::string& type, const
     e->timeStamp = nowMs() - origin;
     // Defaults of the subclass members a page may read
     if (proto != eventProto_) {
-        e->set("detail", proto == mouseEventProto_ ? Value::number(0) : Value::null());
+        e->set("detail", proto == mouseEventProto_ || proto == dragEventProto_ ? Value::number(0) : Value::null());
+    }
+    if (proto == dragEventProto_) {
+        const Value given = init.isObject() ? vm_->getMember(init, "dataTransfer") : Value::undefined();
+        e->set("dataTransfer", given.isObject() ? given : Value::null());
     }
     if (proto == keyboardEventProto_) {
         for (const char* k : {"key", "code"}) e->set(k, str(""));
@@ -2472,7 +2477,8 @@ bool DOMBindings::fireMouseEvent(DOMElement* target, const std::string& type, do
 bool DOMBindings::fireMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY,
                                  const MouseEventInit& init) {
     if (!target || !isConnectedTo(target, document_)) return true;
-    EventObject* e = newEvent(mouseEventProto_, type, Value::undefined());
+    EventObject* e = newEvent(init.dataTransfer ? dragEventProto_ : mouseEventProto_, type, Value::undefined());
+    if (init.dataTransfer) e->set("dataTransfer", Value::object(init.dataTransfer));
     e->bubbles = init.bubbles;
     e->cancelable = init.cancelable;
     e->composed = true;

@@ -952,6 +952,9 @@ void ScriptContext::setupWindowGlobals() {
     // <canvas> contexts and Path2D
     canvasRegistry_ = std::make_unique<CanvasRegistry>(vm_, windowObj);
 
+    // DataTransfer (drag and drop events carry one)
+    setupDragAndDrop(windowObj);
+
     std::cout << "[ScriptContext] Window globals registered (alert, console, setTimeout, navigator, location, JSON, localStorage, history)" << std::endl;
 }
 
