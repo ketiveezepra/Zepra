@@ -237,11 +237,22 @@ public:
     /// Imported stylesheet
     CSSStyleSheet* styleSheet() const { return styleSheet_; }
 
+    /// The URL as written (url("x"), url(x) or "x"), not yet resolved
+    void setHref(std::string href) { href_ = std::move(href); }
+    /// The media query list after the URL ("" = all media)
+    const std::string& mediaText() const { return mediaText_; }
+    void setMediaText(std::string text) { mediaText_ = std::move(text); }
+    /// The condition of supports(...), "" when there is none
+    const std::string& supportsCondition() const { return supports_; }
+    void setSupportsCondition(std::string c) { supports_ = std::move(c); }
+
     std::string cssText() const override;
     void setCssText(const std::string& text) override;
 
 private:
     std::string href_;
+    std::string mediaText_;
+    std::string supports_;
     std::unique_ptr<class MediaList> media_;
     CSSStyleSheet* styleSheet_ = nullptr;
 };

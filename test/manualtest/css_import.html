@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>CSS @import</title>
+<style>
+  @import url("css_import/theme.css");
+  @import "css_import/narrow.css" (min-width: 1px);
+  @import "css_import/print.css" print;
+  @import url(css_import/override.css);
+  body { font-family: sans-serif; margin: 24px; }
+  .box { color: white; padding: 6px 10px; margin: 0 0 6px; background: #cc0000; }
+  /* Rules of this sheet come after its imports, so this one wins */
+  #e { background: #008800; }
+  #d { background: #008800; }
+</style>
+<style>
+  p { color: #cc0000; }
+  /* Too late: @import after another rule is ignored */
+  @import "css_import/override.css";
+</style>
+</head>
+<body>
+<div class="box" id="a">A imported sheet: green</div>
+<div class="box" id="b">B nested import, relative URL: green</div>
+<div class="box" id="c">C import with a media query that matches: green</div>
+<div class="box" id="d">D print-only import does not apply: green</div>
+<div class="box" id="e">E importing sheet beats its import: green</div>
+</body>
+</html>

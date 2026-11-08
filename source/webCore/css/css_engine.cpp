@@ -15,6 +15,7 @@
 #include <iostream>
 #include <sstream>
 #include <cctype>
+#include <cstring>
 
 namespace Zepra::WebCore {
 
@@ -274,11 +275,103 @@ std::unique_ptr<CSSKeyframesRule> CSSParser::parseKeyframesRule() {
     return rule;
 }
 
+// @import url("x") [layer | layer(name)] [supports(cond)] [media queries];
+// The stylesheet is fetched by CSSEngine::addStyleSheet()
 std::unique_ptr<CSSImportRule> CSSParser::parseImportRule() {
-    // Skip to semicolon
-    while (!eof() && peek() != ';') consume();
+    std::string prelude;
+    int parens = 0;
+    while (!eof() && !(peek() == ';' && parens == 0)) {
+        char c = consume();
+        if (c == '"' || c == '\'') {
+            prelude += c;
+            while (!eof() && peek() != c && peek() != '\n') {
+                if (peek() == '\\') prelude += consume();
+                if (!eof()) prelude += consume();
+            }
+            if (!eof() && peek() == c) prelude += consume();
+            continue;
+        }
+        if (c == '(') parens++;
+        else if (c == ')' && parens > 0) parens--;
+        else if (c == '{' && parens == 0) {
+            // Not an @import statement: drop it with its block
+            pos_--;
+            skipInvalidRule();
+            return nullptr;
+        }
+        prelude += c;
+    }
     if (peek() == ';') consume();
-    return std::make_unique<CSSImportRule>();
+
+    auto ws = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
+    size_t i = 0;
+    auto skipWs = [&]() { while (i < prelude.size() && ws(prelude[i])) i++; };
+    auto readString = [&](std::string& out) {
+        char q = prelude[i++];
+        while (i < prelude.size() && prelude[i] != q) {
+            if (prelude[i] == '\\' && i + 1 < prelude.size()) i++;
+            out += prelude[i++];
+        }
+        if (i < prelude.size()) i++;
+    };
+    auto startsWithWord = [&](const char* w) {
+        size_t n = std::strlen(w);
+        if (i + n > prelude.size()) return false;
+        for (size_t k = 0; k < n; k++) {
+            if (std::tolower(static_cast<unsigned char>(prelude[i + k])) != w[k]) return false;
+        }
+        return true;
+    };
+    // Index past the ")" matching the "(" at j
+    auto closeParen = [&](size_t j) {
+        int depth = 0;
+        for (; j < prelude.size(); j++) {
+            if (prelude[j] == '(') depth++;
+            else if (prelude[j] == ')' && --depth == 0) return j + 1;
+        }
+        return prelude.size();
+    };
+
+    skipWs();
+    std::string href;
+    if (i < prelude.size() && (prelude[i] == '"' || prelude[i] == '\'')) {
+        readString(href);
+    } else if (startsWithWord("url(")) {
+        i += 4;
+        skipWs();
+        if (i < prelude.size() && (prelude[i] == '"' || prelude[i] == '\'')) {
+            readString(href);
+            skipWs();
+            if (i < prelude.size() && prelude[i] == ')') i++;
+        } else {
+            while (i < prelude.size() && prelude[i] != ')') href += prelude[i++];
+            if (i < prelude.size()) i++;
+            while (!href.empty() && ws(href.back())) href.pop_back();
+        }
+    } else {
+        return nullptr;  // no URL: invalid
+    }
+    if (href.empty()) return nullptr;
+
+    auto rule = std::make_unique<CSSImportRule>();
+    rule->setHref(href);
+    skipWs();
+    if (startsWithWord("layer(")) {
+        i = closeParen(i + 5);
+    } else if (startsWithWord("layer") && (i + 5 == prelude.size() || ws(prelude[i + 5]))) {
+        i += 5;
+    }
+    skipWs();
+    if (startsWithWord("supports(")) {
+        size_t end = closeParen(i + 8);
+        rule->setSupportsCondition(prelude.substr(i + 9, end > i + 10 ? end - i - 10 : 0));
+        i = end;
+    }
+    skipWs();
+    std::string media = prelude.substr(i);
+    while (!media.empty() && ws(media.back())) media.pop_back();
+    rule->setMediaText(media);
+    return rule;
 }
 
 std::unique_ptr<CSSRule> CSSParser::parseRule() {
@@ -289,6 +382,7 @@ std::unique_ptr<CSSRule> CSSParser::parseRule() {
     if (peek() == '@') {
         consume();
         std::string atWord = parseIdentifier();
+        for (char& ch : atWord) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));  // at-keywords ignore case
         
         if (atWord == "media") return parseMediaRule();
         if (atWord == "font-face") return parseFontFaceRule();
@@ -341,6 +435,7 @@ std::unique_ptr<CSSStyleSheet> CSSParser::parse(const std::string& css) {
     pos_ = 0;
     
     mediaStack_.clear();
+    sawRule_ = false;
     auto sheet = std::make_unique<CSSStyleSheet>();
     parseRulesInto(sheet.get(), 0);
     return sheet;
@@ -363,6 +458,7 @@ void CSSParser::parseRulesInto(CSSStyleSheet* sheet, int depth) {
             size_t savedPos = pos_;
             consume();
             std::string atWord = parseIdentifier();
+            for (char& ch : atWord) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));  // at-keywords ignore case
             
             // @media: its rules are kept (in source order) with the query
             // list, which the cascade matches against the viewport
@@ -372,6 +468,7 @@ void CSSParser::parseRulesInto(CSSStyleSheet* sheet, int depth) {
                 if (peek() == ';') { consume(); continue; }
                 if (peek() == '{') {
                     consume();
+                    sawRule_ = true;
                     mediaStack_.push_back(MediaQueryList::parse(prelude));
                     parseRulesInto(sheet, depth + 1);
                     mediaStack_.pop_back();
@@ -390,6 +487,7 @@ void CSSParser::parseRulesInto(CSSStyleSheet* sheet, int depth) {
                 }
                 if (peek() == '{') {
                     consume(); // Enter the block
+                    sawRule_ = true;
                     parseRulesInto(sheet, depth + 1); // Recursively parse inner rules
                     continue;
                 }
@@ -401,6 +499,10 @@ void CSSParser::parseRulesInto(CSSStyleSheet* sheet, int depth) {
         
         size_t before = pos_;
         auto rule = parseRule();
+        // @import is only valid before every other rule of the sheet
+        // (@charset and @layer statements aside)
+        if (rule && rule->type() == CSSRuleType::Import && (depth > 0 || sawRule_)) rule.reset();
+        if (rule && depth == 0 && rule->type() != CSSRuleType::Import) sawRule_ = true;
         if (rule && !mediaStack_.empty()) {
             if (auto* styleRule = dynamic_cast<CSSStyleRule*>(rule.get())) styleRule->setMedia(mediaStack_);
         }
@@ -463,11 +565,49 @@ void CSSEngine::addStyleSheet(const std::string& css, StyleOrigin origin, const 
     usesHover_  = usesHover_  || css.find(":hover") != std::string::npos;
     usesActive_ = usesActive_ || css.find(":active") != std::string::npos;
     usesFocus_  = usesFocus_  || css.find(":focus") != std::string::npos;
-    auto sheet = parser_.parse(css);
-    if (sheet) {
-        sheet->setHref(href);
-        resolver_.addStyleSheet(std::move(sheet), origin);
+    std::vector<std::string> chain;
+    if (!href.empty()) chain.push_back(href);
+    addSheetWithImports(css, origin, href, {}, chain);
+}
+
+void CSSEngine::addSheetWithImports(const std::string& css, StyleOrigin origin, const std::string& href,
+                                    const std::vector<std::shared_ptr<const MediaQueryList>>& media,
+                                    std::vector<std::string>& chain) {
+    // Deep enough for real sites (WordPress themes import two or three levels)
+    constexpr size_t kMaxImportDepth = 16;
+    std::shared_ptr<CSSStyleSheet> sheet = parser_.parse(css);
+    if (!sheet) return;
+    sheet->setHref(href);
+
+    // The imported sheets come first in the cascade, in order, as if their
+    // rules were written where the @import is
+    if (CSSRuleList* rules = sheet->cssRules(); rules && importFetcher_ && chain.size() < kMaxImportDepth) {
+        for (size_t i = 0; i < rules->length(); i++) {
+            auto* import = dynamic_cast<CSSImportRule*>(rules->item(i));
+            if (!import) continue;
+            if (!import->supportsCondition().empty() && !supportsCondition(import->supportsCondition())) continue;
+            std::string url, text;
+            if (!importFetcher_(import->href(), href.empty() ? baseUrl_ : href, url, text)) continue;
+            if (std::find(chain.begin(), chain.end(), url) != chain.end()) continue;  // a cycle
+            auto lists = media;
+            if (!import->mediaText().empty()) lists.push_back(MediaQueryList::parse(import->mediaText()));
+            chain.push_back(url);
+            addSheetWithImports(text, origin, url, lists, chain);
+            chain.pop_back();
+        }
     }
+
+    // The @import's media queries apply to every rule of the imported sheet
+    if (!media.empty() && sheet->cssRules()) {
+        for (size_t i = 0; i < sheet->cssRules()->length(); i++) {
+            if (auto* rule = dynamic_cast<CSSStyleRule*>(sheet->cssRules()->item(i))) {
+                auto lists = media;
+                lists.insert(lists.end(), rule->media().begin(), rule->media().end());
+                rule->setMedia(lists);
+            }
+        }
+    }
+    resolver_.addStyleSheet(std::move(sheet), origin);
 }
 
 void CSSEngine::addStyleSheetFromUrl(const std::string& url, StyleOrigin origin) {

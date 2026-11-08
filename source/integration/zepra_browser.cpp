@@ -1335,6 +1335,20 @@ void parseWithWebCore(const std::string& html) {
     // Initialize CSS engine
     g_cssEngine = std::make_unique<CSSEngine>();
     g_cssEngine->initialize(g_document.get());
+    // @import rules load their sheets as <link> sheets do
+    g_cssEngine->setBaseUrl(g_currentUrl);
+    g_cssEngine->setImportFetcher([](const std::string& href, const std::string& base,
+                                     std::string& url, std::string& css) {
+        url = resolveUrl(base, href);
+        HttpResponse r = httpGet(url, Zepra::WebCore::ResourceKind::Stylesheet);
+        if (!r.success || r.data.empty()) {
+            std::cerr << "[CSS] Failed to load @import " << url << ": " << r.error << std::endl;
+            return false;
+        }
+        if (!r.finalUrl.empty()) url = r.finalUrl;
+        css = std::move(r.data);
+        return true;
+    });
     
     // Load user-agent stylesheet (browser defaults)
     g_cssEngine->addStyleSheet(
