@@ -12,6 +12,7 @@
 #include "browser/dom.hpp"
 #include "html/html_parser.hpp"
 #include "scripting/dom_bindings.hpp"
+#include "scripting/page_url.hpp"
 #include "scripting/script_context.hpp"
 #include "scripting/web_storage.hpp"
 #include <filesystem>
@@ -690,4 +691,138 @@ TEST(WebStorage, LocalStorageIsKeptOnDisk) {
     }
     setLocalStorageDirectory("");
     fs::remove_all(dir);
+}
+
+// =============================================================================
+// window.location and history
+// =============================================================================
+
+TEST(PageUrl, SplitsAndResolves) {
+    PageUrl u = PageUrl::parse("HTTPS://User:pw@Example.COM:443/a/./b/../c?x=1#top");
+    ASSERT_TRUE(u.valid);
+    EXPECT_EQ(u.href(), "https://User:pw@example.com/a/c?x=1#top");
+    EXPECT_EQ(u.origin(), "https://example.com");
+    EXPECT_EQ(u.host(), "example.com");
+    EXPECT_EQ(u.search(), "?x=1");
+    EXPECT_EQ(u.hash(), "#top");
+    EXPECT_EQ(PageUrl::parse("http://h:8080").href(), "http://h:8080/");
+    EXPECT_EQ(PageUrl::parse("http://h:080/").port, "");
+    EXPECT_EQ(PageUrl::parse("file:///home/me/page.html").href(), "file:///home/me/page.html");
+    EXPECT_EQ(PageUrl::parse("file:///home/me/page.html").origin(), "null");
+    EXPECT_EQ(PageUrl::parse("about:blank").pathname, "blank");
+    EXPECT_FALSE(PageUrl::parse("C:/x").valid);
+    EXPECT_FALSE(PageUrl::parse("http://").valid);
+
+    const std::string base = "https://a.com/dir/page.html?q=1#f";
+    EXPECT_EQ(PageUrl::resolve(base, "other.html").href(), "https://a.com/dir/other.html");
+    EXPECT_EQ(PageUrl::resolve(base, "../up").href(), "https://a.com/up");
+    EXPECT_EQ(PageUrl::resolve(base, "/root?z").href(), "https://a.com/root?z");
+    EXPECT_EQ(PageUrl::resolve(base, "?n=2").href(), "https://a.com/dir/page.html?n=2");
+    EXPECT_EQ(PageUrl::resolve(base, "#g").href(), "https://a.com/dir/page.html?q=1#g");
+    EXPECT_EQ(PageUrl::resolve(base, "").href(), "https://a.com/dir/page.html?q=1");
+    EXPECT_EQ(PageUrl::resolve(base, "//cdn.net/x.js").href(), "https://cdn.net/x.js");
+    EXPECT_EQ(PageUrl::resolve(base, "http://b.org").href(), "http://b.org/");
+    EXPECT_EQ(PageUrl::resolve(base, "  sub\\x  ").href(), "https://a.com/dir/sub/x");
+    EXPECT_EQ(PageUrl::resolve(base, "https:same.html").href(), "https://a.com/dir/same.html");
+    EXPECT_FALSE(PageUrl::resolve(base, "https://").valid);
+    EXPECT_EQ(PageUrl::resolve("about:blank", "#x").href(), "about:blank#x");
+    EXPECT_FALSE(PageUrl::resolve("about:blank", "page.html").valid);
+}
+
+struct LocationPage : Page {
+    std::vector<NavigationRequest> navigations;
+    explicit LocationPage(const std::string& url) : Page(kPage) {
+        script->setPageUrl(url);
+        script->setNavigationHandler([this](const NavigationRequest& r) { navigations.push_back(r); });
+    }
+    std::string last() const {
+        if (navigations.empty()) return "<none>";
+        const char* kinds[] = {"assign", "replace", "reload", "same-document"};
+        return std::string(kinds[static_cast<int>(navigations.back().kind)]) + " " + navigations.back().url;
+    }
+};
+
+TEST(Location, ReadsThePageUrl) {
+    LocationPage page("https://shop.example.com:8443/items/list.html?page=2#reviews");
+    EXPECT_EQ(page.eval("[location.href, location.protocol, location.host, location.hostname, location.port,"
+                        " location.pathname, location.search, location.hash, location.origin].join(' | ')"),
+              "https://shop.example.com:8443/items/list.html?page=2#reviews | https: | shop.example.com:8443 | "
+              "shop.example.com | 8443 | /items/list.html | ?page=2 | #reviews | https://shop.example.com:8443");
+    EXPECT_EQ(page.eval("[String(location), location.toString() === location.href, window.location === location,"
+                        " document.location === location].join()"),
+              "https://shop.example.com:8443/items/list.html?page=2#reviews,true,true,true");
+    // Before the browser gives it one, the page is about:blank
+    Page blank(kPage);
+    EXPECT_EQ(blank.eval("location.href + ' ' + location.origin"), "about:blank null");
+}
+
+TEST(Location, AssigningAsksTheBrowserToNavigate) {
+    LocationPage page("https://a.com/dir/page.html");
+    page.eval("location.href = 'next.html?x=1'");
+    EXPECT_EQ(page.last(), "assign https://a.com/dir/next.html?x=1");
+    // The page keeps its URL until the browser loads the new one
+    EXPECT_EQ(page.eval("location.pathname"), "/dir/page.html");
+    page.eval("location.assign('/root')");
+    EXPECT_EQ(page.last(), "assign https://a.com/root");
+    page.eval("location.replace('https://b.org/elsewhere')");
+    EXPECT_EQ(page.last(), "replace https://b.org/elsewhere");
+    page.eval("location.reload()");
+    EXPECT_EQ(page.last(), "reload https://a.com/dir/page.html");
+    page.eval("window.location = '../up.html'");
+    EXPECT_EQ(page.last(), "assign https://a.com/up.html");
+    page.eval("location = 'bare.html'");
+    EXPECT_EQ(page.last(), "assign https://a.com/dir/bare.html");
+    page.eval("location.search = 'q=zepra'");
+    EXPECT_EQ(page.last(), "assign https://a.com/dir/page.html?q=zepra");
+    page.eval("location.pathname = 'p/../q'");
+    EXPECT_EQ(page.last(), "assign https://a.com/q");
+    page.eval("location.hostname = 'B.example'");
+    EXPECT_EQ(page.last(), "assign https://b.example/dir/page.html");
+    page.eval("location.port = '8080'");
+    EXPECT_EQ(page.last(), "assign https://a.com:8080/dir/page.html");
+    page.eval("location.protocol = 'http'");
+    EXPECT_EQ(page.last(), "assign http://a.com/dir/page.html");
+    EXPECT_EQ(page.eval("(function () { try { location.href = 'http://'; } catch (e) { return e.name; } })()"),
+              "SyntaxError");
+}
+
+TEST(Location, FragmentChangesStayOnThePage) {
+    LocationPage page("https://a.com/doc.html?v=1");
+    page.eval("var seen = []; window.addEventListener('hashchange', function (e) {"
+              "  seen.push(e.type + ' ' + e.oldURL + ' -> ' + e.newURL + ' ' + location.hash); });"
+              "location.hash = 'part2';");
+    EXPECT_EQ(page.last(), "same-document https://a.com/doc.html?v=1#part2");
+    EXPECT_EQ(page.eval("location.hash + ' ' + location.href"), "#part2 https://a.com/doc.html?v=1#part2");
+    // hashchange comes later, as a task
+    EXPECT_EQ(page.eval("seen.length"), "0");
+    page.script->processTimers();
+    EXPECT_EQ(page.eval("seen.join()"),
+              "hashchange https://a.com/doc.html?v=1 -> https://a.com/doc.html?v=1#part2 #part2");
+    // A link-style assignment that only changes the fragment does not load either
+    page.eval("location.href = '#part3'");
+    EXPECT_EQ(page.last(), "same-document https://a.com/doc.html?v=1#part3");
+    // The same fragment again changes nothing
+    size_t count = page.navigations.size();
+    page.eval("location.hash = '#part3'");
+    EXPECT_EQ(page.navigations.size(), count);
+    // Leaving the fragment for another query loads
+    page.eval("location.href = '?v=2#part3'");
+    EXPECT_EQ(page.last(), "assign https://a.com/doc.html?v=2#part3");
+}
+
+TEST(History, PushAndReplaceStateChangeTheUrl) {
+    LocationPage page("https://app.test/");
+    page.eval("history.pushState({ view: 'inbox' }, '', '/mail/inbox')");
+    EXPECT_EQ(page.last(), "same-document https://app.test/mail/inbox");
+    EXPECT_EQ(page.eval("[location.pathname, history.state.view, history.length].join()"), "/mail/inbox,inbox,2");
+    page.eval("history.replaceState(null, '', '?unread=1')");
+    EXPECT_EQ(page.eval("[location.href, history.state, history.length].join()"),
+              "https://app.test/mail/inbox?unread=1,,2");
+    // Only the state, no URL
+    page.eval("history.replaceState({ n: 1 }, '')");
+    EXPECT_EQ(page.eval("history.state.n + ' ' + location.search"), "1 ?unread=1");
+    EXPECT_EQ(page.eval("(function () { try { history.pushState(null, '', 'https://evil.test/'); }"
+                        " catch (e) { return e.name; } })()"),
+              "SecurityError");
+    EXPECT_EQ(page.eval("location.host"), "app.test");
 }

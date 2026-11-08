@@ -2451,6 +2451,17 @@ bool DOMBindings::fireEvent(DOMNode* target, const std::string& type, bool bubbl
     return dispatch(t, e);
 }
 
+bool DOMBindings::fireEvent(DOMNode* target, const std::string& type, bool bubbles, bool cancelable,
+                            const std::vector<std::pair<std::string, Value>>& fields) {
+    EventObject* e = newEvent(eventProto_, type, Value::undefined());
+    e->bubbles = bubbles;
+    e->cancelable = cancelable;
+    e->trusted = true;
+    for (const auto& field : fields) e->set(field.first, field.second);
+    Object* t = target ? wrap(target).asObject() : global_;
+    return dispatch(t, e);
+}
+
 bool DOMBindings::fireMouseEvent(DOMElement* target, const std::string& type, double clientX, double clientY) {
     MouseEventInit init;
     init.detail = 1;

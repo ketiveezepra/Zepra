@@ -391,6 +391,11 @@ static struct PendingSubmission {
     bool isPost = false;
     NavigationPost post;
 } g_pendingSubmission;
+// A location.href/assign/replace/reload waiting for the end of the script task
+static struct PendingScriptNavigation {
+    std::string url;
+    int tabId = -1;
+} g_pendingScriptNavigation;
 static void syncPageFocus();
 void openNewTab(const std::string& url, const NavigationPost* post = nullptr);
 
@@ -1531,6 +1536,23 @@ void parseWithWebCore(const std::string& html) {
             return;
         }
         g_pendingSubmission = {Zepra::WebCore::formSubmissionUrl(action, form.body), form.target == "_blank", pageTabId};
+    });
+
+    // location.href = ..., assign/replace/reload load once the script task is
+    // over; a fragment change or history.pushState only changes the address
+    g_scriptContext->setNavigationHandler([pageTabId](const Zepra::WebCore::NavigationRequest& request) {
+        if (request.kind == Zepra::WebCore::NavigationKind::SameDocument) {
+            if (pageTabId != g_activeTabId) return;
+            g_currentUrl = request.url;
+            g_displayUrl = getDisplayUrl(request.url);
+            g_addressInput = g_displayUrl;
+            for (Tab& tab : g_tabs) {
+                if (tab.id == pageTabId) tab.url = request.url;
+            }
+            return;
+        }
+        // replace() has no history entry to replace yet: it loads like assign()
+        g_pendingScriptNavigation = {request.url, pageTabId};
     });
 
     // Wire alert/confirm/prompt handlers
@@ -4011,10 +4033,11 @@ void render() {
                 std::cerr << "[Browser] Async load error: " << loadedError << std::endl;
             }
         
-            // Update tab state
+            // Update tab state (the page's scripts may have moved the URL
+            // with history.pushState or a fragment change while it loaded)
             for (Tab& tab : g_tabs) {
                 if (tab.id == g_activeTabId) {
-                    tab.url = loadedUrl;
+                    tab.url = g_currentUrl;
                     tab.title = loadedTitle.length() > 25 ? loadedTitle.substr(0, 25) + "..." : loadedTitle;
                 }
             }
@@ -4050,6 +4073,12 @@ void render() {
         const NavigationPost* post = submission.isPost ? &submission.post : nullptr;
         if (submission.newTab) openNewTab(submission.url, post);
         else if (submission.tabId == g_activeTabId) onNavigate(submission.url, post);
+    }
+    // A navigation a script asked for during the last script task
+    if (!g_pendingScriptNavigation.url.empty()) {
+        PendingScriptNavigation navigation = std::move(g_pendingScriptNavigation);
+        g_pendingScriptNavigation = {};
+        if (navigation.tabId == g_activeTabId) onNavigate(navigation.url);
     }
 
     // === LAZY IMAGE LOADER POLL ===

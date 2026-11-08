@@ -558,6 +558,7 @@ void ScriptContext::removeStoredCallback(const std::string& key) {
 
 void ScriptContext::setPageUrl(const std::string& url) {
     storageOrigin_ = storageOriginOf(url);
+    pageUrl_ = url.empty() ? "about:blank" : url;
     setGlobal("__pageUrl__", url);
 }
 
@@ -753,20 +754,12 @@ void ScriptContext::setupWindowGlobals() {
     navObj->set("language", Value::string(new String("en-US")));
     vm_->setGlobal("navigator", Value::object(navObj));
     
-    // location object
-    auto* locObj = new Object();
-    locObj->set("href", Value::string(new String("")));
-    locObj->set("hostname", Value::string(new String("")));
-    locObj->set("pathname", Value::string(new String("/")));
-    locObj->set("protocol", Value::string(new String("https:")));
-    vm_->setGlobal("location", Value::object(locObj));
-    
     // 'window' — self-referencing global scope alias
     // Most JS starts with window.addEventListener, window.document, etc.
     // (an EventTarget: addEventListener comes from its prototype)
     auto* windowObj = domBindings_->window();
     windowObj->set("navigator", Value::object(navObj));
-    windowObj->set("location", Value::object(locObj));
+    setupLocationAndHistory(windowObj);
     windowObj->set("console", Value::object(consoleObj));
     windowObj->set("alert", Value::object(alertFn));
     windowObj->set("confirm", Value::object(confirmFn));
@@ -856,28 +849,7 @@ void ScriptContext::setupWindowGlobals() {
     windowObj->set("localStorage", Value::object(localStorageObj));
     windowObj->set("sessionStorage", Value::object(sessionStorageObj));
     
-    // history object
-    auto* historyObj = new Object();
-    historyObj->set("length", Value::number(1));
-    historyObj->set("state", Value::null());
-    
-    auto* pushStateFn = createNativeFunction("pushState",
-        [](Context*, const std::vector<Value>&) -> Value {
-            return Value::undefined();
-        }, 3);
-    historyObj->set("pushState", Value::object(pushStateFn));
-    historyObj->set("replaceState", Value::object(pushStateFn));
-    
-    auto* histBackFn = createNativeFunction("back",
-        [](Context*, const std::vector<Value>&) -> Value {
-            return Value::undefined();
-        }, 0);
-    historyObj->set("back", Value::object(histBackFn));
-    historyObj->set("forward", Value::object(histBackFn));
-    historyObj->set("go", Value::object(histBackFn));
-    
-    vm_->setGlobal("history", Value::object(historyObj));
-    windowObj->set("history", Value::object(historyObj));
+    // history: with location (setupLocationAndHistory)
     
     
     // MutationObserver is live (scripting/mutation_observer.cpp, set up by DOMBindings)

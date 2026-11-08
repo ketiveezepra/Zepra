@@ -204,13 +204,15 @@ static inline std::string expandHomePath(const std::string& path) {
 /**
  * @brief Convert a file:// URL to a local filesystem path
  *
- * Decodes %XX escapes and expands a leading ~. On Windows the drive form
+ * Drops the query and fragment, decodes %XX escapes and expands a leading ~. On Windows the drive form
  * file:///C:/dir/page.html becomes C:/dir/page.html (the slash before the
  * drive letter is part of the URL, not the path).
  */
 static inline std::string fileUrlToPath(const std::string& url) {
     std::string rest = url.compare(0, 7, "file://") == 0 ? url.substr(7) : url;
     if (rest.compare(0, 10, "localhost/") == 0) rest = rest.substr(9);
+    // The query and fragment are not part of the file's name (%3F and %23 are)
+    rest = rest.substr(0, rest.find_first_of("?#"));
 
     auto hexValue = [](char c) -> int {
         if (c >= '0' && c <= '9') return c - '0';
