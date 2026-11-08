@@ -49,6 +49,7 @@
 #include <nxgfx/context.h>
 #include <nxgfx/primitives.h>
 #include <nxgfx/text.h>
+#include <platform/display_info.h>
 #include "nxrender_cpp.h"
 #include "nxfont.h"
 #include "reox_nxrender_bridge.h"
@@ -107,6 +108,7 @@ extern "C" {
 #include "browser/mouse_handler.h"
 #include "browser/lazy_image_loader.h"
 #include "browser/svg_raster.h"
+#include "browser/gradient_raster.h"
 #include "browser/clipboard.h"
 #include "browser/css_utils.h"
 #include "devtools/devtools_panel.hpp"
@@ -1154,19 +1156,19 @@ static void loadPageWebFonts() {
               << result.skipped << " not needed by the text" << std::endl;
 }
 
-// background-image on a box: a gradient is painted from the CSS text (over
-// the background colour, which hasBgColor turns on); url() is loaded like an <img>
+// background-image on a box: gradients are drawn from the CSS text over the
+// background colour (gradient_raster.cpp); url() is loaded like an <img>
 static void setBackgroundImage(LayoutBox* box, const CSSComputedStyle& style) {
     box->backgroundImage = style.backgroundImage;
-    if (style.backgroundImage.find("gradient(") != std::string::npos && style.backgroundImage.find("url(") == std::string::npos) {
-        box->hasBgColor = true;
+    box->bgRepeat = style.backgroundRepeat;
+    box->bgSize = style.backgroundSize;
+    box->bgPosition = style.backgroundPosition;
+    if (ZepraBrowser::isGradientBackground(style.backgroundImage)) {
+        box->hasBgGradient = true;
         return;
     }
     std::string url = ZepraBrowser::cssUrl(style.backgroundImage);
     if (url.empty()) return;
-    box->bgRepeat = style.backgroundRepeat;
-    box->bgSize = style.backgroundSize;
-    box->bgPosition = style.backgroundPosition;
     ZepraBrowser::g_lazyImageLoader.queueBackground(box, resolveUrl(g_currentUrl, url), g_activeTabId);
 }
 
@@ -1213,6 +1215,7 @@ static void rebuildLayoutTree() {
             // Background
             if (!bodyStyle->backgroundColor.isTransparent()) {
                 g_layoutRoot->bgColor = cssColorToRGB(bodyStyle->backgroundColor);
+                g_layoutRoot->bgAlpha = bodyStyle->backgroundColor.a;
                 g_layoutRoot->hasBgColor = true;
             }
             if (!bodyStyle->backgroundImage.empty() && bodyStyle->backgroundImage != "none") {
@@ -2603,6 +2606,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     
                     if (!childStyle->backgroundColor.isTransparent()) {
                         blockBox->bgColor = cssColorToRGB(childStyle->backgroundColor);
+                        blockBox->bgAlpha = childStyle->backgroundColor.a;
                         blockBox->hasBgColor = true;
                     }
                     if (!childStyle->backgroundImage.empty() && childStyle->backgroundImage != "none") {
@@ -2795,6 +2799,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     
                     if (!childStyle->backgroundColor.isTransparent()) {
                         inlineBox->bgColor = cssColorToRGB(childStyle->backgroundColor);
+                        inlineBox->bgAlpha = childStyle->backgroundColor.a;
                         inlineBox->hasBgColor = true;
                     }
                     
@@ -2984,6 +2989,35 @@ void svgImage(const std::string& key, const std::string& svgText, float x, float
     }
     it->second.lastUse = ++g_svgUseClock;
     if (it->second.id) g_nxGpu.drawTexture(it->second.id, NXRender::Rect((float)px, (float)py, (float)pw, (float)ph));
+}
+
+// A gradient background, drawn on the CPU once per size and kept as a
+// texture (sharing the SVG textures' memory budget)
+void gradientBackground(float x, float y, const ZepraBrowser::GradientBackground& bg) {
+    int pw = 0, ph = 0;
+    ZepraBrowser::gradientPixelSize(bg.width, bg.height, pw, ph);
+    std::string cacheKey = "grad|" + ZepraBrowser::gradientBackgroundKey(bg, pw, ph);
+    auto it = g_svgTextures.find(cacheKey);
+    if (it == g_svgTextures.end()) {
+        SvgTexture tex;
+        std::vector<uint8_t> rgba;
+        if (ZepraBrowser::rasterizeGradientBackground(bg, pw, ph, rgba)) {
+            tex.id = g_nxGpu.createTexture(pw, ph, rgba.data());
+            tex.bytes = rgba.size();
+        }
+        g_svgTextureBytes += tex.bytes;
+        while (g_svgTextureBytes > kSvgCacheBytes && !g_svgTextures.empty()) {
+            auto oldest = g_svgTextures.begin();
+            for (auto e = g_svgTextures.begin(); e != g_svgTextures.end(); ++e)
+                if (e->second.lastUse < oldest->second.lastUse) oldest = e;
+            if (oldest->second.id) g_nxGpu.destroyTexture(oldest->second.id);
+            g_svgTextureBytes -= oldest->second.bytes;
+            g_svgTextures.erase(oldest);
+        }
+        it = g_svgTextures.emplace(cacheKey, tex).first;
+    }
+    it->second.lastUse = ++g_svgUseClock;
+    if (it->second.id) g_nxGpu.drawTexture(it->second.id, NXRender::Rect(x, y, bg.width, bg.height));
 }
 
 } // namespace gfx
@@ -3191,6 +3225,7 @@ static void initLayoutEngine() {
         for (int i = 0; i < count; i++) points.push_back(NXRender::Point(xy[2 * i], xy[2 * i + 1]));
         g_nxGpu.fillPath(points, NXRender::Color(color).withAlpha(alpha));
     });
+    ZepraBrowser::setGradientPaintCallback(gfx::gradientBackground);
     
     std::cout << "[Layout] Layout engine initialized (rounded rect + gradient support)" << std::endl;
     
@@ -3292,6 +3327,9 @@ public:
     }
     double viewportWidth() override { return g_width - getSidebarOffset(); }
     double viewportHeight() override { return pageViewportHeight(); }
+    // The monitor's resolution, asked of the OS once (the window when unknown)
+    double screenWidth() override { return screenSize().first; }
+    double screenHeight() override { return screenSize().second; }
     double scrollX() override { return 0; }
     double scrollY() override {
         Tab* tab = activeTab();
@@ -3312,6 +3350,17 @@ public:
 
 private:
     ZepraBrowser::LayoutGeometryIndex index_;
+
+    static std::pair<double, double> screenSize() {
+        static std::pair<double, double> size = [] {
+            NXRender::DisplayInfo& info = NXRender::DisplayInfo::instance();
+            if (info.screenWidth() <= 0) info.queryFromOS();
+            if (info.screenWidth() > 0 && info.screenHeight() > 0)
+                return std::make_pair((double)info.screenWidth(), (double)info.screenHeight());
+            return std::make_pair((double)g_width, (double)g_height);
+        }();
+        return size;
+    }
     const LayoutBox* indexedRoot_ = nullptr;
     uint64_t indexedPass_ = 0;
 

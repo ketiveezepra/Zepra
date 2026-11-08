@@ -14,6 +14,7 @@
 
 #include "../css/css_computed_style.hpp"
 #include "../dom/form_controls.hpp"
+#include "gradient_raster.h"
 
 // Viewport dimensions (defined in zepra_browser.cpp)
 extern int g_width;
@@ -40,6 +41,7 @@ static void (*s_gfx_gradient)(float, float, float, float, uint32_t, uint32_t) = 
 static void (*s_gfx_svg)(float, float, float, float, const std::string&, const std::string&, uint32_t) = nullptr;
 static void (*s_gfx_canvas)(float, float, float, float, Zepra::WebCore::DOMElement*) = nullptr;
 static void (*s_gfx_hgradient)(float, float, float, float, uint32_t, uint32_t) = nullptr;
+static void (*s_gfx_gradient_bg)(float, float, const GradientBackground&) = nullptr;
 static void (*s_push_clip)(float, float, float, float) = nullptr;
 static void (*s_pop_clip)() = nullptr;
 
@@ -446,6 +448,10 @@ void setLayoutCallbacks2(
     s_gfx_gradient = gfx_gradient;
     s_gfx_svg = gfx_svg;
     s_gfx_hgradient = gfx_hgradient;
+}
+
+void setGradientPaintCallback(void (*gfx_gradient_bg)(float, float, const GradientBackground&)) {
+    s_gfx_gradient_bg = gfx_gradient_bg;
 }
 
 void setCanvasPaintCallback(void (*gfx_canvas)(float, float, float, float, Zepra::WebCore::DOMElement*)) {
@@ -1306,25 +1312,62 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     // Post-layout: apply CSS positioning offsets
     for (auto& child : box.children) {
         if (child.positionType == 2) {
-            // Absolute: position relative to this containing block
-            // First, layout the child to resolve its own dimensions
-            layoutBlock(child, contentWidth, 0);
-            
+            // Absolute: positioned in this box's padding box (CSS 2.1 §10.1)
             float contW = box.width;
             float contH = box.height;
-            
-            // Resolve horizontal
-            if (child.cssLeft.isSet() && !child.cssLeft.isAuto()) {
-                child.x = box.paddingLeft + box.borderLeft + child.cssLeft.resolve(contW, child.fontSize, vpW, vpH);
-            } else if (child.cssRight.isSet() && !child.cssRight.isAuto()) {
-                child.x = contW - box.paddingRight - box.borderRight - child.width - child.cssRight.resolve(contW, child.fontSize, vpW, vpH);
+            float padW = std::max(0.0f, contW - box.borderLeft - box.borderRight);
+            float padH = std::max(0.0f, contH - box.borderTop - box.borderBottom);
+            auto offset = [&](const LayoutLength& l, float against, float& out) {
+                if (!l.isSet() || l.isAuto()) return false;
+                out = l.resolve(against, child.fontSize, vpW, vpH);
+                return true;
+            };
+            float left = 0, right = 0, top = 0, bottom = 0;
+            bool hasLeft = offset(child.cssLeft, padW, left), hasRight = offset(child.cssRight, padW, right);
+            bool hasTop = offset(child.cssTop, padH, top), hasBottom = offset(child.cssBottom, padH, bottom);
+
+            // An auto size between two insets fills the space between them
+            // (§10.3.7 and §10.6.4: "inset: 0" covers the containing block)
+            LayoutLength savedWidth = child.cssWidth, savedHeight = child.cssHeight;
+            int savedSizing = child.boxSizing;
+            bool autoWidth = !child.cssWidth.isSet() || child.cssWidth.isAuto();
+            bool autoHeight = !child.cssHeight.isSet() || child.cssHeight.isAuto();
+            if (autoWidth && hasLeft && hasRight) {
+                float w = padW - left - right - child.marginLeft - child.marginRight;
+                child.cssWidth = LayoutLength::px(std::max(0.0f, w));
+                child.boxSizing = 1;
             }
-            
+            if (autoHeight && hasTop && hasBottom) {
+                float h = padH - top - bottom - child.marginTop - child.marginBottom;
+                child.cssHeight = LayoutLength::px(std::max(0.0f, h));
+                if (child.boxSizing != 1) {
+                    // Keep a set width in its own box-sizing
+                    if (!autoWidth && savedSizing == 0) {
+                        child.cssWidth = LayoutLength::px(child.cssWidth.resolve(padW, child.fontSize, vpW, vpH) +
+                                                          child.paddingLeft + child.paddingRight +
+                                                          child.borderLeft + child.borderRight);
+                    }
+                    child.boxSizing = 1;
+                }
+            }
+            // Lay the child out to resolve its own dimensions
+            layoutBlock(child, autoWidth && hasLeft && hasRight ? padW : contentWidth, 0);
+            child.cssWidth = savedWidth;
+            child.cssHeight = savedHeight;
+            child.boxSizing = savedSizing;
+
+            // Resolve horizontal
+            if (hasLeft) {
+                child.x = box.borderLeft + left + child.marginLeft;
+            } else if (hasRight) {
+                child.x = contW - box.borderRight - right - child.marginRight - child.width;
+            }
+
             // Resolve vertical
-            if (child.cssTop.isSet() && !child.cssTop.isAuto()) {
-                child.y = box.paddingTop + box.borderTop + child.cssTop.resolve(contH, child.fontSize, vpW, vpH);
-            } else if (child.cssBottom.isSet() && !child.cssBottom.isAuto()) {
-                child.y = contH - box.paddingBottom - box.borderBottom - child.height - child.cssBottom.resolve(contH, child.fontSize, vpW, vpH);
+            if (hasTop) {
+                child.y = box.borderTop + top + child.marginTop;
+            } else if (hasBottom) {
+                child.y = contH - box.borderBottom - bottom - child.marginBottom - child.height;
             }
         }
         else if (child.positionType == 1) {
@@ -1870,7 +1913,8 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
         return;
     }
     
-    uint8_t alpha = (uint8_t)(box.opacity * 255.0f);
+    // The background colour's own alpha (rgba(), #rrggbbaa) times opacity
+    uint8_t alpha = (uint8_t)std::lround(box.bgAlpha * std::clamp(box.opacity, 0.0f, 1.0f));
     
     // Row and row-group backgrounds show through their cells only, not the
     // border-spacing between them (CSS 2.1 §17.5.1)
@@ -1887,14 +1931,34 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
             for (const auto& row : box.children)
                 paintCells(row, screenX + row.x, screenY + row.y);
         }
-    } else if (box.hasBgColor) {
-        if (box.backgroundImage.find("gradient(") != std::string::npos && box.backgroundImage.find("url(") == std::string::npos &&
-            s_gfx_gradient && s_gfx_rect) {
-            paintGradient(box.backgroundImage, screenX, screenY, box.width, box.height, box.bgColor);
+    } else if (box.hasBgColor && !s_gfx_gradient_bg && isGradientBackground(box.backgroundImage) &&
+               s_gfx_gradient && s_gfx_rect) {
+        // Without a gradient painter: linear gradients as bands of the GPU's
+        // two-colour fills (the top layer only)
+        paintGradient(box.backgroundImage, screenX, screenY, box.width, box.height, box.bgColor);
+    } else {
+        if (!box.hasBgColor) {
+            // no colour of its own
         } else if (box.borderRadius > 0 && s_gfx_rrect) {
             s_gfx_rrect(screenX, screenY, box.width, box.height, box.borderRadius, box.bgColor, alpha);
         } else if (s_gfx_rect) {
             s_gfx_rect(screenX, screenY, box.width, box.height, box.bgColor);
+        }
+        // Gradient layers over the colour (CSS Backgrounds 3 §2.11.1)
+        if ((box.hasBgGradient || box.hasBgColor) && s_gfx_gradient_bg && isGradientBackground(box.backgroundImage)) {
+            GradientBackground bg;
+            bg.image = box.backgroundImage;
+            bg.size = box.bgSize;
+            bg.position = box.bgPosition;
+            bg.repeat = box.bgRepeat;
+            bg.width = box.width;
+            bg.height = box.height;
+            bg.borderTop = box.borderTop;
+            bg.borderRight = box.borderRight;
+            bg.borderBottom = box.borderBottom;
+            bg.borderLeft = box.borderLeft;
+            bg.radius = box.borderRadius;
+            s_gfx_gradient_bg(screenX, screenY, bg);
         }
     }
     if (box.bgTextureId > 0 || !box.bgSvgData.empty()) paintBackgroundImage(box, screenX, screenY);

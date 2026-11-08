@@ -48,6 +48,10 @@ public:
     /// The page's content area, without the browser's own bars
     virtual double viewportWidth() = 0;
     virtual double viewportHeight() = 0;
+    /// The monitor the browser is on (window.screen), in CSS pixels; a
+    /// browser that cannot tell reports the viewport
+    virtual double screenWidth() { return viewportWidth(); }
+    virtual double screenHeight() { return viewportHeight(); }
     /// How far the page is scrolled
     virtual double scrollX() = 0;
     virtual double scrollY() = 0;

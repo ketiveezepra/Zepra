@@ -12,6 +12,9 @@
   @font-face { font-family: "Bold Only"; font-weight: 700; src: local("DejaVu Sans Mono"); }
   /* A Greek-only subset: this page has no Greek text, so it is never downloaded */
   @font-face { font-family: "Greek Subset"; src: url(https://fonts.test.invalid/greek.woff); unicode-range: U+0370-03FF; }
+  /* WOFF2 straight from Google's font CDN, unpacked by Zepra's own decoder */
+  @font-face { font-family: "Lobster WOFF2"; src: url(https://fonts.gstatic.com/s/lobster/v32/neILzCirqoswsqX9zoKmMw.woff2) format("woff2"); }
+  @font-face { font-family: "Roboto WOFF2"; font-weight: 100 900; src: url(https://fonts.gstatic.com/s/roboto/v51/KFO7CnqEu92Fr1ME7kSn66aGLdTylUAMa3yUBA.woff2) format("woff2"); }
   /* No usable source: the next family in the list is used */
   @font-face { font-family: "Broken"; src: url(https://fonts.test.invalid/broken.woff2) format("woff2"); }
 
@@ -25,6 +28,8 @@
   .boldonly { font-family: "Bold Only", sans-serif; }
   .greek { font-family: "Greek Subset", serif; }
   .broken { font-family: "Broken", monospace; }
+  .lobster2 { font-family: "Lobster WOFF2", monospace; font-size: 32px; }
+  .roboto2 { font-family: "Roboto WOFF2", monospace; }
 </style>
 </head>
 <body>
@@ -36,6 +41,8 @@
 <p class="boldonly">"Bold Only", regular weight: still its one (bold mono) face</p>
 <p class="boldonly"><b>"Bold Only", bold: the same face</b></p>
 <p class="greek">"Greek Subset" (not needed, not downloaded): serif</p>
-<p class="broken">"Broken" (woff2 only, not supported yet): monospace fallback</p>
+<p class="lobster2">Lobster from a .woff2 file: The quick brown fox</p>
+<p class="roboto2">Roboto (variable) from a .woff2 file: The quick brown fox</p>
+<p class="broken">"Broken" (its only .woff2 can't be downloaded): monospace fallback</p>
 </body>
 </html>

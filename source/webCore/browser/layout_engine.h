@@ -135,6 +135,7 @@ struct LayoutBox {
     // Style properties for rendering
     uint32_t color = 0x000000;
     uint32_t bgColor = 0x00000000;
+    uint8_t bgAlpha = 255;       // background-color alpha (rgba(), #rrggbbaa, transparent stops)
     uint32_t borderColor = 0x000000;
     bool borderVisible = true;   // false for a transparent border colour (it still takes space)
     int borderStyle = 2;         // Zepra::WebCore::BorderStyle of the painted sides: 2 solid, 3 dashed, 4 dotted, 5 double
@@ -153,6 +154,7 @@ struct LayoutBox {
     
     // Background image / gradient (CSS string)
     std::string backgroundImage;
+    bool hasBgGradient = false;  // backgroundImage is all gradients: drawn by setGradientPaintCallback
     // background-image: url(...), loaded by LazyImageLoader like an <img>
     // (texture, or SVG text painted at tile size), and how it is laid out
     uint32_t bgTextureId = 0;
@@ -390,6 +392,11 @@ size_t textFieldOffsetAt(const LayoutBox& box, float x, float y);
 
 /// The URL inside the first url(...) of a CSS value ("" when there is none)
 std::string cssUrl(const std::string& value);
+
+struct GradientBackground;
+/// Set the callback that paints a gradient background (gradient_raster.h)
+/// over a box's border box at (x, y)
+void setGradientPaintCallback(void (*gfx_gradient_bg)(float x, float y, const GradientBackground& bg));
 
 /// Set the callback that paints a <canvas> bitmap into its content box
 void setCanvasPaintCallback(
