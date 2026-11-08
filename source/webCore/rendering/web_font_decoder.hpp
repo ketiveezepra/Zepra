@@ -3,9 +3,9 @@
  * @brief Turns downloaded @font-face data into a plain sfnt (TrueType/OpenType)
  *        that FreeType can load.
  *
- * TTF, OTF and TTC pass through. WOFF 1.0 is unpacked here with Zepra's own
- * inflate. WOFF2 is recognised but not decoded yet: it needs a Brotli decoder
- * and the glyf/loca transform, which come in a later change.
+ * TTF, OTF and TTC pass through. WOFF 1.0 is unpacked with Zepra's own
+ * inflate, WOFF2 with Zepra's own Brotli decoder, rebuilding the glyf, loca
+ * and hmtx tables its transforms store in a smaller form.
  */
 
 #pragma once
@@ -38,6 +38,9 @@ struct WebFontDecodeResult {
 constexpr size_t kMaxDecodedFontSize = 64u * 1024u * 1024u;
 
 WebFontDecodeResult decodeWebFont(const uint8_t* data, size_t size);
+
+/// WOFF2 only (woff2_decoder.cpp); decodeWebFont calls it for wOF2 data
+WebFontDecodeResult decodeWoff2(const uint8_t* data, size_t size);
 inline WebFontDecodeResult decodeWebFont(const std::vector<uint8_t>& data) {
     return decodeWebFont(data.data(), data.size());
 }
