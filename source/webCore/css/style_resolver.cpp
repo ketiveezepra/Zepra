@@ -441,6 +441,35 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     else if (property == "right") { style.right = parseLength(value); }
     else if (property == "bottom") { style.bottom = parseLength(value); }
     else if (property == "left") { style.left = parseLength(value); }
+    else if (property == "inset") {
+        // top, right, bottom, left: one to four values, like margin
+        // (CSS Positioned Layout 3 §3.1.1)
+        auto parts = splitValues(value);
+        if (!parts.empty() && parts.size() <= 4) {
+            const std::string& t = parts[0];
+            const std::string& r = parts.size() > 1 ? parts[1] : t;
+            const std::string& b = parts.size() > 2 ? parts[2] : t;
+            const std::string& l = parts.size() > 3 ? parts[3] : r;
+            style.top = parseLength(t);
+            style.right = parseLength(r);
+            style.bottom = parseLength(b);
+            style.left = parseLength(l);
+        }
+    }
+    else if (property == "inset-block" || property == "inset-inline") {
+        // Horizontal, left-to-right writing: block is top/bottom, inline is left/right
+        auto parts = splitValues(value);
+        if (!parts.empty() && parts.size() <= 2) {
+            CSSLength start = parseLength(parts[0]);
+            CSSLength end = parseLength(parts.size() > 1 ? parts[1] : parts[0]);
+            if (property == "inset-block") { style.top = start; style.bottom = end; }
+            else { style.left = start; style.right = end; }
+        }
+    }
+    else if (property == "inset-block-start") { style.top = parseLength(value); }
+    else if (property == "inset-block-end") { style.bottom = parseLength(value); }
+    else if (property == "inset-inline-start") { style.left = parseLength(value); }
+    else if (property == "inset-inline-end") { style.right = parseLength(value); }
     else if (property == "z-index") {
         if (value == "auto") { style.zIndexAuto = true; }
         else { try { style.zIndex = std::stoi(value); style.zIndexAuto = false; } catch (...) {} }
