@@ -234,6 +234,14 @@ if(TARGET webcore)
     endif()
     add_test(NAME WebCoreWebFontDecoderTests COMMAND webcore_web_font_decoder_tests)
 
+    # Web fonts end to end: @font-face sources downloaded, decoded, registered and matched
+    add_executable(webcore_web_font_loader_tests webcore_web_font_loader_tests.cpp)
+    target_link_libraries(webcore_web_font_loader_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(webcore_web_font_loader_tests pthread)
+    endif()
+    add_test(NAME WebCoreWebFontLoaderTests COMMAND webcore_web_font_loader_tests)
+
     # :hover / :active / :focus forced by DevTools, alongside the real interaction state
     add_executable(webcore_forced_pseudo_tests webcore_forced_pseudo_tests.cpp)
     target_link_libraries(webcore_forced_pseudo_tests webcore GTest::gtest GTest::gtest_main)

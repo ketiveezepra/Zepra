@@ -92,6 +92,10 @@ jobs:
       - name: Web font decoder tests
         run: ctest --test-dir build/test -R WebCoreWebFontDecoderTests --output-on-failure
 
+      # Web fonts end to end: download, decode, register, match
+      - name: Web font loader tests
+        run: ctest --test-dir build/test -R WebCoreWebFontLoaderTests --output-on-failure
+
       # NXNet: URL parsing, HTTP framing, keep-alive and timings against a local
       # server, the DNS cache, request validation, crypto
       - name: Networking tests
@@ -140,7 +144,7 @@ jobs:
           cmake --build build --parallel $(nproc) -- -k 0
           nxhttp_tests nxhttp_security_test nxcrypto_tests parser_robustness_tests webcore_font_face_rule_tests
           webcore_dom_bindings_tests webcore_layout_tests webcore_user_input_tests
-          webcore_forced_pseudo_tests webcore_console_format_tests computed_style_tests webcore_web_font_decoder_tests
+          webcore_forced_pseudo_tests webcore_console_format_tests computed_style_tests webcore_web_font_decoder_tests webcore_web_font_loader_tests
           webcore_media_query_tests webcore_custom_property_tests layout_geometry_tests svg_raster_tests zepra_engine_tests
           devtools_style_rules_tests devtools_network_tests devtools_console_input_tests
           devtools_text_field_tests devtools_dom_edit_tests webcore_css_import_tests webcore_font_matching_tests
@@ -157,7 +161,7 @@ jobs:
           cd build/bin
           for t in nxhttp_tests nxhttp_security_test nxcrypto_tests parser_robustness_tests webcore_font_face_rule_tests \
                    webcore_dom_bindings_tests webcore_layout_tests webcore_user_input_tests \
-                   webcore_forced_pseudo_tests webcore_console_format_tests computed_style_tests webcore_web_font_decoder_tests \
+                   webcore_forced_pseudo_tests webcore_console_format_tests computed_style_tests webcore_web_font_decoder_tests webcore_web_font_loader_tests \
                    webcore_media_query_tests webcore_custom_property_tests layout_geometry_tests svg_raster_tests zepra_engine_tests \
                    devtools_style_rules_tests devtools_network_tests devtools_console_input_tests \
                    devtools_text_field_tests devtools_dom_edit_tests webcore_css_import_tests webcore_font_matching_tests zeprascript-integration-tests; do
@@ -247,6 +251,10 @@ jobs:
       - name: Web font decoder tests
         run: ctest --test-dir build/test -R WebCoreWebFontDecoderTests --output-on-failure
 
+      # Web fonts end to end: download, decode, register, match
+      - name: Web font loader tests
+        run: ctest --test-dir build/test -R WebCoreWebFontLoaderTests --output-on-failure
+
   # ============================================================================
   # macOS — Apple Silicon, AppleClang, Cocoa/NSOpenGL backend
   # ============================================================================
@@ -310,3 +318,7 @@ jobs:
       # Web fonts: own inflate (DEFLATE/zlib/gzip) and WOFF unpacking
       - name: Web font decoder tests
         run: ctest --test-dir build/test -R WebCoreWebFontDecoderTests --output-on-failure
+
+      # Web fonts end to end: download, decode, register, match
+      - name: Web font loader tests
+        run: ctest --test-dir build/test -R WebCoreWebFontLoaderTests --output-on-failure

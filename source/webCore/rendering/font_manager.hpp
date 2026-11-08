@@ -29,6 +29,7 @@
 #include <functional>
 #include <optional>
 #include <mutex>
+#include <atomic>
 
 namespace Zepra::Fonts {
 
@@ -82,6 +83,16 @@ struct RegisteredFont {
     bool          italic    = false;
     bool          isSystem  = true;
     std::vector<uint8_t> data;    ///< Non-empty for memory-loaded fonts
+    int           weightMin = 0;  ///< @font-face weight range (web fonts only)
+    int           weightMax = 0;
+};
+
+/// What an @font-face rule says about its face, for registerWebFont()
+struct WebFontFaceInfo {
+    std::string family;   ///< the name in the rule, matched case-insensitively
+    int weightMin = 400;
+    int weightMax = 400;
+    bool italic = false;  ///< italic or oblique
 };
 
 // ============================================================================
@@ -182,6 +193,26 @@ public:
     bool registerFontMemory(std::vector<uint8_t> data, const std::string& family = "");
 
     /**
+     * @brief Register a page's @font-face font (an sfnt: decode WOFF first).
+     *        Its family, weight range and style come from the rule, not from
+     *        the font file. For their family, web fonts win over installed
+     *        fonts, and a later one wins over an earlier one that fits as well.
+     *        Pass a file path in `path` (for local()) or the bytes in `data`.
+     * @return false when FreeType can't load the font
+     */
+    bool registerWebFont(const WebFontFaceInfo& info, std::vector<uint8_t> data, const std::string& path = "");
+
+    /// Forget every web font (on navigation). Bumps webFontGeneration().
+    void clearWebFonts();
+
+    /// Changes whenever the set of web fonts does; renderers that cache
+    /// fonts by family drop their caches when it moves
+    uint64_t webFontGeneration() const { return webFontGeneration_.load(); }
+
+    /// An installed font whose family is `name`, for @font-face local()
+    const RegisteredFont* findInstalled(const std::string& name, int weight, bool italic);
+
+    /**
      * @brief Resolve a font for a given CSS query
      *
      * Resolves the best matching font face, creating and caching it as needed.
@@ -278,6 +309,10 @@ private:
 
     // All registered fonts
     std::deque<RegisteredFont> registry_;  // a deque: match() hands out stable pointers
+
+    // @font-face fonts of the current page, in registration order
+    std::deque<RegisteredFont> webFonts_;
+    std::atomic<uint64_t> webFontGeneration_{0};
 
     // Generic family map (e.g., "sans-serif" -> "DejaVu Sans")
     std::unordered_map<std::string, std::string> genericFamilies_;
