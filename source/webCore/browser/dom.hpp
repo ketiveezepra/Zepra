@@ -268,8 +268,23 @@ public:
     void setDirtyValue(const std::string& v) { dirtyValue_ = v; valueDirty_ = true; }
     bool checkedDirty() const { return checkedDirty_; }
     void setDirtyChecked(bool v) { checked_ = v; checkedDirty_ = true; }
+    /// The text selection of a text control, as byte offsets into its value
+    /// (the caret is a selection with start == end). Until one is set the
+    /// caret sits at the end of the value; dom/form_controls.hpp clamps it.
+    bool selectionSet() const { return selectionSet_; }
+    size_t selectionStart() const { return selectionStart_; }
+    size_t selectionEnd() const { return selectionEnd_; }
+    bool selectionBackward() const { return selectionBackward_; }
+    void setSelection(size_t start, size_t end, bool backward) {
+        selectionStart_ = start; selectionEnd_ = end; selectionBackward_ = backward; selectionSet_ = true;
+    }
+    void clearSelection() { selectionSet_ = selectionBackward_ = false; selectionStart_ = selectionEnd_ = 0; }
     /// Back to the attributes (form reset)
-    void resetControlState() { dirtyValue_.clear(); valueDirty_ = checkedDirty_ = checked_ = false; }
+    void resetControlState() {
+        dirtyValue_.clear();
+        valueDirty_ = checkedDirty_ = checked_ = false;
+        clearSelection();
+    }
 
 private:
     std::string tagName_;
@@ -278,6 +293,10 @@ private:
     std::string dirtyValue_;
     bool valueDirty_ = false;
     bool checkedDirty_ = false;
+    size_t selectionStart_ = 0;
+    size_t selectionEnd_ = 0;
+    bool selectionBackward_ = false;
+    bool selectionSet_ = false;
 
     // Pseudo-class state
     bool hovered_  = false;

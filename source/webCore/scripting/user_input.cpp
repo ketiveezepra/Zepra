@@ -65,19 +65,22 @@ bool isButtonLike(const DOMElement* e) {
                                                                     inputType(e) == "button"));
 }
 
-/// Types `text` into the focused text control: beforeinput, the new value,
-/// input. False when nothing was typed (no editable control, canceled, full).
+/// Types `text` into the focused text control in place of its selection:
+/// beforeinput, the new value, input. False when nothing was typed (no
+/// editable control, canceled, full).
 bool typeInto(DOMBindings& bindings, const std::string& text, const std::string& inputType) {
     DOMElement* focused = bindings.focusedElement();
     if (!editable(focused)) return false;
     std::string data = typeable(text, lower(focused->tagName()) == "textarea");
     if (data.empty()) return false;
-    // maxlength counts characters
+    // maxlength counts characters; the selection makes room as it goes
     std::string value = formControlValue(focused);
+    TextSelection selection = formControlSelection(focused);
     if (focused->hasAttribute("maxlength")) {
         long max = std::strtol(focused->getAttribute("maxlength").c_str(), nullptr, 10);
         if (max >= 0) {
-            size_t used = characterCount(value);
+            size_t used = characterCount(value) -
+                          characterCount(value.substr(selection.start, selection.end - selection.start));
             size_t room = static_cast<size_t>(max) > used ? static_cast<size_t>(max) - used : 0;
             std::string fitted;
             for (size_t i = 0, n = 0; i < data.size(); i++) {
@@ -91,11 +94,97 @@ bool typeInto(DOMBindings& bindings, const std::string& text, const std::string&
     }
     std::string eventData = inputType == "insertLineBreak" ? "" : data;
     if (!bindings.fireInputEvent(focused, "beforeinput", inputType, eventData)) return false;
-    // A beforeinput listener may have moved focus
+    // A beforeinput listener may have moved focus, or the selection
     if (bindings.focusedElement() != focused) return false;
-    setFormControlValue(focused, formControlValue(focused) + data);
+    selection = formControlSelection(focused);
+    replaceFormControlText(focused, selection.start, selection.end, data);
     bindings.fireInputEvent(focused, "input", inputType, eventData);
     return true;
+}
+
+bool wordCharacter(char c) {
+    unsigned char u = static_cast<unsigned char>(c);
+    return u >= 0x80 || std::isalnum(u) || c == '_';
+}
+
+/// Where Ctrl+Left lands: the start of the word before `offset`
+size_t previousWordStart(const std::string& text, size_t offset) {
+    while (offset > 0 && !wordCharacter(text[offset - 1])) offset--;
+    while (offset > 0 && wordCharacter(text[offset - 1])) offset--;
+    return characterBoundary(text, offset);
+}
+
+/// Where Ctrl+Right lands: the end of the word after `offset`
+size_t nextWordEnd(const std::string& text, size_t offset) {
+    while (offset < text.size() && !wordCharacter(text[offset])) offset++;
+    while (offset < text.size() && wordCharacter(text[offset])) offset++;
+    return offset;
+}
+
+size_t lineStart(const std::string& text, size_t offset) {
+    size_t newline = offset == 0 ? std::string::npos : text.rfind('\n', offset - 1);
+    return newline == std::string::npos ? 0 : newline + 1;
+}
+
+size_t lineEnd(const std::string& text, size_t offset) {
+    size_t newline = text.find('\n', offset);
+    return newline == std::string::npos ? text.size() : newline;
+}
+
+/// The offset `characters` characters into the line starting at `start`,
+/// or the line's end when it is shorter
+size_t intoLine(const std::string& text, size_t start, size_t characters) {
+    size_t end = lineEnd(text, start), offset = start;
+    while (characters-- > 0 && offset < end) offset = nextCharacter(text, offset);
+    return offset;
+}
+
+/// Where a caret-moving key takes the caret in a text control's value, or
+/// npos for a key that does not move it
+size_t movedCaret(const std::string& value, const TextSelection& selection, const KeyEventInit& key,
+                  bool multiline) {
+    size_t caret = selection.caret();
+    bool collapse = !key.shiftKey && !selection.collapsed();
+    if (key.key == "ArrowLeft") {
+        if (collapse) return selection.start;
+        return key.ctrlKey ? previousWordStart(value, caret) : previousCharacter(value, caret);
+    }
+    if (key.key == "ArrowRight") {
+        if (collapse) return selection.end;
+        return key.ctrlKey ? nextWordEnd(value, caret) : nextCharacter(value, caret);
+    }
+    if (key.key == "Home") return multiline && !key.ctrlKey ? lineStart(value, caret) : 0;
+    if (key.key == "End") return multiline && !key.ctrlKey ? lineEnd(value, caret) : value.size();
+    if (key.key == "ArrowUp" || key.key == "ArrowDown") {
+        bool up = key.key == "ArrowUp";
+        // One line: to the start or the end, as Chrome and Firefox do
+        if (!multiline) return up ? 0 : value.size();
+        size_t start = lineStart(value, caret);
+        size_t column = characterCount(value.substr(start, caret - start));
+        if (up) return start == 0 ? 0 : intoLine(value, lineStart(value, start - 1), column);
+        size_t end = lineEnd(value, caret);
+        return end == value.size() ? value.size() : intoLine(value, end + 1, column);
+    }
+    return std::string::npos;
+}
+
+/// Backspace / Delete: removes the selection, else the character (Ctrl:
+/// the word) before or after the caret, between beforeinput and input
+void deleteText(DOMBindings& bindings, DOMElement* field, bool forward, bool word) {
+    std::string value = formControlValue(field);
+    TextSelection selection = formControlSelection(field);
+    size_t from = selection.start, to = selection.end;
+    if (selection.collapsed()) {
+        if (forward) to = word ? nextWordEnd(value, to) : nextCharacter(value, to);
+        else from = word ? previousWordStart(value, from) : previousCharacter(value, from);
+    }
+    if (from == to) return;
+    std::string inputType = std::string(word && selection.collapsed() ? "deleteWord" : "deleteContent") +
+                            (forward ? "Forward" : "Backward");
+    if (!bindings.fireInputEvent(field, "beforeinput", inputType, "")) return;
+    if (bindings.focusedElement() != field) return;
+    replaceFormControlText(field, from, to, "");
+    bindings.fireInputEvent(field, "input", inputType, "");
 }
 
 }  // namespace
@@ -225,16 +314,32 @@ KeyResult ScriptContext::keyDown(const KeyEventInit& key, const std::string& tex
 
         if (isTextControl(focused)) {
             result.consumed = controlKeepsKey(key);
-            if (!editable(focused) || key.ctrlKey || key.metaKey) return;
             bool textarea = lower(focused->tagName()) == "textarea";
+            // The caret moves in read-only fields too
+            if (!key.altKey && !key.metaKey) {
+                std::string value = formControlValue(focused);
+                TextSelection selection = formControlSelection(focused);
+                size_t caret = movedCaret(value, selection, key, textarea);
+                if (caret != std::string::npos) {
+                    result.consumed = true;
+                    setFormControlCaret(focused, key.shiftKey ? selection.anchor() : caret, caret);
+                    return;
+                }
+                if (key.ctrlKey && (key.key == "a" || key.key == "A")) {
+                    result.consumed = true;
+                    setFormControlSelection(focused, 0, value.size());
+                    return;
+                }
+            }
+            if (!editable(focused) || key.metaKey) return;
+            if (key.key == "Backspace" || key.key == "Delete") {
+                result.consumed = true;
+                deleteText(*domBindings_, focused, key.key == "Delete", key.ctrlKey);
+                return;
+            }
+            if (key.ctrlKey) return;
             if (character) {
                 typeInto(*domBindings_, text, "insertText");
-            } else if (key.key == "Backspace") {
-                std::string value = formControlValue(focused);
-                if (value.empty() || !domBindings_->fireInputEvent(focused, "beforeinput", "deleteContentBackward", "")) return;
-                eraseLastCharacter(value);
-                setFormControlValue(focused, value);
-                domBindings_->fireInputEvent(focused, "input", "deleteContentBackward", "");
             } else if (key.key == "Enter" && textarea) {
                 typeInto(*domBindings_, "\n", "insertLineBreak");
             } else if (key.key == "Enter") {

@@ -394,6 +394,195 @@ TEST(Keys, KeyboardEventConstructor) {
 }
 
 // ----------------------------------------------------------------------------
+// The caret and the selection in text fields
+// ----------------------------------------------------------------------------
+
+namespace {
+
+KeyResult press(Page& page, const std::string& name, bool shift = false, bool ctrl = false) {
+    KeyEventInit init = key(name, name, 0);
+    init.shiftKey = shift;
+    init.ctrlKey = ctrl;
+    return page.script->keyDown(init, "");
+}
+
+/// "ab|cd" for a caret after "ab"; "a[bc]d" for a selection, "a]bc[d" when
+/// it runs backward
+std::string marked(const DOMElement* field) {
+    std::string value = formControlValue(field);
+    TextSelection s = formControlSelection(field);
+    if (s.collapsed()) return value.substr(0, s.start) + "|" + value.substr(s.start);
+    return value.substr(0, s.start) + (s.backward ? "]" : "[") + value.substr(s.start, s.end - s.start) +
+           (s.backward ? "[" : "]") + value.substr(s.end);
+}
+
+}  // namespace
+
+TEST(Caret, TypingGoesWhereTheCaretIs) {
+    Page page(R"(<input id="q" value="helo"><textarea id="t">one
+two</textarea>)");
+    DOMElement* q = page.byId("q");
+    page.script->focusElement(q);
+    EXPECT_EQ(marked(q), "helo|") << "the caret starts at the end";
+    press(page, "ArrowLeft");
+    typeKey(page, 'l');
+    EXPECT_EQ(marked(q), "hell|o");
+    press(page, "Home");
+    typeKey(page, 'o');
+    press(page, "End");
+    typeKey(page, '!');
+    EXPECT_EQ(marked(q), "ohello!|");
+    press(page, "ArrowLeft");
+    press(page, "ArrowLeft");
+    press(page, "Backspace");
+    EXPECT_EQ(marked(q), "ohel|o!");
+    press(page, "Delete");
+    EXPECT_EQ(marked(q), "ohel|!");
+    // Arrows stop at the ends
+    for (int i = 0; i < 9; i++) press(page, "ArrowRight");
+    EXPECT_EQ(marked(q), "ohel!|");
+
+    // A textarea moves by lines, keeping the column
+    DOMElement* t = page.byId("t");
+    page.script->focusElement(t);
+    press(page, "ArrowUp");
+    EXPECT_EQ(marked(t), "one|\ntwo");
+    press(page, "ArrowLeft");
+    press(page, "ArrowDown");
+    EXPECT_EQ(marked(t), "one\ntw|o");
+    press(page, "Home");
+    EXPECT_EQ(marked(t), "one\n|two");
+    press(page, "End");
+    page.script->keyDown(key("Enter", "Enter", 13), "");
+    typeKey(page, 'x');
+    EXPECT_EQ(marked(t), "one\ntwo\nx|");
+}
+
+TEST(Caret, ShiftSelectsAndTypingReplacesTheSelection) {
+    Page page(R"(<input id="q" value="hello world">)");
+    DOMElement* q = page.byId("q");
+    page.script->focusElement(q);
+    press(page, "ArrowLeft", true);
+    press(page, "ArrowLeft", true);
+    EXPECT_EQ(marked(q), "hello wor]ld[");
+    // An arrow without Shift collapses to that side
+    press(page, "ArrowRight");
+    EXPECT_EQ(marked(q), "hello world|");
+    press(page, "ArrowLeft", true, true);
+    EXPECT_EQ(marked(q), "hello ]world[") << "Ctrl+Shift+Left selects the word";
+    typeKey(page, 'Z');
+    EXPECT_EQ(marked(q), "hello Z|");
+    press(page, "Home", true);
+    press(page, "End", true);
+    EXPECT_EQ(marked(q), "hello Z|") << "Shift+End from the anchor back where it started";
+    press(page, "a", false, true);
+    EXPECT_EQ(marked(q), "[hello Z]") << "Ctrl+A selects the field";
+    press(page, "Backspace");
+    EXPECT_EQ(marked(q), "|");
+}
+
+TEST(Caret, WordDeletesAndMultibyteCharacters) {
+    Page page(R"(<input id="q">)");
+    DOMElement* q = page.byId("q");
+    page.script->focusElement(q);
+    page.script->insertText("caf\xC3\xA9 au lait");
+    press(page, "Backspace", false, true);
+    EXPECT_EQ(marked(q), "caf\xC3\xA9 au |");
+    press(page, "Home");
+    press(page, "ArrowRight", false, true);
+    EXPECT_EQ(marked(q), "caf\xC3\xA9| au ");
+    press(page, "ArrowLeft");
+    EXPECT_EQ(marked(q), "caf|\xC3\xA9 au ") << "a two-byte character is one step";
+    press(page, "Delete");
+    EXPECT_EQ(marked(q), "caf| au ");
+    press(page, "Delete", false, true);
+    EXPECT_EQ(marked(q), "caf| ");
+    page.eval("var log = []; var q = document.getElementById('q');"
+              "q.addEventListener('beforeinput', function (e) { log.push(e.inputType); });");
+    press(page, "Backspace");
+    press(page, "Backspace", false, true);
+    EXPECT_EQ(page.eval("log.join(' ')"), "deleteContentBackward deleteWordBackward");
+}
+
+TEST(Caret, ReadOnlyFieldsMoveTheCaretButKeepTheirText) {
+    Page page(R"(<input id="ro" readonly value="fixed">)");
+    DOMElement* ro = page.byId("ro");
+    page.script->focusElement(ro);
+    EXPECT_TRUE(press(page, "Home").consumed);
+    press(page, "End", true);
+    press(page, "Delete");
+    typeKey(page, 'x');
+    EXPECT_EQ(marked(ro), "[fixed]");
+}
+
+TEST(Caret, ScriptsReadAndSetTheSelection) {
+    Page page(R"(<input id="q" value="abcdef"><input id="n" type="number" value="12">
+                 <input id="cb" type="checkbox"><textarea id="t">xyz</textarea>)");
+    page.eval("var q = document.getElementById('q');");
+    EXPECT_EQ(page.eval("q.selectionStart + ',' + q.selectionEnd + ',' + q.selectionDirection"), "6,6,forward");
+    page.eval("q.setSelectionRange(1, 3)");
+    EXPECT_EQ(marked(page.byId("q")), "a[bc]def");
+    page.eval("q.setSelectionRange(4, 2, 'backward')");
+    EXPECT_EQ(marked(page.byId("q")), "ab|cdef") << "a start past the end becomes the end";
+    page.eval("q.setSelectionRange(1, 99, 'backward')");
+    EXPECT_EQ(page.eval("q.selectionStart + ',' + q.selectionEnd + ',' + q.selectionDirection"), "1,6,backward");
+    page.eval("q.selectionStart = 5");
+    EXPECT_EQ(page.eval("q.selectionStart + ',' + q.selectionEnd"), "5,6");
+    page.eval("q.selectionEnd = 2");
+    EXPECT_EQ(page.eval("q.selectionStart + ',' + q.selectionEnd"), "2,2");
+    page.eval("q.select()");
+    EXPECT_EQ(marked(page.byId("q")), "[abcdef]");
+    // A new value puts the caret at its end; the same value leaves it
+    page.eval("q.setSelectionRange(1, 2); q.value = 'abcdef'");
+    EXPECT_EQ(marked(page.byId("q")), "a[b]cdef");
+    page.eval("q.value = 'xy'");
+    EXPECT_EQ(marked(page.byId("q")), "xy|");
+    // Types without a selection: null, and setting it throws
+    EXPECT_EQ(page.eval("var n = document.getElementById('n'); String(n.selectionStart)"), "null");
+    EXPECT_EQ(page.eval("var name = 'no'; try { n.setSelectionRange(0, 1) } catch (e) { name = e.name } name"), "InvalidStateError");
+    EXPECT_EQ(page.eval("name = 'no'; try { document.getElementById('cb').selectionStart = 0 } catch (e) { name = e.name } name"),
+              "InvalidStateError");
+    page.eval("n.select()");
+    EXPECT_EQ(marked(page.byId("n")), "[12]") << "select() still selects a number field's text";
+    // Typing goes where a script put the caret
+    page.eval("var t = document.getElementById('t'); t.focus(); t.setSelectionRange(1, 1)");
+    typeKey(page, 'q');
+    EXPECT_EQ(page.eval("t.value + ',' + t.selectionStart"), "xqyz,2");
+}
+
+TEST(Caret, SetRangeText) {
+    Page page(R"(<input id="q" value="hello world">)");
+    page.eval("var q = document.getElementById('q');");
+    page.eval("q.setSelectionRange(0, 5); q.setRangeText('HELLO')");
+    EXPECT_EQ(marked(page.byId("q")), "[HELLO] world") << "preserve keeps a selection around the range";
+    page.eval("q.setSelectionRange(8, 9); q.setRangeText('there', 6, 11)");
+    EXPECT_EQ(marked(page.byId("q")), "HELLO [there]") << "a selection inside the range grows to its edges";
+    page.eval("q.setRangeText('big ', 6, 6, 'select')");
+    EXPECT_EQ(marked(page.byId("q")), "HELLO [big ]there");
+    page.eval("q.setRangeText('', 0, 6, 'start')");
+    EXPECT_EQ(marked(page.byId("q")), "|big there");
+    page.eval("q.setRangeText('!', 99, 99, 'end')");
+    EXPECT_EQ(marked(page.byId("q")), "big there!|");
+    page.eval("q.setSelectionRange(9, 10); q.setRangeText('...', 0, 0)");
+    EXPECT_EQ(marked(page.byId("q")), "...big there[!]") << "a selection after the range moves with it";
+    EXPECT_EQ(page.eval("var name = 'no'; try { q.setRangeText('x', 3, 1) } catch (e) { name = e.name } name"), "IndexSizeError");
+}
+
+TEST(Caret, MaxlengthCountsTheSelectionAsRoom) {
+    Page page(R"(<input id="q" maxlength="3" value="abc">)");
+    DOMElement* q = page.byId("q");
+    page.script->focusElement(q);
+    typeKey(page, 'd');
+    EXPECT_EQ(marked(q), "abc|");
+    press(page, "ArrowLeft", true);
+    typeKey(page, 'd');
+    EXPECT_EQ(marked(q), "abd|");
+    setFormControlSelection(q, 0, 3);
+    page.script->insertText("wxyz");
+    EXPECT_EQ(marked(q), "wxy|");
+}
+
+// ----------------------------------------------------------------------------
 // Enter, clicks and submissions
 // ----------------------------------------------------------------------------
 

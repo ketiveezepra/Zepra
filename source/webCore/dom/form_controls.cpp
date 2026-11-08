@@ -150,7 +150,58 @@ std::string formControlValue(const DOMElement* element) {
 }
 
 void setFormControlValue(DOMElement* element, const std::string& value) {
-    if (element) element->setDirtyValue(value);
+    if (!element) return;
+    bool changed = formControlValue(element) != value;
+    element->setDirtyValue(value);
+    // A new value moves the caret to its end (HTML: the value setter)
+    if (changed) element->clearSelection();
+}
+
+bool supportsTextSelection(const DOMElement* element) {
+    if (!element) return false;
+    std::string tag = tagOf(element);
+    if (tag == "textarea") return true;
+    if (tag != "input") return false;
+    std::string type = inputType(element);
+    return type == "text" || type == "search" || type == "url" || type == "tel" || type == "password";
+}
+
+TextSelection formControlSelection(const DOMElement* element) {
+    TextSelection selection;
+    if (!element) return selection;
+    std::string value = formControlValue(element);
+    if (!element->selectionSet()) {
+        selection.start = selection.end = value.size();
+        return selection;
+    }
+    selection.start = characterBoundary(value, std::min(element->selectionStart(), value.size()));
+    selection.end = characterBoundary(value, std::min(element->selectionEnd(), value.size()));
+    selection.backward = element->selectionBackward() && selection.start != selection.end;
+    return selection;
+}
+
+void setFormControlSelection(DOMElement* element, size_t start, size_t end, bool backward) {
+    if (!element) return;
+    if (end < start) std::swap(start, end);
+    std::string value = formControlValue(element);
+    start = characterBoundary(value, std::min(start, value.size()));
+    end = characterBoundary(value, std::min(end, value.size()));
+    element->setSelection(start, end, backward && start != end);
+}
+
+void setFormControlCaret(DOMElement* element, size_t anchor, size_t caret) {
+    setFormControlSelection(element, std::min(anchor, caret), std::max(anchor, caret), caret < anchor);
+}
+
+void replaceFormControlText(DOMElement* element, size_t start, size_t end, const std::string& text) {
+    if (!element) return;
+    std::string value = formControlValue(element);
+    start = std::min(start, value.size());
+    end = std::min(std::max(start, end), value.size());
+    value.replace(start, end - start, text);
+    element->setDirtyValue(value);
+    size_t caret = start + text.size();
+    element->setSelection(caret, caret, false);
 }
 
 bool formControlChecked(const DOMElement* element) {
@@ -399,6 +450,32 @@ bool eraseLastCharacter(std::string& text) {
     while (i > 0 && (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80) i--;
     text.erase(i);
     return true;
+}
+
+namespace {
+bool continuationByte(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
+}  // namespace
+
+size_t characterBoundary(const std::string& text, size_t offset) {
+    offset = std::min(offset, text.size());
+    while (offset > 0 && offset < text.size() && continuationByte(text[offset])) offset--;
+    return offset;
+}
+
+size_t previousCharacter(const std::string& text, size_t offset) {
+    offset = characterBoundary(text, offset);
+    if (offset == 0) return 0;
+    offset--;
+    while (offset > 0 && continuationByte(text[offset])) offset--;
+    return offset;
+}
+
+size_t nextCharacter(const std::string& text, size_t offset) {
+    offset = characterBoundary(text, offset);
+    if (offset >= text.size()) return text.size();
+    offset++;
+    while (offset < text.size() && continuationByte(text[offset])) offset++;
+    return offset;
 }
 
 } // namespace Zepra::WebCore

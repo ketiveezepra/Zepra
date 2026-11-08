@@ -347,6 +347,7 @@ private:
         m.shift = (state & ShiftMask);
         m.ctrl = (state & ControlMask);
         m.alt = (state & Mod1Mask);
+        m.meta = (state & Mod4Mask);
         return m;
     }
     
@@ -378,10 +379,44 @@ private:
             case XK_Shift_L: case XK_Shift_R: return KeyCode::Shift;
             case XK_Control_L: case XK_Control_R: return KeyCode::Ctrl;
             case XK_Alt_L: case XK_Alt_R: return KeyCode::Alt;
+            case XK_Home: case XK_KP_Home: return KeyCode::Home;
+            case XK_End: case XK_KP_End: return KeyCode::End;
+            case XK_Page_Up: case XK_KP_Page_Up: return KeyCode::PageUp;
+            case XK_Page_Down: case XK_KP_Page_Down: return KeyCode::PageDown;
+            case XK_Delete: case XK_KP_Delete: return KeyCode::Delete;
+            case XK_Insert: case XK_KP_Insert: return KeyCode::Insert;
+            case XK_KP_Left: return KeyCode::Left;
+            case XK_KP_Right: return KeyCode::Right;
+            case XK_KP_Up: return KeyCode::Up;
+            case XK_KP_Down: return KeyCode::Down;
+            case XK_KP_Enter: return KeyCode::Enter;
+            case XK_ISO_Left_Tab: return KeyCode::Tab;   // Shift+Tab
+            case XK_Super_L: case XK_Super_R: case XK_Meta_L: case XK_Meta_R: return KeyCode::Meta;
+            case XK_Caps_Lock: return KeyCode::CapsLock;
             case XK_F1: return KeyCode::F1;
             case XK_F2: return KeyCode::F2;
+            case XK_F3: return KeyCode::F3;
+            case XK_F4: return KeyCode::F4;
             case XK_F5: return KeyCode::F5;
+            case XK_F6: return KeyCode::F6;
+            case XK_F7: return KeyCode::F7;
+            case XK_F8: return KeyCode::F8;
+            case XK_F9: return KeyCode::F9;
+            case XK_F10: return KeyCode::F10;
+            case XK_F11: return KeyCode::F11;
             case XK_F12: return KeyCode::F12;
+            // Punctuation, shifted or not (XLookupString gives the shifted keysym)
+            case XK_comma: case XK_less: return KeyCode::Comma;
+            case XK_period: case XK_greater: return KeyCode::Period;
+            case XK_slash: case XK_question: return KeyCode::Slash;
+            case XK_backslash: case XK_bar: return KeyCode::Backslash;
+            case XK_semicolon: case XK_colon: return KeyCode::Semicolon;
+            case XK_apostrophe: case XK_quotedbl: return KeyCode::Quote;
+            case XK_bracketleft: case XK_braceleft: return KeyCode::LeftBracket;
+            case XK_bracketright: case XK_braceright: return KeyCode::RightBracket;
+            case XK_minus: case XK_underscore: return KeyCode::Minus;
+            case XK_equal: case XK_plus: return KeyCode::Equals;
+            case XK_grave: case XK_asciitilde: return KeyCode::Backtick;
             default:
                 return KeyCode::Unknown;
         }

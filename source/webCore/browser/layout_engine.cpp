@@ -13,6 +13,7 @@
 #include <sstream>
 
 #include "../css/css_computed_style.hpp"
+#include "../dom/form_controls.hpp"
 
 // Viewport dimensions (defined in zepra_browser.cpp)
 extern int g_width;
@@ -45,6 +46,185 @@ static void (*s_pop_clip)() = nullptr;
 void setLayoutClipCallbacks(void (*push_clip)(float, float, float, float), void (*pop_clip)()) {
     s_push_clip = push_clip;
     s_pop_clip = pop_clip;
+}
+
+// =============================================================================
+// TEXT FIELDS: the value (masked for passwords), the selection and the caret
+// =============================================================================
+
+namespace {
+
+/// The field with keyboard focus and how far its text is scrolled to keep
+/// the caret in view (only that field scrolls; the others show their start)
+struct FocusedField {
+    const Zepra::WebCore::DOMElement* element = nullptr;
+    bool caretVisible = true;
+    float scrollX = 0;
+    float scrollY = 0;
+} s_field;
+
+constexpr uint32_t kSelectionColor = 0x3390FF;
+
+bool isTextField(const LayoutBox& box) {
+    return box.isInput && box.domElement && Zepra::WebCore::isTextControl(box.domElement);
+}
+
+bool isPassword(const LayoutBox& box) {
+    return box.domElement && Zepra::WebCore::inputType(box.domElement) == "password" &&
+           box.inputType != "textarea";
+}
+
+/// What the field shows for `text`: a bullet per character in a password
+std::string shownText(const LayoutBox& box, const std::string& text) {
+    if (!isPassword(box)) return text;
+    std::string out;
+    for (char c : text) {
+        if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) out += "\xE2\x80\xA2";
+    }
+    return out;
+}
+
+/// The field's text area on screen and how it lays its lines out
+struct FieldGeometry {
+    float x0, y0, x1, y1;   // the content box
+    float textX, baseline;  // where the first line starts (before scrolling)
+    float lineHeight;
+    bool multiline;
+};
+
+FieldGeometry fieldGeometry(const LayoutBox& box) {
+    FieldGeometry g;
+    g.multiline = box.inputType == "textarea";
+    g.x0 = box.screenX + box.borderLeft + box.paddingLeft;
+    g.y0 = box.screenY + box.borderTop + box.paddingTop;
+    g.x1 = std::max(g.x0, box.screenX + box.width - box.borderRight - box.paddingRight);
+    g.y1 = std::max(g.y0, box.screenY + box.height - box.borderBottom - box.paddingBottom);
+    g.lineHeight = box.fontSize + 4;
+    g.textX = box.screenX + box.paddingLeft + 4;
+    g.baseline = g.multiline ? box.screenY + box.paddingTop + box.fontSize + 2
+                             : (g.y0 + g.y1) / 2 + box.fontSize * 0.35f;
+    return g;
+}
+
+std::vector<std::pair<size_t, size_t>> fieldLines(const std::string& value, bool multiline) {
+    std::vector<std::pair<size_t, size_t>> lines;
+    size_t start = 0;
+    while (true) {
+        size_t end = multiline ? value.find('\n', start) : std::string::npos;
+        if (end == std::string::npos) {
+            lines.push_back({start, value.size()});
+            return lines;
+        }
+        lines.push_back({start, end});
+        start = end + 1;
+    }
+}
+
+float prefixWidth(const LayoutBox& box, const std::string& value, size_t lineStart, size_t offset) {
+    if (!s_text_width || offset <= lineStart) return 0;
+    return s_text_width(shownText(box, value.substr(lineStart, offset - lineStart)), box.fontSize);
+}
+
+/// Paints a text control: placeholder or value, the selection behind it and
+/// the caret, clipped to the content box. Returns false for boxes it does
+/// not handle (the generic text painting draws those).
+bool paintTextField(const LayoutBox& box) {
+    if (!isTextField(box)) return false;
+    const Zepra::WebCore::DOMElement* element = box.domElement;
+    std::string value = Zepra::WebCore::formControlValue(element);
+    bool focused = element == s_field.element;
+    FieldGeometry g = fieldGeometry(box);
+    auto lines = fieldLines(value, g.multiline);
+    Zepra::WebCore::TextSelection selection = Zepra::WebCore::formControlSelection(element);
+
+    // Scroll so the caret stays inside the content box
+    if (focused) {
+        size_t line = 0;
+        while (line + 1 < lines.size() && selection.caret() > lines[line].second) line++;
+        float caretX = g.textX + prefixWidth(box, value, lines[line].first, selection.caret());
+        float room = g.x1 - 2;
+        if (caretX - s_field.scrollX > room) s_field.scrollX = caretX - room;
+        if (caretX - s_field.scrollX < g.x0) s_field.scrollX = std::max(0.0f, caretX - g.x0);
+        float caretBottom = g.y0 + (line + 1) * g.lineHeight;
+        if (caretBottom - s_field.scrollY > g.y1) s_field.scrollY = caretBottom - g.y1;
+        if (g.y0 + line * g.lineHeight - s_field.scrollY < g.y0) s_field.scrollY = line * g.lineHeight;
+    }
+    float dx = focused ? s_field.scrollX : 0, dy = focused ? s_field.scrollY : 0;
+
+    if (s_push_clip) s_push_clip(g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0);
+    if (value.empty()) {
+        std::string placeholder = element->getAttribute("placeholder");
+        if (placeholder.empty() && !Zepra::WebCore::supportsTextSelection(element)) placeholder = box.placeholder;
+        if (s_text_render && !placeholder.empty() && !g.multiline) {
+            s_text_render(placeholder, g.textX, g.baseline, 0x999999, box.fontSize);
+        } else if (s_text_render && !placeholder.empty()) {
+            auto placeholderLines = fieldLines(placeholder, true);
+            for (size_t i = 0; i < placeholderLines.size(); i++) {
+                const auto& [a, b] = placeholderLines[i];
+                s_text_render(placeholder.substr(a, b - a), g.textX, g.baseline + i * g.lineHeight, 0x999999,
+                              box.fontSize);
+            }
+        }
+    }
+    for (size_t i = 0; i < lines.size(); i++) {
+        const auto& [a, b] = lines[i];
+        float baseline = g.baseline + i * g.lineHeight - dy;
+        if (baseline < g.y0 - g.lineHeight || baseline > g.y1 + g.lineHeight) continue;
+        // The selection behind the text
+        if (focused && !selection.collapsed() && selection.start <= b && selection.end >= a) {
+            size_t from = std::max(selection.start, a), to = std::min(selection.end, b);
+            float x0 = g.textX + prefixWidth(box, value, a, from) - dx;
+            float x1 = g.textX + prefixWidth(box, value, a, to) - dx;
+            // A selected line break shows as a little space
+            if (selection.end > b && i + 1 < lines.size()) x1 += box.fontSize * 0.3f;
+            float top = baseline - box.fontSize - 1;
+            if (s_gfx_rrect) s_gfx_rrect(x0, top, x1 - x0, box.fontSize + 5, 0, kSelectionColor, 90);
+            else if (s_gfx_rect) s_gfx_rect(x0, top, x1 - x0, box.fontSize + 5, 0xB4D5FE);
+        }
+        if (s_text_render && b > a) s_text_render(shownText(box, value.substr(a, b - a)), g.textX - dx, baseline, box.color, box.fontSize);
+        // The caret
+        size_t caret = selection.caret();
+        bool onLine = caret >= a && caret <= b && (caret < b || i + 1 == lines.size() || caret != lines[i + 1].first);
+        if (focused && s_field.caretVisible && onLine && s_gfx_rect) {
+            float x = g.textX + prefixWidth(box, value, a, caret) - dx;
+            s_gfx_rect(x, baseline - box.fontSize - 1, 1.0f, box.fontSize + 5, box.color);
+        }
+    }
+    if (s_pop_clip) s_pop_clip();
+    return true;
+}
+
+}  // namespace
+
+void setFocusedTextField(const Zepra::WebCore::DOMElement* field, bool caretVisible) {
+    if (field != s_field.element) s_field = {};
+    s_field.element = field;
+    s_field.caretVisible = caretVisible;
+}
+
+size_t textFieldOffsetAt(const LayoutBox& box, float x, float y) {
+    if (!isTextField(box)) return 0;
+    std::string value = Zepra::WebCore::formControlValue(box.domElement);
+    FieldGeometry g = fieldGeometry(box);
+    bool focused = box.domElement == s_field.element;
+    float dx = focused ? s_field.scrollX : 0, dy = focused ? s_field.scrollY : 0;
+    auto lines = fieldLines(value, g.multiline);
+    float firstTop = g.baseline - box.fontSize - 2 - dy;
+    long index = static_cast<long>(std::floor((y - firstTop) / g.lineHeight));
+    size_t line = static_cast<size_t>(std::clamp(index, 0L, static_cast<long>(lines.size()) - 1));
+    const auto& [a, b] = lines[line];
+    // The character boundary nearest to x
+    size_t best = a;
+    float bestDistance = FLT_MAX;
+    for (size_t offset = a;; offset = Zepra::WebCore::nextCharacter(value, offset)) {
+        float distance = std::fabs(g.textX + prefixWidth(box, value, a, offset) - dx - x);
+        if (distance < bestDistance) {
+            best = offset;
+            bestDistance = distance;
+        }
+        if (offset >= b) break;
+    }
+    return best;
 }
 
 // =============================================================================
@@ -1572,8 +1752,10 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
         }
     }
 
-    // Draw text content
-    if ((!box.text.empty() || !box.placeholder.empty()) && 
+    // Draw text content (a text field paints its own)
+    if (paintTextField(box)) {
+        // nothing more: its value, selection and caret are drawn
+    } else if ((!box.text.empty() || !box.placeholder.empty()) && 
         (box.type == LayoutType::Text || box.type == LayoutType::Inline || 
          box.type == LayoutType::Block || box.type == LayoutType::InlineBlock ||
          box.type == LayoutType::FlexItem)) {
