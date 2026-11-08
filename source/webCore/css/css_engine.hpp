@@ -231,6 +231,11 @@ public:
 private:
     /// Which declarations of a block applyDeclarations applies
     enum class Importance { Any, Normal, Important };
+    /// computeStyle() runs the cascade twice: custom properties first (var()
+    /// in ordinary properties needs their final values), then the rest
+    enum class Pass { All, CustomOnly, SkipCustom };
+    Pass pass_ = Pass::All;
+    CustomPropertyMap* declaredCustom_ = nullptr;  // the custom pass's winners
 
     std::vector<StyleSheetEntry> stylesheets_;
     std::unordered_map<DOMElement*, CSSComputedStyle> styleCache_;

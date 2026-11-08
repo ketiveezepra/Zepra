@@ -55,6 +55,7 @@ CSSComputedStyle CSSComputedStyle::inherit(const CSSComputedStyle& parent) {
     style.borderSpacingH = parent.borderSpacingH;
     style.borderSpacingV = parent.borderSpacingV;
     style.borderCollapse = parent.borderCollapse;
+    style.customProperties = parent.customProperties;  // custom properties inherit
     return style;
 }
 

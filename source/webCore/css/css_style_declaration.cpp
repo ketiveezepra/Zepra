@@ -89,6 +89,8 @@ std::string CSSStyleDeclaration::removeProperty(const std::string& property) {
 }
 
 std::string CSSStyleDeclaration::normalizeProperty(const std::string& property) const {
+    // Custom properties (--name) are case-sensitive and kept as written
+    if (property.size() > 2 && property[0] == '-' && property[1] == '-') return property;
     // Convert camelCase to kebab-case and lowercase
     std::string result;
     for (char c : property) {

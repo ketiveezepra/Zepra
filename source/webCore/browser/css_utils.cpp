@@ -12,91 +12,6 @@ uint32_t cssColorToRGB(const Zepra::WebCore::CSSColor& c) {
     return (c.r << 16) | (c.g << 8) | c.b;
 }
 
-std::string expandCSSVariables(const std::string& css) {
-    // Parse :root { --var: value; } declarations
-    std::unordered_map<std::string, std::string> variables;
-    
-    // Find :root block
-    size_t rootStart = css.find(":root");
-    if (rootStart != std::string::npos) {
-        size_t braceStart = css.find('{', rootStart);
-        size_t braceEnd = css.find('}', braceStart);
-        if (braceStart != std::string::npos && braceEnd != std::string::npos) {
-            std::string rootBlock = css.substr(braceStart + 1, braceEnd - braceStart - 1);
-            
-            // Parse --var: value; pairs
-            size_t pos = 0;
-            while ((pos = rootBlock.find("--", pos)) != std::string::npos) {
-                size_t colonPos = rootBlock.find(':', pos);
-                if (colonPos == std::string::npos) break;
-                
-                std::string varName = rootBlock.substr(pos, colonPos - pos);
-                // Trim varName
-                while (!varName.empty() && std::isspace(varName.back())) varName.pop_back();
-                
-                size_t valueStart = colonPos + 1;
-                size_t semicolonPos = rootBlock.find(';', valueStart);
-                if (semicolonPos == std::string::npos) semicolonPos = rootBlock.length();
-                
-                std::string value = rootBlock.substr(valueStart, semicolonPos - valueStart);
-                // Trim value
-                while (!value.empty() && std::isspace(value.front())) value = value.substr(1);
-                while (!value.empty() && std::isspace(value.back())) value.pop_back();
-                
-                // Store raw value
-                variables[varName] = value;
-                
-                pos = semicolonPos + 1;
-            }
-        }
-    }
-    
-    // Iteratively resolve variables (handles --a: var(--b))
-    bool changed = true;
-    int iterations = 0;
-    while (changed && iterations < 10) { // Limit iterations to prevent infinite loops
-        changed = false;
-        for (auto& [name, val] : variables) {
-            size_t varPos = 0;
-            std::string newVal = val;
-            while ((varPos = newVal.find("var(--", varPos)) != std::string::npos) {
-                size_t endPos = newVal.find(')', varPos);
-                if (endPos == std::string::npos) break;
-                
-                std::string refName = newVal.substr(varPos + 4, endPos - (varPos + 4));
-                if (variables.count(refName)) {
-                    newVal.replace(varPos, endPos - varPos + 1, variables[refName]);
-                    changed = true;
-                } else {
-                    varPos++; // Skip if not found to avoid infinite loop on missing var
-                }
-            }
-            if (newVal != val) {
-                val = newVal;
-                changed = true;
-            }
-        }
-        iterations++;
-    }
-    
-    if (!variables.empty()) {
-        std::cout << "[CSS] Resolved " << variables.size() << " CSS variables after " << iterations << " iterations" << std::endl;
-    }
-    
-    // Replace all var(--name) with resolved values in the full CSS
-    std::string result = css;
-    for (const auto& [varName, value] : variables) {
-        std::string varRef = "var(" + varName + ")";
-        size_t pos = 0;
-        while ((pos = result.find(varRef, pos)) != std::string::npos) {
-            result.replace(pos, varRef.length(), value);
-            pos += value.length();
-        }
-    }
-    
-    return result;
-}
-
 std::string polyfillCSSShorthands(const std::string& css) {
     std::string result = css;
     
@@ -132,13 +47,11 @@ std::vector<std::string> extractStylesFromRawHTML(const std::string& html) {
         
         std::string css = html.substr(contentStart, contentEnd - contentStart);
         if (!css.empty()) {
-            // EXPAND CSS VARIABLES
-            css = expandCSSVariables(css);
             // POLYFILL SHORTHANDS
             css = polyfillCSSShorthands(css);
             
             styles.push_back(css);
-            std::cout << "[CSS] Extracted, expanded & polyfilled inline style: " << css.size() << " bytes" << std::endl;
+            std::cout << "[CSS] Extracted & polyfilled inline style: " << css.size() << " bytes" << std::endl;
         }
         pos = contentEnd + 8;
     }

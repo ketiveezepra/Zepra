@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <optional>
 #include <cstdint>
+#include <memory>
+#include "css/custom_properties.hpp"
 
 namespace Zepra::WebCore {
 
@@ -349,6 +351,10 @@ public:
     std::string boxShadow;
     std::string transform;
     std::string transition;
+
+    /// Custom properties (--name), resolved and inherited; shared with the
+    /// parent while the element declares none. Null when there are none.
+    std::shared_ptr<const CustomPropertyMap> customProperties;
     std::string animation;
     std::string filter;
     std::string cursor = "auto";

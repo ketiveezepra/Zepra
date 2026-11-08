@@ -267,7 +267,12 @@ std::vector<std::pair<std::string, std::string>> resolve(const CSSComputedStyle&
 } // namespace
 
 std::vector<std::pair<std::string, std::string>> computedStyleProperties(const CSSComputedStyle& style) {
-    return resolve(style, false);
+    auto out = resolve(style, false);
+    // Custom properties come after the standard ones, as browsers list them
+    if (style.customProperties) {
+        for (const auto& [name, value] : *style.customProperties) out.emplace_back(name, value);
+    }
+    return out;
 }
 
 const std::vector<std::string>& computedStylePropertyNames() {
