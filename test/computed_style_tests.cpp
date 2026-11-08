@@ -306,4 +306,13 @@ TEST(CssNamespace, EscapeSerializesAnIdentifier) {
     EXPECT_EQ(page.eval("[CSS.escape('a.b'), CSS.escape('1st'), CSS.escape('-'), CSS.escape('-2'),"
                         " CSS.escape('x y#z'), CSS.escape('ok_-1')].join('|')"),
               "a\\.b|\\31 st|\\-|-\\32 |x\\ y\\#z|ok_-1");
+TEST(ComputedStyle, NamedColorsCoverEveryCssKeyword) {
+    Page page(kPage);
+    // CSS Color 4 §6.1 lists 148 keywords; the uncommon ones resolved to black
+    EXPECT_EQ(page.eval("var box = document.getElementById('box'); var cs = getComputedStyle(box);"
+                        "box.style.backgroundColor = 'aliceblue'; cs.backgroundColor"),
+              "rgb(240, 248, 255)");
+    EXPECT_EQ(page.eval("box.style.backgroundColor = 'RebeccaPurple'; cs.backgroundColor"), "rgb(102, 51, 153)");
+    EXPECT_EQ(page.eval("box.style.backgroundColor = 'lightgoldenrodyellow'; cs.backgroundColor"),
+              "rgb(250, 250, 210)");
 }

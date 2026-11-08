@@ -135,6 +135,7 @@ struct LayoutBox {
     // Style properties for rendering
     uint32_t color = 0x000000;
     uint32_t bgColor = 0x00000000;
+    uint8_t bgAlpha = 255;       // background-color alpha (rgba(), #rrggbbaa, transparent stops)
     uint32_t borderColor = 0x000000;
     bool borderVisible = true;   // false for a transparent border colour (it still takes space)
     float fontSize = 16.0f;

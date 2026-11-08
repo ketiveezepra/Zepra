@@ -1670,7 +1670,8 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
         return;
     }
     
-    uint8_t alpha = (uint8_t)(box.opacity * 255.0f);
+    // The background colour's own alpha (rgba(), #rrggbbaa) times opacity
+    uint8_t alpha = (uint8_t)std::lround(box.bgAlpha * std::clamp(box.opacity, 0.0f, 1.0f));
     
     // Row and row-group backgrounds show through their cells only, not the
     // border-spacing between them (CSS 2.1 §17.5.1)
@@ -1691,7 +1692,9 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
         if (box.backgroundImage.find("gradient(") != std::string::npos && box.backgroundImage.find("url(") == std::string::npos &&
             s_gfx_gradient && s_gfx_rect) {
             paintGradient(box.backgroundImage, screenX, screenY, box.width, box.height, box.bgColor);
-        } else if (box.borderRadius > 0 && s_gfx_rrect) {
+        } else if ((box.borderRadius > 0 || alpha < 255) && s_gfx_rrect) {
+            // Translucent fills go through the rounded-rect path, the one that
+            // takes an alpha (a radius of 0 is a plain rectangle)
             s_gfx_rrect(screenX, screenY, box.width, box.height, box.borderRadius, box.bgColor, alpha);
         } else if (s_gfx_rect) {
             s_gfx_rect(screenX, screenY, box.width, box.height, box.bgColor);

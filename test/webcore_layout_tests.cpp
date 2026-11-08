@@ -546,6 +546,50 @@ TEST(Gradients, OnlyTheTopLayerAndRadialShapes) {
 }
 
 // ---------------------------------------------------------------------------
+// Background colour alpha
+// ---------------------------------------------------------------------------
+
+struct FillCall {
+    uint32_t color;
+    int alpha;  // -1: an opaque rectangle (no alpha argument)
+};
+std::vector<FillCall> g_fills;
+
+std::vector<FillCall> paintFilledBox(uint8_t bgAlpha, float opacity) {
+    g_fills.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t c) { g_fills.push_back({c, -1}); },
+        [](float, float, float, float, uint32_t, float) {}, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(
+        [](float, float, float, float, float, uint32_t c, uint8_t a) { g_fills.push_back({c, a}); }, nullptr);
+    LayoutBox box;
+    box.width = box.height = 10;
+    box.hasBgColor = true;
+    box.bgColor = 0xFF0000;
+    box.bgAlpha = bgAlpha;
+    box.opacity = opacity;
+    ZepraBrowser::paintBox(box, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(nullptr, nullptr);
+    return g_fills;
+}
+
+TEST(Backgrounds, ColorAlphaAndOpacityReachTheFill) {
+    auto opaque = paintFilledBox(255, 1.0f);
+    ASSERT_EQ(opaque.size(), 1u);
+    EXPECT_EQ(opaque[0].alpha, -1);
+    // rgba(255, 0, 0, 0.5)
+    auto half = paintFilledBox(128, 1.0f);
+    ASSERT_EQ(half.size(), 1u);
+    EXPECT_EQ(half[0].color, 0xFF0000u);
+    EXPECT_EQ(half[0].alpha, 128);
+    // opacity multiplies the colour's own alpha
+    auto both = paintFilledBox(128, 0.5f);
+    ASSERT_EQ(both.size(), 1u);
+    EXPECT_EQ(both[0].alpha, 64);
+}
+
+// ---------------------------------------------------------------------------
 // Serialization (inline <svg> is drawn from its outerHTML)
 // ---------------------------------------------------------------------------
 
