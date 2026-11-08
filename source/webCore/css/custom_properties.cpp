@@ -153,13 +153,60 @@ bool substituteVarFunctions(const std::string& value, const CustomPropertyMap& v
 
 std::shared_ptr<const CustomPropertyMap> resolveCustomProperties(
     const std::shared_ptr<const CustomPropertyMap>& inherited,
-    const CustomPropertyMap& declared) {
-    if (declared.empty()) return inherited;
+    const CustomPropertyMap& declared,
+    const RegisteredPropertyMap* registered) {
+    if (registered && registered->empty()) registered = nullptr;
+    if (declared.empty() && !registered) return inherited;
 
-    auto inheritedValue = [&](const std::string& name) -> const std::string* {
+    auto parentValue = [&](const std::string& name) -> const std::string* {
         if (!inherited) return nullptr;
         auto it = inherited->find(name);
         return it != inherited->end() ? &it->second : nullptr;
+    };
+    auto registration = [&](const std::string& name) -> const RegisteredCustomProperty* {
+        if (!registered) return nullptr;
+        auto it = registered->find(name);
+        return it != registered->end() ? &it->second : nullptr;
+    };
+
+    // What the element starts from before its own declarations: the parent's
+    // values, except that registered properties which don't inherit (or have
+    // no value yet) take their initial value
+    std::shared_ptr<const CustomPropertyMap> base = inherited;
+    if (registered) {
+        bool changes = false;
+        for (const auto& [name, reg] : *registered) {
+            const std::string* parent = parentValue(name);
+            bool wantsInitial = !reg.inherits || !parent;
+            if (!wantsInitial) continue;
+            if (reg.hasInitialValue ? (!parent || *parent != reg.initialValue) : parent != nullptr) {
+                changes = true;
+                break;
+            }
+        }
+        if (changes) {
+            auto copy = std::make_shared<CustomPropertyMap>(inherited ? *inherited : CustomPropertyMap());
+            for (const auto& [name, reg] : *registered) {
+                if (reg.inherits && parentValue(name)) continue;
+                if (reg.hasInitialValue) (*copy)[name] = reg.initialValue;
+                else copy->erase(name);
+            }
+            base = copy;
+        }
+    }
+    if (declared.empty()) return base;
+
+    auto baseValue = [&](const std::string& name) -> const std::string* {
+        if (!base) return nullptr;
+        auto it = base->find(name);
+        return it != base->end() ? &it->second : nullptr;
+    };
+    // The value a registered property falls back to: unset
+    auto unsetValue = [&](const std::string& name, const RegisteredCustomProperty& reg) -> const std::string* {
+        if (reg.inherits) {
+            if (const std::string* parent = parentValue(name)) return parent;
+        }
+        return reg.hasInitialValue ? &reg.initialValue : nullptr;
     };
 
     enum class State { Pending, Resolving, Done };
@@ -177,7 +224,7 @@ std::shared_ptr<const CustomPropertyMap> resolveCustomProperties(
     std::function<const std::string*(const std::string&)> resolve =
         [&](const std::string& name) -> const std::string* {
         auto it = entries.find(name);
-        if (it == entries.end()) return inheritedValue(name);
+        if (it == entries.end()) return baseValue(name);
         Entry& e = it->second;
         if (e.state == State::Resolving) {
             // A dependency cycle: everything on it is invalid
@@ -190,14 +237,18 @@ std::shared_ptr<const CustomPropertyMap> resolveCustomProperties(
         if (e.state == State::Pending) {
             e.state = State::Resolving;
             stack.push_back(name);
+            const RegisteredCustomProperty* reg = registration(name);
             std::string keyword = lower(e.raw);
+            auto take = [&](const std::string* v) {
+                e.valid = v != nullptr;
+                if (v) e.value = *v;
+            };
             if (keyword == "initial") {
-                e.valid = false;
-            } else if (keyword == "inherit" || keyword == "unset" || keyword == "revert" ||
-                       keyword == "revert-layer") {
-                const std::string* parent = inheritedValue(name);
-                e.valid = parent != nullptr;
-                if (parent) e.value = *parent;
+                take(reg && reg->hasInitialValue ? &reg->initialValue : nullptr);
+            } else if (keyword == "inherit") {
+                take(parentValue(name));
+            } else if (keyword == "unset" || keyword == "revert" || keyword == "revert-layer") {
+                take(reg ? unsetValue(name, *reg) : parentValue(name));
             } else if (containsVarFunction(e.raw)) {
                 std::string out;
                 e.valid = substitute(e.raw, resolve, out, 0);
@@ -212,11 +263,16 @@ std::shared_ptr<const CustomPropertyMap> resolveCustomProperties(
         return e.valid && !e.inCycle ? &e.value : nullptr;
     };
 
-    auto result = std::make_shared<CustomPropertyMap>(inherited ? *inherited : CustomPropertyMap());
+    auto result = std::make_shared<CustomPropertyMap>(base ? *base : CustomPropertyMap());
     for (auto& [name, entry] : entries) resolve(name);
     for (auto& [name, entry] : entries) {
-        if (entry.valid && !entry.inCycle) (*result)[name] = entry.value;
-        else result->erase(name);
+        if (entry.valid && !entry.inCycle) {
+            (*result)[name] = entry.value;
+        } else if (const RegisteredCustomProperty* reg = registration(name); reg && unsetValue(name, *reg)) {
+            (*result)[name] = *unsetValue(name, *reg);  // invalid at computed-value time: unset
+        } else {
+            result->erase(name);
+        }
     }
     return result;
 }

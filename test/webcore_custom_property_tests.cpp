@@ -270,3 +270,80 @@ TEST(CustomPropertyScripting, GetComputedStyleReportsCustomProperties) {
     EXPECT_EQ(eval("document.getElementById('d').style.setProperty('--Brand', 'rgb(0, 0, 255)'); cs.color"),
               "rgb(0, 0, 255)");
 }
+
+// ---------------------------------------------------------------------------
+// @property (registered custom properties)
+// ---------------------------------------------------------------------------
+
+TEST(RegisteredCustomProperties, InitialValuesAndInheritance) {
+    RegisteredPropertyMap reg;
+    reg["--size"] = {"<length>", false, true, "4px"};    // doesn't inherit
+    reg["--tone"] = {"<color>", true, true, "green"};    // inherits
+    reg["--any"] = {"*", true, false, ""};               // no initial value
+
+    // The root: registered properties start at their initial value
+    auto root = resolveCustomProperties(nullptr, {}, &reg);
+    ASSERT_TRUE(root);
+    EXPECT_EQ(root->at("--size"), "4px");
+    EXPECT_EQ(root->at("--tone"), "green");
+    EXPECT_EQ(root->count("--any"), 0u);
+
+    auto parent = resolveCustomProperties(root, {{"--size", "10px"}, {"--tone", "red"}, {"--uses", "var(--size)"}}, &reg);
+    EXPECT_EQ(parent->at("--size"), "10px");
+    EXPECT_EQ(parent->at("--uses"), "10px");
+
+    // A child: --size resets to its initial value, --tone is inherited
+    auto child = resolveCustomProperties(parent, {}, &reg);
+    EXPECT_EQ(child->at("--size"), "4px");
+    EXPECT_EQ(child->at("--tone"), "red");
+    // Nothing to change: the parent's map is shared
+    auto grandchild = resolveCustomProperties(child, {}, &reg);
+    EXPECT_EQ(grandchild, child);
+
+    // Keywords and invalid values
+    auto other = resolveCustomProperties(parent, {{"--size", "inherit"}, {"--tone", "initial"},
+                                                  {"--bad", "var(--nope)"}}, &reg);
+    EXPECT_EQ(other->at("--size"), "10px");
+    EXPECT_EQ(other->at("--tone"), "green");
+    EXPECT_EQ(other->count("--bad"), 0u);
+    auto invalid = resolveCustomProperties(parent, {{"--size", "var(--nope)"}, {"--tone", "var(--nope)"}}, &reg);
+    EXPECT_EQ(invalid->at("--size"), "4px");   // unset on a non-inherited property: initial
+    EXPECT_EQ(invalid->at("--tone"), "red");   // unset on an inherited property: the parent's
+}
+
+TEST(RegisteredCustomProperties, ParsingAtPropertyRules) {
+    CSSParser parser;
+    auto sheet = parser.parse(
+        "@property --ok { syntax: '<length>'; inherits: false; initial-value: 0px; }"
+        "@property --star { syntax: \"*\"; inherits: true; }"
+        "@property --no-inherits { syntax: '*'; initial-value: 1; }"
+        "@property --no-initial { syntax: '<color>'; inherits: true; }"
+        "@property --unquoted { syntax: <length>; inherits: true; initial-value: 0px; }"
+        "@property not-custom { syntax: '*'; inherits: true; }"
+        "@property --var-initial { syntax: '<length>'; inherits: true; initial-value: var(--x); }"
+        "p { color: green; }");
+    ASSERT_TRUE(sheet);
+    const auto& regs = sheet->propertyRegistrations();
+    ASSERT_EQ(regs.size(), 2u);
+    EXPECT_EQ(regs[0].first, "--ok");
+    EXPECT_EQ(regs[0].second.syntax, "<length>");
+    EXPECT_FALSE(regs[0].second.inherits);
+    EXPECT_EQ(regs[0].second.initialValue, "0px");
+    EXPECT_EQ(regs[1].first, "--star");
+    EXPECT_TRUE(regs[1].second.inherits);
+    EXPECT_FALSE(regs[1].second.hasInitialValue);
+    // The rule after the @property rules still parses
+    EXPECT_EQ(sheet->cssRules()->length(), 1u);
+}
+
+TEST_F(CustomPropertyCascadeTest, AtPropertyGivesInitialValuesAndStopsInheritance) {
+    // Tailwind v4 registers its internal variables this way and relies on the
+    // initial values (utilities use var() without a fallback)
+    load("@property --tw-text { syntax: '<color>'; inherits: false; initial-value: rgb(0, 128, 0); }"
+         "@property --tw-ring { syntax: '*'; inherits: false; initial-value: 0 0 #0000; }"
+         "#outer { --tw-text: red; color: var(--tw-text); }"
+         "p { color: var(--tw-text); }");
+    EXPECT_EQ(color("outer"), kRed);
+    EXPECT_EQ(color("p"), kGreen);   // not inherited from #outer: the initial value
+    EXPECT_EQ(color("q"), kGreen);
+}

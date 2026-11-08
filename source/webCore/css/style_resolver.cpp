@@ -67,6 +67,10 @@ StyleResolver::StyleResolver() {
 StyleResolver::~StyleResolver() = default;
 
 void StyleResolver::addStyleSheet(std::shared_ptr<CSSStyleSheet> sheet, StyleOrigin origin) {
+    if (sheet) {
+        // A later @property for the same name replaces an earlier one
+        for (const auto& [name, reg] : sheet->propertyRegistrations()) registered_[name] = reg;
+    }
     stylesheets_.push_back({std::move(sheet), origin});
     cascade_.invalidateIndex();
 }
@@ -153,7 +157,7 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
     declaredCustom_ = &declared;
     runCascade();
     declaredCustom_ = nullptr;
-    computed.customProperties = resolveCustomProperties(computed.customProperties, declared);
+    computed.customProperties = resolveCustomProperties(computed.customProperties, declared, &registered_);
     // Then every other property, with var() substituted from them
     pass_ = Pass::SkipCustom;
     runCascade();
@@ -314,7 +318,7 @@ void StyleResolver::applyDeclarations(CSSComputedStyle& style,
                 (*declaredCustom_)[property] = value;  // later declarations win
             } else {
                 // A single pass (pseudo-elements): resolve as it comes
-                style.customProperties = resolveCustomProperties(style.customProperties, {{property, value}});
+                style.customProperties = resolveCustomProperties(style.customProperties, {{property, value}}, &registered_);
             }
             continue;
         }

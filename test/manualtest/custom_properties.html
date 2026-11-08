@@ -29,6 +29,11 @@
   #h { --h: #008800 !important; background: var(--h); }
   /* I: case-sensitive names */
   #i { --Case: #008800; --case: var(--bad); background: var(--Case); }
+  /* L, M: @property initial values, and a property that doesn't inherit */
+  @property --reg-bg { syntax: "<color>"; inherits: false; initial-value: #008800; }
+  #l { background: var(--reg-bg); }
+  #m-parent { --reg-bg: #cc0000; }
+  #m { background: var(--reg-bg); }
   /* J: set from script */
   #j { background: var(--js, var(--bad)); }
 </style>
@@ -45,6 +50,8 @@
 <div class="box" id="i">I case-sensitive: green</div>
 <div class="box" id="j">J set from script: green</div>
 <div class="box" id="k" style="--inline: #008800; background: var(--inline)">K inline style variable: green</div>
+<div class="box" id="l">L @property initial value: green</div>
+<div id="m-parent"><div class="box" id="m">M @property inherits: false: green</div></div>
 <pre id="log"></pre>
 <script>
   document.getElementById('j').style.setProperty('--js', '#008800');
