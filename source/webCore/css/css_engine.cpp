@@ -245,16 +245,15 @@ std::unique_ptr<CSSMediaRule> CSSParser::parseMediaRule() {
 
 std::unique_ptr<CSSFontFaceRule> CSSParser::parseFontFaceRule() {
     auto rule = std::make_unique<CSSFontFaceRule>();
-    // Skip the block
-    if (match('{')) {
-        int depth = 1;
-        while (!eof() && depth > 0) {
-            if (peek() == '{') depth++;
-            if (peek() == '}') depth--;
-            if (depth > 0) consume();
-        }
-        if (peek() == '}') consume();
+    while (!eof() && peek() != '{' && peek() != ';') consume();  // @font-face has no prelude
+    if (peek() == ';') {
+        consume();
+        return nullptr;
     }
+    if (!match('{')) return nullptr;
+    parseDeclarations(rule->style());
+    if (peek() == '}') consume();
+    rule->updateDescriptors();
     return rule;
 }
 
@@ -509,6 +508,7 @@ void CSSParser::parseRulesInto(CSSStyleSheet* sheet, int depth) {
         if (rule && depth == 0 && rule->type() != CSSRuleType::Import) sawRule_ = true;
         if (rule && !mediaStack_.empty()) {
             if (auto* styleRule = dynamic_cast<CSSStyleRule*>(rule.get())) styleRule->setMedia(mediaStack_);
+            else if (auto* fontRule = dynamic_cast<CSSFontFaceRule*>(rule.get())) fontRule->setMedia(mediaStack_);
         }
         if (rule && sheet->cssRules()) {
             sheet->cssRules()->add(std::move(rule));
@@ -650,10 +650,29 @@ void CSSEngine::addSheetWithImports(const std::string& css, StyleOrigin origin, 
                 auto lists = media;
                 lists.insert(lists.end(), rule->media().begin(), rule->media().end());
                 rule->setMedia(lists);
+            } else if (auto* fontRule = dynamic_cast<CSSFontFaceRule*>(sheet->cssRules()->item(i))) {
+                auto lists = media;
+                lists.insert(lists.end(), fontRule->media().begin(), fontRule->media().end());
+                fontRule->setMedia(lists);
             }
         }
     }
     resolver_.addStyleSheet(std::move(sheet), origin);
+}
+
+std::vector<CSSEngine::WebFontFace> CSSEngine::fontFaces() const {
+    std::vector<WebFontFace> faces;
+    for (const auto& entry : resolver_.styleSheets()) {
+        CSSRuleList* rules = entry.sheet ? entry.sheet->cssRules() : nullptr;
+        if (!rules) continue;
+        std::string base = entry.sheet->href().empty() ? baseUrl_ : entry.sheet->href();
+        for (size_t i = 0; i < rules->length(); i++) {
+            auto* rule = dynamic_cast<CSSFontFaceRule*>(rules->item(i));
+            if (!rule || !rule->valid() || !rule->mediaMatches()) continue;
+            faces.push_back({rule->descriptors(), base, entry.origin});
+        }
+    }
+    return faces;
 }
 
 void CSSEngine::addStyleSheetFromUrl(const std::string& url, StyleOrigin origin) {

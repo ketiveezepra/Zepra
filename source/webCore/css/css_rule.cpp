@@ -36,7 +36,14 @@ void CSSMediaRule::setCssText(const std::string& text) {}
 // CSSFontFaceRule
 CSSFontFaceRule::CSSFontFaceRule() : style_(std::make_unique<CSSStyleDeclaration>()) {}
 CSSFontFaceRule::~CSSFontFaceRule() = default;
-std::string CSSFontFaceRule::cssText() const { return "@font-face { }"; }
+std::string CSSFontFaceRule::cssText() const {
+    std::string text = "@font-face { ";
+    for (size_t i = 0; i < style_->length(); i++) {
+        std::string name = style_->item(i);
+        text += name + ": " + style_->getPropertyValue(name) + "; ";
+    }
+    return text + "}";
+}
 void CSSFontFaceRule::setCssText(const std::string& text) {}
 
 // CSSKeyframesRule

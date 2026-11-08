@@ -9,6 +9,7 @@
 
 #include "css/css_style_declaration.hpp"
 #include "css/media_query.hpp"
+#include "css/font_face_descriptors.hpp"
 #include <string>
 #include <vector>
 #include <memory>
@@ -151,12 +152,28 @@ public:
 
     /// Font descriptors
     CSSStyleDeclaration* style() { return style_.get(); }
+    const CSSStyleDeclaration* style() const { return style_.get(); }
+
+    /// The descriptors parsed for loading; valid() is false when the rule
+    /// lacks a usable font-family or src, and then no font is loaded for it
+    const FontFaceDescriptors& descriptors() const { return descriptors_; }
+    bool valid() const { return valid_; }
+    /// Re-read descriptors() from style()
+    void updateDescriptors() { valid_ = parseFontFaceDescriptors(*style_, descriptors_); }
+
+    /// The @media blocks (and @import media) around the rule
+    const std::vector<std::shared_ptr<const MediaQueryList>>& media() const { return media_; }
+    void setMedia(std::vector<std::shared_ptr<const MediaQueryList>> media) { media_ = std::move(media); }
+    bool mediaMatches() const { return allMediaMatch(media_); }
 
     std::string cssText() const override;
     void setCssText(const std::string& text) override;
 
 private:
     std::unique_ptr<CSSStyleDeclaration> style_;
+    FontFaceDescriptors descriptors_;
+    bool valid_ = false;
+    std::vector<std::shared_ptr<const MediaQueryList>> media_;
 };
 
 /**
