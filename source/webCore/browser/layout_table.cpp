@@ -362,7 +362,7 @@ void intrinsicWidths(const LayoutBox& box, float& minW, float& maxW) {
         float h;
         imageSize(box, 0, minW, h);
         maxW = minW;
-    } else if (box.isInput) {
+    } else if (box.isInput || box.isSelect) {
         float w = fixedBorderBoxWidth(box, box.cssWidth);
         minW = maxW = w < 0 ? box.width : w;
     } else if (box.children.empty()) {

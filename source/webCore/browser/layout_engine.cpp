@@ -1155,8 +1155,8 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
             // Inline/Text/InlineBlock: flow horizontally with wrapping
             
             // Measure width/height
-            if (child.isInput) {
-                // Input defaults
+            if (child.isInput || child.isSelect) {
+                // Input defaults (form controls keep the size they were given)
                 if (child.width == 0) child.width = 200;
                 if (child.height == 0) child.height = std::max(24.0f, child.fontSize + 8);
             } else if (child.isImage) {
@@ -1755,6 +1755,19 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
     // Draw text content (a text field paints its own)
     if (paintTextField(box)) {
         // nothing more: its value, selection and caret are drawn
+    } else if (box.isSelect) {
+        float x0 = screenX + box.borderLeft + box.paddingLeft;
+        float x1 = screenX + box.width - box.borderRight - box.paddingRight;
+        float midY = screenY + box.height / 2;
+        if (s_push_clip) s_push_clip(x0, screenY, std::max(0.0f, x1 - x0), box.height);
+        if (s_text_render && !box.text.empty())
+            s_text_render(box.text, x0, midY + box.fontSize * 0.35f, box.color, box.fontSize);
+        if (s_pop_clip) s_pop_clip();
+        // The arrow: a small chevron in the padding on the right
+        float ax = screenX + box.width - box.borderRight - 13, ay = midY - 2;
+        if (s_gfx_rect) {
+            for (int row = 0; row < 4; row++) s_gfx_rect(ax + row, ay + row, 8.0f - 2 * row, 1.0f, box.color);
+        }
     } else if ((!box.text.empty() || !box.placeholder.empty()) && 
         (box.type == LayoutType::Text || box.type == LayoutType::Inline || 
          box.type == LayoutType::Block || box.type == LayoutType::InlineBlock ||

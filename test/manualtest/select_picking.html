@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Drop-down selects</title>
+<style>
+  body { font-family: sans-serif; background: #f4f5f7; color: #1d2330; margin: 16px; }
+  h1 { font-size: 20px; margin: 0 0 8px 0; }
+  p.hint { color: #556; font-size: 13px; margin: 0 0 12px 0; }
+  #log { font-family: monospace; font-size: 13px; color: #0b5cad; }
+</style>
+</head>
+<body>
+<h1>Drop-down selects</h1>
+<p class="hint">Click a select to open its list; click an option or use Up/Down and Enter; Escape closes.
+With the list closed, Up/Down and typing a letter change the choice; Space or Alt+Down opens it.</p>
+<form id="f">
+<p>Size: <select id="size" name="size">
+  <option value="s">Small</option>
+  <option value="m" selected>Medium</option>
+  <option value="x" disabled>Extra (sold out)</option>
+  <optgroup label="Big sizes"><option value="l">Large</option><option value="h">Huge</option></optgroup>
+</select></p>
+<p>Country (filled by script, long list): <select id="country" name="country"></select></p>
+<p><button type="reset">Reset</button> <button id="show" type="button">Show form data</button></p>
+</form>
+<div id="log">events appear here</div>
+<script>
+  var log = document.getElementById('log');
+  var country = document.getElementById('country');
+  ['Argentina', 'Brazil', 'Canada', 'Denmark', 'Egypt', 'France', 'Germany', 'Hungary', 'India', 'Japan',
+   'Kenya', 'Laos', 'Mexico', 'Norway', 'Oman', 'Peru', 'Qatar', 'Romania', 'Spain', 'Togo'].forEach(function (name) {
+    country.add(new Option(name, name.toLowerCase()));
+  });
+  country.value = 'india';
+  ['size', 'country'].forEach(function (id) {
+    var s = document.getElementById(id);
+    ['input', 'change'].forEach(function (type) {
+      s.addEventListener(type, function () {
+        log.textContent = type + ' on ' + id + ': ' + s.value + ' (index ' + s.selectedIndex + ')';
+      });
+    });
+  });
+  document.getElementById('show').addEventListener('click', function () {
+    var f = document.getElementById('f');
+    log.textContent = 'size=' + f.elements.size.value + ' country=' + f.elements.country.value;
+  });
+</script>
+</body>
+</html>
