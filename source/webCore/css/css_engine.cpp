@@ -380,8 +380,12 @@ void CSSParser::parseRulesInto(CSSStyleSheet* sheet, int depth) {
                 continue;  // end of input
             }
 
-            if (atWord == "layer" || atWord == "supports" || 
-                atWord == "theme" || atWord == "property") {
+            if (atWord == "property") {
+                parsePropertyRule(sheet);
+                continue;
+            }
+
+            if (atWord == "layer" || atWord == "supports" || atWord == "theme") {
                 // Skip name/condition
                 while (!eof() && peek() != '{' && peek() != ';') consume();
                 if (peek() == ';') {
@@ -411,6 +415,48 @@ void CSSParser::parseRulesInto(CSSStyleSheet* sheet, int depth) {
         // spins forever on the UI thread (a stray "{ ... }" with no selector did)
         if (pos_ == before) skipInvalidRule();
     }
+}
+
+// @property --name { syntax: "<length>"; inherits: false; initial-value: 0px; }
+// (CSS Properties and Values API 1, 3). An invalid rule is ignored.
+void CSSParser::parsePropertyRule(CSSStyleSheet* sheet) {
+    std::string name;
+    while (!eof() && peek() != '{' && peek() != ';') name += consume();
+    if (peek() == ';') { consume(); return; }
+    if (!match('{')) return;
+    CSSStyleDeclaration descriptors;
+    parseDeclarations(&descriptors);
+    if (peek() == '}') consume();
+
+    auto trimmed = [](std::string v) {
+        size_t b = v.find_first_not_of(" \t\r\n"), e = v.find_last_not_of(" \t\r\n");
+        return b == std::string::npos ? std::string() : v.substr(b, e - b + 1);
+    };
+    name = trimmed(name);
+    if (!isCustomPropertyName(name) || !sheet) return;
+    std::string syntax = trimmed(descriptors.getPropertyValue("syntax"));
+    if (syntax.size() >= 2 && (syntax.front() == '"' || syntax.front() == '\'') && syntax.back() == syntax.front()) {
+        syntax = trimmed(syntax.substr(1, syntax.size() - 2));
+    } else {
+        syntax.clear();  // the syntax descriptor is a string
+    }
+    std::string inherits = descriptors.getPropertyValue("inherits");
+    for (char& c : inherits) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    inherits = trimmed(inherits);
+    if (syntax.empty() || (inherits != "true" && inherits != "false")) return;
+
+    RegisteredCustomProperty reg;
+    reg.syntax = syntax;
+    reg.inherits = inherits == "true";
+    for (size_t i = 0; i < descriptors.length(); i++) {
+        if (descriptors.item(i) == "initial-value") {
+            reg.hasInitialValue = true;
+            reg.initialValue = trimmed(descriptors.getPropertyValue("initial-value"));
+        }
+    }
+    // Anything but the universal syntax needs a computationally independent initial value
+    if (syntax != "*" && (!reg.hasInitialValue || containsVarFunction(reg.initialValue))) return;
+    sheet->addPropertyRegistration(name, std::move(reg));
 }
 
 // Error recovery for an unreadable rule (CSS Syntax 3, "consume a qualified rule"):

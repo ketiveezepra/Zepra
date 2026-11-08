@@ -26,6 +26,15 @@ namespace Zepra::WebCore {
 /// Custom property name ("--x", case-sensitive) to its resolved value
 using CustomPropertyMap = std::map<std::string, std::string>;
 
+/// A custom property registered with @property (CSS Properties and Values API)
+struct RegisteredCustomProperty {
+    std::string syntax = "*";
+    bool inherits = true;
+    bool hasInitialValue = false;
+    std::string initialValue;
+};
+using RegisteredPropertyMap = std::map<std::string, RegisteredCustomProperty>;
+
 /// True for a custom property name: "--" followed by at least one character
 bool isCustomPropertyName(const std::string& name);
 
@@ -46,9 +55,14 @@ bool substituteVarFunctions(const std::string& value, const CustomPropertyMap& v
  * work (initial removes the property; inherit/unset keep the parent's).
  * Properties in a dependency cycle, or whose var() can't be resolved,
  * become guaranteed-invalid (removed).
+ *
+ * With `registered` properties: a property that doesn't inherit starts from
+ * its initial value instead of the parent's, a registered property with no
+ * value takes its initial value, and an invalid value behaves as unset.
  */
 std::shared_ptr<const CustomPropertyMap> resolveCustomProperties(
     const std::shared_ptr<const CustomPropertyMap>& inherited,
-    const CustomPropertyMap& declared);
+    const CustomPropertyMap& declared,
+    const RegisteredPropertyMap* registered = nullptr);
 
 }  // namespace Zepra::WebCore

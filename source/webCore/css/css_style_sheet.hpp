@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <utility>
+#include "css/custom_properties.hpp"
 
 namespace Zepra::WebCore {
 
@@ -123,9 +125,18 @@ public:
     /// Parse and set content
     void parseContent(const std::string& cssText);
 
+    /// The sheet's valid @property rules, in source order
+    const std::vector<std::pair<std::string, RegisteredCustomProperty>>& propertyRegistrations() const {
+        return propertyRegistrations_;
+    }
+    void addPropertyRegistration(std::string name, RegisteredCustomProperty reg) {
+        propertyRegistrations_.emplace_back(std::move(name), std::move(reg));
+    }
+
 private:
     CSSRule* ownerRule_ = nullptr;
     std::unique_ptr<CSSRuleList> cssRules_;
+    std::vector<std::pair<std::string, RegisteredCustomProperty>> propertyRegistrations_;
 };
 
 /**

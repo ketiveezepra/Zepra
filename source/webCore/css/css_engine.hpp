@@ -236,6 +236,7 @@ private:
     enum class Pass { All, CustomOnly, SkipCustom };
     Pass pass_ = Pass::All;
     CustomPropertyMap* declaredCustom_ = nullptr;  // the custom pass's winners
+    RegisteredPropertyMap registered_;             // @property rules of every sheet
 
     std::vector<StyleSheetEntry> stylesheets_;
     std::unordered_map<DOMElement*, CSSComputedStyle> styleCache_;
@@ -289,6 +290,7 @@ private:
     std::unique_ptr<CSSImportRule> parseImportRule();
     void parseRulesInto(CSSStyleSheet* sheet, int depth);
     void skipInvalidRule();
+    void parsePropertyRule(CSSStyleSheet* sheet);
 
     std::string parseSelector_();
     std::string parseDeclarationBlock();
