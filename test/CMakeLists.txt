@@ -218,6 +218,14 @@ if(TARGET webcore)
     endif()
     add_test(NAME WebCoreCustomPropertyTests COMMAND webcore_custom_property_tests)
 
+    # Web fonts: Zepra's own inflate (DEFLATE/zlib/gzip) and WOFF unpacking
+    add_executable(webcore_web_font_decoder_tests webcore_web_font_decoder_tests.cpp)
+    target_link_libraries(webcore_web_font_decoder_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(webcore_web_font_decoder_tests pthread)
+    endif()
+    add_test(NAME WebCoreWebFontDecoderTests COMMAND webcore_web_font_decoder_tests)
+
     # :hover / :active / :focus forced by DevTools, alongside the real interaction state
     add_executable(webcore_forced_pseudo_tests webcore_forced_pseudo_tests.cpp)
     target_link_libraries(webcore_forced_pseudo_tests webcore GTest::gtest GTest::gtest_main)
