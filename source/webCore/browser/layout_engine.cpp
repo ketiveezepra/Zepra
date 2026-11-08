@@ -1664,6 +1664,11 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
     // Save for hit testing
     box.screenX = screenX;
     box.screenY = screenY;
+
+    // border-radius: 50% and the like: a percentage of the box (of its
+    // smaller side, as corners here are circular)
+    if (box.borderRadiusPercent > 0)
+        box.borderRadius = std::min(box.width, box.height) * std::min(box.borderRadiusPercent, 50.0f) / 100.0f;
     
     // Skip if off-screen (culling)
     if (screenY + box.height < 0 || screenY > viewportHeight) {

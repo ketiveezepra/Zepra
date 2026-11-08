@@ -637,13 +637,19 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     else if (property == "border-bottom-color") { style.borderBottomColor = parseColor(value); }
     else if (property == "border-left-color") { style.borderLeftColor = parseColor(value); }
     else if (property == "border-radius") {
-        CSSLength len = parseLength(value);
-        float px = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        // The first value (a percentage of the box is resolved when painting)
+        auto parts = splitValues(value);
+        CSSLength len = parseLength(parts.empty() ? value : parts[0]);
+        float px = len.unit == CSSLength::Unit::Percent ? 0 : len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
         style.borderTopLeftRadius = px; style.borderTopRightRadius = px;
         style.borderBottomRightRadius = px; style.borderBottomLeftRadius = px;
+        style.borderTopLeftRadiusPercent = len.unit == CSSLength::Unit::Percent ? len.value : 0;
     }
     else if (property == "border-top-left-radius") {
-        style.borderTopLeftRadius = parseLength(value).toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        CSSLength len = parseLength(value);
+        bool percent = len.unit == CSSLength::Unit::Percent;
+        style.borderTopLeftRadius = percent ? 0 : len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        style.borderTopLeftRadiusPercent = percent ? len.value : 0;
     }
     else if (property == "border-top-right-radius") {
         style.borderTopRightRadius = parseLength(value).toPx(style.fontSize, 16.0f, 1920, 1080, 0);

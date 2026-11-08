@@ -287,3 +287,10 @@ TEST(ComputedStyle, WithoutAStyleSourceValuesAreEmpty) {
                         "JSON.stringify([cs.width, cs.getPropertyValue('color'), cs.length])"),
               "[\"\",\"\",0]");
 }
+
+TEST(ComputedStyle, PercentageBorderRadiusIsKept) {
+    Page page(kPage);
+    page.eval("var box = document.getElementById('box'); var cs = getComputedStyle(box)");
+    EXPECT_EQ(page.eval("box.style.borderRadius = '50%'; cs.borderRadius"), "50%");
+    EXPECT_EQ(page.eval("box.style.borderRadius = '8px'; cs.borderRadius"), "8px");
+}
