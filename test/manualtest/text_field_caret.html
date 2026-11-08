@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Caret and selection in fields</title>
+<style>
+  body { font-family: sans-serif; background: #f4f5f7; color: #1d2330; margin: 16px; }
+  h1 { font-size: 20px; margin: 0 0 8px 0; }
+  p.hint { color: #556; font-size: 13px; margin: 0 0 12px 0; }
+  #sel { font-family: monospace; color: #0b5cad; margin: 8px 0; }
+</style>
+</head>
+<body>
+<h1>Caret and selection in fields</h1>
+<p class="hint">Click inside the text to put the caret there, drag to select. Arrows, Home/End, Shift to select,
+Ctrl+Left/Right by words, Ctrl+A, Backspace/Delete (Ctrl: a word). Up/Down move lines in the textarea.</p>
+<p><input id="q" value="hello world, click between the words"></p>
+<p><input id="long" value="a long value that does not fit: the field scrolls to keep the caret in view while you type"></p>
+<p><textarea id="t" rows="4">first line
+second line
+third line, longer than the others</textarea></p>
+<p><button id="wrap">Wrap the selection in [ ]</button> <button id="pick">Select "world"</button></p>
+<div id="sel">selection: </div>
+<script>
+  var sel = document.getElementById('sel');
+  var last = null;
+  function show(field) {
+    last = field;
+    sel.textContent = 'selection: ' + field.id + ' ' + field.selectionStart + '-' + field.selectionEnd +
+        ' "' + field.value.substring(field.selectionStart, field.selectionEnd) + '"';
+  }
+  ['q', 'long', 't'].forEach(function (id) {
+    var f = document.getElementById(id);
+    ['keyup', 'mouseup', 'input', 'focus'].forEach(function (type) {
+      f.addEventListener(type, function () { show(f); });
+    });
+  });
+  // Buttons take focus on the press: remember the field and its selection
+  document.getElementById('wrap').addEventListener('click', function () {
+    if (!last) return;
+    var text = last.value.substring(last.selectionStart, last.selectionEnd);
+    last.setRangeText('[' + text + ']', last.selectionStart, last.selectionEnd, 'select');
+    last.focus();
+    show(last);
+  });
+  document.getElementById('pick').addEventListener('click', function () {
+    var q = document.getElementById('q');
+    q.focus();
+    q.setSelectionRange(6, 11);
+    show(q);
+  });
+</script>
+</body>
+</html>

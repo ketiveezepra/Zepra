@@ -130,6 +130,16 @@ std::string argString(const FunctionCallInfo& info, size_t index) {
     return info.argument(index).toString();
 }
 
+/// WebIDL unsigned long: NaN and infinities are 0, the rest truncate and
+/// wrap modulo 2^32
+size_t unsignedLong(const Value& value) {
+    double n = value.toNumber();
+    if (!std::isfinite(n)) return 0;
+    double wrapped = std::fmod(std::trunc(n), 4294967296.0);
+    if (wrapped < 0) wrapped += 4294967296.0;
+    return static_cast<size_t>(wrapped);
+}
+
 bool isFunction(const Value& v) { return v.isObject() && v.asObject()->isFunction(); }
 
 /// Throws a DOMException-like error: an Error whose name is `name`
@@ -1952,17 +1962,104 @@ void DOMBindings::installForms() {
             return owner ? wrap(owner) : Value::null();
         }));
     }
-    // The text selection is the end of the value (no caret position yet)
+    // The text selection: selectionStart/End/Direction, select(),
+    // setSelectionRange() and setRangeText(), indexed as page strings are
+    auto noSelection = [this](const char* what) {
+        throwDOMException("InvalidStateError", std::string("Failed to execute '") + what +
+                                                   "': The input element's type does not support selection.");
+    };
+    auto direction = [](const TextSelection& s) { return str(s.backward ? "backward" : "forward"); };
     for (const char* tag : {"input", "textarea"}) {
         Object* proto = tagInterfaces_[tag].second;
-        for (const char* name : {"selectionStart", "selectionEnd"}) {
-            accessor(proto, name, on<DOMElement>(name, [](DOMElement& e, const Info&) {
-                return Value::number(static_cast<double>(formControlValue(&e).size()));
-            }), on<DOMElement>(name, [](DOMElement&, const Info&) { return Value::undefined(); }));
-        }
-        for (const char* name : {"select", "setSelectionRange", "setRangeText"}) {
-            method(proto, name, 0, on<DOMElement>(name, [](DOMElement&, const Info&) { return Value::undefined(); }));
-        }
+        accessor(proto, "selectionStart",
+            on<DOMElement>("selectionStart", [](DOMElement& e, const Info&) {
+                if (!supportsTextSelection(&e)) return Value::null();
+                return Value::number(static_cast<double>(formControlSelection(&e).start));
+            }),
+            on<DOMElement>("selectionStart", [noSelection](DOMElement& e, const Info& info) {
+                if (!supportsTextSelection(&e)) noSelection("selectionStart");
+                TextSelection s = formControlSelection(&e);
+                size_t start = unsignedLong(info.argument(0));
+                setFormControlSelection(&e, start, std::max(start, s.end), s.backward);
+                return Value::undefined();
+            }));
+        accessor(proto, "selectionEnd",
+            on<DOMElement>("selectionEnd", [](DOMElement& e, const Info&) {
+                if (!supportsTextSelection(&e)) return Value::null();
+                return Value::number(static_cast<double>(formControlSelection(&e).end));
+            }),
+            on<DOMElement>("selectionEnd", [noSelection](DOMElement& e, const Info& info) {
+                if (!supportsTextSelection(&e)) noSelection("selectionEnd");
+                TextSelection s = formControlSelection(&e);
+                size_t end = unsignedLong(info.argument(0));
+                setFormControlSelection(&e, std::min(s.start, end), end, s.backward);
+                return Value::undefined();
+            }));
+        accessor(proto, "selectionDirection",
+            on<DOMElement>("selectionDirection", [direction](DOMElement& e, const Info&) {
+                if (!supportsTextSelection(&e)) return Value::null();
+                return direction(formControlSelection(&e));
+            }),
+            on<DOMElement>("selectionDirection", [noSelection](DOMElement& e, const Info& info) {
+                if (!supportsTextSelection(&e)) noSelection("selectionDirection");
+                TextSelection s = formControlSelection(&e);
+                setFormControlSelection(&e, s.start, s.end, info.argument(0).toString() == "backward");
+                return Value::undefined();
+            }));
+        // select() also selects an email or number field's text
+        method(proto, "select", 0, on<DOMElement>("select", [](DOMElement& e, const Info&) {
+            if (isTextControl(&e)) setFormControlSelection(&e, 0, formControlValue(&e).size());
+            return Value::undefined();
+        }));
+        method(proto, "setSelectionRange", 2, on<DOMElement>("setSelectionRange", [noSelection](DOMElement& e, const Info& info) {
+            if (!supportsTextSelection(&e)) noSelection("setSelectionRange");
+            size_t start = unsignedLong(info.argument(0)), end = unsignedLong(info.argument(1));
+            bool backward = info.argumentCount() > 2 && info.argument(2).toString() == "backward";
+            setFormControlSelection(&e, std::min(start, end), end, backward);
+            return Value::undefined();
+        }));
+        method(proto, "setRangeText", 1, on<DOMElement>("setRangeText", [this, noSelection](DOMElement& e, const Info& info) {
+            if (!supportsTextSelection(&e)) noSelection("setRangeText");
+            std::string replacement = argString(info, 0);
+            std::string value = formControlValue(&e);
+            TextSelection old = formControlSelection(&e);
+            size_t start = old.start, end = old.end;
+            std::string mode = "preserve";
+            if (info.argumentCount() >= 3) {
+                start = unsignedLong(info.argument(1));
+                end = unsignedLong(info.argument(2));
+                if (start > end) {
+                    throwDOMException("IndexSizeError", "Failed to execute 'setRangeText': The provided start value (" +
+                                                            std::to_string(start) + ") is larger than the provided end value (" +
+                                                            std::to_string(end) + ").");
+                }
+                if (info.argumentCount() > 3 && !info.argument(3).isUndefined()) mode = info.argument(3).toString();
+            }
+            start = characterBoundary(value, std::min(start, value.size()));
+            end = characterBoundary(value, std::min(end, value.size()));
+            replaceFormControlText(&e, start, end, replacement);
+            // Like a value set by script: no change event for it
+            if (focusedElement() == &e) valueAtFocus_ = formControlValue(&e);
+            noteDomMutation();
+            size_t newEnd = start + replacement.size();
+            if (mode == "select") {
+                setFormControlSelection(&e, start, newEnd);
+            } else if (mode == "start") {
+                setFormControlSelection(&e, start, start);
+            } else if (mode == "end") {
+                setFormControlSelection(&e, newEnd, newEnd);
+            } else {
+                // preserve: offsets after the range shift with it, ones inside it
+                // go to its edges
+                long delta = static_cast<long>(replacement.size()) - static_cast<long>(end - start);
+                auto keep = [&](size_t offset, size_t inside) {
+                    if (offset > end) return static_cast<size_t>(static_cast<long>(offset) + delta);
+                    return offset > start ? inside : offset;
+                };
+                setFormControlSelection(&e, keep(old.start, start), keep(old.end, newEnd), old.backward);
+            }
+            return Value::undefined();
+        }));
     }
 }
 

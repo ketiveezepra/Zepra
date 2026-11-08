@@ -372,6 +372,13 @@ void setLayoutCallbacks2(
 /// (intersected with any enclosing clip). Used for background-image tiles.
 void setLayoutClipCallbacks(void (*push_clip)(float x, float y, float w, float h), void (*pop_clip)());
 
+/// The text field with keyboard focus (null: none), whose selection and
+/// caret are painted; `caretVisible` blinks the caret
+void setFocusedTextField(const Zepra::WebCore::DOMElement* field, bool caretVisible);
+/// The offset in a text field's value nearest to the screen point (x, y),
+/// for placing the caret with a click; the box must have been painted
+size_t textFieldOffsetAt(const LayoutBox& box, float x, float y);
+
 /// The URL inside the first url(...) of a CSS value ("" when there is none)
 std::string cssUrl(const std::string& value);
 

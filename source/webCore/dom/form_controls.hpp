@@ -46,9 +46,37 @@ DOMElement* focusableSelfOrAncestor(DOMElement* element);
 /// value attribute (a textarea: its text; a select: its selected option's
 /// value; a checkbox or radio without a value attribute: "on")
 std::string formControlValue(const DOMElement* element);
-/// Sets the value the control holds without touching its attributes. The
-/// caller decides whether the page must be laid out again.
+/// Sets the value the control holds without touching its attributes; a new
+/// value puts the caret at its end. The caller decides whether the page must
+/// be laid out again.
 void setFormControlValue(DOMElement* element, const std::string& value);
+/// A control whose text a user or script can select: a <textarea>, or an
+/// <input> of type text, search, url, tel or password (selectionStart is
+/// null on the others)
+bool supportsTextSelection(const DOMElement* element);
+
+/// A text control's selection, as byte offsets into its value (which is
+/// also how page scripts index strings); start <= end, and the caret is
+/// the end the user moves (start when `backward`)
+struct TextSelection {
+    size_t start = 0;
+    size_t end = 0;
+    bool backward = false;
+    size_t caret() const { return backward ? start : end; }
+    size_t anchor() const { return backward ? end : start; }
+    bool collapsed() const { return start == end; }
+};
+/// The selection, kept inside the value and on character boundaries; the
+/// end of the value until something placed it
+TextSelection formControlSelection(const DOMElement* element);
+/// Selects [start, end) (swapped when end < start), clamped as above
+void setFormControlSelection(DOMElement* element, size_t start, size_t end, bool backward = false);
+/// Selects from `anchor` to `caret`, whichever comes first
+void setFormControlCaret(DOMElement* element, size_t anchor, size_t caret);
+/// Puts `text` in place of [start, end) of the value and leaves the caret
+/// after it (no events: the caller fires them)
+void replaceFormControlText(DOMElement* element, size_t start, size_t end, const std::string& text);
+
 /// A checkbox's or radio's checkedness (the checked attribute until a click
 /// or a script set it)
 bool formControlChecked(const DOMElement* element);
@@ -104,5 +132,11 @@ std::string formSubmissionUrl(const std::string& actionUrl, const std::string& b
 
 /// Removes the last character (UTF-8 sequence) of `text`; false when empty
 bool eraseLastCharacter(std::string& text);
+/// The offset of the character boundary before / after `offset` in `text`
+/// (a UTF-8 sequence is one step); stays put at either end
+size_t previousCharacter(const std::string& text, size_t offset);
+size_t nextCharacter(const std::string& text, size_t offset);
+/// `offset` moved back to the start of the character it falls inside
+size_t characterBoundary(const std::string& text, size_t offset);
 
 } // namespace Zepra::WebCore

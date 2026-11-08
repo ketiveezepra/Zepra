@@ -381,6 +381,8 @@ zepra::DownloadManager g_downloadManager;
 // Focus state
 using ZepraBrowser::LayoutBox;
 static LayoutBox* g_focusedBox = nullptr;
+static void markFocusedTextField();
+static void placeCaretAt(float mx, float my);
 // The focus the current styles were computed with (:focus restyles on change)
 static DOMElement* g_styledFocus = nullptr;
 // A form submission waiting for the end of the script task that made it
@@ -2035,7 +2037,12 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     // Display value or placeholder
                     std::string value = Zepra::WebCore::formControlValue(childElement);
                     if (inputType == "password" && !value.empty()) {
-                        value = std::string(value.size(), '\xe2\x80\xa2'); // bullet dots
+                        // A bullet per character
+                        std::string dots;
+                        for (char c : value) {
+                            if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) dots += "\u2022";
+                        }
+                        value = dots;
                     }
                     inputBox->text = value;
                     inputBox->placeholder = childElement->getAttribute("placeholder");
@@ -4076,6 +4083,7 @@ void render() {
         for (const auto& tab : g_tabs) {
             if (tab.id == g_activeTabId) { scrollY = tab.scrollY; break; }
         }
+        markFocusedTextField();
         ZepraBrowser::paintBox(*g_layoutRoot, contentX, contentY, contentY + contentH, scrollY);
         g_layoutPainted = true;
         for (const auto& hitBox : g_linkHitBoxes) {
@@ -4119,6 +4127,7 @@ void render() {
                     }
                 }
                 PageFrame frame = pageFrame();
+                markFocusedTextField();
                 ZepraBrowser::paintBox(*g_layoutRoot, contentX + frame.originX, contentY + frame.originY, maxY, scrollY);
                 g_layoutPainted = true;
                 
@@ -4966,6 +4975,7 @@ void handleClick(float mx, float my) {
         // tree that was never painted: place it for the hit-tests below
         placeUnpaintedBoxes();
         syncPageFocus();
+        placeCaretAt(mx, my);
         // The click, and the link it may follow, wait for the release
         g_pagePress = {true, mx, my};
     }
@@ -4991,6 +5001,13 @@ void handleClick(float mx, float my) {
 
 // NXRender KeyCode
 using NXRender::KeyCode;
+
+static void syncBrowserTypedField(const std::string* buffer) {
+    if (buffer && g_focusedBox && buffer == &g_focusedBox->text && g_focusedBox->domElement &&
+        Zepra::WebCore::isTextControl(g_focusedBox->domElement)) {
+        Zepra::WebCore::setFormControlValue(g_focusedBox->domElement, *buffer);
+    }
+}
 
 void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, bool shift,
                     bool alt = false, bool meta = false, bool repeat = false) {
@@ -5062,6 +5079,7 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
                 } else if (g_focusedBox) {
                     g_focusedBox->text += clipboardText;
                 }
+                if (g_focusedBox && !g_addressFocused) syncBrowserTypedField(&g_focusedBox->text);
             }
             return;
         } else if (key == NXRender::KeyCode::T) {
@@ -5132,6 +5150,9 @@ void handleKeyPress(NXRender::KeyCode key, const std::string& text, bool ctrl, b
             *activeInput += " ";
         }
     }
+    // A field the browser types into itself (a page without scripts, the
+    // start page's search box) keeps its value in the DOM, which paints it
+    syncBrowserTypedField(activeInput);
     // Global shortcuts (when no input focused)
     if (ctrl && key == KeyCode::T) {
         onNewTab();
@@ -5407,6 +5428,58 @@ static void syncPageFocus() {
     }
 }
 
+// A press in a text field places the caret there; dragging with the button
+// held selects from that point
+struct FieldDrag {
+    DOMElement* field = nullptr;
+    size_t anchor = 0;
+};
+static FieldDrag g_fieldDrag;
+
+static LayoutBox* focusedTextFieldBox() {
+    DOMElement* focused = pageFocusedElement();
+    if (!g_layoutRoot || !Zepra::WebCore::isTextControl(focused)) return nullptr;
+    LayoutBox* box = findBoxForElement(g_layoutRoot.get(), focused);
+    return box && box->isInput ? box : nullptr;
+}
+
+static void placeCaretAt(float mx, float my) {
+    g_fieldDrag = {};
+    LayoutBox* box = focusedTextFieldBox();
+    if (!box || mx < box->screenX || mx > box->screenX + box->width || my < box->screenY ||
+        my > box->screenY + box->height) return;
+    size_t offset = ZepraBrowser::textFieldOffsetAt(*box, mx, my);
+    Zepra::WebCore::setFormControlSelection(box->domElement, offset, offset);
+    g_fieldDrag = {box->domElement, offset};
+}
+
+static void dragCaretTo(float mx, float my) {
+    LayoutBox* box = focusedTextFieldBox();
+    if (!box || box->domElement != g_fieldDrag.field) return;
+    Zepra::WebCore::setFormControlCaret(box->domElement, g_fieldDrag.anchor,
+                                        ZepraBrowser::textFieldOffsetAt(*box, mx, my));
+}
+
+// Tells the painter which field shows the caret. The caret blinks, and stays
+// lit for a moment after each edit or move so it is easy to follow.
+static void markFocusedTextField() {
+    static const DOMElement* lastField = nullptr;
+    static std::string lastState;
+    static int blink = 0;
+    DOMElement* focused = (g_addressFocused || g_devTools.textInputFocused()) ? nullptr : pageFocusedElement();
+    if (!Zepra::WebCore::isTextControl(focused)) focused = nullptr;
+    std::string state;
+    if (focused) {
+        Zepra::WebCore::TextSelection selection = Zepra::WebCore::formControlSelection(focused);
+        state = std::to_string(selection.start) + ":" + std::to_string(selection.end) + ":" +
+                Zepra::WebCore::formControlValue(focused);
+    }
+    if (focused != lastField || state != lastState) blink = 0;
+    lastField = focused;
+    lastState = state;
+    ZepraBrowser::setFocusedTextField(focused, (blink++ / 30) % 2 == 0);
+}
+
 void handleNXEvent(const NXRender::Event& event) {
     if (event.type == NXRender::EventType::Close) {
         g_running = false;
@@ -5459,6 +5532,7 @@ void handleNXEvent(const NXRender::Event& event) {
                      g_scriptContext->mouseMove(hovered, x - getSidebarOffset(), y - TOPBAR_HEIGHT, g_mouseDown);
                      placeUnpaintedBoxes();
                  }
+                 if (g_mouseDown && g_fieldDrag.field) dragCaretTo(x, y);
                  if (g_devTools.pickerActive()) g_devTools.pickerHover(hovered);
              }
 
@@ -5518,6 +5592,7 @@ void handleNXEvent(const NXRender::Event& event) {
                  g_devTools.onMouseUp(x, y);
                  ::g_mouseHandler.handleLeftRelease(x, y); 
                  g_mouseDown = false;
+                 g_fieldDrag = {};
                  // The page press ends: mouseup, then the click where press and
                  // release meet, then the link it was on unless a listener
                  // canceled the click
