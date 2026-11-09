@@ -328,6 +328,13 @@ public:
     /** ToPrimitive: objects run valueOf()/toString() (toString first when `preferString`). */
     Value toPrimitiveValue(const Value& value, bool preferString) { return toPrimitive(value, preferString); }
 
+    // new Function(...) / eval: allowed unless the embedder turns them off
+    // (the equivalent of a CSP without 'unsafe-eval')
+    bool codeGenerationFromStringsAllowed() const { return codeGenerationFromStrings_; }
+    void setCodeGenerationFromStringsAllowed(bool allowed) { codeGenerationFromStrings_ = allowed; }
+    // Keeps a chunk compiled at run time alive for the functions it created
+    void retainChunk(std::unique_ptr<Bytecode::BytecodeChunk> chunk);
+
     /**
      * @brief Calls `each` with every value `iterable` yields (arrays, strings,
      * Map and Set, or any object with [Symbol.iterator]); `each` returns false
@@ -492,6 +499,7 @@ private:
 
     // Conversions that may run script (valueOf/toString)
     Value toPrimitive(const Value& value, bool preferString);
+    Value toPrimitiveWithHint(const Value& value, const char* hint);
     void toPrimitiveOperands(Value& a, Value& b);
 
     // Exceptions
@@ -579,6 +587,8 @@ private:
     // Exception handling
     std::vector<ExceptionHandler> exceptionHandlers_;
     Value exceptionValue_;
+    bool codeGenerationFromStrings_ = true;
+    std::vector<std::unique_ptr<Bytecode::BytecodeChunk>> retainedChunks_;
     bool hasException_ = false;
     size_t runDepth_ = 0;  // Nesting of run(): callbacks and generators run inside builtins
     

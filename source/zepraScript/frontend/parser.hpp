@@ -174,6 +174,26 @@ private:
     // Token offsets where an arrow function was tried and ruled out
     std::unordered_set<uint32_t> notArrowAt_;
 
+    // Class private names (#x). Each class body gets a scope with a unique id;
+    // `#x` declared in it becomes the reserved property key
+    // "@@private:<id>:x" (hidden from enumeration, unreachable from source
+    // text). References are patched when the class body ends, so methods can
+    // use names declared later and nested classes can use outer names.
+    struct PrivateScope {
+        uint32_t id;
+        std::unordered_set<std::string> declared;
+        std::vector<std::pair<std::string, IdentifierExpr*>> identRefs;
+        std::vector<std::pair<std::string, LiteralExpr*>> literalRefs;
+    };
+    std::vector<PrivateScope> privateScopes_;
+    static std::string privateKey(uint32_t scopeId, const std::string& name);
+    ExprPtr privateNameDeclaration(const Token& token);
+    ExprPtr privateNameReference(const Token& token);  // obj.#x
+    ExprPtr privateNameInOperand(const Token& token);  // #x in obj
+    void resolvePrivateScope();
+    // True when a line terminator separates the previous and the current token
+    bool newlineBeforeCurrent() const { return previousToken_.end.line < currentToken_.start.line; }
+
     // Labeled statement: `label: statement`
     StmtPtr parseLabeledStatement(const std::string& label);
     

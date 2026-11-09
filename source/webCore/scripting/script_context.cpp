@@ -505,9 +505,12 @@ void ScriptContext::processTimers() {
         }
         if (callback) callback();
     }
+    runMessageTasks();
 }
 
 void ScriptContext::runAnimationFrames() {
+    // Intersection/resize observations are taken once per frame
+    deliverObservations();
     if (animationFrameQueue_.empty()) return;
     const double timestampMs = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now().time_since_epoch()).count() - timeOriginMs_;
@@ -962,36 +965,8 @@ void ScriptContext::setupWindowGlobals() {
     
     // MutationObserver is live (scripting/mutation_observer.cpp, set up by DOMBindings)
 
-    // IntersectionObserver — lazy loading, viewport detection
-    auto* intObsCtor = createNativeFunction("IntersectionObserver",
-        [](Context*, const std::vector<Value>&) -> Value {
-            auto* obs = new Object();
-            obs->set("observe", Value::object(createNativeFunction("observe",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            obs->set("unobserve", Value::object(createNativeFunction("unobserve",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            obs->set("disconnect", Value::object(createNativeFunction("disconnect",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 0)));
-            return Value::object(obs);
-        }, 1);
-    vm_->setGlobal("IntersectionObserver", Value::object(intObsCtor));
-    windowObj->set("IntersectionObserver", Value::object(intObsCtor));
-    
-    // ResizeObserver — responsive components
-    auto* resObsCtor = createNativeFunction("ResizeObserver",
-        [](Context*, const std::vector<Value>&) -> Value {
-            auto* obs = new Object();
-            obs->set("observe", Value::object(createNativeFunction("observe",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            obs->set("unobserve", Value::object(createNativeFunction("unobserve",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            obs->set("disconnect", Value::object(createNativeFunction("disconnect",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 0)));
-            return Value::object(obs);
-        }, 1);
-    vm_->setGlobal("ResizeObserver", Value::object(resObsCtor));
-    windowObj->set("ResizeObserver", Value::object(resObsCtor));
-    
+    // IntersectionObserver, ResizeObserver, MessageChannel: installWebTaskApis()
+
     // fetch(), XMLHttpRequest and Headers (fetch_bindings.cpp)
     setupFetchGlobals(windowObj);
     
@@ -1063,7 +1038,303 @@ void ScriptContext::setupWindowGlobals() {
     // DataTransfer (drag and drop events carry one)
     setupDragAndDrop(windowObj);
 
+    installWebTaskApis(windowObj);
+
     std::cout << "[ScriptContext] Window globals registered (alert, console, setTimeout, navigator, location, JSON, localStorage, history)" << std::endl;
+}
+
+namespace {
+
+// MessageChannel/MessagePort, window.postMessage, IntersectionObserver and
+// ResizeObserver, written in script on two native hooks:
+//  - __zepraPostTask(fn) queues fn as a task (drained by processTimers()
+//    within a time budget, so a scheduler that posts itself a message per
+//    slice, like React's, gets several slices per frame, unclamped)
+//  - __zepraDeliverObservations() is called by runAnimationFrames() every
+//    frame: observers measure their targets with getBoundingClientRect()
+//    against the viewport (or their root) and call back on changes. A newly
+//    observed target is always reported on the next frame (IO: whether it
+//    intersects; RO: its size), as the specs' initial observation requires.
+const char* const kWebTaskApis = R"JS(
+var MessagePort, MessageChannel, IntersectionObserver, IntersectionObserverEntry, ResizeObserver, ResizeObserverEntry;
+(function () {
+  var post = __zepraPostTask;
+  var clone = function (d) { try { return structuredClone(d); } catch (e) { return d; } };
+
+  MessagePort = function MessagePort() {
+    this.__other = null; this.__listeners = []; this.__started = false;
+    this.__queue = []; this.__onmessage = null; this.__closed = false;
+  };
+  Object.defineProperty(MessagePort.prototype, 'onmessage', {
+    get: function () { return this.__onmessage; },
+    set: function (f) { this.__onmessage = f; this.start(); },
+    configurable: true
+  });
+  MessagePort.prototype.postMessage = function (data) {
+    var target = this.__other;
+    if (!target || this.__closed) return;
+    var payload = clone(data);
+    post(function () { target.__deliver(payload); });
+  };
+  MessagePort.prototype.__deliver = function (data) {
+    if (this.__closed) return;
+    if (!this.__started) { this.__queue.push(data); return; }
+    var ev;
+    try { ev = new MessageEvent('message'); } catch (e) { ev = { type: 'message' }; }
+    try { Object.defineProperty(ev, 'data', { value: data, configurable: true }); } catch (e) { ev.data = data; }
+    ev.ports = []; ev.origin = ''; ev.lastEventId = ''; ev.source = null;
+    if (typeof this.__onmessage === 'function') this.__onmessage.call(this, ev);
+    var listeners = this.__listeners.slice();
+    for (var i = 0; i < listeners.length; i++) {
+      var l = listeners[i];
+      if (typeof l === 'function') l.call(this, ev);
+      else if (l && typeof l.handleEvent === 'function') l.handleEvent(ev);
+    }
+  };
+  MessagePort.prototype.start = function () {
+    if (this.__started) return;
+    this.__started = true;
+    var queued = this.__queue, self = this;
+    this.__queue = [];
+    queued.forEach(function (d) { post(function () { self.__deliver(d); }); });
+  };
+  MessagePort.prototype.close = function () { this.__closed = true; };
+  MessagePort.prototype.addEventListener = function (type, l) {
+    if (type === 'message' && l && this.__listeners.indexOf(l) < 0) this.__listeners.push(l);
+  };
+  MessagePort.prototype.removeEventListener = function (type, l) {
+    var i = this.__listeners.indexOf(l);
+    if (i >= 0) this.__listeners.splice(i, 1);
+  };
+  MessagePort.prototype.dispatchEvent = function () { return true; };
+
+  MessageChannel = function MessageChannel() {
+    var a = new MessagePort(), b = new MessagePort();
+    a.__other = b; b.__other = a;
+    this.port1 = a; this.port2 = b;
+  };
+
+  if (typeof window.postMessage !== 'function') {
+    window.postMessage = function (message) {
+      var data = clone(message);
+      post(function () {
+        var ev;
+        try { ev = new MessageEvent('message'); } catch (e) { return; }
+        try { Object.defineProperty(ev, 'data', { value: data, configurable: true }); } catch (e) { ev.data = data; }
+        ev.origin = (typeof location !== 'undefined' && location.origin) || '';
+        ev.source = window;
+        window.dispatchEvent(ev);
+      });
+    };
+  }
+
+  // ---- observers ----
+  var observers = [];
+  var now = function () { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); };
+  var report = function (e) { setTimeout(function () { throw e; }, 0); };
+  var register = function (o) { if (observers.indexOf(o) < 0) observers.push(o); };
+  var unregister = function (o) { var i = observers.indexOf(o); if (i >= 0) observers.splice(i, 1); };
+  var rect = function (x, y, w, h) {
+    return { x: x, y: y, width: w, height: h, top: y, left: x, right: x + w, bottom: y + h,
+             toJSON: function () { return { x: x, y: y, width: w, height: h, top: y, left: x, right: x + w, bottom: y + h }; } };
+  };
+  var measure = function (el) {
+    var r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    if (!r) return null;
+    var x = r.left !== undefined ? r.left : r.x, y = r.top !== undefined ? r.top : r.y;
+    return rect(x, y, r.width || 0, r.height || 0);
+  };
+  var connected = function (el) { return el.isConnected !== false; };
+  var parseMargin = function (text) {
+    var parts = String(text || '0px').trim().split(/\s+/), out = [];
+    for (var i = 0; i < parts.length && i < 4; i++) {
+      var v = parseFloat(parts[i]) || 0;
+      out.push(parts[i].indexOf('%') >= 0 ? { pct: v } : { px: v });
+    }
+    if (out.length === 0) out.push({ px: 0 });
+    if (out.length === 1) out.push(out[0]);
+    if (out.length === 2) out.push(out[0]);
+    if (out.length === 3) out.push(out[1]);
+    return out;  // top, right, bottom, left
+  };
+  var marginPx = function (m, size) { return m.pct !== undefined ? m.pct * size / 100 : m.px; };
+
+  IntersectionObserverEntry = function IntersectionObserverEntry(init) {
+    for (var k in init) this[k] = init[k];
+  };
+  IntersectionObserver = function IntersectionObserver(callback, options) {
+    if (typeof callback !== 'function') throw new TypeError("Failed to construct 'IntersectionObserver': The callback provided as parameter 1 is not a function.");
+    options = options || {};
+    var t = options.threshold === undefined ? [0] : [].concat(options.threshold);
+    for (var i = 0; i < t.length; i++) {
+      t[i] = Number(t[i]);
+      if (!(t[i] >= 0 && t[i] <= 1)) throw new RangeError("Failed to construct 'IntersectionObserver': Threshold values must be numbers between 0 and 1");
+    }
+    t.sort(function (a, b) { return a - b; });
+    this.root = options.root || null;
+    this.rootMargin = options.rootMargin || '0px 0px 0px 0px';
+    this.thresholds = t;
+    this.__callback = callback; this.__margin = parseMargin(this.rootMargin);
+    this.__targets = []; this.__records = []; this.__checkedAt = -1e9;
+  };
+  IntersectionObserver.prototype.observe = function (target) {
+    if (!target || typeof target !== 'object') throw new TypeError("Failed to execute 'observe' on 'IntersectionObserver': parameter 1 is not of type 'Element'.");
+    for (var i = 0; i < this.__targets.length; i++) if (this.__targets[i].el === target) return;
+    this.__targets.push({ el: target, state: null });
+    register(this);
+  };
+  IntersectionObserver.prototype.unobserve = function (target) {
+    this.__targets = this.__targets.filter(function (t) { return t.el !== target; });
+    if (!this.__targets.length) unregister(this);
+  };
+  IntersectionObserver.prototype.disconnect = function () { this.__targets = []; unregister(this); };
+  IntersectionObserver.prototype.takeRecords = function () { var r = this.__records; this.__records = []; return r; };
+  IntersectionObserver.prototype.__check = function (time, full) {
+    var rootRect;
+    if (this.root) { rootRect = measure(this.root); if (!rootRect) return; }
+    else rootRect = rect(0, 0, window.innerWidth || 0, window.innerHeight || 0);
+    var m = this.__margin;
+    var top = rootRect.top - marginPx(m[0], rootRect.height), right = rootRect.right + marginPx(m[1], rootRect.width);
+    var bottom = rootRect.bottom + marginPx(m[2], rootRect.height), left = rootRect.left - marginPx(m[3], rootRect.width);
+    var rootBounds = rect(left, top, right - left, bottom - top);
+    for (var i = 0; i < this.__targets.length; i++) {
+      var t = this.__targets[i];
+      if (t.state && !full) continue;
+      var box = connected(t.el) ? measure(t.el) : null;
+      var hasBox = box && !(box.width === 0 && box.height === 0 && box.left === 0 && box.top === 0);
+      var b = box || rect(0, 0, 0, 0);
+      var il = Math.max(b.left, left), it = Math.max(b.top, top);
+      var ir = Math.min(b.right, right), ib = Math.min(b.bottom, bottom);
+      var intersecting = !!hasBox && ir >= il && ib >= it;
+      var area = b.width * b.height;
+      var ratio = intersecting ? (area > 0 ? Math.min(1, (ir - il) * (ib - it) / area) : 1) : 0;
+      var index = -1;
+      if (intersecting) { index = 0; while (index < this.thresholds.length && this.thresholds[index] <= ratio) index++; }
+      if (t.state && t.state.index === index && t.state.intersecting === intersecting) continue;
+      t.state = { index: index, intersecting: intersecting };
+      this.__records.push(new IntersectionObserverEntry({
+        time: time, target: t.el, rootBounds: this.root ? rootBounds : rootBounds,
+        boundingClientRect: b,
+        intersectionRect: intersecting ? rect(il, it, ir - il, ib - it) : rect(0, 0, 0, 0),
+        isIntersecting: intersecting, intersectionRatio: ratio, isVisible: false
+      }));
+    }
+  };
+
+  ResizeObserverEntry = function ResizeObserverEntry(init) { for (var k in init) this[k] = init[k]; };
+  ResizeObserver = function ResizeObserver(callback) {
+    if (typeof callback !== 'function') throw new TypeError("Failed to construct 'ResizeObserver': The callback provided as parameter 1 is not a function.");
+    this.__callback = callback; this.__targets = []; this.__records = []; this.__checkedAt = -1e9;
+  };
+  ResizeObserver.prototype.observe = function (target, options) {
+    if (!target || typeof target !== 'object') throw new TypeError("Failed to execute 'observe' on 'ResizeObserver': parameter 1 is not of type 'Element'.");
+    for (var i = 0; i < this.__targets.length; i++) if (this.__targets[i].el === target) return;
+    this.__targets.push({ el: target, w: 0, h: 0, fresh: true, box: (options && options.box) || 'content-box' });
+    register(this);
+  };
+  ResizeObserver.prototype.unobserve = IntersectionObserver.prototype.unobserve;
+  ResizeObserver.prototype.disconnect = IntersectionObserver.prototype.disconnect;
+  ResizeObserver.prototype.__check = function (time, full) {
+    for (var i = 0; i < this.__targets.length; i++) {
+      var t = this.__targets[i];
+      if (!t.fresh && !full) continue;
+      var b = connected(t.el) ? measure(t.el) : null;
+      var pl = 0, pt = 0, pr = 0, pb = 0, bl = 0, bt = 0, br = 0, bb = 0;
+      if (b && typeof getComputedStyle === 'function') {
+        try {
+          var cs = getComputedStyle(t.el);
+          pl = parseFloat(cs.paddingLeft) || 0; pr = parseFloat(cs.paddingRight) || 0;
+          pt = parseFloat(cs.paddingTop) || 0; pb = parseFloat(cs.paddingBottom) || 0;
+          bl = parseFloat(cs.borderLeftWidth) || 0; br = parseFloat(cs.borderRightWidth) || 0;
+          bt = parseFloat(cs.borderTopWidth) || 0; bb = parseFloat(cs.borderBottomWidth) || 0;
+        } catch (e) {}
+      }
+      var bw = b ? b.width : 0, bh = b ? b.height : 0;
+      var cw = Math.max(0, bw - pl - pr - bl - br), ch = Math.max(0, bh - pt - pb - bt - bb);
+      var w = t.box === 'border-box' ? bw : cw, h = t.box === 'border-box' ? bh : ch;
+      var fresh = t.fresh;
+      t.fresh = false;
+      if (w === t.w && h === t.h && !(fresh && (w || h))) continue;
+      t.w = w; t.h = h;
+      this.__records.push(new ResizeObserverEntry({
+        target: t.el, contentRect: rect(pl, pt, cw, ch),
+        contentBoxSize: [{ inlineSize: cw, blockSize: ch }],
+        borderBoxSize: [{ inlineSize: bw, blockSize: bh }],
+        devicePixelContentBoxSize: [{ inlineSize: cw * (window.devicePixelRatio || 1), blockSize: ch * (window.devicePixelRatio || 1) }]
+      }));
+    }
+  };
+
+  // Called once per frame; existing targets are re-measured at most every
+  // 100 ms, new ones at once
+  __zepraDeliverObservations = function () {
+    if (!observers.length) return;
+    var time = now();
+    var list = observers.slice();
+    for (var i = 0; i < list.length; i++) {
+      var o = list[i];
+      var full = time - o.__checkedAt >= 100;
+      if (full) o.__checkedAt = time;
+      try { o.__check(time, full); } catch (e) { report(e); }
+    }
+    for (var j = 0; j < list.length; j++) {
+      var ob = list[j];
+      if (!ob.__records.length) continue;
+      var records = ob.__records;
+      ob.__records = [];
+      try { ob.__callback.call(ob, records, ob); } catch (e) { report(e); }
+    }
+  };
+
+  window.MessagePort = MessagePort; window.MessageChannel = MessageChannel;
+  window.IntersectionObserver = IntersectionObserver; window.IntersectionObserverEntry = IntersectionObserverEntry;
+  window.ResizeObserver = ResizeObserver; window.ResizeObserverEntry = ResizeObserverEntry;
+})();
+)JS";
+
+} // namespace
+
+void ScriptContext::installWebTaskApis(Zepra::Runtime::Object* windowObj) {
+    using namespace Zepra::Runtime;
+    (void)windowObj;
+    auto* postTask = createNativeFunction("__zepraPostTask",
+        [this](Context*, const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isObject() || !args[0].asObject()->isFunction()) return Value::undefined();
+            const int id = nextMessageTaskId_++;
+            callbackStore_->set("m" + std::to_string(id), args[0]);
+            messageTasks_.push_back(id);
+            return Value::undefined();
+        }, 1);
+    vm_->setGlobal("__zepraPostTask", Value::object(postTask));
+    vm_->setGlobal("__zepraDeliverObservations", Value::undefined());
+    ScriptResult result = evaluate(kWebTaskApis, "<zepra-web-apis>");
+    if (!result.success) {
+        std::cerr << "[ScriptContext] web task APIs failed to install: " << result.error << std::endl;
+    }
+}
+
+// Runs posted message tasks (MessagePort/window.postMessage) for up to
+// ~8 ms; tasks posted meanwhile run too, the rest wait for the next frame
+void ScriptContext::runMessageTasks() {
+    if (messageTasks_.empty() || !vm_) return;
+    const auto start = std::chrono::steady_clock::now();
+    while (!messageTasks_.empty()) {
+        const int id = messageTasks_.front();
+        messageTasks_.pop_front();
+        const std::string key = "m" + std::to_string(id);
+        callStoredCallback(key, false, 0);
+        removeStoredCallback(key);
+        if (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(8)) break;
+    }
+}
+
+void ScriptContext::deliverObservations() {
+    using namespace Zepra::Runtime;
+    if (!vm_) return;
+    Value deliver = vm_->getGlobal("__zepraDeliverObservations");
+    if (!deliver.isObject() || !deliver.asObject()->isFunction()) return;
+    auto* fn = static_cast<Function*>(deliver.asObject());
+    runTask([&] { vm_->call(fn, Value::undefined(), {}); }, "observer callback");
 }
 
 void ScriptContext::setupDocumentGlobals() {

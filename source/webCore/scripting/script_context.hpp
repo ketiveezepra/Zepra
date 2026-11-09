@@ -11,6 +11,7 @@
 #include <string>
 #include <functional>
 #include <vector>
+#include <deque>
 #include <unordered_map>
 #include <memory>
 
@@ -454,6 +455,13 @@ private:
     Zepra::Runtime::Object* callbackStore_ = nullptr;
     Zepra::Runtime::Object* globalObject_ = nullptr;  // the engine's built-ins (Object, Array, JSON, ...)
     std::vector<int> animationFrameQueue_;
+    // MessageChannel / postMessage tasks (ids of "m<id>" callbacks) and the
+    // observer hooks (installWebTaskApis in script_context.cpp)
+    std::deque<int> messageTasks_;
+    int nextMessageTaskId_ = 1;
+    void installWebTaskApis(Zepra::Runtime::Object* windowObj);
+    void runMessageTasks();
+    void deliverObservations();
     double timeOriginMs_ = 0;   // performance.now() origin
     void callStoredCallback(const std::string& key, bool passTimestamp, double timestampMs);
     void removeStoredCallback(const std::string& key);

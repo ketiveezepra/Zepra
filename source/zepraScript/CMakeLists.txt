@@ -273,6 +273,7 @@ set(ZEPRA_CORE_SOURCES
     builtins/reflect.cpp
     builtins/generator.cpp
     builtins/intl.cpp
+    builtins/intl_bindings.cpp
     builtins/typed_array.cpp
     builtins/data_view.cpp
     builtins/temporal.cpp

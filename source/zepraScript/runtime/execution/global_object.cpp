@@ -9,6 +9,10 @@
  */
 
 #include "runtime/execution/global_object.hpp"
+#include "bytecode/bytecode_generator.hpp"
+#include "frontend/syntax_checker.hpp"
+#include "frontend/parser.hpp"
+#include "frontend/source_code.hpp"
 #include <algorithm>
 #include "builtins/promise_builtin.hpp"
 #include "builtins/console.hpp"
@@ -28,6 +32,7 @@
 #include "builtins/map.hpp"
 #include "builtins/set.hpp"
 #include "builtins/date.hpp"
+#include "builtins/intl_bindings.hpp"
 #include "builtins/weakmap.hpp"
 #include "builtins/regexp.hpp"
 #include "builtins/typed_array.hpp"
@@ -217,16 +222,63 @@ void GlobalObject::initializeBooleanConstructor() {
     set("Boolean", Value::object(booleanConstructor_));
 }
 
+// Compiles and runs `source` as a global script; its completion value is
+// the result. Errors become catchable SyntaxError / thrown values.
+Value GlobalObject::evaluateSourceText(const std::string& source, const char* what, const std::string& name) {
+    VM* vm = VM::current();
+    if (!vm) throw JSError("EvalError", std::string(what) + " called outside a running script");
+    if (!vm->codeGenerationFromStringsAllowed()) {
+        throw JSError("EvalError", std::string("Code generation from strings disallowed for this context (") + what + ")");
+    }
+    auto sourceCode = Frontend::SourceCode::fromString(source, name);
+    Frontend::Parser parser(sourceCode.get());
+    auto program = parser.parseProgram();
+    if (parser.hasErrors()) throw JSError("SyntaxError", parser.errors().front());
+    Frontend::SyntaxChecker checker;
+    if (!checker.check(program.get())) throw JSError("SyntaxError", checker.errors().front());
+    Bytecode::BytecodeGenerator generator;
+    auto chunk = generator.compile(program.get());
+    if (generator.hasErrors() || !chunk) {
+        throw JSError("SyntaxError", generator.hasErrors() ? generator.errors().front() : "Invalid source");
+    }
+    ExecutionResult result = vm->execute(chunk.get());
+    // Functions created by the code reference its chunk's constants
+    vm->retainChunk(std::move(chunk));
+    if (result.status == ExecutionResult::Status::Exception) throw ThrownException(result.value);
+    if (result.status == ExecutionResult::Status::Error) throw std::runtime_error(result.error);
+    return result.value;
+}
+
 void GlobalObject::initializeFunctionConstructor() {
     VM& vm = vmOf(context_);
     functionPrototype_ = vm.intrinsic(VM::Intrinsic::Function);
-    // new Function("...") compiles source text at run time, which the engine refuses
-    functionConstructor_ = new Function("Function", [](const FunctionCallInfo&) -> Value {
-        throw JSError("EvalError", "Code generation from strings is disallowed (Function constructor)");
+    // new Function(p1, ..., body) compiles `(function anonymous(p1,...\n) {\nbody\n})`
+    // in the global scope. Page scripts can already run any code they like
+    // (inline <script>, script injection), so compiling strings adds no
+    // capability; an embedder that wants CSP-style 'unsafe-eval' blocking
+    // can turn it off with VM::setCodeGenerationFromStringsAllowed(false).
+    functionConstructor_ = new Function("Function", [](const FunctionCallInfo& info) -> Value {
+        std::string params;
+        const size_t count = info.argumentCount();
+        for (size_t i = 0; i + 1 < count; ++i) {
+            if (i) params += ",";
+            params += info.argument(i).toString();
+        }
+        const std::string body = count ? info.argument(count - 1).toString() : std::string();
+        return evaluateSourceText("(function anonymous(" + params + "\n) {\n" + body + "\n})",
+                                  "Function", "<anonymous>");
     }, 1);
     Builtins::defineHidden(functionConstructor_, "prototype", Value::object(functionPrototype_));
     Builtins::defineHidden(functionPrototype_, "constructor", Value::object(functionConstructor_));
     set("Function", Value::object(functionConstructor_));
+
+    // Global eval. Calls run as indirect eval (global scope): a direct
+    // eval's access to the caller's local variables is not supported.
+    Builtins::defineHidden(this, "eval", Value::object(new Function("eval", [](const FunctionCallInfo& info) -> Value {
+        const Value code = info.argument(0);
+        if (!code.isString()) return code;
+        return evaluateSourceText(code.toString(), "eval", "<eval>");
+    }, 1)));
 }
 
 void GlobalObject::initializeErrorConstructors() {
@@ -369,9 +421,22 @@ void GlobalObject::initializeGlobalFunctions() {
             [](Context* ctx, const std::vector<Value>& args) -> Value {
                 return Builtins::DateBuiltin::now(ctx, args);
             }, 0)));
+    dateCtor->set("parse", Value::object(
+        createNativeFunction("parse",
+            [](Context* ctx, const std::vector<Value>& args) -> Value {
+                return Builtins::DateBuiltin::parse(ctx, args);
+            }, 1)));
+    dateCtor->set("UTC", Value::object(
+        createNativeFunction("UTC",
+            [](Context* ctx, const std::vector<Value>& args) -> Value {
+                return Builtins::DateBuiltin::UTC(ctx, args);
+            }, 7)));
     Builtins::defineHidden(dateCtor, "prototype", Value::object(dateProto));
     Builtins::defineHidden(dateProto, "constructor", Value::object(dateCtor));
     set("Date", Value::object(dateCtor));
+
+    // Intl (ECMA-402): number/date formatting, collation, plural rules, ...
+    Builtins::defineHidden(this, "Intl", Value::object(Builtins::createIntlObject(objectPrototype_)));
 
     // WeakMap constructor + prototype
     Object* weakMapProto = Builtins::WeakMapBuiltin::createWeakMapPrototype();

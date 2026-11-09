@@ -9,6 +9,7 @@
 #include <algorithm>
 #include "frontend/ast.hpp"
 #include <stdexcept>
+#include <atomic>
 
 namespace Zepra::Frontend {
 
@@ -311,7 +312,66 @@ std::unique_ptr<FunctionExpr> Parser::parseMethod(bool isAsync, bool isGenerator
 // `static` followed by one are modifiers rather than names themselves
 bool Parser::startsPropertyKey(TokenType type) const {
     return isPropertyName(type) || type == TokenType::String || type == TokenType::Number ||
-           type == TokenType::LeftBracket;
+           type == TokenType::LeftBracket || type == TokenType::PrivateName;
+}
+
+std::string Parser::privateKey(uint32_t scopeId, const std::string& name) {
+    return "@@private:" + std::to_string(scopeId) + ":" + name.substr(1);
+}
+
+// `#x` as a class element name: declares it in the innermost class
+ExprPtr Parser::privateNameDeclaration(const Token& token) {
+    if (privateScopes_.empty()) {
+        error(token, "Private field '" + token.value + "' must be declared in an enclosing class");
+        throw ParseError("Unexpected private name");
+    }
+    PrivateScope& scope = privateScopes_.back();
+    scope.declared.insert(token.value);
+    return std::make_unique<IdentifierExpr>(privateKey(scope.id, token.value), token.start);
+}
+
+ExprPtr Parser::privateNameReference(const Token& token) {
+    if (privateScopes_.empty()) {
+        error(token, "Private field '" + token.value + "' must be declared in an enclosing class");
+        throw ParseError("Unexpected private name");
+    }
+    auto ident = std::make_unique<IdentifierExpr>(token.value, token.start);
+    privateScopes_.back().identRefs.emplace_back(token.value, ident.get());
+    return ident;
+}
+
+ExprPtr Parser::privateNameInOperand(const Token& token) {
+    if (privateScopes_.empty() || !check(TokenType::In)) {
+        error(token, "Unexpected private name " + token.value);
+        throw ParseError("Unexpected private name");
+    }
+    auto literal = std::make_unique<LiteralExpr>(token.value, token.start);
+    privateScopes_.back().literalRefs.emplace_back(token.value, literal.get());
+    return literal;
+}
+
+// At the end of a class body: binds references to names it declares and
+// hands the rest to the enclosing class
+void Parser::resolvePrivateScope() {
+    PrivateScope scope = std::move(privateScopes_.back());
+    privateScopes_.pop_back();
+    PrivateScope* outer = privateScopes_.empty() ? nullptr : &privateScopes_.back();
+    for (auto& [name, ident] : scope.identRefs) {
+        if (scope.declared.count(name)) ident->setName(privateKey(scope.id, name));
+        else if (outer) outer->identRefs.emplace_back(name, ident);
+        else {
+            error("Private field '" + name + "' must be declared in an enclosing class");
+            throw ParseError("Undeclared private name");
+        }
+    }
+    for (auto& [name, literal] : scope.literalRefs) {
+        if (scope.declared.count(name)) literal->setValue(privateKey(scope.id, name));
+        else if (outer) outer->literalRefs.emplace_back(name, literal);
+        else {
+            error("Private field '" + name + "' must be declared in an enclosing class");
+            throw ParseError("Undeclared private name");
+        }
+    }
 }
 
 // Identifier or keyword, string, number, or [computed]
@@ -355,6 +415,15 @@ std::unique_ptr<ClassDecl> Parser::parseClass(bool requireName) {
 
     consume(TokenType::LeftBrace, "Expected '{' before class body");
 
+    static std::atomic<uint32_t> nextPrivateScopeId{1};
+    privateScopes_.push_back(PrivateScope{nextPrivateScopeId++, {}, {}, {}});
+    struct PrivateScopeExit {  // pops the scope when the class body throws
+        std::vector<PrivateScope>& scopes;
+        size_t depth;
+        bool resolved = false;
+        ~PrivateScopeExit() { if (!resolved && scopes.size() == depth) scopes.pop_back(); }
+    } privateScopeExit{privateScopes_, privateScopes_.size()};
+
     std::unique_ptr<FunctionExpr> constructor = nullptr;
     std::vector<ClassDecl::MethodDef> methods;
     std::vector<ClassDecl::FieldDef> fields;
@@ -362,6 +431,28 @@ std::unique_ptr<ClassDecl> Parser::parseClass(bool requireName) {
 
     while (!check(TokenType::RightBrace) && !isAtEnd()) {
         if (match(TokenType::Semicolon)) continue;
+
+        // Class static block: `static { statements }`, run once with the
+        // class as `this`, in order with the static fields
+        if (check(TokenType::Static) && peek().type == TokenType::LeftBrace) {
+            SourceLocation loc = currentToken_.start;
+            advance();  // static
+            advance();  // {
+            bool usesSuper = false;
+            auto body = parseFunctionBody(&usesSuper);
+            if (usesSuper) {
+                error(previousToken_, "'super' in a static block is not supported");
+                throw ParseError("'super' in a static block is not supported");
+            }
+            auto arrow = std::make_unique<ArrowFunctionExpr>(std::vector<FunctionParam>(),
+                                                             std::move(body), false, loc);
+            ClassDecl::FieldDef block;
+            block.isStatic = true;
+            block.isStaticBlock = true;
+            block.value = std::make_unique<CallExpr>(std::move(arrow), std::vector<ExprPtr>());
+            fields.push_back(std::move(block));
+            continue;
+        }
 
         // A modifier only when a member name follows it: `static(){}`,
         // `get = 1` and `async;` name members called static, get and async
@@ -384,7 +475,8 @@ std::unique_ptr<ClassDecl> Parser::parseClass(bool requireName) {
         bool isGenerator = !isGetter && !isSetter && match(TokenType::Star);
 
         bool computed = false;
-        ExprPtr key = parsePropertyKey(computed);
+        ExprPtr key = check(TokenType::PrivateName) ? privateNameDeclaration(advance())
+                                                    : parsePropertyKey(computed);
         std::string name;
         if (!computed) {
             if (key->type() == NodeType::Identifier) {
@@ -440,6 +532,8 @@ std::unique_ptr<ClassDecl> Parser::parseClass(bool requireName) {
     }
 
     consume(TokenType::RightBrace, "Expected '}' after class body");
+    privateScopeExit.resolved = true;
+    resolvePrivateScope();
 
     const bool implicitConstructor = !constructor;
     if (!constructor) {
@@ -541,7 +635,8 @@ StmtPtr Parser::parseStatement() {
     
     // Labeled statement: identifier followed by colon
     // e.g., outer: for (;;) { break outer; }
-    if (check(TokenType::Identifier) && peek().type == TokenType::Colon) {
+    if ((check(TokenType::Identifier) || isContextualKeyword(currentToken_.type)) &&
+        peek().type == TokenType::Colon) {
         std::string label = currentToken_.value;
         SourceLocation loc = currentToken_.start;
         advance(); // consume identifier
@@ -841,6 +936,10 @@ StmtPtr Parser::parseTryStatement() {
 }
 
 StmtPtr Parser::parseThrowStatement() {
+    if (newlineBeforeCurrent()) {
+        error(currentToken_, "Illegal newline after throw");
+        throw ParseError("Illegal newline after throw");
+    }
     ExprPtr argument = parseExpression();
     match(TokenType::Semicolon);
     return std::make_unique<ThrowStmt>(std::move(argument));
@@ -849,7 +948,9 @@ StmtPtr Parser::parseThrowStatement() {
 StmtPtr Parser::parseReturnStatement() {
     ExprPtr argument = nullptr;
     
-    if (!check(TokenType::Semicolon) && !check(TokenType::RightBrace) && !isAtEnd()) {
+    // Restricted production: `return` LineTerminator inserts a semicolon
+    if (!check(TokenType::Semicolon) && !check(TokenType::RightBrace) && !isAtEnd() &&
+        !newlineBeforeCurrent()) {
         argument = parseExpression();
     }
     
@@ -859,7 +960,8 @@ StmtPtr Parser::parseReturnStatement() {
 
 StmtPtr Parser::parseBreakStatement() {
     std::string label;
-    if (check(TokenType::Identifier)) {
+    if ((check(TokenType::Identifier) || isContextualKeyword(currentToken_.type)) &&
+        !newlineBeforeCurrent()) {
         label = advance().value;
     }
     match(TokenType::Semicolon);
@@ -868,7 +970,8 @@ StmtPtr Parser::parseBreakStatement() {
 
 StmtPtr Parser::parseContinueStatement() {
     std::string label;
-    if (check(TokenType::Identifier)) {
+    if ((check(TokenType::Identifier) || isContextualKeyword(currentToken_.type)) &&
+        !newlineBeforeCurrent()) {
         label = advance().value;
     }
     match(TokenType::Semicolon);
@@ -1198,8 +1301,9 @@ ExprPtr Parser::parseUpdateExpression() {
     
     ExprPtr expr = parseLeftHandSideExpression();
     
-    // Postfix increment/decrement (no line terminator between)
-    if (match({TokenType::PlusPlus, TokenType::MinusMinus})) {
+    // Postfix increment/decrement (no line terminator between: `a\n++b` is `a; ++b`)
+    if ((check(TokenType::PlusPlus) || check(TokenType::MinusMinus)) && !newlineBeforeCurrent()) {
+        advance();
         TokenType op = previousToken_.type;
         return std::make_unique<UpdateExpr>(op, std::move(expr), false);
     }
@@ -1221,6 +1325,10 @@ ExprPtr Parser::parseLeftHandSideExpression() {
         if (match(TokenType::LeftParen)) {
             expr = parseCallExpression(std::move(expr));
         } else if (match(TokenType::Dot)) {
+            if (check(TokenType::PrivateName)) {
+                expr = std::make_unique<MemberExpr>(std::move(expr), privateNameReference(advance()), false);
+                continue;
+            }
             // Allow keywords as property names (e.g., Array.from, obj.class)
             if (!isPropertyName(currentToken_.type)) {
                 error(currentToken_, "Expected property name");
@@ -1248,6 +1356,11 @@ ExprPtr Parser::parseLeftHandSideExpression() {
                 expr = std::make_unique<MemberExpr>(std::move(expr), std::move(property), true, true);
             } else {
                 // Optional property access: obj?.prop
+                if (check(TokenType::PrivateName)) {
+                    expr = std::make_unique<MemberExpr>(std::move(expr), privateNameReference(advance()),
+                                                        false, true);
+                    continue;
+                }
                 if (!isPropertyName(currentToken_.type)) {
                     error(currentToken_, "Expected property name");
                 }
@@ -1307,6 +1420,10 @@ ExprPtr Parser::parseMemberExpression() {
     
     while (true) {
         if (match(TokenType::Dot)) {
+            if (check(TokenType::PrivateName)) {
+                expr = std::make_unique<MemberExpr>(std::move(expr), privateNameReference(advance()), false);
+                continue;
+            }
             // Allow keywords as property names
             if (!isPropertyName(currentToken_.type)) {
                 error(currentToken_, "Expected property name");
@@ -1342,6 +1459,11 @@ ExprPtr Parser::parseNewExpression() {
 }
 
 ExprPtr Parser::parsePrimaryExpression() {
+    // `#x in obj` (ergonomic brand check)
+    if (check(TokenType::PrivateName)) {
+        Token name = advance();
+        return privateNameInOperand(name);
+    }
     // Literals
     if (match(TokenType::Number)) {
         return std::make_unique<LiteralExpr>(previousToken_.numericValue, previousToken_.start);

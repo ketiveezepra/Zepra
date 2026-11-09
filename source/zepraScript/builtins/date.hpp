@@ -3,6 +3,11 @@
 /**
  * @file date.hpp
  * @brief JavaScript Date object
+ *
+ * A Date holds one time value: milliseconds since the epoch in UTC, or NaN
+ * for an invalid date. Calendar arithmetic follows the spec's day/time
+ * decomposition (ECMA-262 21.4.1) on that number; local time is UTC shifted
+ * by the host time zone's offset at that instant.
  */
 
 #include "../config.hpp"
@@ -10,6 +15,7 @@
 #include "runtime/objects/value.hpp"
 #include <ctime>
 #include <chrono>
+#include <string>
 
 namespace Zepra::Runtime { class Context; }
 
@@ -23,12 +29,12 @@ using Runtime::Object;
  */
 class DateObject : public Object {
 public:
-    DateObject();
+    DateObject();                        // now
     explicit DateObject(double timestamp);
-    DateObject(int year, int month, int day = 1, int hours = 0, 
+    // Local-time components, as new Date(y, m, d, h, min, s, ms)
+    DateObject(int year, int month, int day = 1, int hours = 0,
                int minutes = 0, int seconds = 0, int ms = 0);
-    
-    // Getters
+
     int getFullYear() const;
     int getMonth() const;
     int getDate() const;
@@ -38,8 +44,7 @@ public:
     int getSeconds() const;
     int getMilliseconds() const;
     double getTime() const { return timestamp_; }
-    
-    // UTC getters
+
     int getUTCFullYear() const;
     int getUTCMonth() const;
     int getUTCDate() const;
@@ -48,37 +53,26 @@ public:
     int getUTCMinutes() const;
     int getUTCSeconds() const;
     int getUTCMilliseconds() const;
-    
-    // Setters
-    void setFullYear(int year);
-    void setMonth(int month);
-    void setDate(int day);
-    void setHours(int hours);
-    void setMinutes(int minutes);
-    void setSeconds(int seconds);
-    void setMilliseconds(int ms);
-    void setTime(double timestamp) { timestamp_ = timestamp; }
-    
-    // String representations
+
+    void setTime(double timestamp);      // TimeClip'd
+
     std::string toString() const;
     std::string toDateString() const;
     std::string toTimeString() const;
-    std::string toISOString() const;
+    std::string toISOString() const;     // "" for an invalid date
     std::string toUTCString() const;
     std::string toLocaleString() const;
-    
-    // Timezone
+    std::string toLocaleDateString() const;
+    std::string toLocaleTimeString() const;
+
     int getTimezoneOffset() const;
-    
+
 private:
-    double timestamp_; // ms since epoch
-    
-    std::tm toTm() const;
-    void fromTm(const std::tm& tm);
+    double timestamp_;  // ms since epoch (UTC), NaN when invalid
 };
 
 /**
- * @brief Date builtin methods
+ * @brief Date constructor and prototype
  */
 class DateBuiltin {
 public:
@@ -86,18 +80,11 @@ public:
     static Value now(Runtime::Context* ctx, const std::vector<Value>& args);
     static Value parse(Runtime::Context* ctx, const std::vector<Value>& args);
     static Value UTC(Runtime::Context* ctx, const std::vector<Value>& args);
-    
-    static Value getTime(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value getFullYear(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value getMonth(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value getDate(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value getDay(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value getHours(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value getMinutes(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value getSeconds(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value toString(Runtime::Context* ctx, const std::vector<Value>& args);
-    static Value toISOString(Runtime::Context* ctx, const std::vector<Value>& args);
-    
+
+    // Date.parse: ISO 8601 (the spec's Date Time String Format) and the
+    // common RFC 2822 / toString / "Month D, YYYY" forms; NaN otherwise
+    static double parseDate(const std::string& text);
+
     static Object* createDatePrototype();
 };
 

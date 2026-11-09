@@ -32,10 +32,14 @@ private:
     bool parseQuantifier(size_t atomStart);
     bool parseCharClass();
     bool parseEscape();
+    bool parseCharacterEscape(char32_t esc, char32_t& out);
+    bool addSetEscape(char32_t esc, CharClass& cc);
+
     bool parseGroup();
 
     // Helpers
     char32_t current() const;
+    size_t sequenceLength() const;
     char32_t advance();
     bool match(char32_t c);
     bool atEnd() const;

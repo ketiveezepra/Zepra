@@ -575,6 +575,23 @@ void BytecodeGenerator::compileStatement(const Frontend::Statement* stmt) {
 }
 
 void BytecodeGenerator::compileStatementList(const std::vector<Frontend::StmtPtr>& statements) {
+    // The block's let/const/class slots exist from its start, so a closure
+    // compiled before a declaration (a hoisted function, an arrow assigned
+    // earlier) captures the binding the declaration later initializes:
+    // `let f = () => S.size; let S = new Map; f()`
+    if (!(current_->isScript && current_->scopeDepth == 0)) {
+        std::vector<std::string> lexicalNames;
+        for (const auto& s : statements) {
+            if (s->type() == Frontend::NodeType::VariableDeclaration) {
+                const auto* decl = static_cast<const Frontend::VariableDecl*>(s.get());
+                if (decl->kind() == Frontend::VariableDecl::Kind::Var) continue;
+                for (const auto& declarator : decl->declarators()) {
+                    collectPatternNames(declarator.id.get(), lexicalNames);
+                }
+            }
+        }
+        for (const auto& name : lexicalNames) reserveLexicalSlot(name);
+    }
     hoistFunctionDeclarations(statements);
     for (const auto& stmt : statements) {
         if (stmt->type() == Frontend::NodeType::FunctionDeclaration) continue;  // Hoisted
@@ -1243,6 +1260,11 @@ void BytecodeGenerator::compileFunction(const FunctionSource& source, Runtime::F
         // Field initializer: this.key = value, in declaration order
         for (const auto& field : source.fieldClass->fields()) {
             if (field.isStatic != source.staticFields) continue;
+            if (field.isStaticBlock) {
+                compileExpression(field.value.get());
+                emit(Opcode::OP_POP);
+                continue;
+            }
             emitLocal(Opcode::OP_GET_LOCAL, 0);
             emitPropertyKey(field.key.get(), field.computed);
             if (field.value) {

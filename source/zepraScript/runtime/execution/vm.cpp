@@ -35,6 +35,7 @@
 #include "builtins/map.hpp"
 #include "builtins/set.hpp"
 #include "builtins/object_builtins.hpp"
+#include "builtins/date.hpp"
 #include "builtins/promise_builtin.hpp"
 #include <algorithm>
 #include <cmath>
@@ -397,7 +398,23 @@ void VM::throwValue(Value exception) {
 // array without usable methods joins its elements, as Array.prototype.toString
 // does; other objects fall back to their default string form.
 Value VM::toPrimitive(const Value& value, bool preferString) {
+    return toPrimitiveWithHint(value, preferString ? "string" : "number");
+}
+
+// ToPrimitive with an explicit hint ("string", "number" or "default", the
+// last for `+` and `==`): an object's [Symbol.toPrimitive](hint) when it has
+// one; otherwise valueOf/toString, where a Date treats "default" as "string"
+Value VM::toPrimitiveWithHint(const Value& value, const char* hint) {
     if (!value.isObject()) return value;
+    Value exotic = getProperty(value, symbolPropertyKey(WellKnownSymbols::ToPrimitive));
+    if (exotic.isObject() && exotic.asObject()->isFunction()) {
+        Value result = executeCallback(static_cast<Function*>(exotic.asObject()), value,
+                                       {Value::string(new String(hint))});
+        if (result.isObject()) throw std::runtime_error("Cannot convert object to primitive value");
+        return result;
+    }
+    bool preferString = hint[0] == 's' ||
+                        (hint[0] == 'd' && dynamic_cast<Builtins::DateObject*>(value.asObject()));
     const char* first = preferString ? "toString" : "valueOf";
     const char* second = preferString ? "valueOf" : "toString";
     for (const char* name : {first, second}) {
@@ -693,7 +710,8 @@ void VM::dispatch(Opcode op) {
         case Opcode::OP_ADD: {
             Value b = pop();
             Value a = pop();
-            toPrimitiveOperands(a, b);
+            if (a.isObject()) a = toPrimitiveWithHint(a, "default");
+            if (b.isObject()) b = toPrimitiveWithHint(b, "default");
             push(Value::add(a, b));
             break;
         }
@@ -1684,12 +1702,14 @@ void VM::dispatch(Opcode op) {
                     push(Value::object(new Array(values)));
                 }
             } else if (iterable.isString()) {
-                // String: iterate characters
+                // String: iterate code points
                 std::string s = iterable.toString();
                 std::vector<Value> chars;
                 chars.reserve(s.size());
-                for (size_t i = 0; i < s.size(); i++) {
-                    chars.push_back(Value::string(new String(std::string(1, s[i]))));
+                for (size_t i = 0; i < s.size();) {
+                    size_t bytes = std::min(utf8SequenceLength(static_cast<unsigned char>(s[i])), s.size() - i);
+                    chars.push_back(Value::string(new String(s.substr(i, bytes))));
+                    i += bytes;
                 }
                 push(Value::object(new Array(chars)));
             } else {
@@ -2298,6 +2318,18 @@ Object* VM::ensurePrototypeObject(Function* fn) {
 
 // obj.name: getters run with obj as `this`, primitives read through their
 // prototype, and reading from null or undefined is a TypeError.
+// Class private names (#x) are stored under "@@private:<class>:x"
+// (see Parser::privateKey); reading one an object lacks is a TypeError
+static bool isPrivateKey(const std::string& name) {
+    return name.size() > 10 && name[0] == '@' && name.compare(0, 10, "@@private:") == 0;
+}
+
+[[noreturn]] static void throwPrivateBrandError(const std::string& name) {
+    size_t colon = name.find(':', 10);
+    throw std::runtime_error("Cannot read private member #" + name.substr(colon + 1) +
+                             " from an object whose class did not declare it");
+}
+
 Value VM::getProperty(const Value& target, const std::string& name) {
     return getProperty(target, name, target);
 }
@@ -2330,6 +2362,7 @@ Value VM::getProperty(const Value& target, const std::string& name, const Value&
         Object* builtin = obj->isArray() ? intrinsic(Intrinsic::Array)
                         : obj->isFunction() ? intrinsic(Intrinsic::Function) : nullptr;
         if (builtin && readProperty(builtin, receiver, name, value)) return value;
+        if (isPrivateKey(name)) throwPrivateBrandError(name);
         return Value::undefined();
     }
 
@@ -2339,7 +2372,8 @@ Value VM::getProperty(const Value& target, const std::string& name, const Value&
             return Value::number(static_cast<double>(str->length()));
         }
         uint32_t index;
-        if (toArrayIndex(Value::string(new String(name)), index)) {
+        if (!name.empty() && name[0] >= '0' && name[0] <= '9' &&
+            toArrayIndex(Value::string(new String(name)), index)) {
             return index < str->length() ? str->charAt(index) : Value::undefined();
         }
     }
@@ -2348,6 +2382,7 @@ Value VM::getProperty(const Value& target, const std::string& name, const Value&
         throw std::runtime_error("Cannot read properties of " + describeForError(target) +
                                  " (reading '" + name + "')");
     }
+    if (isPrivateKey(name)) throwPrivateBrandError(name);
     Object* proto = primitivePrototype(target);
     Value value;
     return proto && readProperty(proto, target, name, value) ? value : Value::undefined();
@@ -3042,6 +3077,10 @@ Value VM::evaluateInFrame(size_t frameIdx, const std::string& expression) {
 
     auto result = execute(chunk.get());
     return (result.status == ExecutionResult::Status::Success) ? result.value : Value::undefined();
+}
+
+void VM::retainChunk(std::unique_ptr<Bytecode::BytecodeChunk> chunk) {
+    retainedChunks_.push_back(std::move(chunk));
 }
 
 // Compiled chunk storage — keeps unique_ptrs alive for execute(void*) callers

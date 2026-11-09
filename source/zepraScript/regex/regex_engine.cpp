@@ -220,24 +220,59 @@ std::vector<std::string> RegexEngine::split(const std::string& input, int32_t li
 // =============================================================================
 
 bool RegexEngine::execute(const std::string& input, int32_t startPos) {
-    stack_.clear();
-
-    // Create initial thread
     Thread initial;
     initial.pc = 0;
     initial.inputPos = startPos;
     initial.captures.resize(program_.numGroups);
 
-    stack_.push_back(std::move(initial));
+    Thread done;
+    if (!run(input, std::move(initial), SIZE_MAX, -1, done)) return false;
+    result_.success = true;
+    result_.captures = done.captures;
+    if (!done.captures.empty() && done.captures[0].matched()) {
+        result_.matchStart = done.captures[0].start;
+        result_.matchEnd = done.captures[0].end;
+    } else {
+        result_.matchStart = startPos;
+        result_.matchEnd = done.inputPos;
+    }
+    return true;
+}
 
-    while (!stack_.empty()) {
-        Thread t = std::move(stack_.back());
-        stack_.pop_back();
+// The pc of the Lookahead/LookbehindEnd closing the assertion opened at `pc`
+size_t RegexEngine::assertionEnd(size_t pc) const {
+    int depth = 0;
+    for (size_t i = pc; i < program_.size(); ++i) {
+        const RegexOp op = program_.at(i).op;
+        if (op == RegexOp::LookaheadStart || op == RegexOp::LookbehindStart) ++depth;
+        else if (op == RegexOp::LookaheadEnd || op == RegexOp::LookbehindEnd) {
+            if (--depth == 0) return i;
+        }
+    }
+    return program_.size();
+}
+
+// Backtracking run from `initial` until the program's Match, or until a
+// thread reaches `stopPc` (an assertion's end), at input position
+// `requiredEnd` when that is >= 0. `out` receives the successful thread.
+bool RegexEngine::run(const std::string& input, Thread initial, size_t stopPc,
+                      int32_t requiredEnd, Thread& out) {
+    std::vector<Thread> stack;
+    stack.push_back(std::move(initial));
+
+    while (!stack.empty()) {
+        Thread t = std::move(stack.back());
+        stack.pop_back();
 
         bool dead = false;
 
         while (!dead && t.pc < program_.size()) {
             if (++steps_ > kStepBudget) throw RegexBudgetExceeded();
+            if (t.pc == stopPc) {
+                if (requiredEnd >= 0 && t.inputPos != requiredEnd) { dead = true; break; }
+                out = std::move(t);
+                return true;
+            }
             const RegexInstr& instr = program_.at(t.pc);
 
             switch (instr.op) {
@@ -245,7 +280,7 @@ bool RegexEngine::execute(const std::string& input, int32_t startPos) {
                     if (t.inputPos >= static_cast<int32_t>(input.size())) { dead = true; break; }
                     char32_t c = charAt(input, t.inputPos);
                     if (c != instr.ch) { dead = true; break; }
-                    t.inputPos++;
+                    t.inputPos += charLength(input, t.inputPos);
                     t.pc++;
                     break;
                 }
@@ -254,7 +289,7 @@ bool RegexEngine::execute(const std::string& input, int32_t startPos) {
                     if (t.inputPos >= static_cast<int32_t>(input.size())) { dead = true; break; }
                     char32_t c = charAt(input, t.inputPos);
                     if (std::tolower(c) != std::tolower(instr.ch)) { dead = true; break; }
-                    t.inputPos++;
+                    t.inputPos += charLength(input, t.inputPos);
                     t.pc++;
                     break;
                 }
@@ -263,7 +298,7 @@ bool RegexEngine::execute(const std::string& input, int32_t startPos) {
                     if (t.inputPos >= static_cast<int32_t>(input.size())) { dead = true; break; }
                     char32_t c = charAt(input, t.inputPos);
                     if (!flags_.dotAll && c == '\n') { dead = true; break; }
-                    t.inputPos++;
+                    t.inputPos += charLength(input, t.inputPos);
                     t.pc++;
                     break;
                 }
@@ -274,8 +309,18 @@ bool RegexEngine::execute(const std::string& input, int32_t startPos) {
                     char32_t c = charAt(input, t.inputPos);
                     const CharClass& cc = program_.classes[instr.classIdx];
                     bool match = cc.contains(c);
+                    if (flags_.ignoreCase && c < 0x80) {
+                        // Case-folded: [a-z] matches 'A' under /i, [^a] rejects 'A'
+                        const char32_t lower = static_cast<char32_t>(std::tolower(static_cast<int>(c)));
+                        const char32_t upper = static_cast<char32_t>(std::toupper(static_cast<int>(c)));
+                        bool inRange = false;
+                        for (const auto& r : cc.ranges) {
+                            if (r.contains(c) || r.contains(lower) || r.contains(upper)) { inRange = true; break; }
+                        }
+                        match = cc.negated ? !inRange : inRange;
+                    }
                     if (!match) { dead = true; break; }
-                    t.inputPos++;
+                    t.inputPos += charLength(input, t.inputPos);
                     t.pc++;
                     break;
                 }
@@ -284,7 +329,7 @@ bool RegexEngine::execute(const std::string& input, int32_t startPos) {
                     // Fork: push second path, continue with first
                     Thread fork = t;
                     fork.pc = t.pc + instr.split.offsetB;
-                    stack_.push_back(std::move(fork));
+                    stack.push_back(std::move(fork));
                     t.pc = t.pc + instr.split.offsetA;
                     break;
                 }
@@ -358,9 +403,11 @@ bool RegexEngine::execute(const std::string& input, int32_t startPos) {
                 }
 
                 case RegexOp::BackRef: {
+                    // A group that did not take part matches the empty string
                     if (instr.groupIdx >= t.captures.size() ||
-                        !t.captures[instr.groupIdx].matched()) {
-                        dead = true; break;
+                        !t.captures[instr.groupIdx].matched() || t.captures[instr.groupIdx].end < 0) {
+                        t.pc++;
+                        break;
                     }
                     const auto& cap = t.captures[instr.groupIdx];
                     int32_t refLen = cap.end - cap.start;
@@ -392,22 +439,41 @@ bool RegexEngine::execute(const std::string& input, int32_t startPos) {
                 }
 
                 case RegexOp::LookaheadStart: {
-                    // Save state, try sub-expression
-                    bool isNegative = (instr.ch != 0);
-                    Thread fork = t;
-                    fork.pc++;
-                    // Execute the lookahead sub-expression
-                    // For simplicity, inline execute here
-                    // The sub-expression ends at LookaheadEnd
-                    // If it matches → positive succeeds, negative fails
-                    // If it fails → positive fails, negative succeeds
-                    t.pc++;
-                    (void)isNegative;
+                    // (?=...) / (?!...): run the body from here on its own
+                    const bool negative = instr.ch != 0;
+                    const size_t end = assertionEnd(t.pc);
+                    Thread probe = t;
+                    probe.pc = t.pc + 1;
+                    Thread matched;
+                    const bool found = run(input, std::move(probe), end, -1, matched);
+                    if (found == negative) { dead = true; break; }
+                    if (found) t.captures = matched.captures;
+                    t.pc = end + 1;
+                    break;
+                }
+
+                case RegexOp::LookbehindStart: {
+                    // (?<=...) / (?<!...): some start at or before here from
+                    // which the body ends exactly here
+                    const bool negative = instr.ch != 0;
+                    const size_t end = assertionEnd(t.pc);
+                    bool found = false;
+                    Thread matched;
+                    for (int32_t from = t.inputPos; from >= 0 && !found; --from) {
+                        if (from < static_cast<int32_t>(input.size()) &&
+                            (static_cast<unsigned char>(input[from]) & 0xC0) == 0x80) continue;
+                        Thread probe = t;
+                        probe.pc = t.pc + 1;
+                        probe.inputPos = from;
+                        found = run(input, std::move(probe), end, t.inputPos, matched);
+                    }
+                    if (found == negative) { dead = true; break; }
+                    if (found) t.captures = matched.captures;
+                    t.pc = end + 1;
                     break;
                 }
 
                 case RegexOp::LookaheadEnd:
-                case RegexOp::LookbehindStart:
                 case RegexOp::LookbehindEnd:
                     t.pc++;
                     break;
@@ -418,16 +484,8 @@ bool RegexEngine::execute(const std::string& input, int32_t startPos) {
                     break;
 
                 case RegexOp::Match: {
-                    // Success
-                    result_.success = true;
-                    result_.captures = t.captures;
-                    if (!t.captures.empty() && t.captures[0].matched()) {
-                        result_.matchStart = t.captures[0].start;
-                        result_.matchEnd = t.captures[0].end;
-                    } else {
-                        result_.matchStart = startPos;
-                        result_.matchEnd = t.inputPos;
-                    }
+                    if (stopPc != SIZE_MAX) { dead = true; break; }
+                    out = std::move(t);
                     return true;
                 }
 
@@ -445,12 +503,19 @@ bool RegexEngine::execute(const std::string& input, int32_t startPos) {
 bool RegexEngine::backtrack(const std::string& input) {
     (void)input;
     // Handled by the stack in execute()
-    return !stack_.empty();
+    return false;
 }
 
 // =============================================================================
 // Helpers
 // =============================================================================
+
+// Bytes in the UTF-8 sequence at `pos` (1 for ASCII and stray bytes)
+int32_t RegexEngine::charLength(const std::string& input, int32_t pos) const {
+    const unsigned char c = static_cast<unsigned char>(input[pos]);
+    int32_t n = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
+    return pos + n <= static_cast<int32_t>(input.size()) ? n : 1;
+}
 
 char32_t RegexEngine::charAt(const std::string& input, int32_t pos) const {
     if (pos < 0 || pos >= static_cast<int32_t>(input.size())) return 0;

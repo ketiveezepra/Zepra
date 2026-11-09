@@ -12,6 +12,7 @@
 #include "runtime/execution/vm.hpp"
 #include "runtime/objects/number_conversion.hpp"
 #include "runtime/objects/well_known_symbols.hpp"
+#include "runtime/objects/string_utf16.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -25,6 +26,7 @@ using Runtime::FunctionCallInfo;
 using Runtime::JSError;
 using Runtime::String;
 using Runtime::VM;
+namespace Utf16 = Runtime::Utf16;
 
 namespace {
 
@@ -154,6 +156,55 @@ std::string thisString(const FunctionCallInfo& info, const char* method) {
     return toText(self);
 }
 
+// The `this` string of a String.prototype method as a String object, so that
+// its cached ASCII flag and UTF-16 form are reused across calls (a loop of
+// s.charCodeAt(i) over non-ASCII text converts s once, not per call)
+class ThisText {
+public:
+    ThisText(const FunctionCallInfo& info, const char* method) {
+        const Value self = info.thisValue();
+        if (self.isNull() || self.isUndefined()) {
+            throw JSError("TypeError", std::string("String.prototype.") + method + " called on null or undefined");
+        }
+        if (self.isString()) {
+            str_ = static_cast<String*>(self.asObject());
+        } else if (self.isObject() && dynamic_cast<String*>(self.asObject())) {
+            str_ = static_cast<String*>(self.asObject());
+        } else {
+            owned_ = std::make_unique<String>(toText(self));
+            str_ = owned_.get();
+        }
+    }
+    const String* operator->() const { return str_; }
+    const String& operator*() const { return *str_; }
+    const std::string& bytes() const { return str_->value(); }
+    size_t length() const { return str_->length(); }
+
+    // Index of `needle` at or after code unit `from`, npos when absent
+    size_t find(const std::string& needle, size_t from) const {
+        if (from > length()) return std::string::npos;
+        if (str_->isAscii()) {
+            if (!Utf16::isAscii(needle)) return std::string::npos;
+            return bytes().find(needle, from);
+        }
+        return str_->utf16().find(Utf16::toUtf16(needle), from);
+    }
+    // Last index of `needle` at or before code unit `from`
+    size_t rfind(const std::string& needle, size_t from) const {
+        if (str_->isAscii()) {
+            if (!Utf16::isAscii(needle)) return std::string::npos;
+            return bytes().rfind(needle, from);
+        }
+        return str_->utf16().rfind(Utf16::toUtf16(needle), from);
+    }
+    // Code units of `needle` in the same unit space as this text
+    size_t unitLength(const std::string& needle) const { return Utf16::length(needle); }
+
+private:
+    const String* str_ = nullptr;
+    std::unique_ptr<String> owned_;
+};
+
 // ToIntegerOrInfinity
 double integerOf(const Value& value) {
     double d = value.toNumber();
@@ -194,15 +245,18 @@ struct Match {
 };
 
 // First match at or after `from`. `re` must be global so that lastIndex applies.
-bool findMatch(RegExpObject& re, const std::string& text, size_t from, Match& out) {
+// `from` and out.index are byte offsets into the WTF-8 text; the exec()
+// array in out.result reports UTF-16 indices
+bool findMatch(RegExpObject& re, const std::string& text, size_t from, Match& out, bool ascii,
+               Value input = Value::undefined()) {
     if (from > text.size()) return false;
-    re.setLastIndex(static_cast<int>(from));
-    const Value result = re.exec(text);
+    size_t start = 0;
+    const Value result = re.execAt(text, from, ascii, &start, nullptr, input);
     if (!result.isObject()) return false;
     auto* array = static_cast<Array*>(result.asObject());
     out.result = result;
     out.matched = array->get(static_cast<uint32_t>(0)).toString();
-    out.index = static_cast<size_t>(array->get("index").toNumber());
+    out.index = start;
     const auto& elements = array->elements();
     out.captures.assign(elements.begin() + 1, elements.end());
     return true;
@@ -210,10 +264,12 @@ bool findMatch(RegExpObject& re, const std::string& text, size_t from, Match& ou
 
 // Every match, left to right; empty matches advance by one code point
 std::vector<Match> allMatches(RegExpObject& re, const std::string& text) {
+    const bool ascii = Utf16::isAscii(text);
+    const Value input = makeString(text);  // shared by every match's exec() array
     std::vector<Match> matches;
     size_t from = 0;
     Match match;
-    while (findMatch(re, text, from, match)) {
+    while (findMatch(re, text, from, match, ascii, input)) {
         const size_t end = match.index + match.matched.size();
         from = match.matched.empty() ? (match.index < text.size() ? match.index + stepOver(text, match.index)
                                                                    : text.size() + 1)
@@ -299,7 +355,10 @@ std::string replacementFor(const Value& replacer, const std::string& templateTex
     std::vector<Value> args;
     args.push_back(makeString(matched));
     args.insert(args.end(), captures.begin(), captures.end());
-    args.push_back(Value::number(static_cast<double>(position)));
+    // `position` is a byte offset into the WTF-8 text; the callback sees code units
+    const double unitPosition = Utf16::isAscii(text.data(), position)
+        ? static_cast<double>(position) : static_cast<double>(Utf16::unitOffsetOfByte(text, position));
+    args.push_back(Value::number(unitPosition));
     args.push_back(makeString(text));
     return toText(vm->executeCallback(static_cast<Runtime::Function*>(replacer.asObject()), Value::undefined(), args));
 }
@@ -324,7 +383,7 @@ Value replaceImpl(const FunctionCallInfo& info, bool all) {
             matches = allMatches(*re, text);
         } else {
             Match match;
-            if (findMatch(*re, text, 0, match)) matches.push_back(std::move(match));
+            if (findMatch(*re, text, 0, match, Utf16::isAscii(text))) matches.push_back(std::move(match));
         }
         std::string out;
         size_t last = 0;
@@ -372,14 +431,16 @@ Value splitImpl(const FunctionCallInfo& info) {
         Scanner scanner(re);
         if (text.empty()) {
             Match match;
-            if (!findMatch(scanner.get(), text, 0, match)) parts.push_back(makeString(text));
+            if (!findMatch(scanner.get(), text, 0, match, true)) parts.push_back(makeString(text));
             scanner.get().setLastIndex(0);
             return Value::object(new Array(std::move(parts)));
         }
         size_t last = 0;   // start of the piece being built
         size_t from = 0;   // where to look for the next match
         Match match;
-        while (from < text.size() && findMatch(scanner.get(), text, from, match)) {
+        const bool ascii = Utf16::isAscii(text);
+        const Value input = makeString(text);
+        while (from < text.size() && findMatch(scanner.get(), text, from, match, ascii, input)) {
             const size_t end = match.index + match.matched.size();
             if (match.index >= text.size()) break;
             if (end == last) {  // an empty match right after the previous cut splits nothing
@@ -402,9 +463,21 @@ Value splitImpl(const FunctionCallInfo& info) {
 
     const std::string needle = toText(separator);
     if (needle.empty()) {
+        // One part per UTF-16 code unit (a pair splits into two lone halves)
         for (size_t i = 0; i < text.size() && parts.size() < limit;) {
-            const size_t length = stepOver(text, i);
-            parts.push_back(makeString(text.substr(i, length)));
+            size_t length;
+            const uint32_t code = Utf16::decodeAt(text.data(), text.size(), i, length);
+            if (code > 0xFFFF) {
+                std::string half;
+                Utf16::appendWtf8(half, 0xD800 + ((code - 0x10000) >> 10));
+                parts.push_back(makeString(half));
+                if (parts.size() == limit) break;
+                half.clear();
+                Utf16::appendWtf8(half, 0xDC00 + ((code - 0x10000) & 0x3FF));
+                parts.push_back(makeString(half));
+            } else {
+                parts.push_back(makeString(text.substr(i, length)));
+            }
             i += length;
         }
         return Value::object(new Array(std::move(parts)));
@@ -478,17 +551,27 @@ Value searchImpl(const FunctionCallInfo& info) {
 }
 
 Value padImpl(const FunctionCallInfo& info, bool atStart) {
-    const std::string text = thisString(info, atStart ? "padStart" : "padEnd");
+    ThisText self(info, atStart ? "padStart" : "padEnd");
+    const std::string& text = self.bytes();
     const double target = std::max(0.0, integerOf(info.argument(0)));
     const std::string filler = info.argument(1).isUndefined() ? " " : toText(info.argument(1));
-    if (target <= static_cast<double>(text.size()) || filler.empty()) return makeString(text);
+    if (target <= static_cast<double>(self.length()) || filler.empty()) return makeString(text);
     if (target > static_cast<double>(kMaxStringLength)) throw JSError("RangeError", "Invalid string length");
 
-    const size_t padding = static_cast<size_t>(target) - text.size();
+    // Padding is counted in UTF-16 code units; a filler cut mid-pair keeps the lead half
+    const size_t padding = static_cast<size_t>(target) - self.length();
     std::string fill;
-    fill.reserve(padding);
-    while (fill.size() < padding) fill += filler;
-    fill.resize(padding);
+    if (Utf16::isAscii(filler)) {
+        fill.reserve(padding);
+        while (fill.size() < padding) fill += filler;
+        fill.resize(padding);
+    } else {
+        const std::u16string unit = Utf16::toUtf16(filler);
+        std::u16string units;
+        while (units.size() < padding) units += unit;
+        units.resize(padding);
+        fill = Utf16::fromUtf16(units);
+    }
     return makeString(atStart ? fill + text : text + fill);
 }
 
@@ -515,14 +598,11 @@ Value trimImpl(const FunctionCallInfo& info, bool start, bool end, const char* m
     return makeString(substringOf(text, from, to));
 }
 
-// The text of the code point that starts at a byte index, "" for any other index
-std::string characterAt(const std::string& text, double index) {
-    if (!(index >= 0) || index >= static_cast<double>(text.size())) return "";
+// The code unit at a UTF-16 index as a one-unit string, "" out of range
+std::string characterAt(const String& text, double index) {
+    if (!(index >= 0) || index >= static_cast<double>(text.length())) return "";
     const size_t i = static_cast<size_t>(index);
-    if (isContinuation(static_cast<unsigned char>(text[i]))) return "";
-    size_t length;
-    decodeAt(text, i, length);
-    return text.substr(i, length);
+    return text.substringUnits(i, i + 1);
 }
 
 // Primary comparison ignores case; on a tie lower case sorts before upper case
@@ -560,33 +640,38 @@ Runtime::Object* StringBuiltin::createStringPrototype(Runtime::Context*) {
     prototype->defineProperty("valueOf", *prototype->getOwnPropertyDescriptor("toString"));
 
     defineMethod(prototype, "charAt", [](const FunctionCallInfo& info) -> Value {
-        return makeString(characterAt(thisString(info, "charAt"), integerOf(info.argument(0))));
+        ThisText text(info, "charAt");
+        return makeString(characterAt(*text, integerOf(info.argument(0))));
     }, 1);
 
     defineMethod(prototype, "at", [](const FunctionCallInfo& info) -> Value {
-        const std::string text = thisString(info, "at");
+        ThisText text(info, "at");
         double index = integerOf(info.argument(0));
-        if (index < 0) index += static_cast<double>(text.size());
-        const std::string character = characterAt(text, index);
-        return character.empty() ? Value::undefined() : makeString(character);
+        if (index < 0) index += static_cast<double>(text.length());
+        if (!(index >= 0) || index >= static_cast<double>(text.length())) return Value::undefined();
+        return makeString(characterAt(*text, index));
     }, 1);
 
     defineMethod(prototype, "charCodeAt", [](const FunctionCallInfo& info) -> Value {
-        const std::string text = thisString(info, "charCodeAt");
+        ThisText text(info, "charCodeAt");
         const double index = integerOf(info.argument(0));
-        if (!(index >= 0) || index >= static_cast<double>(text.size())) return Value::number(std::nan(""));
-        size_t length;
-        const uint32_t code = decodeAt(text, static_cast<size_t>(index), length);
-        // Code units above the BMP are surrogate pairs; this is the high half
-        return Value::number(code > 0xFFFF ? 0xD800 + ((code - 0x10000) >> 10) : code);
+        if (!(index >= 0) || index >= static_cast<double>(text.length())) return Value::number(std::nan(""));
+        return Value::number(text->codeUnitAt(static_cast<size_t>(index)));
     }, 1);
 
     defineMethod(prototype, "codePointAt", [](const FunctionCallInfo& info) -> Value {
-        const std::string text = thisString(info, "codePointAt");
+        ThisText text(info, "codePointAt");
         const double index = integerOf(info.argument(0));
-        if (!(index >= 0) || index >= static_cast<double>(text.size())) return Value::undefined();
-        size_t length;
-        return Value::number(decodeAt(text, static_cast<size_t>(index), length));
+        if (!(index >= 0) || index >= static_cast<double>(text.length())) return Value::undefined();
+        const size_t i = static_cast<size_t>(index);
+        const uint32_t unit = text->codeUnitAt(i);
+        if (Utf16::isLeadSurrogate(unit) && i + 1 < text.length()) {
+            const uint32_t trail = text->codeUnitAt(i + 1);
+            if (Utf16::isTrailSurrogate(trail)) {
+                return Value::number(0x10000 + ((unit - 0xD800) << 10) + (trail - 0xDC00));
+            }
+        }
+        return Value::number(unit);
     }, 1);
 
     defineMethod(prototype, "concat", [](const FunctionCallInfo& info) -> Value {
@@ -596,68 +681,96 @@ Runtime::Object* StringBuiltin::createStringPrototype(Runtime::Context*) {
     }, 1);
 
     defineMethod(prototype, "includes", [](const FunctionCallInfo& info) -> Value {
-        const std::string text = thisString(info, "includes");
+        ThisText text(info, "includes");
         if (asRegExp(info.argument(0))) regExpNotAllowed("includes");
         const std::string needle = toText(info.argument(0));
-        return Value::boolean(text.find(needle, clampPosition(info.argument(1), text.size(), 0)) != std::string::npos);
+        return Value::boolean(text.find(needle, clampPosition(info.argument(1), text.length(), 0)) != std::string::npos);
     }, 1);
 
     defineMethod(prototype, "indexOf", [](const FunctionCallInfo& info) -> Value {
-        const std::string text = thisString(info, "indexOf");
+        ThisText text(info, "indexOf");
         const std::string needle = toText(info.argument(0));
-        const size_t found = text.find(needle, clampPosition(info.argument(1), text.size(), 0));
+        const size_t found = text.find(needle, clampPosition(info.argument(1), text.length(), 0));
         return Value::number(found == std::string::npos ? -1 : static_cast<double>(found));
     }, 1);
 
     defineMethod(prototype, "lastIndexOf", [](const FunctionCallInfo& info) -> Value {
-        const std::string text = thisString(info, "lastIndexOf");
+        ThisText text(info, "lastIndexOf");
         const std::string needle = toText(info.argument(0));
         const double requested = info.argument(1).toNumber();
-        const size_t from = std::isnan(requested) ? text.size() : clampPosition(Value::number(requested), text.size(), text.size());
+        const size_t from = std::isnan(requested) ? text.length() : clampPosition(Value::number(requested), text.length(), text.length());
         const size_t found = text.rfind(needle, from);
         return Value::number(found == std::string::npos ? -1 : static_cast<double>(found));
     }, 1);
 
     defineMethod(prototype, "startsWith", [](const FunctionCallInfo& info) -> Value {
-        const std::string text = thisString(info, "startsWith");
+        ThisText text(info, "startsWith");
         if (asRegExp(info.argument(0))) regExpNotAllowed("startsWith");
         const std::string needle = toText(info.argument(0));
-        const size_t from = clampPosition(info.argument(1), text.size(), 0);
-        return Value::boolean(text.compare(from, needle.size(), needle) == 0 && from + needle.size() <= text.size());
+        const size_t from = clampPosition(info.argument(1), text.length(), 0);
+        const size_t units = text.unitLength(needle);
+        if (from + units > text.length()) return Value::boolean(false);
+        return Value::boolean(text->substringUnits(from, from + units) == needle);
     }, 1);
 
     defineMethod(prototype, "endsWith", [](const FunctionCallInfo& info) -> Value {
-        const std::string text = thisString(info, "endsWith");
+        ThisText text(info, "endsWith");
         if (asRegExp(info.argument(0))) regExpNotAllowed("endsWith");
         const std::string needle = toText(info.argument(0));
-        const size_t end = clampPosition(info.argument(1), text.size(), text.size());
-        if (needle.size() > end) return Value::boolean(false);
-        return Value::boolean(text.compare(end - needle.size(), needle.size(), needle) == 0);
+        const size_t end = clampPosition(info.argument(1), text.length(), text.length());
+        const size_t units = text.unitLength(needle);
+        if (units > end) return Value::boolean(false);
+        return Value::boolean(text->substringUnits(end - units, end) == needle);
     }, 1);
 
     defineMethod(prototype, "slice", [](const FunctionCallInfo& info) -> Value {
-        const std::string text = thisString(info, "slice");
-        const size_t from = relativePosition(info.argument(0), text.size(), 0);
-        const size_t to = relativePosition(info.argument(1), text.size(), text.size());
-        return makeString(substringOf(text, from, to));
+        ThisText text(info, "slice");
+        const size_t from = relativePosition(info.argument(0), text.length(), 0);
+        const size_t to = relativePosition(info.argument(1), text.length(), text.length());
+        return makeString(text->substringUnits(from, to));
     }, 2);
 
     defineMethod(prototype, "substring", [](const FunctionCallInfo& info) -> Value {
-        const std::string text = thisString(info, "substring");
-        size_t from = clampPosition(info.argument(0), text.size(), 0);
-        size_t to = clampPosition(info.argument(1), text.size(), text.size());
+        ThisText text(info, "substring");
+        size_t from = clampPosition(info.argument(0), text.length(), 0);
+        size_t to = clampPosition(info.argument(1), text.length(), text.length());
         if (from > to) std::swap(from, to);
-        return makeString(substringOf(text, from, to));
+        return makeString(text->substringUnits(from, to));
     }, 2);
 
     defineMethod(prototype, "substr", [](const FunctionCallInfo& info) -> Value {
-        const std::string text = thisString(info, "substr");
-        const size_t from = relativePosition(info.argument(0), text.size(), 0);
-        const double length = info.argument(1).isUndefined() ? static_cast<double>(text.size())
+        ThisText text(info, "substr");
+        const size_t from = relativePosition(info.argument(0), text.length(), 0);
+        const double length = info.argument(1).isUndefined() ? static_cast<double>(text.length())
                                                              : std::max(0.0, integerOf(info.argument(1)));
-        const size_t to = static_cast<size_t>(std::min(static_cast<double>(text.size()), static_cast<double>(from) + length));
-        return makeString(substringOf(text, from, to));
+        const size_t to = static_cast<size_t>(std::min(static_cast<double>(text.length()), static_cast<double>(from) + length));
+        return makeString(text->substringUnits(from, to));
     }, 2);
+
+    // Canonical composition is not implemented: text that is already in NFC
+    // (all ASCII, and nearly all real-world text) is returned unchanged
+    defineMethod(prototype, "normalize", [](const FunctionCallInfo& info) -> Value {
+        ThisText text(info, "normalize");
+        const Value form = info.argument(0);
+        if (!form.isUndefined()) {
+            const std::string name = toText(form);
+            if (name != "NFC" && name != "NFD" && name != "NFKC" && name != "NFKD") {
+                throw JSError("RangeError", "The normalization form should be one of NFC, NFD, NFKC, NFKD.");
+            }
+        }
+        return makeString(text.bytes());
+    }, 0);
+
+    defineMethod(prototype, "isWellFormed", [](const FunctionCallInfo& info) -> Value {
+        ThisText text(info, "isWellFormed");
+        if (text->isAscii()) return Value::boolean(true);
+        const std::u16string& units = text->utf16();
+        for (size_t i = 0; i < units.size(); ++i) {
+            if (Utf16::isLeadSurrogate(units[i]) && i + 1 < units.size() && Utf16::isTrailSurrogate(units[i + 1])) { ++i; continue; }
+            if (Utf16::isLeadSurrogate(units[i]) || Utf16::isTrailSurrogate(units[i])) return Value::boolean(false);
+        }
+        return Value::boolean(true);
+    }, 0);
 
     defineMethod(prototype, "toLowerCase", [](const FunctionCallInfo& info) -> Value {
         return makeString(mapCase(thisString(info, "toLowerCase"), false));
@@ -743,8 +856,8 @@ void StringBuiltin::installStatics(Runtime::Function* constructor) {
                     continue;
                 }
             }
-            // A lone surrogate has no UTF-8 form
-            appendCodePoint(out, (unit >= 0xD800 && unit <= 0xDFFF) ? 0xFFFD : unit);
+            // A lone surrogate keeps its 3-byte (WTF-8) form
+            Utf16::appendWtf8(out, unit);
         }
         return makeString(out);
     }, 1);
@@ -757,7 +870,7 @@ void StringBuiltin::installStatics(Runtime::Function* constructor) {
                 throw JSError("RangeError", "Invalid code point " + info.argument(i).toString());
             }
             const uint32_t point = static_cast<uint32_t>(code);
-            appendCodePoint(out, (point >= 0xD800 && point <= 0xDFFF) ? 0xFFFD : point);
+            Utf16::appendWtf8(out, point);
         }
         return makeString(out);
     }, 1);

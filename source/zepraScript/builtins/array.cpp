@@ -763,8 +763,10 @@ Runtime::Value ArrayBuiltin::flat(const Runtime::FunctionCallInfo& info) {
     if (!arr) return Runtime::Value::object(new Runtime::Array({}));
     
     int64_t depth = 1;
-    if (info.argumentCount() > 0 && info.argument(0).isNumber()) {
-        depth = static_cast<int64_t>(info.argument(0).asNumber());
+    if (info.argumentCount() > 0 && !info.argument(0).isUndefined()) {
+        // ToIntegerOrInfinity; flat(Infinity) flattens completely
+        const double d = info.argument(0).toNumber();
+        depth = std::isnan(d) ? 0 : d > 1e6 ? 1000000 : d < 0 ? 0 : static_cast<int64_t>(d);
     }
     
     std::vector<Runtime::Value> result;

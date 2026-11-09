@@ -6,6 +6,7 @@
  */
 
 #include "runtime/objects/object.hpp"
+#include "runtime/objects/string_utf16.hpp"
 #include "runtime/objects/function.hpp"
 #include "builtins/array.hpp"
 #include <algorithm>
@@ -222,6 +223,13 @@ std::optional<PropertyDescriptor> Object::getOwnPropertyDescriptor(const std::st
     return std::nullopt;
 }
 
+// Symbol-keyed and class-private (#name) properties share the string key
+// space under reserved "@@" prefixes; they are never property names
+static bool isInternalPropertyKey(const std::string& key) {
+    return key.size() > 2 && key[0] == '@' && key[1] == '@' &&
+           (key.compare(2, 7, "symbol:") == 0 || key.compare(2, 8, "private:") == 0);
+}
+
 std::vector<std::string> Object::getOwnPropertyNames() const {
     std::vector<std::string> names;
     names.reserve(properties_.size() + elements_.size());
@@ -235,7 +243,7 @@ std::vector<std::string> Object::getOwnPropertyNames() const {
     
     // Add named properties, in insertion order (symbol-keyed ones are not names)
     for (auto& key : orderedNamedKeys()) {
-        if (key.compare(0, 9, "@@symbol:") == 0) continue;
+        if (isInternalPropertyKey(key)) continue;
         names.push_back(std::move(key));
     }
 
@@ -254,7 +262,7 @@ std::vector<std::string> Object::keys() const {
     
     // Add enumerable named properties, in insertion order
     for (auto& key : orderedNamedKeys()) {
-        if (key.compare(0, 9, "@@symbol:") == 0) continue;  // symbol keys are not string keys
+        if (isInternalPropertyKey(key)) continue;  // symbol and private keys are not string keys
         auto descIt = descriptors_.find(key);
         if (descIt == descriptors_.end() || descIt->second.isEnumerable()) {
             result.push_back(std::move(key));
@@ -476,30 +484,50 @@ String::String(std::string value)
     setPrototype(getStringPrototype());
 }
 
+bool String::asciiText(const std::string& text) {
+    return Utf16::isAscii(text);
+}
+
+const std::u16string& String::utf16() const {
+    if (!utf16_) utf16_ = std::make_unique<std::u16string>(Utf16::toUtf16(value_));
+    return *utf16_;
+}
+
+std::string String::substringUnits(size_t from, size_t to) const {
+    const size_t size = length();
+    if (to > size) to = size;
+    if (from >= to) return std::string();
+    if (isAscii()) return value_.substr(from, to - from);
+    return Utf16::fromUtf16(utf16().data() + from, to - from);
+}
+
 Value String::charAt(size_t index) const {
-    if (index >= value_.size()) {
+    if (index >= length()) {
         return Value::string(new String(""));
     }
-    return Value::string(new String(std::string(1, value_[index])));
+    if (isAscii()) return Value::string(new String(std::string(1, value_[index])));
+    std::string unit;
+    Utf16::appendWtf8(unit, utf16()[index]);
+    return Value::string(new String(std::move(unit)));
 }
 
 int String::charCodeAt(size_t index) const {
-    if (index >= value_.size()) {
+    if (index >= length()) {
         return -1; // NaN in JS
     }
-    return static_cast<unsigned char>(value_[index]);
+    return codeUnitAt(index);
 }
 
 String* String::concat(const String* other) const {
+    if (Utf16::needsSurrogateJoin(value_, other->value_)) {
+        return new String(Utf16::joinSurrogates(value_, other->value_));
+    }
     return new String(value_ + other->value_);
 }
 
 String* String::substring(size_t start, size_t end) const {
-    if (start > value_.size()) start = value_.size();
-    if (end > value_.size()) end = value_.size();
     if (start > end) std::swap(start, end);
-    
-    return new String(value_.substr(start, end - start));
+    return new String(substringUnits(start, end));
 }
 
 String* String::toLowerCase() const {

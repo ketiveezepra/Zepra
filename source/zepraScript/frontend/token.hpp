@@ -25,6 +25,7 @@ enum class TokenType : uint8 {
     TemplateHead,
     TemplateMiddle,
     TemplateTail,
+    PrivateName,    // #name (value includes the '#')
     
     // Keywords
     Var,

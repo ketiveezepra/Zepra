@@ -29,6 +29,14 @@ public:
 
     bool test(const std::string& str);
     Value exec(const std::string& str);
+    // One match at or after byte offset `byteStart` of WTF-8 `str` (ignores
+    // and keeps lastIndex). The result array's index is in UTF-16 code units;
+    // the match's byte range is returned through the out parameters.
+    // `input` (optional) is `str` as a string value, reused for the result's
+    // input property instead of copying the text once per match
+    Value execAt(const std::string& str, size_t byteStart, bool ascii,
+                 size_t* matchByteStart = nullptr, size_t* matchByteEnd = nullptr,
+                 Value input = Value::undefined());
 
     const std::string& pattern() const { return pattern_; }
     const std::string& flags() const { return flagStr_; }
@@ -38,6 +46,11 @@ public:
     bool dotAll() const { return flags_.dotAll; }
     bool unicode() const { return flags_.unicode; }
     bool sticky() const { return flags_.sticky; }
+    bool hasIndices() const { return flags_.hasIndices; }
+    bool unicodeSets() const { return flagStr_.find('v') != std::string::npos; }
+    // Flags in canonical order ("dgimsuvy"), as RegExp.prototype.flags gives them
+    std::string canonicalFlags() const;
+    // In UTF-16 code units, as JavaScript sees it
     int lastIndex() const { return lastIndex_; }
     void setLastIndex(int idx) { lastIndex_ = idx; }
     bool isValid() const { return valid_; }
