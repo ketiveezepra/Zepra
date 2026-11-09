@@ -15,6 +15,7 @@
 #include "../css/css_computed_style.hpp"
 #include "../dom/form_controls.hpp"
 #include "gradient_raster.h"
+#include "box_shadow.h"
 
 // Viewport dimensions (defined in zepra_browser.cpp)
 extern int g_width;
@@ -448,6 +449,30 @@ void setLayoutCallbacks2(
     s_gfx_gradient = gfx_gradient;
     s_gfx_svg = gfx_svg;
     s_gfx_hgradient = gfx_hgradient;
+}
+
+static void (*s_gfx_shadow)(float, float, const ShadowBox&, const BoxShadow&) = nullptr;
+
+void setShadowPaintCallback(void (*gfx_shadow)(float, float, const ShadowBox&, const BoxShadow&)) {
+    s_gfx_shadow = gfx_shadow;
+}
+
+// The box's outer (inset = false) or inset shadows, bottom one first
+static void paintShadows(const LayoutBox& box, float x, float y, bool inset) {
+    if (!s_gfx_shadow || box.boxShadow.empty() || box.boxShadow == "none") return;
+    std::vector<BoxShadow> shadows = parseBoxShadow(box.boxShadow, box.color);
+    if (shadows.empty()) return;
+    ShadowBox sb;
+    sb.width = box.width;
+    sb.height = box.height;
+    sb.borderTop = box.borderTop;
+    sb.borderRight = box.borderRight;
+    sb.borderBottom = box.borderBottom;
+    sb.borderLeft = box.borderLeft;
+    sb.radius = box.borderRadius;
+    for (size_t i = shadows.size(); i-- > 0;) {
+        if (shadows[i].inset == inset) s_gfx_shadow(x, y, sb, shadows[i]);
+    }
 }
 
 void setGradientPaintCallback(void (*gfx_gradient_bg)(float, float, const GradientBackground&)) {
@@ -2174,6 +2199,9 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     // The background colour's own alpha (rgba(), #rrggbbaa) times opacity
     uint8_t alpha = (uint8_t)std::lround(box.bgAlpha * std::clamp(box.opacity, 0.0f, 1.0f));
     
+    // Outer shadows under everything the box paints (CSS Backgrounds 3 §7.1)
+    paintShadows(box, screenX, screenY, false);
+
     // Row and row-group backgrounds show through their cells only, not the
     // border-spacing between them (CSS 2.1 §17.5.1)
     if (box.hasBgColor && (box.type == LayoutType::TableRow || box.type == LayoutType::TableRowGroup)) {
@@ -2220,6 +2248,8 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
         }
     }
     if (box.bgTextureId > 0 || !box.bgSvgData.empty()) paintBackgroundImage(box, screenX, screenY);
+    // Inset shadows over the background, under the border and content
+    paintShadows(box, screenX, screenY, true);
     
     // Draw border, inside the border box (CSS Backgrounds 3, 4): each side is
     // a rectangle of its own width along that edge. Strokes are centered on
