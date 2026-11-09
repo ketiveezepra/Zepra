@@ -455,6 +455,8 @@ static void (*s_gfx_blend_fill)(float, float, float, float, float, uint32_t, uin
 
 void setBlendFillCallback(void (*gfx_blend_fill)(float, float, float, float, float, uint32_t, uint8_t, uint8_t)) {
     s_gfx_blend_fill = gfx_blend_fill;
+}
+
 static void (*s_gfx_shadow)(float, float, const ShadowBox&, const BoxShadow&) = nullptr;
 
 void setShadowPaintCallback(void (*gfx_shadow)(float, float, const ShadowBox&, const BoxShadow&)) {
@@ -2396,7 +2398,6 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     if (!box.bgClipText && (box.bgTextureId > 0 || !box.bgSvgData.empty())) paintBackgroundImage(box, screenX, screenY);
     // Text inside a background-clip: text box shows its background
     ClipTextScope clipText(box, screenX, screenY);
-    if (box.bgTextureId > 0 || !box.bgSvgData.empty()) paintBackgroundImage(box, screenX, screenY);
     // Inset shadows over the background, under the border and content
     paintShadows(box, screenX, screenY, true);
     

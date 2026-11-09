@@ -788,6 +788,9 @@ TEST(TextTransform, UpperLowerAndCapitalize) {
     EXPECT_EQ(applyTextTransform("ÉCOLE ΣΟΦΙΑ ЖУК", "lowercase"), "école σοφια жук");
     EXPECT_EQ(applyTextTransform("hello wide world 3d", "capitalize"), "Hello Wide World 3d");
     EXPECT_EQ(applyTextTransform("Mixed Case", "none"), "Mixed Case");
+}
+
+// ---------------------------------------------------------------------------
 // mix-blend-mode (blend_modes.cpp)
 // ---------------------------------------------------------------------------
 
@@ -811,6 +814,9 @@ TEST(BlendModes, SeparableAndNonSeparable) {
     EXPECT_GT(col & 0xFF, (col >> 16) & 0xFF);
     // Alpha mixes the result with the backdrop
     EXPECT_EQ(blendPixel(BlendMode::Multiply, 0xFFFFFF, 0x000000, 128), 0x7F7F7Fu);
+}
+
+// ---------------------------------------------------------------------------
 // background-clip: text
 // ---------------------------------------------------------------------------
 
@@ -864,6 +870,9 @@ TEST(ClipText, TransparentTextWithoutABackgroundIsNotDrawn) {
     ZepraBrowser::paintBox(run, 0, 0, 10000, 0);
     ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
     EXPECT_TRUE(g_glyphs.empty());
+}
+
+// ---------------------------------------------------------------------------
 // box-shadow (box_shadow.cpp)
 // ---------------------------------------------------------------------------
 
