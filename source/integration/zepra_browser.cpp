@@ -4525,8 +4525,17 @@ void render() {
             }
         }
     } else {
-        // Render loaded web content
-        gfx::rect(contentX, contentY, contentW, contentH, 0xFFFFFF);
+        // Render loaded web content. The body's background propagates to the
+        // canvas (CSS Backgrounds 3 §2.11.2): it covers the whole viewport,
+        // not just the body box, so a dark page has no white gutter or tail.
+        uint32_t canvasColor = 0xFFFFFF;
+        if (g_layoutRoot && g_layoutRoot->hasBgColor && !g_isLoading && g_loadError.empty()) {
+            uint32_t c = g_layoutRoot->bgColor & 0xFFFFFF;
+            unsigned a = g_layoutRoot->bgAlpha;
+            auto blend = [&](unsigned ch) { return (ch * a + 255 * (255 - a)) / 255; };
+            canvasColor = (blend((c >> 16) & 0xFF) << 16) | (blend((c >> 8) & 0xFF) << 8) | blend(c & 0xFF);
+        }
+        gfx::rect(contentX, contentY, contentW, contentH, canvasColor);
         
         if (g_isLoading) {
             // Loading indicator
