@@ -144,11 +144,8 @@ public:
         
         float startX = x;
         
-        for (size_t i = 0; i < text.size();) {
-            uint32_t c = nextCodepoint(text, i);
-            if (c == ' ') { x += spaceAdvance() + letterSpacing + wordSpacing; continue; }
-            const Glyph* found = glyphFor(c);
-            if (!found) continue;
+        eachGlyph(text, [&](const Glyph* found) {
+            if (!found) { x += spaceAdvance() + letterSpacing + wordSpacing; return; }
             const Glyph& glyph = *found;
             
             if (glyph.textureId && glyph.width > 0 && glyph.height > 0) {
@@ -182,7 +179,7 @@ public:
             }
             
             x += glyph.advance + letterSpacing;
-        }
+        });
         
         // Restore OpenGL state
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -192,13 +189,6 @@ public:
         return x - startX;
     }
     
-    // Measure text width
-    float measureText(const std::string& text, float letterSpacing = 0, float wordSpacing = 0) {
-        float width = 0;
-        for (size_t i = 0; i < text.size();) {
-            uint32_t c = nextCodepoint(text, i);
-            if (c == ' ') { width += spaceAdvance() + letterSpacing + wordSpacing; continue; }
-            if (const Glyph* glyph = glyphFor(c)) width += glyph->advance + letterSpacing;
     /// Calls `f(glyph)` for each glyph of `text` in order (nullptr for a space),
     /// emoji sequences shaped into their ligatures
     template <typename F>
@@ -219,9 +209,12 @@ public:
         }
     }
 
-    float measureText(const std::string& text) {
+    // Measure text width, with the same spacing as drawText
+    float measureText(const std::string& text, float letterSpacing = 0, float wordSpacing = 0) {
         float width = 0;
-        eachGlyph(text, [&](const Glyph* glyph) { width += glyph ? glyph->advance : spaceAdvance(); });
+        eachGlyph(text, [&](const Glyph* glyph) {
+            width += glyph ? glyph->advance + letterSpacing : spaceAdvance() + letterSpacing + wordSpacing;
+        });
         return width;
     }
     
