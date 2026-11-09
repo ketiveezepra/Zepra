@@ -326,3 +326,13 @@ TEST(ComputedStyle, PercentageBorderRadiusIsKept) {
     EXPECT_EQ(page.eval("box.style.borderRadius = '50%'; cs.borderRadius"), "50%");
     EXPECT_EQ(page.eval("box.style.borderRadius = '8px'; cs.borderRadius"), "8px");
 }
+
+TEST(ComputedStyle, LetterSpacingParsesAndInherits) {
+    Page page(kPage);
+    page.eval("var box = document.getElementById('box'); var child = document.getElementById('child');"
+              "var cs = getComputedStyle(box); var ccs = getComputedStyle(child)");
+    EXPECT_EQ(page.eval("box.style.letterSpacing = '1.5px'; cs.letterSpacing + '|' + ccs.letterSpacing"),
+              "1.5px|1.5px");
+    EXPECT_EQ(page.eval("box.style.letterSpacing = 'normal'; cs.letterSpacing"),
+              page.eval("box.style.letterSpacing = ''; cs.letterSpacing"));
+}
