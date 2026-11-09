@@ -2697,6 +2697,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         Zepra::WebCore::CSSColor borderColor = usedBorderColor(*childStyle);
                         blockBox->borderColor = cssColorToRGB(borderColor);
                         blockBox->borderVisible = borderColor.a > 0;
+                        blockBox->borderAlpha = borderColor.a;
                         blockBox->borderStyle = usedBorderStyle(*childStyle);
                     }
                     blockBox->borderRadius = childStyle->borderTopLeftRadius;
@@ -2920,6 +2921,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         Zepra::WebCore::CSSColor borderColor = usedBorderColor(*childStyle);
                         inlineBox->borderColor = cssColorToRGB(borderColor);
                         inlineBox->borderVisible = borderColor.a > 0;
+                        inlineBox->borderAlpha = borderColor.a;
                         inlineBox->borderStyle = usedBorderStyle(*childStyle);
                     }
                     inlineBox->borderRadius = childStyle->borderTopLeftRadius;
@@ -3032,6 +3034,9 @@ void rect(float x, float y, float w, float h, uint32_t c, uint8_t a = 255) {
 }
 
 void rrect(float x, float y, float w, float h, float rad, uint32_t c, uint8_t a = 255) {
+    // The GPU's rounded rect places corner vertices at (x + r ± r): a radius
+    // past half the box (border-radius: 9999px) must be clamped first
+    rad = std::max(0.0f, std::min({rad, w / 2, h / 2}));
     g_nxGpu.fillRoundedRect(NXRender::Rect(x, y, w, h), NXRender::Color(c).withAlpha(a), rad);
 }
 
@@ -3536,8 +3541,9 @@ static void updateMediaViewport() {
 }
 
 static void layoutPage() {
-    ZepraBrowser::setLayoutViewport(g_width - getSidebarOffset(), pageViewportHeight());
-    ZepraBrowser::layoutBlock(*g_layoutRoot, pageFrame().layoutWidth, 0);
+    PageFrame frame = pageFrame();
+    ZepraBrowser::setLayoutViewport(g_width - getSidebarOffset(), pageViewportHeight(), frame.originX, frame.originY);
+    ZepraBrowser::layoutBlock(*g_layoutRoot, frame.layoutWidth, 0);
     g_layoutPending = false;
     g_layoutPass++;
 }

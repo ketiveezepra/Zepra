@@ -140,6 +140,7 @@ struct LayoutBox {
     uint8_t bgAlpha = 255;       // background-color alpha (rgba(), #rrggbbaa, transparent stops)
     uint32_t borderColor = 0x000000;
     bool borderVisible = true;   // false for a transparent border colour (it still takes space)
+    uint8_t borderAlpha = 255;   // the border colour's alpha (rgba(), #rrggbbaa)
     int borderStyle = 2;         // Zepra::WebCore::BorderStyle of the painted sides: 2 solid, 3 dashed, 4 dotted, 5 double
     float fontSize = 16.0f;
     bool bold = false;
@@ -468,7 +469,8 @@ void setCanvasPaintCallback(
  * against: the page's content area, not the whole window. Until it is set,
  * the window size (g_width x g_height) is used.
  */
-void setLayoutViewport(float width, float height);
+// rootOffset: where the root box sits inside the viewport (page gutter)
+void setLayoutViewport(float width, float height, float rootOffsetX = 0, float rootOffsetY = 0);
 float layoutViewportWidth();
 float layoutViewportHeight();
 

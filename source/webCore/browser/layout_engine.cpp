@@ -509,10 +509,15 @@ void setCanvasPaintCallback(void (*gfx_canvas)(float, float, float, float, Zepra
 
 static float s_viewportW = 0;
 static float s_viewportH = 0;
+// Where the root box sits inside the viewport (the browser's page gutter)
+static float s_rootOffsetX = 0;
+static float s_rootOffsetY = 0;
 
-void setLayoutViewport(float width, float height) {
+void setLayoutViewport(float width, float height, float rootOffsetX, float rootOffsetY) {
     s_viewportW = width;
     s_viewportH = height;
+    s_rootOffsetX = rootOffsetX;
+    s_rootOffsetY = rootOffsetY;
 }
 
 float layoutViewportWidth() { return s_viewportW > 0 ? s_viewportW : (float)g_width; }
@@ -2434,10 +2439,11 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
         paintBoxImpl(box, offsetX, offsetY, viewportHeight, scrollY);
         return;
     }
-    // A new frame: (offsetX, offsetY) is the viewport origin
+    // A new frame: (offsetX, offsetY) is where the root box paints; the
+    // viewport (fixed boxes' containing block) starts the gutter before it
     t_frame.active = true;
-    t_frame.viewX = offsetX;
-    t_frame.viewY = offsetY;
+    t_frame.viewX = offsetX - s_rootOffsetX;
+    t_frame.viewY = offsetY - s_rootOffsetY;
     t_frame.viewW = layoutViewportWidth();
     t_frame.viewBottom = viewportHeight;
     t_frame.root = &box;
@@ -2481,7 +2487,13 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     // smaller side, as corners here are circular)
     if (box.borderRadiusPercent > 0)
         box.borderRadius = std::min(box.width, box.height) * std::min(box.borderRadiusPercent, 50.0f) / 100.0f;
-    // A radius past half the box (Tailwind's rounded-full is 3.40282e38px)
+    // Radii that would overlap are scaled down to fit the box (CSS
+    // Backgrounds 3 §5.5); with one uniform radius that is half the shorter
+    // side. Tailwind's rounded-full is 3.4e38px, which the GPU's fan of
+    // corner vertices otherwise turns into a screen-filling shape.
+    if (box.borderRadius > 0)
+        box.borderRadius = std::min({box.borderRadius, box.width / 2.0f, box.height / 2.0f});
+// A radius past half the box (Tailwind's rounded-full is 3.40282e38px)
     // is a pill: the rasterizer places corner centres at +-radius and drew
     // nothing sensible from such a value
     if (box.borderRadius > 0 && box.width > 0 && box.height > 0)
@@ -2581,11 +2593,17 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
             float middle = box.height - top - bottom;
             float left = std::min(box.borderLeft, box.width);
             float right = std::min(box.borderRight, std::max(0.0f, box.width - left));
-            if (top > 0) s_gfx_rect(screenX, screenY, box.width, top, box.borderColor);
-            if (bottom > 0) s_gfx_rect(screenX, screenY + box.height - bottom, box.width, bottom, box.borderColor);
-            if (middle > 0 && left > 0) s_gfx_rect(screenX, screenY + top, left, middle, box.borderColor);
-            if (middle > 0 && right > 0)
-                s_gfx_rect(screenX + box.width - right, screenY + top, right, middle, box.borderColor);
+            // A translucent border colour (rgba(), #rrggbbaa) goes through the
+            // fill that takes an alpha, as the background does
+            uint8_t borderAlpha = (uint8_t)std::lround(box.borderAlpha * std::clamp(box.opacity, 0.0f, 1.0f));
+            auto side = [&](float sx, float sy, float sw, float sh) {
+                if (borderAlpha < 255 && s_gfx_rrect) s_gfx_rrect(sx, sy, sw, sh, 0, box.borderColor, borderAlpha);
+                else s_gfx_rect(sx, sy, sw, sh, box.borderColor);
+            };
+            if (top > 0) side(screenX, screenY, box.width, top);
+            if (bottom > 0) side(screenX, screenY + box.height - bottom, box.width, bottom);
+            if (middle > 0 && left > 0) side(screenX, screenY + top, left, middle);
+            if (middle > 0 && right > 0) side(screenX + box.width - right, screenY + top, right, middle);
         }
     }
     

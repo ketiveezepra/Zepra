@@ -585,6 +585,24 @@ bool CSSCascade::selectorGroupMatches(DOMElement* element, const std::string& se
     return true;
 }
 
+// Standard pseudo-classes this matcher does not evaluate: they keep matching
+// (as before) rather than dropping the rule. Anything else, including every
+// vendor-prefixed name, is an unknown pseudo-class and matches nothing.
+static bool knownPseudoClass(const std::string& name) {
+    static const char* const known[] = {
+        "first-of-type", "last-of-type", "only-of-type", "nth-of-type", "nth-last-of-type", "nth-last-child",
+        "lang", "dir", "scope", "host", "host-context", "has", "defined", "valid", "invalid", "user-valid",
+        "user-invalid", "required", "optional", "in-range", "out-of-range", "autofill", "fullscreen",
+        "modal", "popover-open", "picture-in-picture", "playing", "paused", "open", "closed", "blank",
+        "current", "past", "future", "local-link", "target-within", "focus-visible", "nth-child", "not",
+        "is", "where", "matches", "any", "root", "empty", "first-child", "last-child", "only-child",
+    };
+    for (const char* k : known) {
+        if (name == k) return true;
+    }
+    return false;
+}
+
 // Match a compound selector ("div.class#id[attr]") against a single element
 bool CSSCascade::compoundSelectorMatches(DOMElement* element, const std::string& compound) {
     if (!element || compound.empty()) return false;
@@ -823,6 +841,12 @@ bool CSSCascade::compoundSelectorMatches(DOMElement* element, const std::string&
             } else if (pseudoName == "where") {
                 // :where(sel) — same as :is() but zero specificity
                 if (!pseudoArg.empty() && !selectorMatches(element, pseudoArg)) return false;
+            } else if (!knownPseudoClass(pseudoName)) {
+                // A pseudo-class this engine does not know (vendor ones like
+                // :-moz-focusring above all) makes the selector invalid, so it
+                // matches nothing (Selectors 4 §3.9); Tailwind's preflight
+                // ":-moz-focusring{outline:auto}" otherwise outlines every box
+                return false;
             }
         }
         else if (std::isalnum(compound[i]) || compound[i] == '-' || compound[i] == '_') {
