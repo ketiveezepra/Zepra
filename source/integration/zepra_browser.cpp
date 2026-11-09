@@ -109,6 +109,8 @@ extern "C" {
 #include "browser/lazy_image_loader.h"
 #include "browser/svg_raster.h"
 #include "browser/gradient_raster.h"
+#include "browser/blend_modes.h"
+#include "browser/box_shadow.h"
 #include "browser/clipboard.h"
 #include "browser/css_utils.h"
 #include "devtools/devtools_panel.hpp"
@@ -1747,6 +1749,20 @@ static int usedBorderStyle(const CSSComputedStyle& style) {
     return (int)style.borderLeftStyle;
 }
 
+// outline-* on a box (an outline style of none or hidden draws nothing;
+// auto, a focus ring, is drawn solid)
+static void setOutline(LayoutBox* box, const CSSComputedStyle& style) {
+    Zepra::WebCore::BorderStyle b = Zepra::WebCore::BorderStyle::Solid;
+    if (style.outlineStyle != "auto" && !Zepra::WebCore::parseBorderStyle(style.outlineStyle, b)) return;
+    // none and hidden (X11 defines None as a macro here)
+    if (b == Zepra::WebCore::BorderStyle{} || b == Zepra::WebCore::BorderStyle::Hidden) return;
+    if (style.outlineWidth <= 0 || style.outlineColor.a == 0) return;
+    box->outlineWidth = style.outlineWidth;
+    box->outlineOffset = style.outlineOffset;
+    box->outlineColor = cssColorToRGB(style.outlineColor);
+    box->outlineStyle = (int)b;
+}
+
 // Table display values → table box types (CSS 2.1 §17.2)
 static void applyTableDisplay(LayoutBox* box, DOMElement* element, const std::string& tag,
                               const CSSComputedStyle* style) {
@@ -1923,6 +1939,8 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
             
             // Decode HTML entities (&nbsp; &amp; etc.)
             normalized = decodeHtmlEntities(normalized);
+            if (style && !style->textTransform.empty())
+                normalized = ZepraBrowser::applyTextTransform(normalized, style->textTransform);
             
             // CREATE LAYOUTBOX
             LayoutBox* box = addChild(parentBox);
@@ -1934,8 +1952,15 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 // Typography
                 box->fontSize = style->fontSize;
                 box->color = cssColorToRGB(style->color);
+                if (style->hasTextFillColor) {
+                    // -webkit-text-fill-color paints the glyphs instead of color
+                    if (style->textFillColor.a == 0) box->textFillTransparent = true;
+                    else box->color = cssColorToRGB(style->textFillColor);
+                }
                 box->fontWeight = static_cast<int>(style->fontWeight);
                 box->fontFamily = style->fontFamily;
+                box->letterSpacing = style->letterSpacing;
+                box->wordSpacing = style->wordSpacing;
                 box->bold = (box->fontWeight >= 600);
                 box->italic = (style->fontStyle == FontStyle::Italic);
                 box->textDecoration = style->textDecoration;
@@ -2660,6 +2685,10 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         blockBox->borderStyle = usedBorderStyle(*childStyle);
                     }
                     blockBox->borderRadius = childStyle->borderTopLeftRadius;
+                    blockBox->blendMode = (uint8_t)ZepraBrowser::parseBlendMode(childStyle->mixBlendMode);
+                    blockBox->bgClipText = childStyle->backgroundClipText;
+                    blockBox->boxShadow = childStyle->boxShadow;
+                    setOutline(blockBox, *childStyle);
                     blockBox->borderRadiusPercent = childStyle->borderTopLeftRadiusPercent;
                     
                     // Visual
@@ -2749,8 +2778,53 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                             case JustifyAlign::SpaceAround: blockBox->alignContent = 5; break;
                             default: blockBox->alignContent = 0; break; // stretch
                         }
-                    } else if (childStyle->display == DisplayValue::InlineBlock ||
+                    } else if (childStyle->display == DisplayValue::Grid ||
                                childStyle->display == DisplayValue::InlineGrid) {
+                        // inline-grid lays out as a block-level grid for now
+                        blockBox->type = LayoutType::Grid;
+                        using namespace Zepra::WebCore;
+                        float gapPx = childStyle->gap.toPx(style->fontSize, 16.0f, (float)g_width, (float)g_height, 0);
+                        blockBox->gap = gapPx;
+                        blockBox->rowGap = childStyle->rowGap.value > 0 ?
+                            childStyle->rowGap.toPx(style->fontSize, 16.0f, (float)g_width, (float)g_height, 0) : gapPx;
+                        blockBox->columnGap = childStyle->columnGap.value > 0 ?
+                            childStyle->columnGap.toPx(style->fontSize, 16.0f, (float)g_width, (float)g_height, 0) : gapPx;
+                        blockBox->gridTemplateColumns = childStyle->gridTemplateColumns;
+                        blockBox->gridTemplateRows = childStyle->gridTemplateRows;
+                        blockBox->gridTemplateAreas = childStyle->gridTemplateAreas;
+                        blockBox->gridAutoColumns = childStyle->gridAutoColumns;
+                        blockBox->gridAutoRows = childStyle->gridAutoRows;
+                        blockBox->gridAutoFlowColumn = childStyle->gridAutoFlowColumn;
+                        blockBox->gridAutoFlowDense = childStyle->gridAutoFlowDense;
+                        // justify-content: 0 normal (auto tracks stretch), then as flex; 6 = start
+                        switch (childStyle->justifyContent) {
+                            case JustifyAlign::FlexEnd: case JustifyAlign::End: blockBox->justifyContent = 1; break;
+                            case JustifyAlign::Center: blockBox->justifyContent = 2; break;
+                            case JustifyAlign::SpaceBetween: blockBox->justifyContent = 3; break;
+                            case JustifyAlign::SpaceAround: blockBox->justifyContent = 4; break;
+                            case JustifyAlign::SpaceEvenly: blockBox->justifyContent = 5; break;
+                            default: blockBox->justifyContent = childStyle->justifyContentNormal ? 0 : 6; break;
+                        }
+                        auto selfAlign = [](JustifyAlign a) {
+                            switch (a) {
+                                case JustifyAlign::FlexStart: case JustifyAlign::Start: case JustifyAlign::Baseline: return 1;
+                                case JustifyAlign::FlexEnd: case JustifyAlign::End: return 2;
+                                case JustifyAlign::Center: return 3;
+                                default: return 0;
+                            }
+                        };
+                        blockBox->alignItems = selfAlign(childStyle->alignItems);
+                        blockBox->justifyItems = selfAlign(childStyle->justifyItems);
+                        switch (childStyle->alignContent) {
+                            case JustifyAlign::FlexStart: case JustifyAlign::Start: blockBox->alignContent = 1; break;
+                            case JustifyAlign::FlexEnd: case JustifyAlign::End: blockBox->alignContent = 2; break;
+                            case JustifyAlign::Center: blockBox->alignContent = 3; break;
+                            case JustifyAlign::SpaceBetween: blockBox->alignContent = 4; break;
+                            case JustifyAlign::SpaceAround: blockBox->alignContent = 5; break;
+                            case JustifyAlign::SpaceEvenly: blockBox->alignContent = 6; break;
+                            default: blockBox->alignContent = 0; break;
+                        }
+                    } else if (childStyle->display == DisplayValue::InlineBlock) {
                         blockBox->type = LayoutType::InlineBlock;
                     } else {
                         applyTableDisplay(blockBox, childElement, childTag, childStyle);
@@ -2773,6 +2847,18 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         case JustifyAlign::FlexEnd: case JustifyAlign::End: blockBox->alignSelf = 2; break;
                         case JustifyAlign::Center: blockBox->alignSelf = 3; break;
                         default: blockBox->alignSelf = -1; break; // auto = inherit from parent
+                    }
+                    // Grid item placement, consumed when the parent is LayoutType::Grid
+                    blockBox->gridColumnStart = childStyle->gridColumnStart;
+                    blockBox->gridColumnEnd = childStyle->gridColumnEnd;
+                    blockBox->gridRowStart = childStyle->gridRowStart;
+                    blockBox->gridRowEnd = childStyle->gridRowEnd;
+                    switch (childStyle->justifySelf) {
+                        case JustifyAlign::Stretch: blockBox->justifySelf = 0; break;
+                        case JustifyAlign::FlexStart: case JustifyAlign::Start: case JustifyAlign::Baseline: blockBox->justifySelf = 1; break;
+                        case JustifyAlign::FlexEnd: case JustifyAlign::End: blockBox->justifySelf = 2; break;
+                        case JustifyAlign::Center: blockBox->justifySelf = 3; break;
+                        default: blockBox->justifySelf = -1; break;
                     }
                 } else {
                     // Fallback margins for common block tags (no CSS engine available)
@@ -2822,6 +2908,9 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         inlineBox->borderStyle = usedBorderStyle(*childStyle);
                     }
                     inlineBox->borderRadius = childStyle->borderTopLeftRadius;
+                    inlineBox->blendMode = (uint8_t)ZepraBrowser::parseBlendMode(childStyle->mixBlendMode);
+                    inlineBox->boxShadow = childStyle->boxShadow;
+                    setOutline(inlineBox, *childStyle);
                     inlineBox->borderRadiusPercent = childStyle->borderTopLeftRadiusPercent;
                     inlineBox->opacity = childStyle->opacity;
                     inlineBox->visibilityHidden = (childStyle->visibility == Visibility::Hidden);
@@ -2996,15 +3085,15 @@ void svgImage(const std::string& key, const std::string& svgText, float x, float
 
 // A gradient background, drawn on the CPU once per size and kept as a
 // texture (sharing the SVG textures' memory budget)
-void gradientBackground(float x, float y, const ZepraBrowser::GradientBackground& bg) {
-    int pw = 0, ph = 0;
-    ZepraBrowser::gradientPixelSize(bg.width, bg.height, pw, ph);
-    std::string cacheKey = "grad|" + ZepraBrowser::gradientBackgroundKey(bg, pw, ph);
+// A bitmap drawn on the CPU once per key and kept as a texture (sharing the
+// SVG textures' memory budget); `draw` fills it, false when it is empty
+static void cachedRaster(const std::string& cacheKey, int pw, int ph, const NXRender::Rect& dest,
+                         const std::function<bool(std::vector<uint8_t>&)>& draw) {
     auto it = g_svgTextures.find(cacheKey);
     if (it == g_svgTextures.end()) {
         SvgTexture tex;
         std::vector<uint8_t> rgba;
-        if (ZepraBrowser::rasterizeGradientBackground(bg, pw, ph, rgba)) {
+        if (draw(rgba)) {
             tex.id = g_nxGpu.createTexture(pw, ph, rgba.data());
             tex.bytes = rgba.size();
         }
@@ -3020,7 +3109,69 @@ void gradientBackground(float x, float y, const ZepraBrowser::GradientBackground
         it = g_svgTextures.emplace(cacheKey, tex).first;
     }
     it->second.lastUse = ++g_svgUseClock;
-    if (it->second.id) g_nxGpu.drawTexture(it->second.id, NXRender::Rect(x, y, bg.width, bg.height));
+    if (it->second.id) g_nxGpu.drawTexture(it->second.id, dest);
+}
+
+// A gradient background (gradient_raster.cpp)
+void gradientBackground(float x, float y, const ZepraBrowser::GradientBackground& bg) {
+    int pw = 0, ph = 0;
+    ZepraBrowser::gradientPixelSize(bg.width, bg.height, pw, ph);
+    cachedRaster("grad|" + ZepraBrowser::gradientBackgroundKey(bg, pw, ph), pw, ph,
+                 NXRender::Rect(x, y, bg.width, bg.height),
+                 [&](std::vector<uint8_t>& rgba) { return ZepraBrowser::rasterizeGradientBackground(bg, pw, ph, rgba); });
+}
+
+// One box-shadow (box_shadow.cpp)
+void boxShadow(float x, float y, const ZepraBrowser::ShadowBox& box, const ZepraBrowser::BoxShadow& shadow) {
+    ZepraBrowser::ShadowRect r = ZepraBrowser::shadowRect(box, shadow);
+    int pw = 0, ph = 0;
+    ZepraBrowser::shadowPixelSize(r, pw, ph);
+    cachedRaster(ZepraBrowser::shadowKey(box, shadow, pw, ph), pw, ph, NXRender::Rect(x + r.x, y + r.y, r.width, r.height),
+                 [&](std::vector<uint8_t>& rgba) { return ZepraBrowser::rasterizeShadow(box, shadow, pw, ph, rgba); });
+}
+
+// A background colour with a mix-blend-mode: the pixels under it are read
+// back, mixed on the CPU (blend_modes.cpp) and drawn over as a texture
+void blendFill(float x, float y, float w, float h, float radius, uint32_t color, uint8_t alpha, uint8_t mode) {
+    // Window pixels (the GL framebuffer may be larger on HiDPI screens)
+    float scale = g_width > 0 ? (float)g_nxGpu.width() / (float)g_width : 1.0f;
+    int px = (int)std::floor(x * scale), py = (int)std::floor(y * scale);
+    int pw = (int)std::ceil((x + w) * scale) - px, ph = (int)std::ceil((y + h) * scale) - py;
+    int fbw = g_nxGpu.width(), fbh = g_nxGpu.height();
+    int x0 = std::max(0, px), y0 = std::max(0, py), x1 = std::min(fbw, px + pw), y1 = std::min(fbh, py + ph);
+    if (x1 <= x0 || y1 <= y0) return;
+    int rw = x1 - x0, rh = y1 - y0;
+    std::vector<uint8_t> under;
+    if (!g_nxGpu.readPixels(x0, fbh - y1, rw, rh, under)) {
+        rrect(x, y, w, h, radius, color, alpha);
+        return;
+    }
+    auto blend = static_cast<ZepraBrowser::BlendMode>(mode);
+    float r = std::min({radius, w / 2, h / 2}) * scale;
+    std::vector<uint8_t> rgba((size_t)rw * rh * 4);
+    for (int j = 0; j < rh; j++) {
+        const uint8_t* src = &under[(size_t)(rh - 1 - j) * rw * 3];  // GL rows run bottom-up
+        for (int i = 0; i < rw; i++) {
+            uint32_t backdrop = ((uint32_t)src[i * 3] << 16) | ((uint32_t)src[i * 3 + 1] << 8) | src[i * 3 + 2];
+            uint32_t out = ZepraBrowser::blendPixel(blend, backdrop, color, alpha);
+            // Rounded corners: outside them the backdrop stays
+            float cx = x0 + i + 0.5f - px, cy = y0 + j + 0.5f - py;
+            float inside = 1;
+            if (r > 0) {
+                float qx = std::clamp(cx, r, pw - r), qy = std::clamp(cy, r, ph - r);
+                inside = std::clamp(r - std::hypot(cx - qx, cy - qy) + 0.5f, 0.0f, 1.0f);
+            }
+            uint8_t* d = &rgba[((size_t)j * rw + i) * 4];
+            d[0] = (out >> 16) & 0xFF;
+            d[1] = (out >> 8) & 0xFF;
+            d[2] = out & 0xFF;
+            d[3] = (uint8_t)std::lround(inside * 255);
+        }
+    }
+    uint32_t tex = g_nxGpu.createTexture(rw, rh, rgba.data());
+    if (!tex) return;
+    g_nxGpu.drawTexture(tex, NXRender::Rect(x0 / scale, y0 / scale, rw / scale, rh / scale));
+    g_nxGpu.destroyTexture(tex);
 }
 
 // Rounded overflow clips: the four corner squares of a clipping box, read
@@ -3102,12 +3253,13 @@ static nxfont::Font* fontFor(float size, const LayoutBox* style) {
 
 void text(const std::string& str, float x, float y, uint32_t c, float size = 14.0f, const LayoutBox* style = nullptr) {
     auto* font = fontFor(size, style);
-    if (font) font->drawText(str, x, y, R(c), G(c), B(c));
+    if (font) font->drawText(str, x, y, R(c), G(c), B(c), style ? style->letterSpacing : 0, style ? style->wordSpacing : 0);
 }
 
 float textWidth(const std::string& str, float size = 14.0f, const LayoutBox* style = nullptr) {
     auto* font = fontFor(size, style);
-    return font ? font->measureText(str) : str.length() * (size * 0.6f);
+    if (font) return font->measureText(str, style ? style->letterSpacing : 0, style ? style->wordSpacing : 0);
+    return str.length() * (size * 0.6f);
 }
 
 // ============================================================================
@@ -3290,6 +3442,8 @@ static void initLayoutEngine() {
     });
     ZepraBrowser::setGradientPaintCallback(gfx::gradientBackground);
     ZepraBrowser::setRoundedClipCallbacks(gfx::saveCorners, gfx::restoreCorners);
+    ZepraBrowser::setBlendFillCallback(gfx::blendFill);
+    ZepraBrowser::setShadowPaintCallback(gfx::boxShadow);
     
     std::cout << "[Layout] Layout engine initialized (rounded rect + gradient support)" << std::endl;
     

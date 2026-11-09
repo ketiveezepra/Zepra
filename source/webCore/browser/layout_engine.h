@@ -29,6 +29,7 @@ enum class LayoutType {
     InlineBlock, // Inline-block element
     Flex,        // Flexbox container
     FlexItem,    // Child of flexbox container
+    Grid,        // CSS Grid container (display: grid / inline-grid)
     None,        // display: none
     Text,        // Text node
     // CSS 2.1 §17 table boxes; LayoutBox children follow the table model
@@ -144,8 +145,16 @@ struct LayoutBox {
     bool italic = false;
     std::string fontFamily;      // CSS font-family list ("" = the system font)
     int fontWeight = 400;        // 100..900; bold is set too at 600 and above
+    float letterSpacing = 0;     // px added after each character (text runs)
+    float wordSpacing = 0;       // px added to each space
     bool hasBgColor = false;
     
+    // Outline (CSS UI 4 §5): drawn outside the border box, over the content
+    float outlineWidth = 0;      // 0: none
+    float outlineOffset = 0;
+    uint32_t outlineColor = 0x000000;
+    int outlineStyle = 2;        // as borderStyle
+
     // Border radius (uniform for now); a percentage radius is resolved
     // against the box's size when it is painted
     mutable float borderRadius = 0;
@@ -154,6 +163,17 @@ struct LayoutBox {
     // Opacity (0.0 = transparent, 1.0 = opaque)
     float opacity = 1.0f;
     
+    // mix-blend-mode of the box's background colour (blend_modes.h; 0 normal)
+    uint8_t blendMode = 0;
+    // background-clip: text: the background shows through the text of the
+    // box and its descendants only
+    bool bgClipText = false;
+    // Text (runs): -webkit-text-fill-color is transparent, so the glyphs show
+    // the background of an enclosing background-clip: text box
+    bool textFillTransparent = false;
+    // box-shadow (CSS text; drawn by setShadowPaintCallback)
+    std::string boxShadow;
+
     // Background image / gradient (CSS string)
     std::string backgroundImage;
     bool hasBgGradient = false;  // backgroundImage is all gradients: drawn by setGradientPaintCallback
@@ -206,6 +226,18 @@ struct LayoutBox {
     LayoutLength flexBasis;  // auto = use content size, otherwise resolved value
     int alignSelf = -1;      // -1=auto (inherit alignItems), 0=stretch, 1=start, 2=end, 3=center
     int order = 0;
+
+    // Grid container properties (CSS Grid 1), kept as CSS text and parsed
+    // by layoutGrid; justify-items uses the alignItems numbering
+    std::string gridTemplateColumns, gridTemplateRows, gridTemplateAreas;
+    std::string gridAutoColumns, gridAutoRows;
+    bool gridAutoFlowColumn = false;  // grid-auto-flow: column
+    bool gridAutoFlowDense = false;   // dense (placed like sparse for now)
+    int justifyItems = 0;             // 0=stretch (normal), 1=start, 2=end, 3=center
+
+    // Grid item properties: grid-row/column-start/end as CSS text
+    std::string gridColumnStart, gridColumnEnd, gridRowStart, gridRowEnd;
+    int justifySelf = -1;             // -1=auto, then as justifyItems
     
     // Text decoration
     std::string textDecoration;
@@ -407,6 +439,15 @@ void setGradientPaintCallback(void (*gfx_gradient_bg)(float x, float y, const Gr
 /// corners afterwards, so the content is clipped to the curve
 void setRoundedClipCallbacks(int (*save_corners)(float x, float y, float w, float h, float radius),
                              void (*restore_corners)(int token));
+/// Set the callback that fills a box's background colour with a
+/// mix-blend-mode (blend_modes.h) against what is already drawn under it
+void setBlendFillCallback(void (*gfx_blend_fill)(float x, float y, float w, float h, float radius, uint32_t color,
+                                                 uint8_t alpha, uint8_t mode));
+struct ShadowBox;
+struct BoxShadow;
+/// Set the callback that paints one box-shadow (box_shadow.h) of the box
+/// whose border box is at (x, y)
+void setShadowPaintCallback(void (*gfx_shadow)(float x, float y, const ShadowBox& box, const BoxShadow& shadow));
 
 /// Set the callback that paints a <canvas> bitmap into its content box
 void setCanvasPaintCallback(
@@ -451,6 +492,20 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY = 0);
  * then row heights and cell vertical alignment. Called by layoutBlock.
  */
 void layoutTable(LayoutBox& table, float containingWidth, float startY);
+
+/**
+ * @brief Lay out a Grid container's items (CSS Grid 1) in its content box,
+ * which starts at (contentX, contentY) and is contentWidth wide. Returns
+ * the y of the content's bottom edge. Called by layoutBlock.
+ */
+float layoutGrid(LayoutBox& box, float contentWidth, float contentX, float contentY);
+
+/// Min-/max-content widths of a Grid container's content (no edges)
+void gridIntrinsicWidths(const LayoutBox& box, float& minWidth, float& maxWidth);
+
+/// Lays a box out again as a block exactly `width` wide (border box),
+/// ignoring its own width and min/max-width
+void layoutBoxAtWidth(LayoutBox& box, float width);
 
 /**
  * @brief Min-content and max-content border-box widths of a box (the

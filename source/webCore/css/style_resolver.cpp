@@ -48,6 +48,40 @@ static std::vector<std::string> splitValues(const std::string& value) {
     return parts;
 }
 
+static std::string trimGridText(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
+    return a == std::string::npos ? "" : s.substr(a, b - a + 1);
+}
+
+// A custom ident in grid placement (a line or area name), not a number,
+// span or auto
+static bool isGridIdent(const std::string& s) {
+    if (s.empty() || s == "auto" || s.rfind("span", 0) == 0) return false;
+    return !(std::isdigit(static_cast<unsigned char>(s[0])) || s[0] == '-' || s[0] == '+');
+}
+
+// grid-row / grid-column: <start> [/ <end>]; a lone name is also the end
+static void splitGridLine(const std::string& value, std::string& start, std::string& end) {
+    auto slash = value.find('/');
+    start = trimGridText(value.substr(0, slash));
+    if (slash != std::string::npos) end = trimGridText(value.substr(slash + 1));
+    else end = isGridIdent(start) ? start : "auto";
+}
+
+// justify-items/-self, align-items/-self values (normal and legacy are stretch)
+static JustifyAlign parseSelfAlign(const std::string& raw, JustifyAlign normal) {
+    std::string v = raw;
+    if (v.rfind("safe ", 0) == 0) v = v.substr(5);
+    if (v.rfind("unsafe ", 0) == 0) v = v.substr(7);
+    if (v == "start" || v == "flex-start" || v == "self-start" || v == "left") return JustifyAlign::Start;
+    if (v == "end" || v == "flex-end" || v == "self-end" || v == "right") return JustifyAlign::End;
+    if (v == "center") return JustifyAlign::Center;
+    if (v == "stretch") return JustifyAlign::Stretch;
+    if (v == "baseline" || v == "first baseline" || v == "last baseline") return JustifyAlign::Baseline;
+    if (v == "auto") return JustifyAlign::Auto;
+    return normal;
+}
+
 // ============================================================================
 // Properties that inherit (per CSS spec)
 // ============================================================================
@@ -58,7 +92,7 @@ static const std::unordered_set<std::string> INHERITED_PROPERTIES = {
     "color", "font", "font-family", "font-size", "font-style", 
     "font-weight", "font-variant", "line-height", "letter-spacing",
     "word-spacing", "text-align", "text-indent", "text-transform",
-    "white-space", "direction",
+    "white-space", "direction", "-webkit-text-fill-color",
     // Lists
     "list-style", "list-style-image", "list-style-position", "list-style-type",
     // Other
@@ -541,12 +575,20 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     }
     else if (property == "text-transform") { style.textTransform = value; }
     else if (property == "letter-spacing") {
-        CSSLength len = parseLength(value);
-        if (!len.isAuto()) style.letterSpacing = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        // normal is 0 (CSS Text 3 §8)
+        if (value == "normal") style.letterSpacing = 0;
+        else {
+            CSSLength len = parseLength(value);
+            if (!len.isAuto()) style.letterSpacing = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        }
     }
     else if (property == "word-spacing") {
-        CSSLength len = parseLength(value);
-        if (!len.isAuto()) style.wordSpacing = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        // normal is 0 (CSS Text 3 §8)
+        if (value == "normal") style.wordSpacing = 0;
+        else {
+            CSSLength len = parseLength(value);
+            if (!len.isAuto()) style.wordSpacing = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        }
     }
     else if (property == "white-space") { style.whiteSpace = value; }
 
@@ -786,6 +828,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         style.wrapReverse = (value == "wrap-reverse");
     }
     else if (property == "justify-content") {
+        style.justifyContentNormal = value == "normal";
         if (value == "flex-start" || value == "start") style.justifyContent = JustifyAlign::FlexStart;
         else if (value == "flex-end" || value == "end") style.justifyContent = JustifyAlign::FlexEnd;
         else if (value == "center") style.justifyContent = JustifyAlign::Center;
@@ -835,18 +878,102 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         try { style.order = std::stoi(value); } catch (...) {}
     }
     else if (property == "gap" || property == "grid-gap") {
-        style.gap = parseLength(value);
+        // gap: <row-gap> [<column-gap>]
+        auto parts = splitValues(value);
+        style.gap = parseLength(parts.empty() ? value : parts[0]);
         style.rowGap = style.gap;
-        style.columnGap = style.gap;
+        style.columnGap = parts.size() > 1 ? parseLength(parts[1]) : style.gap;
     }
-    else if (property == "row-gap") { style.rowGap = parseLength(value); }
-    else if (property == "column-gap") { style.columnGap = parseLength(value); }
+    else if (property == "row-gap" || property == "grid-row-gap") { style.rowGap = parseLength(value); }
+    else if (property == "column-gap" || property == "grid-column-gap") { style.columnGap = parseLength(value); }
 
     // =====================================================================
     // Grid
     // =====================================================================
     else if (property == "grid-template-columns") { style.gridTemplateColumns = value; }
     else if (property == "grid-template-rows") { style.gridTemplateRows = value; }
+    else if (property == "grid-template-areas") { style.gridTemplateAreas = value; }
+    else if (property == "grid-template" || property == "grid") {
+        // <rows> / <columns> (the area-string form keeps only its tracks)
+        if (value == "none") {
+            style.gridTemplateRows = style.gridTemplateColumns = style.gridTemplateAreas = "";
+        } else if (value.find('"') == std::string::npos && value.find('\'') == std::string::npos) {
+            auto slash = value.find('/');
+            if (slash != std::string::npos) {
+                style.gridTemplateRows = trimGridText(value.substr(0, slash));
+                style.gridTemplateColumns = trimGridText(value.substr(slash + 1));
+            }
+        } else {
+            // "a a" 40px "b c" 1fr / 1fr 2fr: areas, row sizes after each string
+            std::string areas, rows;
+            auto slash = value.rfind('/');
+            std::string head = slash != std::string::npos && slash > value.rfind('"') ? value.substr(0, slash) : value;
+            size_t i = 0;
+            while (i < head.size()) {
+                char q = head[i];
+                if (q == '"' || q == '\'') {
+                    size_t end = head.find(q, i + 1);
+                    if (end == std::string::npos) break;
+                    areas += head.substr(i, end - i + 1) + " ";
+                    i = end + 1;
+                    size_t next = head.find_first_of("\"'", i);
+                    std::string size = trimGridText(head.substr(i, next == std::string::npos ? std::string::npos : next - i));
+                    rows += (size.empty() ? "auto" : size) + " ";
+                    i = next == std::string::npos ? head.size() : next;
+                } else {
+                    ++i;
+                }
+            }
+            style.gridTemplateAreas = trimGridText(areas);
+            style.gridTemplateRows = trimGridText(rows);
+            if (head.size() < value.size()) style.gridTemplateColumns = trimGridText(value.substr(head.size() + 1));
+        }
+    }
+    else if (property == "grid-auto-columns") { style.gridAutoColumns = value; }
+    else if (property == "grid-auto-rows") { style.gridAutoRows = value; }
+    else if (property == "grid-auto-flow") {
+        style.gridAutoFlowColumn = value.find("column") != std::string::npos;
+        style.gridAutoFlowDense = value.find("dense") != std::string::npos;
+    }
+    else if (property == "grid-column-start") { style.gridColumnStart = value; }
+    else if (property == "grid-column-end") { style.gridColumnEnd = value; }
+    else if (property == "grid-row-start") { style.gridRowStart = value; }
+    else if (property == "grid-row-end") { style.gridRowEnd = value; }
+    else if (property == "grid-column" || property == "grid-row") {
+        std::string start, end;
+        splitGridLine(value, start, end);
+        if (property == "grid-column") { style.gridColumnStart = start; style.gridColumnEnd = end; }
+        else { style.gridRowStart = start; style.gridRowEnd = end; }
+    }
+    else if (property == "grid-area") {
+        // row-start / column-start / row-end / column-end; a missing line
+        // repeats a name given before it, or is auto
+        std::vector<std::string> lines;
+        size_t from = 0;
+        for (;;) {
+            size_t slash = value.find('/', from);
+            lines.push_back(trimGridText(value.substr(from, slash == std::string::npos ? std::string::npos : slash - from)));
+            if (slash == std::string::npos) break;
+            from = slash + 1;
+        }
+        auto fallback = [&](size_t i, size_t from) {
+            if (i < lines.size()) return lines[i];
+            return isGridIdent(lines[from]) ? lines[from] : std::string("auto");
+        };
+        style.gridRowStart = lines[0];
+        style.gridColumnStart = fallback(1, 0);
+        style.gridRowEnd = fallback(2, 0);
+        style.gridColumnEnd = lines.size() > 3 ? lines[3] : (lines.size() > 1 ? fallback(3, 1) : fallback(3, 0));
+    }
+    else if (property == "justify-items") { style.justifyItems = parseSelfAlign(value, JustifyAlign::Stretch); }
+    else if (property == "justify-self") { style.justifySelf = parseSelfAlign(value, JustifyAlign::Auto); }
+    else if (property == "place-self") {
+        auto parts = splitValues(value);
+        if (!parts.empty()) {
+            style.alignSelf = parseSelfAlign(parts[0], JustifyAlign::Auto);
+            style.justifySelf = parseSelfAlign(parts.size() > 1 ? parts[1] : parts[0], JustifyAlign::Auto);
+        }
+    }
 
     // =====================================================================
     // Background & Visual
@@ -864,6 +991,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         style.backgroundRepeat = "repeat";
         style.backgroundPosition.clear();
         style.backgroundSize.clear();
+        style.backgroundClipText = false;
         std::vector<std::string> tokens;
         std::string token;
         int depth = 0;
@@ -909,6 +1037,17 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         try { style.opacity = std::stof(value); } catch (...) {}
     }
     else if (property == "box-shadow") { style.boxShadow = value; }
+    else if (property == "background-clip" || property == "-webkit-background-clip") {
+        std::string v = value;
+        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+        style.backgroundClipText = v == "text";
+    }
+    else if (property == "-webkit-text-fill-color") {
+        std::string v = value;
+        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+        style.hasTextFillColor = v != "currentcolor";
+        if (style.hasTextFillColor) style.textFillColor = CSSColor::parse(v);
+    }
     else if (property == "transform") { style.transform = value; }
     else if (property == "transition") { style.transition = value; }
     else if (property == "animation") { style.animation = value; }
@@ -959,29 +1098,25 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         style.backdropFilter = value;
     }
     else if (property == "place-items") {
+        // <align-items> [<justify-items>]
         style.placeItems = value;
-        // Shorthand: sets align-items and justify-items
         auto parts = splitValues(value);
-        if (parts.size() == 1) {
-            if (value == "center") {
-                style.alignItems = JustifyAlign::Center;
-                style.justifyContent = JustifyAlign::Center;
-            } else if (value == "stretch") {
-                style.alignItems = JustifyAlign::Stretch;
-            }
+        if (!parts.empty()) {
+            style.alignItems = parseSelfAlign(parts[0], JustifyAlign::Stretch);
+            style.justifyItems = parseSelfAlign(parts.size() > 1 ? parts[1] : parts[0], JustifyAlign::Stretch);
         }
     }
     else if (property == "place-content") {
+        // <align-content> [<justify-content>]
         style.placeContent = value;
         auto parts = splitValues(value);
-        if (parts.size() == 1) {
-            if (value == "center") {
-                style.alignContent = JustifyAlign::Center;
-                style.justifyContent = JustifyAlign::Center;
-            }
+        if (!parts.empty()) {
+            applyProperty(style, "align-content", parts[0], parentStyle);
+            applyProperty(style, "justify-content", parts.size() > 1 ? parts[1] : parts[0], parentStyle);
         }
     }
     else if (property == "isolation") { style.isolation = value; }
+    else if (property == "mix-blend-mode") { style.mixBlendMode = value; }
     else if (property == "will-change") { style.willChange = value; }
     else if (property == "content") { style.content = value; }
     else if (property == "user-select" || property == "-webkit-user-select") {
@@ -991,34 +1126,42 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         style.appearance = value;
     }
     else if (property == "outline") {
-        // Shorthand: "2px solid #000" or "none"
-        if (value == "none" || value == "0") {
-            style.outlineWidth = 0;
-            style.outlineStyle = "none";
-        } else {
-            style.outlineStyle = "solid";
-            std::istringstream ss(value);
-            std::string token;
-            while (ss >> token) {
-                if (token == "solid" || token == "dashed" || token == "dotted") {
-                    style.outlineStyle = token;
-                } else if (token == "none") {
-                    style.outlineWidth = 0;
-                } else if (token[0] == '#' || token.substr(0,3) == "rgb") {
-                    style.outlineColor = parseColor(token);
-                } else {
-                    CSSLength len = parseLength(token);
-                    if (!len.isAuto()) style.outlineWidth = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
-                }
+        // Width, style and colour in any order; omitted parts take their
+        // initial values: medium, none, currentColor (CSS UI 4 §5.1)
+        float width = 3;
+        std::string outlineStyle = "none";
+        CSSColor color = style.color;
+        std::istringstream ss(value);
+        std::string token;
+        while (ss >> token) {
+            BorderStyle b;
+            std::string t = token;
+            std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+            if (t == "auto" || parseBorderStyle(t, b)) { outlineStyle = t; continue; }
+            if (t == "thin") { width = 1; continue; }
+            if (t == "medium") { width = 3; continue; }
+            if (t == "thick") { width = 5; continue; }
+            if (std::isdigit((unsigned char)t[0]) || t[0] == '.') {
+                CSSLength len = parseLength(t);
+                if (!len.isAuto()) width = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+                continue;
             }
+            color = parseColor(token);
         }
+        style.outlineWidth = width;
+        style.outlineStyle = outlineStyle;
+        style.outlineColor = color;
     }
     else if (property == "outline-width") {
         CSSLength len = parseLength(value);
         if (!len.isAuto()) style.outlineWidth = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
     }
     else if (property == "outline-color") { style.outlineColor = parseColor(value); }
-    else if (property == "outline-style") { style.outlineStyle = value; }
+    else if (property == "outline-style") {
+        std::string t = value;
+        std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+        style.outlineStyle = t;
+    }
     else if (property == "outline-offset") {
         CSSLength len = parseLength(value);
         if (!len.isAuto()) style.outlineOffset = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
