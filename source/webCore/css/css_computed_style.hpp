@@ -287,6 +287,9 @@ public:
     float borderTopRightRadius = 0;
     float borderBottomRightRadius = 0;
     float borderBottomLeftRadius = 0;
+    // A percentage top-left radius ("50%"), resolved against the box at
+    // paint time (0: the px radius above applies)
+    float borderTopLeftRadiusPercent = 0;
 
     // Overflow
     OverflowValue overflowX = OverflowValue::Visible;
