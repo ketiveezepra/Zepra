@@ -1,7 +1,7 @@
 /**
  * @file web_font_loader.hpp
  * @brief Loads a page's @font-face fonts: picks each face's first usable
- *        src entry, downloads it, decodes it (WOFF included) and registers
+ *        src entry, downloads it, decodes it (WOFF and WOFF2 included) and registers
  *        it with the FontManager so CSS font-family can use it.
  *
  * Downloads go through a batch callback so the browser can fetch every

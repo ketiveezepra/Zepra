@@ -213,6 +213,12 @@ std::vector<std::pair<std::string, std::string>> resolve(const CSSComputedStyle&
     add("border-right-width", formatComputedNumber(s.borderRightWidth) + "px");
     add("border-bottom-width", formatComputedNumber(s.borderBottomWidth) + "px");
     add("border-left-width", formatComputedNumber(s.borderLeftWidth) + "px");
+    static const char* kBorderStyles[] = {"none", "hidden", "solid", "dashed", "dotted",
+                                          "double", "groove", "ridge", "inset", "outset"};
+    add("border-top-style", kBorderStyles[(int)s.borderTopStyle]);
+    add("border-right-style", kBorderStyles[(int)s.borderRightStyle]);
+    add("border-bottom-style", kBorderStyles[(int)s.borderBottomStyle]);
+    add("border-left-style", kBorderStyles[(int)s.borderLeftStyle]);
     add("border-top-color", colorStr(s.borderTopColor));
     add("border-radius", s.borderTopLeftRadiusPercent > 0 ? formatComputedNumber(s.borderTopLeftRadiusPercent) + "%"
                                                            : formatComputedNumber(s.borderTopLeftRadius) + "px");

@@ -193,6 +193,25 @@ enum class BoxSizing {
 };
 
 /**
+ * @brief border-style (CSS Backgrounds 3 §3.2)
+ */
+enum class BorderStyle : uint8_t {
+    None,
+    Hidden,
+    Solid,
+    Dashed,
+    Dotted,
+    Double,
+    Groove,
+    Ridge,
+    Inset,
+    Outset,
+};
+
+/// A border-style keyword; false for anything else
+bool parseBorderStyle(const std::string& keyword, BorderStyle& out);
+
+/**
  * @brief Visibility
  */
 enum class Visibility {
@@ -250,6 +269,12 @@ public:
     float borderRightWidth = 0;
     float borderBottomWidth = 0;
     float borderLeftWidth = 0;
+
+    // Border style (a side whose style is none or hidden has no width)
+    BorderStyle borderTopStyle = BorderStyle::None;
+    BorderStyle borderRightStyle = BorderStyle::None;
+    BorderStyle borderBottomStyle = BorderStyle::None;
+    BorderStyle borderLeftStyle = BorderStyle::None;
 
     // Border color
     CSSColor borderTopColor;

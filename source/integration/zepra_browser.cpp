@@ -49,6 +49,7 @@
 #include <nxgfx/context.h>
 #include <nxgfx/primitives.h>
 #include <nxgfx/text.h>
+#include <platform/display_info.h>
 #include "nxrender_cpp.h"
 #include "nxfont.h"
 #include "reox_nxrender_bridge.h"
@@ -107,6 +108,7 @@ extern "C" {
 #include "browser/mouse_handler.h"
 #include "browser/lazy_image_loader.h"
 #include "browser/svg_raster.h"
+#include "browser/gradient_raster.h"
 #include "browser/clipboard.h"
 #include "browser/css_utils.h"
 #include "devtools/devtools_panel.hpp"
@@ -1154,19 +1156,19 @@ static void loadPageWebFonts() {
               << result.skipped << " not needed by the text" << std::endl;
 }
 
-// background-image on a box: a gradient is painted from the CSS text (over
-// the background colour, which hasBgColor turns on); url() is loaded like an <img>
+// background-image on a box: gradients are drawn from the CSS text over the
+// background colour (gradient_raster.cpp); url() is loaded like an <img>
 static void setBackgroundImage(LayoutBox* box, const CSSComputedStyle& style) {
     box->backgroundImage = style.backgroundImage;
-    if (style.backgroundImage.find("gradient(") != std::string::npos && style.backgroundImage.find("url(") == std::string::npos) {
-        box->hasBgColor = true;
+    box->bgRepeat = style.backgroundRepeat;
+    box->bgSize = style.backgroundSize;
+    box->bgPosition = style.backgroundPosition;
+    if (ZepraBrowser::isGradientBackground(style.backgroundImage)) {
+        box->hasBgGradient = true;
         return;
     }
     std::string url = ZepraBrowser::cssUrl(style.backgroundImage);
     if (url.empty()) return;
-    box->bgRepeat = style.backgroundRepeat;
-    box->bgSize = style.backgroundSize;
-    box->bgPosition = style.backgroundPosition;
     ZepraBrowser::g_lazyImageLoader.queueBackground(box, resolveUrl(g_currentUrl, url), g_activeTabId);
 }
 
@@ -1213,6 +1215,7 @@ static void rebuildLayoutTree() {
             // Background
             if (!bodyStyle->backgroundColor.isTransparent()) {
                 g_layoutRoot->bgColor = cssColorToRGB(bodyStyle->backgroundColor);
+                g_layoutRoot->bgAlpha = bodyStyle->backgroundColor.a;
                 g_layoutRoot->hasBgColor = true;
             }
             if (!bodyStyle->backgroundImage.empty() && bodyStyle->backgroundImage != "none") {
@@ -1734,6 +1737,14 @@ static Zepra::WebCore::CSSColor usedBorderColor(const CSSComputedStyle& style) {
     if (style.borderRightWidth > 0) return style.borderRightColor;
     if (style.borderBottomWidth > 0) return style.borderBottomColor;
     return style.borderLeftColor;
+}
+
+// ... and one border style, the same side's
+static int usedBorderStyle(const CSSComputedStyle& style) {
+    if (style.borderTopWidth > 0) return (int)style.borderTopStyle;
+    if (style.borderRightWidth > 0) return (int)style.borderRightStyle;
+    if (style.borderBottomWidth > 0) return (int)style.borderBottomStyle;
+    return (int)style.borderLeftStyle;
 }
 
 // Table display values → table box types (CSS 2.1 §17.2)
@@ -2595,6 +2606,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     
                     if (!childStyle->backgroundColor.isTransparent()) {
                         blockBox->bgColor = cssColorToRGB(childStyle->backgroundColor);
+                        blockBox->bgAlpha = childStyle->backgroundColor.a;
                         blockBox->hasBgColor = true;
                     }
                     if (!childStyle->backgroundImage.empty() && childStyle->backgroundImage != "none") {
@@ -2645,6 +2657,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         Zepra::WebCore::CSSColor borderColor = usedBorderColor(*childStyle);
                         blockBox->borderColor = cssColorToRGB(borderColor);
                         blockBox->borderVisible = borderColor.a > 0;
+                        blockBox->borderStyle = usedBorderStyle(*childStyle);
                     }
                     blockBox->borderRadius = childStyle->borderTopLeftRadius;
                     blockBox->borderRadiusPercent = childStyle->borderTopLeftRadiusPercent;
@@ -2675,6 +2688,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     if (!childStyle->bottom.isAuto()) blockBox->cssBottom = cssToLayout(childStyle->bottom);
                     if (!childStyle->left.isAuto()) blockBox->cssLeft = cssToLayout(childStyle->left);
                     blockBox->zIndex = childStyle->zIndex;
+                    blockBox->zIndexAuto = childStyle->zIndexAuto;
                     
                     // Float
                     blockBox->floatType = childStyle->cssFloat;
@@ -2787,6 +2801,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     
                     if (!childStyle->backgroundColor.isTransparent()) {
                         inlineBox->bgColor = cssColorToRGB(childStyle->backgroundColor);
+                        inlineBox->bgAlpha = childStyle->backgroundColor.a;
                         inlineBox->hasBgColor = true;
                     }
                     
@@ -2804,6 +2819,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         Zepra::WebCore::CSSColor borderColor = usedBorderColor(*childStyle);
                         inlineBox->borderColor = cssColorToRGB(borderColor);
                         inlineBox->borderVisible = borderColor.a > 0;
+                        inlineBox->borderStyle = usedBorderStyle(*childStyle);
                     }
                     inlineBox->borderRadius = childStyle->borderTopLeftRadius;
                     inlineBox->borderRadiusPercent = childStyle->borderTopLeftRadiusPercent;
@@ -2976,6 +2992,35 @@ void svgImage(const std::string& key, const std::string& svgText, float x, float
     }
     it->second.lastUse = ++g_svgUseClock;
     if (it->second.id) g_nxGpu.drawTexture(it->second.id, NXRender::Rect((float)px, (float)py, (float)pw, (float)ph));
+}
+
+// A gradient background, drawn on the CPU once per size and kept as a
+// texture (sharing the SVG textures' memory budget)
+void gradientBackground(float x, float y, const ZepraBrowser::GradientBackground& bg) {
+    int pw = 0, ph = 0;
+    ZepraBrowser::gradientPixelSize(bg.width, bg.height, pw, ph);
+    std::string cacheKey = "grad|" + ZepraBrowser::gradientBackgroundKey(bg, pw, ph);
+    auto it = g_svgTextures.find(cacheKey);
+    if (it == g_svgTextures.end()) {
+        SvgTexture tex;
+        std::vector<uint8_t> rgba;
+        if (ZepraBrowser::rasterizeGradientBackground(bg, pw, ph, rgba)) {
+            tex.id = g_nxGpu.createTexture(pw, ph, rgba.data());
+            tex.bytes = rgba.size();
+        }
+        g_svgTextureBytes += tex.bytes;
+        while (g_svgTextureBytes > kSvgCacheBytes && !g_svgTextures.empty()) {
+            auto oldest = g_svgTextures.begin();
+            for (auto e = g_svgTextures.begin(); e != g_svgTextures.end(); ++e)
+                if (e->second.lastUse < oldest->second.lastUse) oldest = e;
+            if (oldest->second.id) g_nxGpu.destroyTexture(oldest->second.id);
+            g_svgTextureBytes -= oldest->second.bytes;
+            g_svgTextures.erase(oldest);
+        }
+        it = g_svgTextures.emplace(cacheKey, tex).first;
+    }
+    it->second.lastUse = ++g_svgUseClock;
+    if (it->second.id) g_nxGpu.drawTexture(it->second.id, NXRender::Rect(x, y, bg.width, bg.height));
 }
 
 } // namespace gfx
@@ -3177,6 +3222,13 @@ static void initLayoutEngine() {
         [](float x, float y, float w, float h) { g_nxGpu.pushClip(NXRender::Rect(x, y, w, h)); },
         [] { g_nxGpu.popClip(); });
     ZepraBrowser::setCanvasPaintCallback(layout_gfx_canvas);
+    ZepraBrowser::setPolygonCallback([](const float* xy, int count, uint32_t color, uint8_t alpha) {
+        std::vector<NXRender::Point> points;
+        points.reserve((size_t)count);
+        for (int i = 0; i < count; i++) points.push_back(NXRender::Point(xy[2 * i], xy[2 * i + 1]));
+        g_nxGpu.fillPath(points, NXRender::Color(color).withAlpha(alpha));
+    });
+    ZepraBrowser::setGradientPaintCallback(gfx::gradientBackground);
     
     std::cout << "[Layout] Layout engine initialized (rounded rect + gradient support)" << std::endl;
     
@@ -3278,6 +3330,9 @@ public:
     }
     double viewportWidth() override { return g_width - getSidebarOffset(); }
     double viewportHeight() override { return pageViewportHeight(); }
+    // The monitor's resolution, asked of the OS once (the window when unknown)
+    double screenWidth() override { return screenSize().first; }
+    double screenHeight() override { return screenSize().second; }
     double scrollX() override { return 0; }
     double scrollY() override {
         Tab* tab = activeTab();
@@ -3298,6 +3353,17 @@ public:
 
 private:
     ZepraBrowser::LayoutGeometryIndex index_;
+
+    static std::pair<double, double> screenSize() {
+        static std::pair<double, double> size = [] {
+            NXRender::DisplayInfo& info = NXRender::DisplayInfo::instance();
+            if (info.screenWidth() <= 0) info.queryFromOS();
+            if (info.screenWidth() > 0 && info.screenHeight() > 0)
+                return std::make_pair((double)info.screenWidth(), (double)info.screenHeight());
+            return std::make_pair((double)g_width, (double)g_height);
+        }();
+        return size;
+    }
     const LayoutBox* indexedRoot_ = nullptr;
     uint64_t indexedPass_ = 0;
 
@@ -4936,6 +5002,15 @@ static bool boxContains(const LayoutBox* box, float x, float y) {
 
 LayoutBox* findBoxAt(LayoutBox* box, float x, float y) {
     if (!box) return nullptr;
+    // position: fixed boxes paint over the rest of the page, so they are hit
+    // first, topmost first
+    if (box == g_layoutRoot.get()) {
+        auto fixed = ZepraBrowser::fixedBoxesInPaintOrder(*box);
+        for (auto it = fixed.rbegin(); it != fixed.rend(); ++it) {
+            if (*it == box) continue;
+            if (LayoutBox* found = findBoxAt(const_cast<LayoutBox*>(*it), x, y)) return found;
+        }
+    }
     // A clipping box's content is only visible (and hit) inside it
     if (ZepraBrowser::clipsContent(*box) && !boxContains(box, x, y)) return nullptr;
     
@@ -4970,7 +5045,9 @@ PagePress g_pagePress;
 // Follows the link under (mx, my) when the press at (pressX, pressY) was on
 // that same link; true when one was followed
 bool followLinkAt(float mx, float my, float pressX, float pressY) {
-    for (const auto& linkBox : g_linkHitBoxes) {
+    // Last painted is on top (fixed headers and overlays paint last)
+    for (auto it = g_linkHitBoxes.rbegin(); it != g_linkHitBoxes.rend(); ++it) {
+        const auto& linkBox = *it;
         auto inside = [&](float x, float y) {
             return x >= linkBox.x && x <= linkBox.x + linkBox.w && y >= linkBox.y && y <= linkBox.y + linkBox.h;
         };

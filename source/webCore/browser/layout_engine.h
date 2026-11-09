@@ -135,8 +135,10 @@ struct LayoutBox {
     // Style properties for rendering
     uint32_t color = 0x000000;
     uint32_t bgColor = 0x00000000;
+    uint8_t bgAlpha = 255;       // background-color alpha (rgba(), #rrggbbaa, transparent stops)
     uint32_t borderColor = 0x000000;
     bool borderVisible = true;   // false for a transparent border colour (it still takes space)
+    int borderStyle = 2;         // Zepra::WebCore::BorderStyle of the painted sides: 2 solid, 3 dashed, 4 dotted, 5 double
     float fontSize = 16.0f;
     bool bold = false;
     bool italic = false;
@@ -154,6 +156,7 @@ struct LayoutBox {
     
     // Background image / gradient (CSS string)
     std::string backgroundImage;
+    bool hasBgGradient = false;  // backgroundImage is all gradients: drawn by setGradientPaintCallback
     // background-image: url(...), loaded by LazyImageLoader like an <img>
     // (texture, or SVG text painted at tile size), and how it is laid out
     uint32_t bgTextureId = 0;
@@ -179,6 +182,7 @@ struct LayoutBox {
     LayoutLength cssBottom;
     LayoutLength cssLeft;
     int zIndex = 0;
+    bool zIndexAuto = true;  ///< z-index: auto (no stacking context of its own when positioned)
     
     // Float: 0=none, 1=left, 2=right
     int floatType = 0;
@@ -378,6 +382,10 @@ void setLayoutCallbacks2(
 /// (intersected with any enclosing clip). Used for background-image tiles.
 void setLayoutClipCallbacks(void (*push_clip)(float x, float y, float w, float h), void (*pop_clip)());
 
+/// Fills a convex polygon of `count` points (x, y pairs in `xy`): the pieces
+/// of styled and rounded borders
+void setPolygonCallback(void (*gfx_polygon)(const float* xy, int count, uint32_t color, uint8_t alpha));
+
 /// The text field with keyboard focus (null: none), whose selection and
 /// caret are painted; `caretVisible` blinks the caret
 void setFocusedTextField(const Zepra::WebCore::DOMElement* field, bool caretVisible);
@@ -387,6 +395,11 @@ size_t textFieldOffsetAt(const LayoutBox& box, float x, float y);
 
 /// The URL inside the first url(...) of a CSS value ("" when there is none)
 std::string cssUrl(const std::string& value);
+
+struct GradientBackground;
+/// Set the callback that paints a gradient background (gradient_raster.h)
+/// over a box's border box at (x, y)
+void setGradientPaintCallback(void (*gfx_gradient_bg)(float x, float y, const GradientBackground& bg));
 
 /// Set the callback that paints a <canvas> bitmap into its content box
 void setCanvasPaintCallback(
@@ -452,8 +465,15 @@ bool isBlockLevel(LayoutType type);
  * 1. Draw background
  * 2. Draw border
  * 3. Draw text content (if text node)
- * 4. Paint children
+ * 4. Paint children: negative z-index, then in flow, then positioned
+ *    (z-index 0, then positive), so later ones paint on top
  * 5. Register link hit boxes
+ *
+ * position: fixed boxes are painted last, by z-index, at viewport
+ * coordinates (offsetX, offsetY is the viewport origin), unscrolled and
+ * unclipped by their ancestors; negative z-index ones go just above the
+ * root's background. position: sticky boxes are moved to stay inside their
+ * nearest scroll container (or the viewport) while their parent is visible.
  * 
  * @param box The box to paint
  * @param offsetX X offset from viewport origin
@@ -463,6 +483,11 @@ bool isBlockLevel(LayoutType type);
  */
 void paintBox(const LayoutBox& box, float offsetX, float offsetY, 
               float viewportHeight, float scrollY);
+
+/// The position: fixed boxes under `root`, in paint order (bottom first:
+/// by z-index, then tree order). Hit testing checks them, last first,
+/// before the rest of the tree, since they paint on top of it.
+std::vector<const LayoutBox*> fixedBoxesInPaintOrder(const LayoutBox& root);
 
 /**
  * @brief Calculate text width using current font

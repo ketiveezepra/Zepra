@@ -14,6 +14,7 @@
 
 #include "../css/css_computed_style.hpp"
 #include "../dom/form_controls.hpp"
+#include "gradient_raster.h"
 
 // Viewport dimensions (defined in zepra_browser.cpp)
 extern int g_width;
@@ -40,12 +41,19 @@ static void (*s_gfx_gradient)(float, float, float, float, uint32_t, uint32_t) = 
 static void (*s_gfx_svg)(float, float, float, float, const std::string&, const std::string&, uint32_t) = nullptr;
 static void (*s_gfx_canvas)(float, float, float, float, Zepra::WebCore::DOMElement*) = nullptr;
 static void (*s_gfx_hgradient)(float, float, float, float, uint32_t, uint32_t) = nullptr;
+static void (*s_gfx_gradient_bg)(float, float, const GradientBackground&) = nullptr;
 static void (*s_push_clip)(float, float, float, float) = nullptr;
 static void (*s_pop_clip)() = nullptr;
 
 void setLayoutClipCallbacks(void (*push_clip)(float, float, float, float), void (*pop_clip)()) {
     s_push_clip = push_clip;
     s_pop_clip = pop_clip;
+}
+
+static void (*s_gfx_polygon)(const float* xy, int count, uint32_t color, uint8_t alpha) = nullptr;
+
+void setPolygonCallback(void (*gfx_polygon)(const float* xy, int count, uint32_t color, uint8_t alpha)) {
+    s_gfx_polygon = gfx_polygon;
 }
 
 // =============================================================================
@@ -264,7 +272,7 @@ bool insideClip(float& x, float& y, float& w, float& h) {
 // size: its content is scrolled inside it.
 void contentExtent(const LayoutBox& box, float x, float y, float& right, float& bottom) {
     for (const LayoutBox& child : box.children) {
-        if (child.type == LayoutType::None) continue;
+        if (child.type == LayoutType::None || child.positionType == 3) continue;  // fixed: viewport's
         float cx = x + child.x, cy = y + child.y;
         right = std::max(right, cx + child.width);
         bottom = std::max(bottom, cy + child.height);
@@ -442,6 +450,10 @@ void setLayoutCallbacks2(
     s_gfx_hgradient = gfx_hgradient;
 }
 
+void setGradientPaintCallback(void (*gfx_gradient_bg)(float, float, const GradientBackground&)) {
+    s_gfx_gradient_bg = gfx_gradient_bg;
+}
+
 void setCanvasPaintCallback(void (*gfx_canvas)(float, float, float, float, Zepra::WebCore::DOMElement*)) {
     s_gfx_canvas = gfx_canvas;
 }
@@ -562,6 +574,41 @@ void imageSize(const LayoutBox& img, float containingWidth, float& width, float&
     }
     width = w + edgesW;
     height = h + edgesH;
+}
+
+// A position: fixed box, laid out against the viewport (CSS 2.1 §10.3.7,
+// §10.6.4). x and y are viewport coordinates; paintBox draws it there.
+static void layoutFixed(LayoutBox& box, float vpW, float vpH) {
+    auto given = [](const LayoutLength& l) { return l.isSet() && !l.isAuto(); };
+    bool hasL = given(box.cssLeft), hasR = given(box.cssRight);
+    bool hasT = given(box.cssTop), hasB = given(box.cssBottom);
+    float left = hasL ? box.cssLeft.resolve(vpW, box.fontSize, vpW, vpH) : 0;
+    float right = hasR ? box.cssRight.resolve(vpW, box.fontSize, vpW, vpH) : 0;
+    float top = hasT ? box.cssTop.resolve(vpH, box.fontSize, vpW, vpH) : 0;
+    float bottom = hasB ? box.cssBottom.resolve(vpH, box.fontSize, vpW, vpH) : 0;
+
+    bool autoWidth = !box.cssWidth.isSet() || box.cssWidth.isAuto();
+    if (autoWidth && hasL && hasR) {
+        layoutBlock(box, std::max(0.0f, vpW - left - right), 0);  // stretched between the insets
+    } else if (autoWidth && !box.isImage) {
+        // Shrink-to-fit within the space the insets leave
+        float minW, maxW;
+        intrinsicWidths(box, minW, maxW);
+        float available = vpW - left - right - box.marginLeft - box.marginRight;
+        layoutAtWidth(box, std::max(0.0f, std::min(maxW, std::max(minW, available))));
+    } else {
+        layoutBlock(box, vpW, 0);
+    }
+    bool autoHeight = !box.cssHeight.isSet() || box.cssHeight.isAuto();
+    if (autoHeight && hasT && hasB)
+        box.height = std::max(box.height, vpH - top - bottom - box.marginTop - box.marginBottom);
+
+    if (hasL) box.x = left + box.marginLeft;
+    else if (hasR) box.x = vpW - right - box.width - box.marginRight;
+    else box.x = box.marginLeft;
+    if (hasT) box.y = top + box.marginTop;
+    else if (hasB) box.y = vpH - bottom - box.height - box.marginBottom;
+    else box.y = box.marginTop;
 }
 
 bool isBlockLevel(LayoutType type) {
@@ -722,6 +769,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         std::vector<FlexChild> allItems;
         for (auto& child : box.children) {
             if (child.type == LayoutType::None) continue;
+            if (child.positionType == 2 || child.positionType == 3) continue;  // out of flow
             
             float childAvailableWidth = contentWidth > 0 ? contentWidth : 200;
 
@@ -1300,26 +1348,66 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     // Post-layout: apply CSS positioning offsets
     for (auto& child : box.children) {
         if (child.positionType == 2) {
-            // Absolute: position relative to this containing block
-            // First, layout the child to resolve its own dimensions
-            layoutBlock(child, contentWidth, 0);
-            
+            // Absolute: positioned in this box's padding box (CSS 2.1 §10.1)
             float contW = box.width;
             float contH = box.height;
-            
+            float padW = std::max(0.0f, contW - box.borderLeft - box.borderRight);
+            float padH = std::max(0.0f, contH - box.borderTop - box.borderBottom);
+            auto offset = [&](const LayoutLength& l, float against, float& out) {
+                if (!l.isSet() || l.isAuto()) return false;
+                out = l.resolve(against, child.fontSize, vpW, vpH);
+                return true;
+            };
+            float left = 0, right = 0, top = 0, bottom = 0;
+            bool hasLeft = offset(child.cssLeft, padW, left), hasRight = offset(child.cssRight, padW, right);
+            bool hasTop = offset(child.cssTop, padH, top), hasBottom = offset(child.cssBottom, padH, bottom);
+
+            // An auto size between two insets fills the space between them
+            // (§10.3.7 and §10.6.4: "inset: 0" covers the containing block)
+            LayoutLength savedWidth = child.cssWidth, savedHeight = child.cssHeight;
+            int savedSizing = child.boxSizing;
+            bool autoWidth = !child.cssWidth.isSet() || child.cssWidth.isAuto();
+            bool autoHeight = !child.cssHeight.isSet() || child.cssHeight.isAuto();
+            if (autoWidth && hasLeft && hasRight) {
+                float w = padW - left - right - child.marginLeft - child.marginRight;
+                child.cssWidth = LayoutLength::px(std::max(0.0f, w));
+                child.boxSizing = 1;
+            }
+            if (autoHeight && hasTop && hasBottom) {
+                float h = padH - top - bottom - child.marginTop - child.marginBottom;
+                child.cssHeight = LayoutLength::px(std::max(0.0f, h));
+                if (child.boxSizing != 1) {
+                    // Keep a set width in its own box-sizing
+                    if (!autoWidth && savedSizing == 0) {
+                        child.cssWidth = LayoutLength::px(child.cssWidth.resolve(padW, child.fontSize, vpW, vpH) +
+                                                          child.paddingLeft + child.paddingRight +
+                                                          child.borderLeft + child.borderRight);
+                    }
+                    child.boxSizing = 1;
+                }
+            }
+            // Lay the child out to resolve its own dimensions
+            layoutBlock(child, autoWidth && hasLeft && hasRight ? padW : contentWidth, 0);
+            child.cssWidth = savedWidth;
+            child.cssHeight = savedHeight;
+            child.boxSizing = savedSizing;
+
             // Resolve horizontal
-            if (child.cssLeft.isSet() && !child.cssLeft.isAuto()) {
-                child.x = box.paddingLeft + box.borderLeft + child.cssLeft.resolve(contW, child.fontSize, vpW, vpH);
-            } else if (child.cssRight.isSet() && !child.cssRight.isAuto()) {
-                child.x = contW - box.paddingRight - box.borderRight - child.width - child.cssRight.resolve(contW, child.fontSize, vpW, vpH);
+            if (hasLeft) {
+                child.x = box.borderLeft + left + child.marginLeft;
+            } else if (hasRight) {
+                child.x = contW - box.borderRight - right - child.marginRight - child.width;
             }
-            
+
             // Resolve vertical
-            if (child.cssTop.isSet() && !child.cssTop.isAuto()) {
-                child.y = box.paddingTop + box.borderTop + child.cssTop.resolve(contH, child.fontSize, vpW, vpH);
-            } else if (child.cssBottom.isSet() && !child.cssBottom.isAuto()) {
-                child.y = contH - box.paddingBottom - box.borderBottom - child.height - child.cssBottom.resolve(contH, child.fontSize, vpW, vpH);
+            if (hasTop) {
+                child.y = box.borderTop + top + child.marginTop;
+            } else if (hasBottom) {
+                child.y = contH - box.borderBottom - bottom - child.marginBottom - child.height;
             }
+        }
+        else if (child.positionType == 3) {
+            layoutFixed(child, vpW, vpH);
         }
         else if (child.positionType == 1) {
             // Relative: offset from normal flow position
@@ -1633,17 +1721,430 @@ static void dumpLayoutTree(const LayoutBox& box, int depth = 0) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Styled and rounded borders (CSS Backgrounds 3 §4): dashes, dots, double
+// lines and rings around rounded corners, drawn as rectangles, circles and
+// convex quads
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr int kBorderSolid = 2, kBorderDashed = 3, kBorderDotted = 4, kBorderDouble = 5;
+
+// A point of a border's centre line: position, outward normal, distance
+// along the line from its start
+struct LinePoint {
+    float x, y, nx, ny, s;
+};
+
+// The centre line of a rounded rectangle, clockwise from the start of the
+// top edge, closed (the last point repeats the first)
+std::vector<LinePoint> roundedLine(float x, float y, float w, float h, float r) {
+    r = std::max(0.0f, std::min({r, w / 2, h / 2}));
+    int seg = std::max(2, (int)std::ceil(r * 1.5707963f / 2.0f));  // ~2px pieces
+    struct Corner { float cx, cy, from; };
+    const Corner corners[4] = {{x + w - r, y + r, -90}, {x + w - r, y + h - r, 0},
+                               {x + r, y + h - r, 90}, {x + r, y + r, 180}};
+    std::vector<LinePoint> pts;
+    for (const Corner& c : corners) {
+        for (int k = 0; k <= seg; k++) {
+            float a = (c.from + 90.0f * (float)k / (float)seg) * 3.14159265f / 180.0f;
+            float nx = std::cos(a), ny = std::sin(a);
+            pts.push_back({c.cx + r * nx, c.cy + r * ny, nx, ny, 0});
+        }
+    }
+    // Start at the top edge's left end (the top-left arc's last point)
+    pts.insert(pts.begin(), pts.back());
+    pts.pop_back();
+    pts.push_back(pts.front());
+    for (size_t i = 1; i < pts.size(); i++)
+        pts[i].s = pts[i - 1].s + std::hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    return pts;
+}
+
+LinePoint pointAt(const std::vector<LinePoint>& line, float s) {
+    float total = line.back().s;
+    s = std::fmod(std::fmod(s, total) + total, total);
+    for (size_t i = 1; i < line.size(); i++) {
+        if (line[i].s < s) continue;
+        const LinePoint& a = line[i - 1];
+        const LinePoint& b = line[i];
+        float t = b.s > a.s ? (s - a.s) / (b.s - a.s) : 0;
+        float nx = a.nx + (b.nx - a.nx) * t, ny = a.ny + (b.ny - a.ny) * t;
+        float len = std::hypot(nx, ny);
+        if (len > 0) { nx /= len; ny /= len; }
+        return {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, nx, ny, s};
+    }
+    return line.back();
+}
+
+// A band of `thickness` along the line from distance `from` to `to`
+void strokeRange(const std::vector<LinePoint>& line, float from, float to, float thickness, uint32_t color) {
+    if (!s_gfx_polygon || to <= from) return;
+    float total = line.back().s;
+    if (to - from >= total) { from = 0; to = total; }
+    std::vector<LinePoint> pts{pointAt(line, from)};
+    float base = std::floor(from / total) * total;
+    // Line vertices inside the range, going round past the start if needed
+    for (float lap = base; lap < to; lap += total) {
+        for (const LinePoint& p : line) {
+            float s = lap + p.s;
+            if (s > from && s < to) pts.push_back({p.x, p.y, p.nx, p.ny, s});
+        }
+    }
+    pts.push_back(pointAt(line, to));
+    float h = thickness / 2;
+    for (size_t i = 0; i + 1 < pts.size(); i++) {
+        const LinePoint& a = pts[i];
+        const LinePoint& b = pts[i + 1];
+        float quad[8] = {a.x + a.nx * h, a.y + a.ny * h, b.x + b.nx * h, b.y + b.ny * h,
+                         b.x - b.nx * h, b.y - b.ny * h, a.x - a.nx * h, a.y - a.ny * h};
+        s_gfx_polygon(quad, 4, color, 255);
+    }
+}
+
+void dot(float cx, float cy, float d, uint32_t color) {
+    if (d <= 2.0f || !s_gfx_rrect) {
+        if (s_gfx_rect) s_gfx_rect(cx - d / 2, cy - d / 2, d, d, color);
+    } else {
+        s_gfx_rrect(cx - d / 2, cy - d / 2, d, d, d / 2, color, 255);
+    }
+}
+
+// Dashes: about three times as long as the border is wide, with gaps as
+// long, fitted so the pattern divides the length evenly
+float dashLength(float t) { return std::max(3.0f * t, 3.0f); }
+
+// One side of a square-cornered box, from corner to corner along its centre
+// line: dashes start and end at the corners, dots sit at both ends
+void styledSide(float x0, float y0, float x1, float y1, float t, int style, uint32_t color) {
+    if (!s_gfx_rect) return;
+    bool horizontal = y0 == y1;
+    float length = horizontal ? x1 - x0 : y1 - y0;
+    if (length <= 0) return;
+    auto piece = [&](float a, float b) {
+        if (horizontal) s_gfx_rect(x0 + a, y0 - t / 2, b - a, t, color);
+        else s_gfx_rect(x0 - t / 2, y0 + a, t, b - a, color);
+    };
+    if (style == kBorderDotted) {
+        int n = std::max(1, (int)std::lround(length / (2 * t)));
+        float span = length - t;
+        for (int i = 0; i <= n; i++) {
+            float c = t / 2 + (n > 0 ? span * (float)i / (float)n : 0);
+            if (horizontal) dot(x0 + c, y0, t, color);
+            else dot(x0, y0 + c, t, color);
+        }
+        return;
+    }
+    float dash = dashLength(t);
+    int n = std::max(1, (int)std::lround((length + dash) / (2 * dash)));
+    if (n == 1) { piece(0, length); return; }
+    float gap = (length - n * dash) / (float)(n - 1);
+    if (gap < 0) { dash = length / (2 * n - 1); gap = dash; }
+    for (int i = 0; i < n; i++) {
+        float a = i * (dash + gap);
+        piece(a, std::min(length, a + dash));
+    }
+}
+
+} // namespace
+
+// Paints a border whose style is not plain solid on square corners: dashed,
+// dotted and double, and any style around rounded corners. False when it
+// left the border to the solid painter.
+static bool paintStyledBorder(const LayoutBox& box, float x, float y) {
+    float t = std::max({box.borderTop, box.borderRight, box.borderBottom, box.borderLeft});
+    t = std::min({t, box.width / 2.0f, box.height / 2.0f});
+    if (t <= 0) return true;
+    int style = box.borderStyle;
+    if (style != kBorderDashed && style != kBorderDotted && style != kBorderDouble) style = kBorderSolid;
+    float radius = std::min({box.borderRadius, box.width / 2.0f, box.height / 2.0f});
+    uint32_t color = box.borderColor;
+    float w = box.width, h = box.height;
+
+    if (radius <= 0) {
+        if (style == kBorderSolid) return false;
+        if (style == kBorderDouble) {
+            // Two lines a third of the width each, with a third between
+            float third = t / 3.0f;
+            if (!s_gfx_rect) return false;
+            for (float inset : {0.0f, 2 * third}) {
+                float bx = x + inset, by = y + inset, bw = w - 2 * inset, bh = h - 2 * inset;
+                if (bw <= 0 || bh <= 0) continue;
+                if (box.borderTop > 0) s_gfx_rect(bx, by, bw, third, color);
+                if (box.borderBottom > 0) s_gfx_rect(bx, by + bh - third, bw, third, color);
+                if (box.borderLeft > 0) s_gfx_rect(bx, by + third, third, bh - 2 * third, color);
+                if (box.borderRight > 0) s_gfx_rect(bx + bw - third, by + third, third, bh - 2 * third, color);
+            }
+            return true;
+        }
+        float h2 = t / 2;
+        if (box.borderTop > 0) styledSide(x, y + h2, x + w, y + h2, t, style, color);
+        if (box.borderBottom > 0) styledSide(x, y + h - h2, x + w, y + h - h2, t, style, color);
+        if (box.borderLeft > 0) styledSide(x + h2, y, x + h2, y + h, t, style, color);
+        if (box.borderRight > 0) styledSide(x + w - h2, y, x + w - h2, y + h, t, style, color);
+        return true;
+    }
+
+    if (!s_gfx_polygon && style != kBorderDotted) return false;
+    if (style == kBorderDouble) {
+        float third = t / 3.0f;
+        for (float inset : {third / 2, t - third / 2}) {
+            auto line = roundedLine(x + inset, y + inset, w - 2 * inset, h - 2 * inset, radius - inset);
+            strokeRange(line, 0, line.back().s, third, color);
+        }
+        return true;
+    }
+    auto line = roundedLine(x + t / 2, y + t / 2, w - t, h - t, radius - t / 2);
+    float total = line.back().s;
+    if (total <= 0) return true;
+    if (style == kBorderSolid) {
+        strokeRange(line, 0, total, t, color);
+    } else if (style == kBorderDotted) {
+        int n = std::max(4, (int)std::lround(total / (2 * t)));
+        for (int i = 0; i < n; i++) {
+            LinePoint p = pointAt(line, total * (float)i / (float)n);
+            dot(p.x, p.y, t, color);
+        }
+    } else {
+        float dash = dashLength(t);
+        int n = std::max(2, (int)std::lround(total / (2 * dash)));
+        float period = total / (float)n, len = period / 2;
+        for (int i = 0; i < n; i++) strokeRange(line, i * period - len / 2, i * period + len / 2, t, color);
+    }
+    return true;
+}
+
 static void paintChildren(const LayoutBox& box, float screenX, float screenY, float viewportHeight);
+
+namespace {
+
+// A box painted out of tree order by its stacking context: where it goes on
+// screen and the clip in force where it sits in the tree
+struct PaintLayer {
+    const LayoutBox* box;
+    float x, y;                      // paintBox offset (its parent's origin)
+    bool clipped;
+    ClipRect clip;
+    std::vector<ClipRect> scrollports;
+    bool context;                    // starts a stacking context of its own
+};
+
+// One frame's paint: the viewport fixed boxes are placed in, the scroll
+// containers sticky boxes stick to, and the box budget
+struct PaintFrame {
+    bool active = false;
+    float viewX = 0, viewY = 0, viewW = 0, viewBottom = 0;
+    const LayoutBox* root = nullptr;
+    const LayoutBox* contextLayer = nullptr;  // the layer being painted, when it starts a context
+    std::vector<ClipRect> scrollports;        // innermost last; empty: the viewport
+    int count = 0;
+    int depth = 0;
+};
+thread_local PaintFrame t_frame;
+
+void collectFixed(const LayoutBox& box, std::vector<const LayoutBox*>& out) {
+    for (const LayoutBox& child : box.children) {
+        if (child.type == LayoutType::None || child.opacity <= 0.001f) continue;
+        if (child.positionType == 3) out.push_back(&child);
+        collectFixed(child, out);
+    }
+}
+
+// Painted by its stacking context, not in tree order: positioned boxes, and
+// flex items with a z-index (CSS Flexbox §4.3)
+bool isLayered(const LayoutBox& child, const LayoutBox& parent) {
+    return child.positionType != 0 || (parent.type == LayoutType::Flex && !child.zIndexAuto);
+}
+
+// Starts a stacking context: its layered descendants paint inside it
+// (CSS 2.1 §9.9.1; fixed, sticky and opacity from CSS Positioned Layout 3
+// and CSS Color 4)
+bool startsContext(const LayoutBox& box, bool flexItem) {
+    if (box.positionType == 3 || box.positionType == 4) return true;
+    if (!box.zIndexAuto && (box.positionType != 0 || flexItem)) return true;
+    return box.opacity < 0.999f;
+}
+
+int layerZ(const LayoutBox& box) { return box.zIndexAuto ? 0 : box.zIndex; }
+
+// How far a position: sticky child moves from its in-flow place so it stays
+// `top`/`bottom`/`left`/`right` inside its scrollport, without leaving its
+// parent's content box (CSS Positioned Layout 3, §3.4)
+void stickyShift(const LayoutBox& child, const LayoutBox& parent, float parentX, float parentY,
+                 const std::vector<ClipRect>& scrollports, float& dx, float& dy) {
+    dx = dy = 0;
+    ClipRect port = scrollports.empty()
+        ? ClipRect{t_frame.viewX, t_frame.viewY, t_frame.viewX + t_frame.viewW, t_frame.viewBottom}
+        : scrollports.back();
+    float vpW = layoutViewportWidth(), vpH = layoutViewportHeight();
+    float parentW = parent.width, parentH = parent.height;
+    if (isScrollContainer(parent)) scrollableSize(parent, parentW, parentH);
+    float cbLeft = parentX + parent.borderLeft + parent.paddingLeft;
+    float cbTop = parentY + parent.borderTop + parent.paddingTop;
+    float cbRight = parentX + parentW - parent.borderRight - parent.paddingRight;
+    float cbBottom = parentY + parentH - parent.borderBottom - parent.paddingBottom;
+    float x = parentX + child.x, y = parentY + child.y;
+    auto given = [](const LayoutLength& l) { return l.isSet() && !l.isAuto(); };
+
+    if (given(child.cssTop)) {
+        float want = port.y0 + child.cssTop.resolve(port.y1 - port.y0, child.fontSize, vpW, vpH) - y;
+        if (want > 0) dy = std::max(0.0f, std::min(want, cbBottom - child.marginBottom - (y + child.height)));
+    }
+    if (dy == 0 && given(child.cssBottom)) {
+        float want = port.y1 - child.cssBottom.resolve(port.y1 - port.y0, child.fontSize, vpW, vpH) - (y + child.height);
+        if (want < 0) dy = std::min(0.0f, std::max(want, cbTop + child.marginTop - y));
+    }
+    if (given(child.cssLeft)) {
+        float want = port.x0 + child.cssLeft.resolve(port.x1 - port.x0, child.fontSize, vpW, vpH) - x;
+        if (want > 0) dx = std::max(0.0f, std::min(want, cbRight - child.marginRight - (x + child.width)));
+    }
+    if (dx == 0 && given(child.cssRight)) {
+        float want = port.x1 - child.cssRight.resolve(port.x1 - port.x0, child.fontSize, vpW, vpH) - (x + child.width);
+        if (want < 0) dx = std::min(0.0f, std::max(want, cbLeft + child.marginLeft - x));
+    }
+}
+
+// The layered descendants a stacking context paints, in tree order, with
+// where each sits. It walks the same offsets, scrolling and clips as
+// paintChildren, and passes through positioned boxes with z-index: auto
+// (their layered descendants belong to this context), but not into boxes
+// that start a context of their own.
+struct LayerWalk {
+    std::vector<PaintLayer>& out;
+    std::vector<ClipRect> clips;
+    std::vector<ClipRect> ports;
+
+    void children(const LayoutBox& box, float x, float y) {
+        for (const LayoutBox& child : box.children) {
+            if (child.type == LayoutType::None || child.opacity <= 0.001f) continue;
+            if (child.positionType == 3) continue;  // fixed: the frame's root paints them
+            float dx = 0, dy = 0;
+            if (child.positionType == 4) stickyShift(child, box, x, y, ports, dx, dy);
+            bool flexItem = box.type == LayoutType::Flex;
+            bool layered = isLayered(child, box);
+            bool context = startsContext(child, flexItem);
+            if (layered) {
+                PaintLayer layer{&child, x + dx, y + dy, !clips.empty(), {}, ports, layered && context};
+                if (layer.clipped) layer.clip = clips.back();
+                out.push_back(std::move(layer));
+            }
+            if (!context) descend(child, x + dx + child.x, y + dy + child.y);
+        }
+    }
+
+    void descend(const LayoutBox& box, float x, float y) {
+        if (box.children.empty()) return;
+        if (!clipsContent(box)) {
+            children(box, x, y);
+            return;
+        }
+        const float padX = x + box.borderLeft, padY = y + box.borderTop;
+        ClipRect clip{padX, padY, padX + std::max(0.0f, box.width - box.borderLeft - box.borderRight),
+                      padY + std::max(0.0f, box.height - box.borderTop - box.borderBottom)};
+        bool port = isScrollContainer(box);
+        if (port) ports.push_back(clip);
+        if (!clips.empty()) {
+            const ClipRect& o = clips.back();
+            clip = {std::max(clip.x0, o.x0), std::max(clip.y0, o.y0), std::min(clip.x1, o.x1), std::min(clip.y1, o.y1)};
+        }
+        clips.push_back(clip);
+        ScrollOffset offset = scrollOffsetOf(box);
+        children(box, x - offset.x, y - offset.y);
+        clips.pop_back();
+        if (port) ports.pop_back();
+    }
+};
+
+void paintLayer(const PaintLayer& layer) {
+    std::vector<ClipRect> clips, ports = layer.scrollports;
+    clips.swap(t_clipStack);
+    ports.swap(t_frame.scrollports);
+    if (layer.clipped) {
+        t_clipStack.push_back(layer.clip);
+        if (s_push_clip) s_push_clip(layer.clip.x0, layer.clip.y0, std::max(0.0f, layer.clip.x1 - layer.clip.x0),
+                                     std::max(0.0f, layer.clip.y1 - layer.clip.y0));
+    }
+    const LayoutBox* outer = t_frame.contextLayer;
+    t_frame.contextLayer = layer.context ? layer.box : nullptr;
+    paintBox(*layer.box, layer.x, layer.y, t_frame.viewBottom, 0);
+    t_frame.contextLayer = outer;
+    if (layer.clipped && s_pop_clip) s_pop_clip();
+    clips.swap(t_clipStack);
+    ports.swap(t_frame.scrollports);
+}
+
+// Paints `box`'s children whose top-left is relative to (x, y). In-flow
+// children paint in tree order; layered ones are left to their stacking
+// context. When `box` starts a context, it paints its layers around its
+// in-flow content (CSS 2.1 Appendix E): negative z-index first, then the
+// rest by z-index, z-index: auto counting as 0. The frame's root also
+// paints the fixed boxes, at the viewport, unscrolled and unclipped.
+void paintChildBoxes(const LayoutBox& box, float x, float y, float viewportHeight, bool context) {
+    std::vector<PaintLayer> layers;
+    if (context) {
+        LayerWalk walk{layers, {}, t_frame.scrollports};
+        if (!t_clipStack.empty()) walk.clips.push_back(t_clipStack.back());
+        walk.children(box, x, y);
+        if (&box == t_frame.root) {
+            std::vector<const LayoutBox*> fixed;
+            collectFixed(box, fixed);
+            for (const LayoutBox* f : fixed)
+                layers.push_back({f, t_frame.viewX, t_frame.viewY, false, {}, {}, true});
+        }
+        std::stable_sort(layers.begin(), layers.end(),
+                         [](const PaintLayer& a, const PaintLayer& b) { return layerZ(*a.box) < layerZ(*b.box); });
+    }
+    size_t next = 0;
+    for (; next < layers.size() && layerZ(*layers[next].box) < 0; ++next) paintLayer(layers[next]);
+    for (const auto& child : box.children) {
+        if (isLayered(child, box)) continue;
+        paintBox(child, x, y, viewportHeight, 0);
+    }
+    for (; next < layers.size(); ++next) paintLayer(layers[next]);
+}
+
+} // namespace
+
+std::vector<const LayoutBox*> fixedBoxesInPaintOrder(const LayoutBox& root) {
+    std::vector<const LayoutBox*> out;
+    if (root.positionType == 3) out.push_back(&root);
+    collectFixed(root, out);
+    std::stable_sort(out.begin(), out.end(),
+                     [](const LayoutBox* a, const LayoutBox* b) { return layerZ(*a) < layerZ(*b); });
+    return out;
+}
+
+static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY, float viewportHeight, float scrollY);
 
 void paintBox(const LayoutBox& box, float offsetX, float offsetY,
               float viewportHeight, float scrollY) {
+    if (t_frame.active) {
+        paintBoxImpl(box, offsetX, offsetY, viewportHeight, scrollY);
+        return;
+    }
+    // A new frame: (offsetX, offsetY) is the viewport origin
+    t_frame.active = true;
+    t_frame.viewX = offsetX;
+    t_frame.viewY = offsetY;
+    t_frame.viewW = layoutViewportWidth();
+    t_frame.viewBottom = viewportHeight;
+    t_frame.root = &box;
+    t_frame.contextLayer = nullptr;
+    t_frame.scrollports.clear();
+    t_frame.count = 0;
+    t_frame.depth = 0;
+    paintBoxImpl(box, offsetX, offsetY, viewportHeight, scrollY);
+    t_frame.active = false;
+    t_frame.root = nullptr;
+}
+
+static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
+                         float viewportHeight, float scrollY) {
     // Budget: limit total painted boxes per frame to prevent UI hang on complex pages
-    static thread_local int s_paintCount = 0;
-    static thread_local int s_paintDepth = 0;
-    if (s_paintDepth == 0) s_paintCount = 0;  // Reset at top-level call
-    if (s_paintCount++ > 4000 || s_paintDepth > 64) return;
-    s_paintDepth++;
-    struct PaintGuard { ~PaintGuard() { --s_paintDepth; } } pg;
+    if (t_frame.count++ > 4000 || t_frame.depth > 64) return;
+    t_frame.depth++;
+    struct PaintGuard { ~PaintGuard() { --t_frame.depth; } } pg;
     
     if (box.type == LayoutType::None) return;
     if (box.opacity <= 0.001f) return;
@@ -1675,7 +2176,8 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
         return;
     }
     
-    uint8_t alpha = (uint8_t)(box.opacity * 255.0f);
+    // The background colour's own alpha (rgba(), #rrggbbaa) times opacity
+    uint8_t alpha = (uint8_t)std::lround(box.bgAlpha * std::clamp(box.opacity, 0.0f, 1.0f));
     
     // Row and row-group backgrounds show through their cells only, not the
     // border-spacing between them (CSS 2.1 §17.5.1)
@@ -1692,14 +2194,36 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
             for (const auto& row : box.children)
                 paintCells(row, screenX + row.x, screenY + row.y);
         }
-    } else if (box.hasBgColor) {
-        if (box.backgroundImage.find("gradient(") != std::string::npos && box.backgroundImage.find("url(") == std::string::npos &&
-            s_gfx_gradient && s_gfx_rect) {
-            paintGradient(box.backgroundImage, screenX, screenY, box.width, box.height, box.bgColor);
-        } else if (box.borderRadius > 0 && s_gfx_rrect) {
+    } else if (box.hasBgColor && !s_gfx_gradient_bg && isGradientBackground(box.backgroundImage) &&
+               s_gfx_gradient && s_gfx_rect) {
+        // Without a gradient painter: linear gradients as bands of the GPU's
+        // two-colour fills (the top layer only)
+        paintGradient(box.backgroundImage, screenX, screenY, box.width, box.height, box.bgColor);
+    } else {
+        if (!box.hasBgColor) {
+            // no colour of its own
+        } else if ((box.borderRadius > 0 || alpha < 255) && s_gfx_rrect) {
+            // Translucent fills go through the rounded-rect path, the one that
+            // takes an alpha (a radius of 0 is a plain rectangle)
             s_gfx_rrect(screenX, screenY, box.width, box.height, box.borderRadius, box.bgColor, alpha);
         } else if (s_gfx_rect) {
             s_gfx_rect(screenX, screenY, box.width, box.height, box.bgColor);
+        }
+        // Gradient layers over the colour (CSS Backgrounds 3 §2.11.1)
+        if ((box.hasBgGradient || box.hasBgColor) && s_gfx_gradient_bg && isGradientBackground(box.backgroundImage)) {
+            GradientBackground bg;
+            bg.image = box.backgroundImage;
+            bg.size = box.bgSize;
+            bg.position = box.bgPosition;
+            bg.repeat = box.bgRepeat;
+            bg.width = box.width;
+            bg.height = box.height;
+            bg.borderTop = box.borderTop;
+            bg.borderRight = box.borderRight;
+            bg.borderBottom = box.borderBottom;
+            bg.borderLeft = box.borderLeft;
+            bg.radius = box.borderRadius;
+            s_gfx_gradient_bg(screenX, screenY, bg);
         }
     }
     if (box.bgTextureId > 0 || !box.bgSvgData.empty()) paintBackgroundImage(box, screenX, screenY);
@@ -1710,7 +2234,9 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
     // its width so it stays inside the box too.
     if ((box.borderTop > 0 || box.borderRight > 0 || box.borderBottom > 0 || box.borderLeft > 0) &&
         box.borderVisible && (s_gfx_rect || s_gfx_border)) {
-        if ((box.borderRadius > 0 || !s_gfx_rect) && s_gfx_border) {
+        if (paintStyledBorder(box, screenX, screenY)) {
+            // dashed, dotted, double, or around rounded corners
+        } else if ((box.borderRadius > 0 || !s_gfx_rect) && s_gfx_border) {
             float thickness = std::max({box.borderTop, box.borderRight, box.borderBottom, box.borderLeft});
             float t = std::min({thickness, box.width / 2.0f, box.height / 2.0f});
             if (t > 0) {
@@ -1833,8 +2359,12 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
 // its scroll position, with a scroll thumb when the user can scroll it.
 static void paintChildren(const LayoutBox& box, float screenX, float screenY, float viewportHeight) {
     if (box.children.empty()) return;
+    // The frame's root, a layer that starts a context, or an in-flow box
+    // that does (opacity) paints its own layers
+    bool context = &box == t_frame.root || &box == t_frame.contextLayer ||
+                   (box.positionType == 0 && startsContext(box, false));
     if (!clipsContent(box)) {
-        for (const auto& child : box.children) paintBox(child, screenX, screenY, viewportHeight, 0);
+        paintChildBoxes(box, screenX, screenY, viewportHeight, context);
         return;
     }
     const float padX = screenX + box.borderLeft, padY = screenY + box.borderTop;
@@ -1849,9 +2379,10 @@ static void paintChildren(const LayoutBox& box, float screenX, float screenY, fl
     t_clipStack.push_back(clip);
     if (s_push_clip) s_push_clip(padX, padY, padW, padH);
     ScrollOffset offset = scrollOffsetOf(box);
-    for (const auto& child : box.children) {
-        paintBox(child, screenX - offset.x, screenY - offset.y, viewportHeight, 0);
-    }
+    bool scrollport = isScrollContainer(box);
+    if (scrollport) t_frame.scrollports.push_back({padX, padY, padX + padW, padY + padH});
+    paintChildBoxes(box, screenX - offset.x, screenY - offset.y, viewportHeight, context);
+    if (scrollport) t_frame.scrollports.pop_back();
     if (s_pop_clip) s_pop_clip();
     t_clipStack.pop_back();
 

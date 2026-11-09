@@ -10,7 +10,10 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+
 #include "browser/dom.hpp"
+#include "browser/gradient_raster.h"
 #include "browser/layout_engine.h"
 #include "css/css_engine.hpp"
 #include "css/presentational_hints.hpp"
@@ -322,6 +325,39 @@ LayoutBox& addImage(LayoutBox& parent, float naturalW, float naturalH) {
     return img;
 }
 
+TEST(AbsoluteLayout, InsetsStretchAnAutoSizedBox) {
+    LayoutBox parent;
+    parent.type = LayoutType::Block;
+    parent.positionType = 1;
+    parent.cssWidth = LayoutLength::px(120);
+    parent.cssHeight = LayoutLength::px(80);
+    parent.borderLeft = parent.borderTop = 2;
+    parent.paddingLeft = parent.paddingTop = 10;
+    parent.boxSizing = 1;
+    LayoutBox& cover = addBox(parent, LayoutType::Block);
+    cover.positionType = 2;
+    cover.cssTop = cover.cssRight = cover.cssBottom = cover.cssLeft = LayoutLength::px(0);
+    LayoutBox& inset = addBox(parent, LayoutType::Block);
+    inset.positionType = 2;
+    inset.cssTop = LayoutLength::px(5);
+    inset.cssBottom = LayoutLength::px(15);
+    inset.cssLeft = LayoutLength::px(4);
+    inset.cssRight = LayoutLength::px(6);
+    inset.paddingLeft = 3;  // content-box: the padding stays inside the stretched size
+    ZepraBrowser::layoutBlock(parent, 1000, 0);
+    // inset: 0 covers the padding box (inside the border, over the padding)
+    EXPECT_FLOAT_EQ(cover.x, 2);
+    EXPECT_FLOAT_EQ(cover.y, 2);
+    EXPECT_FLOAT_EQ(cover.width, 118);
+    EXPECT_FLOAT_EQ(cover.height, 78);
+    EXPECT_FLOAT_EQ(inset.x, 6);
+    EXPECT_FLOAT_EQ(inset.y, 7);
+    EXPECT_FLOAT_EQ(inset.width, 108);
+    EXPECT_FLOAT_EQ(inset.height, 58);
+    // The specified (auto) sizes are kept for the next layout pass
+    EXPECT_FALSE(cover.cssWidth.isSet() && !cover.cssWidth.isAuto());
+}
+
 TEST(FlexLayout, ColumnAlignCenterCentresHorizontally) {
     LayoutBox flex = makeFlex(1, 3);
     LayoutBox& item = addBox(flex, LayoutType::Block);
@@ -543,6 +579,186 @@ TEST(Gradients, OnlyTheTopLayerAndRadialShapes) {
     ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
     ZepraBrowser::setLayoutCallbacks2(nullptr, nullptr);
     EXPECT_EQ(solid, 0xFF6B6Bu);
+}
+
+// ---------------------------------------------------------------------------
+// Gradient backgrounds drawn on the CPU (gradient_raster.cpp)
+// ---------------------------------------------------------------------------
+
+struct Raster {
+    int w = 0, h = 0;
+    std::vector<uint8_t> px;
+    std::array<int, 4> at(int x, int y) const {
+        const uint8_t* p = &px[((size_t)y * w + x) * 4];
+        return {p[0], p[1], p[2], p[3]};
+    }
+};
+
+Raster raster(const std::string& image, float w, float h, const std::string& size = "",
+              const std::string& position = "", const std::string& repeat = "", float radius = 0) {
+    ZepraBrowser::GradientBackground bg;
+    bg.image = image;
+    bg.size = size;
+    bg.position = position;
+    bg.repeat = repeat;
+    bg.width = w;
+    bg.height = h;
+    bg.radius = radius;
+    Raster r;
+    ZepraBrowser::gradientPixelSize(w, h, r.w, r.h);
+    EXPECT_TRUE(ZepraBrowser::rasterizeGradientBackground(bg, r.w, r.h, r.px)) << image;
+    if (r.px.empty()) r.px.assign((size_t)r.w * r.h * 4, 0);
+    return r;
+}
+
+using RGBA = std::array<int, 4>;
+
+::testing::AssertionResult near(const RGBA& actual, const RGBA& expected, int tolerance) {
+    for (int i = 0; i < 4; i++) {
+        if (std::abs(actual[i] - expected[i]) > tolerance) {
+            return ::testing::AssertionFailure() << "(" << actual[0] << "," << actual[1] << "," << actual[2] << ","
+                                                 << actual[3] << ") is not within " << tolerance << " of ("
+                                                 << expected[0] << "," << expected[1] << "," << expected[2] << ","
+                                                 << expected[3] << ")";
+        }
+    }
+    return ::testing::AssertionSuccess();
+}
+
+using RGBA = std::array<int, 4>;
+
+TEST(GradientRaster, LinearRunsAlongItsAngle) {
+    Raster r = raster("linear-gradient(to right, #000, #fff)", 100, 10);
+    EXPECT_TRUE(near(r.at(0, 5), RGBA{1, 1, 1, 255}, 4));
+    EXPECT_TRUE(near(r.at(50, 5), RGBA{129, 129, 129, 255}, 4));
+    EXPECT_TRUE(near(r.at(99, 5), RGBA{254, 254, 254, 255}, 4));
+    // to top right: the bottom-left corner starts, the top-right corner ends
+    Raster corner = raster("linear-gradient(to top right, #f00, #00f)", 200, 50);
+    EXPECT_TRUE(near(corner.at(0, 49), RGBA{253, 0, 2, 255}, 6));
+    EXPECT_TRUE(near(corner.at(199, 0), RGBA{2, 0, 253, 255}, 6));
+}
+
+TEST(GradientRaster, TransparentStopsFadeWithoutDarkening) {
+    // Premultiplied interpolation: half way is red at half alpha, not grey
+    Raster r = raster("linear-gradient(to right, red, transparent)", 101, 1);
+    RGBA mid = r.at(50, 0);
+    EXPECT_EQ(mid[0], 255);
+    EXPECT_NEAR(mid[3], 128, 4);
+}
+
+TEST(GradientRaster, RadialCircleAndEllipse) {
+    Raster r = raster("radial-gradient(circle closest-side, #fff, #000)", 100, 60);
+    EXPECT_TRUE(near(r.at(50, 30), RGBA{253, 253, 253, 255}, 6));
+    // closest-side is 30px: 30px right of the centre is the end colour
+    EXPECT_TRUE(near(r.at(81, 30), RGBA{0, 0, 0, 255}, 6));
+    // An ellipse reaches its end at each side (farthest-side here)
+    Raster e = raster("radial-gradient(farthest-side at 0 0, #fff, #000)", 100, 40);
+    EXPECT_TRUE(near(e.at(99, 0), RGBA{0, 0, 0, 255}, 8));
+    EXPECT_TRUE(near(e.at(0, 39), RGBA{0, 0, 0, 255}, 8));
+    EXPECT_TRUE(near(e.at(49, 0), RGBA{128, 128, 128, 255}, 8));
+}
+
+TEST(GradientRaster, ConicTurnsClockwiseFromItsStart) {
+    Raster r = raster("conic-gradient(#f00 0 25%, #0f0 0 50%, #00f 0 75%, #ff0 0)", 100, 100);
+    EXPECT_TRUE(near(r.at(80, 20), RGBA{255, 0, 0, 255}, 0));    // top right
+    EXPECT_TRUE(near(r.at(80, 80), RGBA{0, 255, 0, 255}, 0));    // bottom right
+    EXPECT_TRUE(near(r.at(20, 80), RGBA{0, 0, 255, 255}, 0));    // bottom left
+    EXPECT_TRUE(near(r.at(20, 20), RGBA{255, 255, 0, 255}, 0));  // top left
+    Raster from = raster("conic-gradient(from 90deg, #f00 0 50%, #00f 0)", 100, 100);
+    EXPECT_TRUE(near(from.at(50, 90), RGBA{255, 0, 0, 255}, 0));  // right half turns to the bottom
+    EXPECT_TRUE(near(from.at(50, 10), RGBA{0, 0, 255, 255}, 0));
+}
+
+TEST(GradientRaster, RepeatingStripes) {
+    Raster r = raster("repeating-linear-gradient(to right, #000 0 10px, #fff 10px 20px)", 60, 1);
+    EXPECT_EQ(r.at(5, 0)[0], 0);
+    EXPECT_EQ(r.at(15, 0)[0], 255);
+    EXPECT_EQ(r.at(45, 0)[0], 0);
+    EXPECT_EQ(r.at(55, 0)[0], 255);
+}
+
+TEST(GradientRaster, LayersWithSizePositionAndRepeat) {
+    // The checkerboard of zepracolor.html: four layers, 16px tiles
+    Raster r = raster("linear-gradient(45deg, #333 25%, transparent 25%),"
+                      "linear-gradient(-45deg, #333 25%, transparent 25%),"
+                      "linear-gradient(45deg, transparent 75%, #333 75%),"
+                      "linear-gradient(-45deg, transparent 75%, #333 75%)",
+                      64, 32, "16px 16px", "0 0, 0 8px, 8px -8px, -8px 0px");
+    // Alternating 8px squares, the top-left one clear, and no gaps on the
+    // diagonals where two layers' triangles meet
+    for (int y = 0; y < 32; y++) {
+        for (int x = 0; x < 64; x++) {
+            bool filled = ((x / 8) + (y / 8)) % 2 == 1;
+            ASSERT_EQ(r.at(x, y)[3], filled ? 255 : 0) << x << "," << y;
+            if (filled) ASSERT_TRUE(near(r.at(x, y), RGBA{0x33, 0x33, 0x33, 255}, 0));
+        }
+    }
+    // The first layer is on top; no-repeat leaves the rest of the box empty
+    Raster top = raster("linear-gradient(#f00, #f00), linear-gradient(#00f, #00f)", 40, 10, "10px 10px, auto",
+                        "right center, 0 0", "no-repeat");
+    EXPECT_TRUE(near(top.at(35, 5), RGBA{255, 0, 0, 255}, 0));
+    EXPECT_TRUE(near(top.at(5, 5), RGBA{0, 0, 255, 255}, 0));
+}
+
+TEST(GradientRaster, RoundedCornersAreClipped) {
+    Raster r = raster("linear-gradient(#f00, #f00)", 40, 40, "", "", "", 10);
+    EXPECT_EQ(r.at(0, 0)[3], 0);
+    EXPECT_EQ(r.at(20, 20)[3], 255);
+    EXPECT_EQ(r.at(20, 0)[3], 255);
+}
+
+TEST(GradientRaster, OnlyGradientLayersAreDrawn) {
+    EXPECT_TRUE(ZepraBrowser::isGradientBackground("radial-gradient(red, blue)"));
+    EXPECT_FALSE(ZepraBrowser::isGradientBackground("url(a.png), linear-gradient(red, blue)"));
+    EXPECT_FALSE(ZepraBrowser::isGradientBackground("none"));
+    int w = 0, h = 0;
+    ZepraBrowser::gradientPixelSize(4000, 4000, w, h);
+    EXPECT_LE((double)w * h, 2.6e6);
+    EXPECT_EQ(w, h);
+}
+
+// ---------------------------------------------------------------------------
+// Background colour alpha
+// ---------------------------------------------------------------------------
+
+struct FillCall {
+    uint32_t color;
+    int alpha;  // -1: an opaque rectangle (no alpha argument)
+};
+std::vector<FillCall> g_fills;
+
+std::vector<FillCall> paintFilledBox(uint8_t bgAlpha, float opacity) {
+    g_fills.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t c) { g_fills.push_back({c, -1}); },
+        [](float, float, float, float, uint32_t, float) {}, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(
+        [](float, float, float, float, float, uint32_t c, uint8_t a) { g_fills.push_back({c, a}); }, nullptr);
+    LayoutBox box;
+    box.width = box.height = 10;
+    box.hasBgColor = true;
+    box.bgColor = 0xFF0000;
+    box.bgAlpha = bgAlpha;
+    box.opacity = opacity;
+    ZepraBrowser::paintBox(box, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(nullptr, nullptr);
+    return g_fills;
+}
+
+TEST(Backgrounds, ColorAlphaAndOpacityReachTheFill) {
+    auto opaque = paintFilledBox(255, 1.0f);
+    ASSERT_EQ(opaque.size(), 1u);
+    EXPECT_EQ(opaque[0].alpha, -1);
+    // rgba(255, 0, 0, 0.5)
+    auto half = paintFilledBox(128, 1.0f);
+    ASSERT_EQ(half.size(), 1u);
+    EXPECT_EQ(half[0].color, 0xFF0000u);
+    EXPECT_EQ(half[0].alpha, 128);
+    // opacity multiplies the colour's own alpha
+    auto both = paintFilledBox(128, 0.5f);
+    ASSERT_EQ(both.size(), 1u);
+    EXPECT_EQ(both[0].alpha, 64);
 }
 
 // ---------------------------------------------------------------------------
@@ -931,4 +1147,173 @@ TEST(Cascade, OverflowShorthandTakesOneOrTwoValues) {
     EXPECT_EQ(d.style("c")->overflowX, OverflowValue::Visible);
     EXPECT_EQ(d.style("c")->overflowY, OverflowValue::Clip);
     EXPECT_EQ(d.style("d")->overflowY, OverflowValue::Auto);
+}
+
+// ---------------------------------------------------------------------------
+// position: fixed and sticky, and z-index paint order
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct PaintedRect {
+    float x, y, w, h;
+    uint32_t color;
+};
+std::vector<PaintedRect> g_rects;
+
+// Paints `root` at (0, 0) in a 1280x800 viewport and returns its background
+// rectangles in the order they were drawn
+std::vector<PaintedRect> paintRects(const LayoutBox& root, float scrollY = 0) {
+    g_rects.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float x, float y, float w, float h, uint32_t c) { g_rects.push_back({x, y, w, h, c}); },
+        [](float, float, float, float, uint32_t, float) {}, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::paintBox(root, 0, 0, 800, scrollY);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    return g_rects;
+}
+
+std::vector<uint32_t> colors(const std::vector<PaintedRect>& rects) {
+    std::vector<uint32_t> out;
+    for (const auto& r : rects) out.push_back(r.color);
+    return out;
+}
+
+const PaintedRect* rectOf(const std::vector<PaintedRect>& rects, uint32_t color) {
+    for (const auto& r : rects)
+        if (r.color == color) return &r;
+    return nullptr;
+}
+
+LayoutBox& coloured(LayoutBox& parent, uint32_t color, float height, int position = 0) {
+    LayoutBox& b = addBox(parent, LayoutType::Block);
+    b.hasBgColor = true;
+    b.bgColor = color;
+    b.cssHeight = LayoutLength{height, LayoutLength::Unit::Px};
+    b.height = height;
+    b.positionType = position;
+    return b;
+}
+
+LayoutLength px(float v) { return LayoutLength{v, LayoutLength::Unit::Px}; }
+
+} // namespace
+
+TEST(FixedPosition, LaidOutAgainstTheViewport) {
+    LayoutBox root;
+    root.type = LayoutType::Block;
+    root.paddingLeft = root.paddingTop = 30;
+    LayoutBox& wrapper = addBox(root, LayoutType::Block);
+    wrapper.marginTop = 200;
+    LayoutBox& header = coloured(wrapper, 0x1111, 50, 3);  // top: 0; left: 0; right: 0
+    header.cssTop = px(0);
+    header.cssLeft = px(0);
+    header.cssRight = px(0);
+    LayoutBox& fab = addBox(wrapper, LayoutType::Block);  // right: 20px; bottom: 10px
+    fab.positionType = 3;
+    fab.cssRight = px(20);
+    fab.cssBottom = px(10);
+    addBox(fab, LayoutType::Inline).text = "abcdefghij";  // 80px wide
+    LayoutBox& overlay = addBox(wrapper, LayoutType::Block);  // inset: 0
+    overlay.positionType = 3;
+    overlay.cssTop = overlay.cssRight = overlay.cssBottom = overlay.cssLeft = px(0);
+    coloured(wrapper, 0x2222, 40);  // in flow
+    ZepraBrowser::layoutBlock(root, 1280, 0);
+
+    EXPECT_FLOAT_EQ(header.x, 0);
+    EXPECT_FLOAT_EQ(header.y, 0);
+    EXPECT_FLOAT_EQ(header.width, 1280);
+    EXPECT_FLOAT_EQ(fab.width, 80);  // shrinks to its content
+    EXPECT_FLOAT_EQ(fab.x, 1280 - 20 - 80);
+    EXPECT_FLOAT_EQ(fab.y, 800 - 10 - fab.height);
+    EXPECT_FLOAT_EQ(overlay.width, 1280);
+    EXPECT_FLOAT_EQ(overlay.height, 800);
+    // Out of flow: the in-flow box is the wrapper's first child as far as layout goes
+    EXPECT_FLOAT_EQ(child(wrapper, 3)->y, 0);
+    EXPECT_FLOAT_EQ(wrapper.height, 40);
+}
+
+TEST(FixedPosition, PaintedLastAtTheViewportWhateverTheScroll) {
+    LayoutBox root;
+    root.type = LayoutType::Block;
+    LayoutBox& header = coloured(root, 0xAAAA, 50, 3);
+    header.cssTop = px(0);
+    header.cssLeft = px(0);
+    header.cssRight = px(0);
+    coloured(root, 0xBBBB, 2000);
+    ZepraBrowser::layoutBlock(root, 1280, 0);
+
+    for (float scroll : {0.0f, 700.0f}) {
+        auto rects = paintRects(root, scroll);
+        ASSERT_EQ(colors(rects), (std::vector<uint32_t>{0xBBBB, 0xAAAA})) << scroll;
+        EXPECT_FLOAT_EQ(rectOf(rects, 0xAAAA)->y, 0) << scroll;
+        EXPECT_FLOAT_EQ(rectOf(rects, 0xBBBB)->y, -scroll) << scroll;
+    }
+    auto fixed = ZepraBrowser::fixedBoxesInPaintOrder(root);
+    ASSERT_EQ(fixed.size(), 1u);
+    EXPECT_EQ(fixed[0], &header);
+}
+
+TEST(ZIndex, PositionedBoxesPaintByZIndex) {
+    LayoutBox root;
+    root.type = LayoutType::Block;
+    LayoutBox& a = coloured(root, 0xA, 10, 1);
+    a.zIndex = 2;
+    a.zIndexAuto = false;
+    LayoutBox& b = coloured(root, 0xB, 10, 1);
+    b.zIndex = 1;
+    b.zIndexAuto = false;
+    coloured(root, 0xC, 10, 1);  // z-index: auto
+    coloured(root, 0xD, 10);     // in flow
+    ZepraBrowser::layoutBlock(root, 1280, 0);
+    EXPECT_EQ(colors(paintRects(root)), (std::vector<uint32_t>{0xD, 0xC, 0xB, 0xA}));
+}
+
+TEST(ZIndex, NegativeZIndexGoesUnderInFlowContentThroughAutoAncestors) {
+    // <div style="position: relative">       (z-index: auto: no stacking context)
+    //   <div style="position: absolute; z-index: -1">grey</div>
+    // </div>
+    // <div>blue</div>                          grey paints under blue
+    LayoutBox root;
+    root.type = LayoutType::Block;
+    LayoutBox& stack = coloured(root, 0x5, 10, 1);
+    LayoutBox& grey = coloured(stack, 0x6, 10, 2);
+    grey.zIndex = -1;
+    grey.zIndexAuto = false;
+    coloured(root, 0x7, 10);
+    ZepraBrowser::layoutBlock(root, 1280, 0);
+    EXPECT_EQ(colors(paintRects(root)), (std::vector<uint32_t>{0x6, 0x7, 0x5}));
+
+    // A z-index on the wrapper makes it a stacking context: grey stays inside it
+    stack.zIndex = 0;
+    stack.zIndexAuto = false;
+    EXPECT_EQ(colors(paintRects(root)), (std::vector<uint32_t>{0x7, 0x5, 0x6}));
+}
+
+TEST(ZIndex, FlexItemsUseZIndexWithoutPositioning) {
+    LayoutBox flex = makeFlex(0, 0);
+    LayoutBox& first = coloured(flex, 0x1, 10);
+    first.zIndex = 1;
+    first.zIndexAuto = false;
+    coloured(flex, 0x2, 10);
+    ZepraBrowser::layoutBlock(flex, 1280, 0);
+    EXPECT_EQ(colors(paintRects(flex)), (std::vector<uint32_t>{0x2, 0x1}));
+}
+
+TEST(StickyPosition, SticksUntilItsParentEnds) {
+    LayoutBox root;
+    root.type = LayoutType::Block;
+    coloured(root, 0x1, 300);  // spacer
+    LayoutBox& section = coloured(root, 0x2, 500);
+    LayoutBox& title = coloured(section, 0x3, 40, 4);
+    title.cssTop = px(10);
+    coloured(root, 0x4, 2000);  // more page
+    ZepraBrowser::layoutBlock(root, 1280, 0);
+
+    auto titleY = [&](float scroll) { return rectOf(paintRects(root, scroll), 0x3)->y; };
+    EXPECT_FLOAT_EQ(titleY(0), 300);      // in flow
+    EXPECT_FLOAT_EQ(titleY(200), 100);    // still in flow
+    EXPECT_FLOAT_EQ(titleY(400), 10);     // stuck 10px from the top
+    EXPECT_FLOAT_EQ(titleY(700), 10);
+    EXPECT_FLOAT_EQ(titleY(780), -20);    // pushed out with the section's end (800 - 780 - 40)
 }
