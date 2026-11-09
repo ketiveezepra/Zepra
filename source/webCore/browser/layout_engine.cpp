@@ -50,6 +50,14 @@ void setLayoutClipCallbacks(void (*push_clip)(float, float, float, float), void 
     s_pop_clip = pop_clip;
 }
 
+static int (*s_save_corners)(float, float, float, float, float) = nullptr;
+static void (*s_restore_corners)(int) = nullptr;
+
+void setRoundedClipCallbacks(int (*save_corners)(float, float, float, float, float), void (*restore_corners)(int)) {
+    s_save_corners = save_corners;
+    s_restore_corners = restore_corners;
+}
+
 static void (*s_gfx_polygon)(const float* xy, int count, uint32_t color, uint8_t alpha) = nullptr;
 
 void setPolygonCallback(void (*gfx_polygon)(const float* xy, int count, uint32_t color, uint8_t alpha)) {
@@ -254,7 +262,13 @@ int usedOverflow(int self, int other) {
 // scrolled out of its container must not be clickable where it would be
 struct ClipRect {
     float x0, y0, x1, y1;
+    float radius = 0;  // the clipping box's inner corner radius (rounded clip)
 };
+
+// The inner border radius a clipping box clips its content to
+float innerClipRadius(const LayoutBox& box) {
+    return std::max(0.0f, box.borderRadius - std::max({box.borderTop, box.borderRight, box.borderBottom, box.borderLeft}));
+}
 thread_local std::vector<ClipRect> t_clipStack;
 
 bool insideClip(float& x, float& y, float& w, float& h) {
@@ -2048,6 +2062,7 @@ struct LayerWalk {
             const ClipRect& o = clips.back();
             clip = {std::max(clip.x0, o.x0), std::max(clip.y0, o.y0), std::min(clip.x1, o.x1), std::min(clip.y1, o.y1)};
         }
+        clip.radius = innerClipRadius(box);
         clips.push_back(clip);
         ScrollOffset offset = scrollOffsetOf(box);
         children(box, x - offset.x, y - offset.y);
@@ -2065,10 +2080,17 @@ void paintLayer(const PaintLayer& layer) {
         if (s_push_clip) s_push_clip(layer.clip.x0, layer.clip.y0, std::max(0.0f, layer.clip.x1 - layer.clip.x0),
                                      std::max(0.0f, layer.clip.y1 - layer.clip.y0));
     }
+    // A positioned box inside a rounded clipping box is clipped to its curve too
+    int corners = -1;
+    if (layer.clipped && layer.clip.radius > 0.5f && s_save_corners && s_restore_corners) {
+        corners = s_save_corners(layer.clip.x0, layer.clip.y0, layer.clip.x1 - layer.clip.x0,
+                                 layer.clip.y1 - layer.clip.y0, layer.clip.radius);
+    }
     const LayoutBox* outer = t_frame.contextLayer;
     t_frame.contextLayer = layer.context ? layer.box : nullptr;
     paintBox(*layer.box, layer.x, layer.y, t_frame.viewBottom, 0);
     t_frame.contextLayer = outer;
+    if (corners >= 0) s_restore_corners(corners);
     if (layer.clipped && s_pop_clip) s_pop_clip();
     clips.swap(t_clipStack);
     ports.swap(t_frame.scrollports);
@@ -2378,11 +2400,17 @@ static void paintChildren(const LayoutBox& box, float screenX, float screenY, fl
     }
     t_clipStack.push_back(clip);
     if (s_push_clip) s_push_clip(padX, padY, padW, padH);
+    // A rounded box clips to its inner border edge's curve (CSS Backgrounds
+    // 3 §5.3): the corners outside it are put back after the content
+    float innerRadius = innerClipRadius(box);
+    int corners = innerRadius > 0.5f && s_save_corners && s_restore_corners
+                      ? s_save_corners(padX, padY, padW, padH, innerRadius) : -1;
     ScrollOffset offset = scrollOffsetOf(box);
     bool scrollport = isScrollContainer(box);
     if (scrollport) t_frame.scrollports.push_back({padX, padY, padX + padW, padY + padH});
     paintChildBoxes(box, screenX - offset.x, screenY - offset.y, viewportHeight, context);
     if (scrollport) t_frame.scrollports.pop_back();
+    if (corners >= 0) s_restore_corners(corners);
     if (s_pop_clip) s_pop_clip();
     t_clipStack.pop_back();
 

@@ -401,6 +401,13 @@ struct GradientBackground;
 /// over a box's border box at (x, y)
 void setGradientPaintCallback(void (*gfx_gradient_bg)(float x, float y, const GradientBackground& bg));
 
+/// Rounded overflow clips: `save` keeps the pixels in the corners of the
+/// padding box (x, y, w, h) with inner radius r before its content paints
+/// and returns a token; `restore` puts back those outside the rounded
+/// corners afterwards, so the content is clipped to the curve
+void setRoundedClipCallbacks(int (*save_corners)(float x, float y, float w, float h, float radius),
+                             void (*restore_corners)(int token));
+
 /// Set the callback that paints a <canvas> bitmap into its content box
 void setCanvasPaintCallback(
     void (*gfx_canvas)(float x, float y, float w, float h, Zepra::WebCore::DOMElement* canvas));

@@ -3023,6 +3023,66 @@ void gradientBackground(float x, float y, const ZepraBrowser::GradientBackground
     if (it->second.id) g_nxGpu.drawTexture(it->second.id, NXRender::Rect(x, y, bg.width, bg.height));
 }
 
+// Rounded overflow clips: the four corner squares of a clipping box, read
+// before its content paints and drawn back outside the curve afterwards
+struct SavedCorners {
+    float x = 0, y = 0, w = 0, h = 0, r = 0, scale = 1;
+    int px[4] = {}, py[4] = {}, size = 0;  // framebuffer pixels, GL rows (bottom-up)
+    std::vector<uint8_t> rgb[4];
+};
+static std::vector<SavedCorners> g_savedCorners;
+
+int saveCorners(float x, float y, float w, float h, float r) {
+    SavedCorners c;
+    c.scale = g_width > 0 ? (float)g_nxGpu.width() / (float)g_width : 1.0f;
+    r = std::min({r, w / 2, h / 2});
+    c.x = x; c.y = y; c.w = w; c.h = h; c.r = r;
+    c.size = (int)std::ceil(r * c.scale) + 1;
+    int fbw = g_nxGpu.width(), fbh = g_nxGpu.height();
+    float sx[4] = {x, x + w - r, x, x + w - r}, sy[4] = {y, y, y + h - r, y + h - r};
+    for (int k = 0; k < 4; k++) {
+        c.px[k] = (int)std::floor(sx[k] * c.scale);
+        c.py[k] = (int)std::floor(sy[k] * c.scale);
+        // Only corners wholly in the framebuffer (others are left unclipped)
+        if (c.px[k] < 0 || c.py[k] < 0 || c.px[k] + c.size > fbw || c.py[k] + c.size > fbh ||
+            !g_nxGpu.readPixels(c.px[k], fbh - c.py[k] - c.size, c.size, c.size, c.rgb[k]))
+            c.rgb[k].clear();
+    }
+    g_savedCorners.push_back(std::move(c));
+    return (int)g_savedCorners.size() - 1;
+}
+
+void restoreCorners(int token) {
+    if (token < 0 || token >= (int)g_savedCorners.size()) return;
+    const SavedCorners& c = g_savedCorners[token];
+    float r = c.r * c.scale;
+    // Arc centres in framebuffer pixels
+    float cx[4] = {(c.x + c.r) * c.scale, (c.x + c.w - c.r) * c.scale, (c.x + c.r) * c.scale, (c.x + c.w - c.r) * c.scale};
+    float cy[4] = {(c.y + c.r) * c.scale, (c.y + c.r) * c.scale, (c.y + c.h - c.r) * c.scale, (c.y + c.h - c.r) * c.scale};
+    std::vector<uint8_t> rgba((size_t)c.size * c.size * 4);
+    for (int k = 0; k < 4; k++) {
+        if (c.rgb[k].empty()) continue;
+        bool right = k == 1 || k == 3, bottom = k >= 2;
+        for (int j = 0; j < c.size; j++) {
+            const uint8_t* src = &c.rgb[k][(size_t)(c.size - 1 - j) * c.size * 3];
+            for (int i = 0; i < c.size; i++) {
+                float px = c.px[k] + i + 0.5f, py = c.py[k] + j + 0.5f;
+                // Only the part of the square beyond the arc centre is a corner
+                bool beyond = (right ? px > cx[k] : px < cx[k]) && (bottom ? py > cy[k] : py < cy[k]);
+                float outside = beyond ? std::clamp(std::hypot(px - cx[k], py - cy[k]) - r + 0.5f, 0.0f, 1.0f) : 0.0f;
+                uint8_t* d = &rgba[((size_t)j * c.size + i) * 4];
+                d[0] = src[i * 3]; d[1] = src[i * 3 + 1]; d[2] = src[i * 3 + 2];
+                d[3] = (uint8_t)std::lround(outside * 255);
+            }
+        }
+        uint32_t tex = g_nxGpu.createTexture(c.size, c.size, rgba.data());
+        if (!tex) continue;
+        g_nxGpu.drawTexture(tex, NXRender::Rect(c.px[k] / c.scale, c.py[k] / c.scale, c.size / c.scale, c.size / c.scale));
+        g_nxGpu.destroyTexture(tex);
+    }
+    g_savedCorners.resize(token);
+}
+
 } // namespace gfx
 
 // ============================================================================
@@ -3229,6 +3289,7 @@ static void initLayoutEngine() {
         g_nxGpu.fillPath(points, NXRender::Color(color).withAlpha(alpha));
     });
     ZepraBrowser::setGradientPaintCallback(gfx::gradientBackground);
+    ZepraBrowser::setRoundedClipCallbacks(gfx::saveCorners, gfx::restoreCorners);
     
     std::cout << "[Layout] Layout engine initialized (rounded rect + gradient support)" << std::endl;
     
