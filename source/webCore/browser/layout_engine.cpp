@@ -1915,6 +1915,27 @@ static bool paintStyledBorder(const LayoutBox& box, float x, float y) {
     return true;
 }
 
+// The outline: a border of its own around the border box, outline-offset
+// away from it, following its rounded corners
+static void paintOutline(const LayoutBox& box, float x, float y) {
+    if (box.outlineWidth <= 0 || box.width <= 0 || box.height <= 0) return;
+    float ow = box.outlineWidth, gap = box.outlineOffset;
+    LayoutBox ring;
+    ring.width = box.width + 2 * (gap + ow);
+    ring.height = box.height + 2 * (gap + ow);
+    if (ring.width <= 0 || ring.height <= 0) return;
+    ring.borderTop = ring.borderRight = ring.borderBottom = ring.borderLeft = ow;
+    ring.borderStyle = box.outlineStyle;
+    ring.borderColor = box.outlineColor;
+    ring.borderRadius = box.borderRadius > 0 ? std::max(0.0f, box.borderRadius + gap + ow) : 0;
+    float rx = x - gap - ow, ry = y - gap - ow;
+    if (paintStyledBorder(ring, rx, ry) || !s_gfx_rect) return;
+    s_gfx_rect(rx, ry, ring.width, ow, ring.borderColor);
+    s_gfx_rect(rx, ry + ring.height - ow, ring.width, ow, ring.borderColor);
+    s_gfx_rect(rx, ry + ow, ow, ring.height - 2 * ow, ring.borderColor);
+    s_gfx_rect(rx + ring.width - ow, ry + ow, ow, ring.height - 2 * ow, ring.borderColor);
+}
+
 static void paintChildren(const LayoutBox& box, float screenX, float screenY, float viewportHeight);
 
 namespace {
@@ -2457,6 +2478,7 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     }
     
     paintChildren(box, screenX, screenY, viewportHeight);
+    paintOutline(box, screenX, screenY);
 }
 
 // A box's children at its screen position. A clipping box (overflow other
