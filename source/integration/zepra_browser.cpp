@@ -1659,6 +1659,11 @@ void parseWithWebCore(const std::string& html) {
                         && type != "module") {
                         continue;
                     }
+                    // `nomodule` scripts are legacy fallbacks for browsers
+                    // without module support; a browser that runs
+                    // type="module" scripts must skip them (they usually
+                    // re-run the same bundle, ES5-transpiled)
+                    if (child->hasAttribute("nomodule")) continue;
                     
                     std::string src = child->getAttribute("src");
                     if (src.empty()) {
@@ -1699,12 +1704,13 @@ void parseWithWebCore(const std::string& html) {
         }
     };
     
-    if (g_document->body()) {
-        executePageScripts(g_document->body());
-    }
-    // Also check head for scripts
+    // Document order: <head> scripts first (they define the globals —
+    // ytcfg, __next_f, polyfills — that <body> scripts call), then <body>
     if (g_document->head()) {
         executePageScripts(g_document->head());
+    }
+    if (g_document->body()) {
+        executePageScripts(g_document->body());
     }
     
     // DOMContentLoaded, then load (listeners and on* handlers)

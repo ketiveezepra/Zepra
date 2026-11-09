@@ -604,9 +604,40 @@ Token Lexer::scanTemplate() {
 
 bool Lexer::skipTemplateSubstitution() {
     int depth = 0;
+    // The last non-space character seen: a '/' after one of these starts a
+    // regex literal rather than a division or a comment, so
+    // `${e.replace(/\//g, ".")}` is not cut at its "//"
+    char lastSignificant = '(';
+    auto regexCanFollow = [](char p) {
+        return p == '(' || p == ',' || p == '=' || p == ':' || p == '[' || p == '!' ||
+               p == '&' || p == '|' || p == '?' || p == '{' || p == '}' || p == ';' ||
+               p == '+' || p == '-' || p == '*' || p == '%' || p == '<' || p == '>' ||
+               p == '~' || p == '^';
+    };
     while (current() != '\0') {
         char c = current();
         if (c == '}' && depth == 0) return true;
+        if (c == '/' && peek(1) != '/' && peek(1) != '*' && regexCanFollow(lastSignificant)) {
+            // Regex literal: skip to its closing '/', honouring escapes and classes
+            advance();
+            bool inClass = false;
+            while (current() != '\0' && current() != '\n') {
+                char r = current();
+                if (r == '\\') { advance(); if (current() != '\0') advance(); continue; }
+                if (r == '[') inClass = true;
+                else if (r == ']') inClass = false;
+                else if (r == '/' && !inClass) break;
+                advance();
+            }
+            if (current() == '/') advance();
+            while (std::isalpha(static_cast<unsigned char>(current()))) advance();  // flags
+            lastSignificant = ')';
+            continue;
+        }
+        if (c == '/' && regexCanFollow(lastSignificant) && (peek(1) == '/' || peek(1) == '*')) {
+            // "//" or "/*" where a regex could start is still a comment: fall through
+        }
+        if (!std::isspace(static_cast<unsigned char>(c)) && c != '/') lastSignificant = c;
         if (c == '{') {
             depth++;
             advance();
@@ -620,9 +651,11 @@ bool Lexer::skipTemplateSubstitution() {
                 advance();
             }
             if (current() == c) advance();
+            lastSignificant = ')';
         } else if (c == '`') {
             advance();
             skipNestedTemplate();
+            lastSignificant = ')';
         } else if (c == '/' && peek(1) == '/') {
             while (current() != '\0' && current() != '\n') advance();
         } else if (c == '/' && peek(1) == '*') {
@@ -634,6 +667,7 @@ bool Lexer::skipTemplateSubstitution() {
                 advance();
             }
         } else {
+            if (c == '/') lastSignificant = ')';  // division operator
             advance();
         }
     }

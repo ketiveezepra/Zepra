@@ -529,6 +529,15 @@ StmtPtr Parser::parseStatement() {
         match(TokenType::Semicolon);
         return std::make_unique<EmptyStmt>();
     }
+    // A declaration where a Statement is expected: `if (x) var a = 1;`,
+    // `label: var a;`, `if (x) function f() {}` (Annex B). Only the
+    // top-level and block parsers route through parseDeclaration, so these
+    // reached parseExpressionStatement and failed on the keyword.
+    if (check(TokenType::Var) || check(TokenType::Let) || check(TokenType::Const) ||
+        check(TokenType::Function) || check(TokenType::Class) ||
+        (check(TokenType::Async) && peek().type == TokenType::Function)) {
+        return parseDeclaration();
+    }
     
     // Labeled statement: identifier followed by colon
     // e.g., outer: for (;;) { break outer; }
@@ -644,7 +653,9 @@ StmtPtr Parser::parseForStatement() {
         if (match(TokenType::Of) || match(TokenType::In)) {
             bool isIn = (previousToken_.type == TokenType::In);
             
-            ExprPtr iterable = parseAssignmentExpression();
+            // for-in: `for (k in a = b, obj)` takes an Expression (comma
+            // operator allowed; minifiers emit this). for-of: AssignmentExpression.
+            ExprPtr iterable = isIn ? parseExpression() : parseAssignmentExpression();
             consume(TokenType::RightParen, isIn ? "Expected ')' after for...in" : "Expected ')' after for...of");
             
             bool prevInLoop = inLoop_;
@@ -707,7 +718,9 @@ StmtPtr Parser::parseForStatement() {
         if (match(TokenType::Of) || match(TokenType::In)) {
             bool isIn = (previousToken_.type == TokenType::In);
             
-            ExprPtr iterable = parseAssignmentExpression();
+            // for-in: `for (k in a = b, obj)` takes an Expression (comma
+            // operator allowed; minifiers emit this). for-of: AssignmentExpression.
+            ExprPtr iterable = isIn ? parseExpression() : parseAssignmentExpression();
             consume(TokenType::RightParen, isIn ? "Expected ')' after for...in" : "Expected ')' after for...of");
             
             bool prevInLoop = inLoop_;

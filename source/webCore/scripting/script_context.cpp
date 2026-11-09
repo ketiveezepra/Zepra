@@ -18,7 +18,9 @@
 #include <memory>
 #include <unordered_map>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
+#include <random>
 
 // ZepraScript internal headers
 #include "runtime/execution/vm.hpp"
@@ -312,9 +314,11 @@ ScriptResult ScriptContext::run(const std::string& code, const std::string& file
         return result;
     }
     
-    // Skip oversized scripts — extremely large bundles (>512KB) are still
-    // beyond what ZepraScript's single-pass compile can handle safely.
-    static constexpr size_t MAX_SCRIPT_SIZE = 524288; // 512KB
+    // Skip only absurdly large scripts. Real app bundles are 1–4 MB
+    // (YouTube's base module is 1.2 MB, its ytBootstrapConfig inline
+    // script 760 KB); the parser handles ~40 MB/s, so they fit the 500 ms
+    // parse budget below with room to spare.
+    static constexpr size_t MAX_SCRIPT_SIZE = size_t(16) * 1024 * 1024; // 16MB
     if (code.size() > MAX_SCRIPT_SIZE) {
         result.success = true;
         result.value = "undefined";
@@ -798,8 +802,95 @@ void ScriptContext::setupWindowGlobals() {
             return Value::number(now - timeOriginMs_);
         }, 0);
     performanceObj->set("now", Value::object(perfNowFn));
+    // performance.timeOrigin and the legacy performance.timing /
+    // performance.navigation (YouTube's ytcsi reads timing.responseStart on
+    // load and threw "Cannot read properties of undefined")
+    {
+        const double epochOriginMs = std::chrono::duration<double, std::milli>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        performanceObj->set("timeOrigin", Value::number(epochOriginMs));
+        auto* timing = new Object();
+        const double t = std::floor(epochOriginMs);
+        for (const char* key : {"navigationStart", "fetchStart", "domainLookupStart", "domainLookupEnd",
+                                "connectStart", "connectEnd", "requestStart", "responseStart",
+                                "responseEnd", "domLoading", "domInteractive",
+                                "domContentLoadedEventStart", "domContentLoadedEventEnd",
+                                "domComplete", "loadEventStart", "loadEventEnd"}) {
+            timing->set(key, Value::number(t));
+        }
+        for (const char* key : {"unloadEventStart", "unloadEventEnd", "redirectStart", "redirectEnd",
+                                "secureConnectionStart"}) {
+            timing->set(key, Value::number(0));
+        }
+        performanceObj->set("timing", Value::object(timing));
+        auto* navigation = new Object();
+        navigation->set("type", Value::number(0));
+        navigation->set("redirectCount", Value::number(0));
+        performanceObj->set("navigation", Value::object(navigation));
+        // User Timing / Performance Timeline: accepted, nothing recorded
+        auto emptyList = [](Context*, const std::vector<Value>&) -> Value {
+            return Value::object(new Array());
+        };
+        auto noop = [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); };
+        performanceObj->set("mark", Value::object(createNativeFunction("mark", noop, 1)));
+        performanceObj->set("measure", Value::object(createNativeFunction("measure", noop, 1)));
+        performanceObj->set("clearMarks", Value::object(createNativeFunction("clearMarks", noop, 0)));
+        performanceObj->set("clearMeasures", Value::object(createNativeFunction("clearMeasures", noop, 0)));
+        performanceObj->set("clearResourceTimings", Value::object(createNativeFunction("clearResourceTimings", noop, 0)));
+        performanceObj->set("setResourceTimingBufferSize", Value::object(createNativeFunction("setResourceTimingBufferSize", noop, 1)));
+        performanceObj->set("getEntries", Value::object(createNativeFunction("getEntries", emptyList, 0)));
+        performanceObj->set("getEntriesByType", Value::object(createNativeFunction("getEntriesByType", emptyList, 1)));
+        performanceObj->set("getEntriesByName", Value::object(createNativeFunction("getEntriesByName", emptyList, 1)));
+    }
     windowObj->set("performance", Value::object(performanceObj));
     vm_->setGlobal("performance", Value::object(performanceObj));
+
+    // window.crypto: getRandomValues(typedArray) and randomUUID()
+    // (Cloudflare's beacon.min.js threw "crypto is not defined")
+    {
+        auto* cryptoObj = new Object();
+        auto* getRandomValues = createNativeFunction("getRandomValues",
+            [](Context*, const std::vector<Value>& args) -> Value {
+                if (args.empty() || !args[0].isObject()) {
+                    throw JSError("TypeError", "Failed to execute 'getRandomValues' on 'Crypto': parameter 1 is not of type 'ArrayBufferView'.");
+                }
+                Object* view = args[0].asObject();
+                const double length = view->get("length").toNumber();
+                if (!(length >= 0) || length > 65536) {
+                    throw JSError("QuotaExceededError", "Failed to execute 'getRandomValues' on 'Crypto': The ArrayBufferView's byte length exceeds the number of bytes of entropy available via this API (65536).");
+                }
+                const double bytesPerElement = view->get("BYTES_PER_ELEMENT").toNumber();
+                const double maxValue = bytesPerElement >= 4 ? 4294967296.0 : bytesPerElement == 2 ? 65536.0 : 256.0;
+                std::random_device rd;
+                for (size_t i = 0; i < static_cast<size_t>(length); ++i) {
+                    const double r = std::fmod(static_cast<double>(rd()), maxValue);
+                    view->set(std::to_string(i), Value::number(r));
+                }
+                return args[0];
+            }, 1);
+        cryptoObj->set("getRandomValues", Value::object(getRandomValues));
+        auto* randomUUID = createNativeFunction("randomUUID",
+            [](Context*, const std::vector<Value>&) -> Value {
+                std::random_device rd;
+                unsigned char bytes[16];
+                for (int i = 0; i < 16; ++i) bytes[i] = static_cast<unsigned char>(rd() & 0xFF);
+                bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0F) | 0x40);  // version 4
+                bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3F) | 0x80);  // variant 10
+                char text[37];
+                std::snprintf(text, sizeof(text),
+                              "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                              bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                              bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
+                return Value::string(new String(text));
+            }, 0);
+        cryptoObj->set("randomUUID", Value::object(randomUUID));
+        windowObj->set("crypto", Value::object(cryptoObj));
+        vm_->setGlobal("crypto", Value::object(cryptoObj));
+    }
+
+    // window.devicePixelRatio: the page is rendered 1:1
+    windowObj->set("devicePixelRatio", Value::number(1));
+    vm_->setGlobal("devicePixelRatio", Value::number(1));
     vm_->setGlobal("requestAnimationFrame", Value::object(rafFn));
     
     // window.cancelAnimationFrame (no-op)

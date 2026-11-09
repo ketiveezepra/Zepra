@@ -2151,6 +2151,28 @@ void DOMBindings::installForms() {
         vm_->setGlobal("Option", Value::object(ctor));
         if (global_) defineHidden(global_, "Option", Value::object(ctor));
     }
+    // new Image(width, height): an <img> element (YouTube's ytcsi beacon
+    // code threw "Image is not defined")
+    {
+        Object* image = tagInterfaces_["img"].second;
+        auto* ctor = new Function("Image", [this](const FunctionCallInfo& info) -> Value {
+            if (!document_) throw JSError("TypeError", "Illegal constructor: Image");
+            std::unique_ptr<DOMNode> el = document_->createElement("img");
+            auto* e = static_cast<DOMElement*>(el.get());
+            if (info.argumentCount() > 0 && !info.argument(0).isUndefined()) {
+                e->setAttribute("width", std::to_string(unsignedLong(info.argument(0))));
+            }
+            if (info.argumentCount() > 1 && !info.argument(1).isUndefined()) {
+                e->setAttribute("height", std::to_string(unsignedLong(info.argument(1))));
+            }
+            NodeWrapper* w = wrapperOf(e);
+            w->owned = std::move(el);
+            return Value::object(w);
+        }, 0);
+        ctor->set("prototype", Value::object(image));
+        vm_->setGlobal("Image", Value::object(ctor));
+        if (global_) defineHidden(global_, "Image", Value::object(ctor));
+    }
 
     // The text selection: selectionStart/End/Direction, select(),
     // setSelectionRange() and setRangeText(), indexed as page strings are
