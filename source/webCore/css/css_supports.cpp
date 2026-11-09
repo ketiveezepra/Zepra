@@ -33,7 +33,7 @@ const std::unordered_set<std::string>& knownProperties() {
         "gap", "grid-gap", "grid-template-columns", "grid-template-rows", "height", "isolation",
         "justify-content", "left", "letter-spacing", "line-height", "margin", "margin-bottom",
         "margin-left", "margin-right", "margin-top", "max-height", "max-width", "min-height",
-        "min-width", "object-fit", "object-position", "opacity", "order", "outline", "outline-color",
+        "min-width", "mix-blend-mode", "object-fit", "object-position", "opacity", "order", "outline", "outline-color",
         "outline-offset", "outline-style", "outline-width", "overflow", "overflow-x", "overflow-y",
         "padding", "padding-bottom", "padding-left", "padding-right", "padding-top", "place-content",
         "place-items", "pointer-events", "position", "right", "row-gap", "table-layout", "text-align",

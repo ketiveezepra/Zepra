@@ -109,6 +109,7 @@ extern "C" {
 #include "browser/lazy_image_loader.h"
 #include "browser/svg_raster.h"
 #include "browser/gradient_raster.h"
+#include "browser/blend_modes.h"
 #include "browser/box_shadow.h"
 #include "browser/clipboard.h"
 #include "browser/css_utils.h"
@@ -2680,6 +2681,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         blockBox->borderStyle = usedBorderStyle(*childStyle);
                     }
                     blockBox->borderRadius = childStyle->borderTopLeftRadius;
+                    blockBox->blendMode = (uint8_t)ZepraBrowser::parseBlendMode(childStyle->mixBlendMode);
                     blockBox->bgClipText = childStyle->backgroundClipText;
                     blockBox->boxShadow = childStyle->boxShadow;
                     setOutline(blockBox, *childStyle);
@@ -2845,6 +2847,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         inlineBox->borderStyle = usedBorderStyle(*childStyle);
                     }
                     inlineBox->borderRadius = childStyle->borderTopLeftRadius;
+                    inlineBox->blendMode = (uint8_t)ZepraBrowser::parseBlendMode(childStyle->mixBlendMode);
                     inlineBox->boxShadow = childStyle->boxShadow;
                     setOutline(inlineBox, *childStyle);
                     inlineBox->borderRadiusPercent = childStyle->borderTopLeftRadiusPercent;
@@ -3066,6 +3069,50 @@ void boxShadow(float x, float y, const ZepraBrowser::ShadowBox& box, const Zepra
                  [&](std::vector<uint8_t>& rgba) { return ZepraBrowser::rasterizeShadow(box, shadow, pw, ph, rgba); });
 }
 
+// A background colour with a mix-blend-mode: the pixels under it are read
+// back, mixed on the CPU (blend_modes.cpp) and drawn over as a texture
+void blendFill(float x, float y, float w, float h, float radius, uint32_t color, uint8_t alpha, uint8_t mode) {
+    // Window pixels (the GL framebuffer may be larger on HiDPI screens)
+    float scale = g_width > 0 ? (float)g_nxGpu.width() / (float)g_width : 1.0f;
+    int px = (int)std::floor(x * scale), py = (int)std::floor(y * scale);
+    int pw = (int)std::ceil((x + w) * scale) - px, ph = (int)std::ceil((y + h) * scale) - py;
+    int fbw = g_nxGpu.width(), fbh = g_nxGpu.height();
+    int x0 = std::max(0, px), y0 = std::max(0, py), x1 = std::min(fbw, px + pw), y1 = std::min(fbh, py + ph);
+    if (x1 <= x0 || y1 <= y0) return;
+    int rw = x1 - x0, rh = y1 - y0;
+    std::vector<uint8_t> under;
+    if (!g_nxGpu.readPixels(x0, fbh - y1, rw, rh, under)) {
+        rrect(x, y, w, h, radius, color, alpha);
+        return;
+    }
+    auto blend = static_cast<ZepraBrowser::BlendMode>(mode);
+    float r = std::min({radius, w / 2, h / 2}) * scale;
+    std::vector<uint8_t> rgba((size_t)rw * rh * 4);
+    for (int j = 0; j < rh; j++) {
+        const uint8_t* src = &under[(size_t)(rh - 1 - j) * rw * 3];  // GL rows run bottom-up
+        for (int i = 0; i < rw; i++) {
+            uint32_t backdrop = ((uint32_t)src[i * 3] << 16) | ((uint32_t)src[i * 3 + 1] << 8) | src[i * 3 + 2];
+            uint32_t out = ZepraBrowser::blendPixel(blend, backdrop, color, alpha);
+            // Rounded corners: outside them the backdrop stays
+            float cx = x0 + i + 0.5f - px, cy = y0 + j + 0.5f - py;
+            float inside = 1;
+            if (r > 0) {
+                float qx = std::clamp(cx, r, pw - r), qy = std::clamp(cy, r, ph - r);
+                inside = std::clamp(r - std::hypot(cx - qx, cy - qy) + 0.5f, 0.0f, 1.0f);
+            }
+            uint8_t* d = &rgba[((size_t)j * rw + i) * 4];
+            d[0] = (out >> 16) & 0xFF;
+            d[1] = (out >> 8) & 0xFF;
+            d[2] = out & 0xFF;
+            d[3] = (uint8_t)std::lround(inside * 255);
+        }
+    }
+    uint32_t tex = g_nxGpu.createTexture(rw, rh, rgba.data());
+    if (!tex) return;
+    g_nxGpu.drawTexture(tex, NXRender::Rect(x0 / scale, y0 / scale, rw / scale, rh / scale));
+    g_nxGpu.destroyTexture(tex);
+}
+
 } // namespace gfx
 
 // ============================================================================
@@ -3272,6 +3319,7 @@ static void initLayoutEngine() {
         g_nxGpu.fillPath(points, NXRender::Color(color).withAlpha(alpha));
     });
     ZepraBrowser::setGradientPaintCallback(gfx::gradientBackground);
+    ZepraBrowser::setBlendFillCallback(gfx::blendFill);
     ZepraBrowser::setShadowPaintCallback(gfx::boxShadow);
     
     std::cout << "[Layout] Layout engine initialized (rounded rect + gradient support)" << std::endl;

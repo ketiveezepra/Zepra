@@ -12,6 +12,7 @@
 
 #include <array>
 
+#include "browser/blend_modes.h"
 #include "browser/dom.hpp"
 #include "browser/box_shadow.h"
 #include "browser/gradient_raster.h"
@@ -763,6 +764,29 @@ TEST(Backgrounds, ColorAlphaAndOpacityReachTheFill) {
 }
 
 // ---------------------------------------------------------------------------
+// mix-blend-mode (blend_modes.cpp)
+// ---------------------------------------------------------------------------
+
+TEST(BlendModes, SeparableAndNonSeparable) {
+    using ZepraBrowser::BlendMode;
+    using ZepraBrowser::blendPixel;
+    EXPECT_EQ(ZepraBrowser::parseBlendMode("Color-Dodge"), BlendMode::ColorDodge);
+    EXPECT_EQ(ZepraBrowser::parseBlendMode("bogus"), BlendMode::Normal);
+    // Opaque source: B(Cb, Cs) itself
+    EXPECT_EQ(blendPixel(BlendMode::Normal, 0x102030, 0x806040, 255), 0x806040u);
+    EXPECT_EQ(blendPixel(BlendMode::Multiply, 0xFF8000, 0x808080, 255), 0x804000u);
+    EXPECT_EQ(blendPixel(BlendMode::Screen, 0x000000, 0x336699, 255), 0x336699u);
+    EXPECT_EQ(blendPixel(BlendMode::Difference, 0xFFFFFF, 0x336699, 255), 0xCC9966u);
+    EXPECT_EQ(blendPixel(BlendMode::Darken, 0x20F020, 0x808080, 255), 0x208020u);
+    EXPECT_EQ(blendPixel(BlendMode::Exclusion, 0x000000, 0x123456, 255), 0x123456u);
+    // Luminosity of grey over a colour keeps the hue but takes the grey's light
+    uint32_t lum = blendPixel(BlendMode::Luminosity, 0xFF0000, 0x808080, 255);
+    EXPECT_GT((lum >> 16) & 0xFF, (lum >> 8) & 0xFF);
+    // Colour over grey: the grey's lightness, the source's hue
+    uint32_t col = blendPixel(BlendMode::Color, 0x808080, 0x0000FF, 255);
+    EXPECT_GT(col & 0xFF, (col >> 16) & 0xFF);
+    // Alpha mixes the result with the backdrop
+    EXPECT_EQ(blendPixel(BlendMode::Multiply, 0xFFFFFF, 0x000000, 128), 0x7F7F7Fu);
 // background-clip: text
 // ---------------------------------------------------------------------------
 

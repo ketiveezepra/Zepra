@@ -451,6 +451,10 @@ void setLayoutCallbacks2(
     s_gfx_hgradient = gfx_hgradient;
 }
 
+static void (*s_gfx_blend_fill)(float, float, float, float, float, uint32_t, uint8_t, uint8_t) = nullptr;
+
+void setBlendFillCallback(void (*gfx_blend_fill)(float, float, float, float, float, uint32_t, uint8_t, uint8_t)) {
+    s_gfx_blend_fill = gfx_blend_fill;
 static void (*s_gfx_shadow)(float, float, const ShadowBox&, const BoxShadow&) = nullptr;
 
 void setShadowPaintCallback(void (*gfx_shadow)(float, float, const ShadowBox&, const BoxShadow&)) {
@@ -2354,6 +2358,9 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     } else {
         if (!box.hasBgColor) {
             // no colour of its own
+        } else if (box.blendMode != 0 && s_gfx_blend_fill) {
+            // mix-blend-mode: mixed with what is already drawn under it
+            s_gfx_blend_fill(screenX, screenY, box.width, box.height, box.borderRadius, box.bgColor, alpha, box.blendMode);
         } else if ((box.borderRadius > 0 || alpha < 255) && s_gfx_rrect) {
             // Translucent fills go through the rounded-rect path, the one that
             // takes an alpha (a radius of 0 is a plain rectangle)
