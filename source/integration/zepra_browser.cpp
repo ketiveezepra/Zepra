@@ -2496,6 +2496,20 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         imgBox->marginLeft = imgStyle->marginLeft.isAuto() ? 0 : imgStyle->marginLeft.value;
                         imgBox->marginRight = imgStyle->marginRight.isAuto() ? 0 : imgStyle->marginRight.value;
                         imgBox->floatType = imgStyle->cssFloat;
+                        // Padding and border surround the image; with
+                        // box-sizing: border-box they come out of its size
+                        imgBox->paddingTop = imgStyle->paddingTop.value;
+                        imgBox->paddingRight = imgStyle->paddingRight.value;
+                        imgBox->paddingBottom = imgStyle->paddingBottom.value;
+                        imgBox->paddingLeft = imgStyle->paddingLeft.value;
+                        imgBox->borderTop = imgStyle->borderTopWidth;
+                        imgBox->borderRight = imgStyle->borderRightWidth;
+                        imgBox->borderBottom = imgStyle->borderBottomWidth;
+                        imgBox->borderLeft = imgStyle->borderLeftWidth;
+                        if (imgBox->borderTop > 0 || imgBox->borderRight > 0 || imgBox->borderBottom > 0 ||
+                            imgBox->borderLeft > 0)
+                            imgBox->borderColor = cssColorToRGB(imgStyle->borderTopColor);
+                        imgBox->boxSizing = imgStyle->boxSizing == Zepra::WebCore::BoxSizing::BorderBox ? 1 : 0;
                     }
 
                     ZepraBrowser::g_lazyImageLoader.queueImage(imgBox, src, 0, g_activeTabId);

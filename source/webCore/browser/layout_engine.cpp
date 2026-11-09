@@ -971,7 +971,12 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         // The line of a single-line container is as big as the container's
         // definite cross size, min-height included (§9.4 step 15), so
         // align-items: center centres in the whole row
-        if (lines.size() == 1 && !box.flexWrap && containerCrossSize > lines[0].crossSize) {
+        // A definite height also bounds the line when the items are taller:
+        // they are then centred (or aligned) within it and overflow it, as
+        // in other browsers, instead of being pushed down to the top
+        bool definiteHeight = box.cssHeight.isSet() && !box.cssHeight.isAuto() && !box.cssHeight.isPercent();
+        if (lines.size() == 1 && !box.flexWrap &&
+            (containerCrossSize > lines[0].crossSize || (!isColumn && definiteHeight && containerCrossSize > 0))) {
             lines[0].crossSize = containerCrossSize;
         }
         
@@ -1016,58 +1021,83 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         for (auto& line : lines) {
             if (line.items.empty()) continue;
             
-            float freeSpace = containerMainSize - line.mainSize;
-            
-            // Grow: distribute positive free space proportionally
-            if (freeSpace > 0) {
-                float totalGrow = 0;
-                for (auto& fc : line.items) totalGrow += fc.flexGrow;
-                if (totalGrow > 0) {
-                    for (auto& fc : line.items) {
-                        fc.mainSize += freeSpace * (fc.flexGrow / totalGrow);
-                    }
-                }
-            }
-            // Shrink: distribute negative overflow weighted by shrink*basis
-            else if (freeSpace < 0) {
-                float totalShrinkWeighted = 0;
-                for (auto& fc : line.items)
-                    totalShrinkWeighted += fc.flexShrink * fc.flexBasis;
-                if (totalShrinkWeighted > 0) {
-                    for (auto& fc : line.items) {
-                        float ratio = (fc.flexShrink * fc.flexBasis) / totalShrinkWeighted;
-                        fc.mainSize += freeSpace * ratio;
-                        if (fc.mainSize < 0) fc.mainSize = 0;
-                    }
-                }
-            }
-            
-            // Clamp to min/max constraints
-            for (auto& fc : line.items) {
-                LayoutBox& child = *fc.ptr;
+            // Grow or shrink the items into the free space, then clamp each to
+            // its min/max. A clamped item is frozen at that size and the others
+            // are resolved again in the space that leaves (CSS Flexbox §9.7), so
+            // a minimum one item keeps is taken from its siblings, not overflow
+            auto mainLimits = [&](const LayoutBox& child, float& minMain, float& maxMain) {
+                minMain = 0;
+                maxMain = FLT_MAX;
                 if (isColumn) {
                     if (child.cssMinHeight.isSet() && !child.cssMinHeight.isAuto()) {
                         float minH = child.cssMinHeight.resolve(containerMainSize, child.fontSize, vpW, vpH);
-                        float minMain = minH + child.marginTop + child.marginBottom;
-                        if (fc.mainSize < minMain) fc.mainSize = minMain;
+                        minMain = minH + child.marginTop + child.marginBottom;
                     }
                     if (child.cssMaxHeight.isSet() && !child.cssMaxHeight.isAuto()) {
                         float maxH = child.cssMaxHeight.resolve(containerMainSize, child.fontSize, vpW, vpH);
-                        float maxMain = maxH + child.marginTop + child.marginBottom;
-                        if (fc.mainSize > maxMain) fc.mainSize = maxMain;
+                        maxMain = maxH + child.marginTop + child.marginBottom;
                     }
                 } else {
                     if (child.cssMinWidth.isSet() && !child.cssMinWidth.isAuto()) {
                         float minW = child.cssMinWidth.resolve(containerMainSize, child.fontSize, vpW, vpH);
-                        float minMain = minW + child.marginLeft + child.marginRight;
-                        if (fc.mainSize < minMain) fc.mainSize = minMain;
+                        minMain = minW + child.marginLeft + child.marginRight;
+                    } else if (child.isImage && child.naturalWidth > 0 && !child.overflowHidden &&
+                               child.overflowX == 0) {
+                        // min-width: auto of a replaced item (CSS Flexbox §4.5):
+                        // the smaller of its content size (the natural width)
+                        // and its specified or aspect-ratio-transferred size,
+                        // which imageSize() computed. So an image given only a
+                        // height never shrinks below the width its ratio gives
+                        float minW = child.width;
+                        bool specified = child.cssWidth.isSet() && !child.cssWidth.isAuto();
+                        if (specified) {
+                            float edges = child.paddingLeft + child.paddingRight + child.borderLeft + child.borderRight;
+                            minW = std::min(minW, child.naturalWidth + edges);
+                        }
+                        minMain = minW + child.marginLeft + child.marginRight;
                     }
                     if (child.cssMaxWidth.isSet() && !child.cssMaxWidth.isAuto()) {
                         float maxW = child.cssMaxWidth.resolve(containerMainSize, child.fontSize, vpW, vpH);
-                        float maxMain = maxW + child.marginLeft + child.marginRight;
-                        if (fc.mainSize > maxMain) fc.mainSize = maxMain;
+                        maxMain = maxW + child.marginLeft + child.marginRight;
                     }
                 }
+                if (maxMain < minMain) maxMain = minMain;
+            };
+            std::vector<bool> frozen(line.items.size(), false);
+            float gaps = flexGap * (line.items.size() > 1 ? line.items.size() - 1 : 0);
+            for (size_t pass = 0; pass <= line.items.size(); pass++) {
+                float used = gaps, totalGrow = 0, totalShrinkWeighted = 0;
+                for (size_t i = 0; i < line.items.size(); i++) {
+                    FlexChild& fc = line.items[i];
+                    if (!frozen[i]) fc.mainSize = fc.flexBasis;
+                    used += fc.mainSize;
+                    if (frozen[i]) continue;
+                    totalGrow += fc.flexGrow;
+                    totalShrinkWeighted += fc.flexShrink * fc.flexBasis;
+                }
+                float freeSpace = containerMainSize - used;
+                for (size_t i = 0; i < line.items.size(); i++) {
+                    if (frozen[i]) continue;
+                    FlexChild& fc = line.items[i];
+                    if (freeSpace > 0 && totalGrow > 0) {
+                        // Grow: distribute positive free space proportionally
+                        fc.mainSize += freeSpace * (fc.flexGrow / totalGrow);
+                    } else if (freeSpace < 0 && totalShrinkWeighted > 0) {
+                        // Shrink: distribute negative overflow weighted by shrink*basis
+                        fc.mainSize += freeSpace * ((fc.flexShrink * fc.flexBasis) / totalShrinkWeighted);
+                        if (fc.mainSize < 0) fc.mainSize = 0;
+                    }
+                }
+                bool violated = false;
+                for (size_t i = 0; i < line.items.size(); i++) {
+                    if (frozen[i]) continue;
+                    FlexChild& fc = line.items[i];
+                    float minMain, maxMain;
+                    mainLimits(*fc.ptr, minMain, maxMain);
+                    if (fc.mainSize < minMain) { fc.mainSize = minMain; frozen[i] = violated = true; }
+                    else if (fc.mainSize > maxMain) { fc.mainSize = maxMain; frozen[i] = violated = true; }
+                }
+                if (!violated) break;
             }
             
             // Recalculate line main size after flex + clamping
@@ -1174,12 +1204,20 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                     case 1: crossOffset = 0; break;
                     case 2: crossOffset = crossSpace - fc.crossSize; break;
                     case 3: crossOffset = (crossSpace - fc.crossSize) / 2.0f; break;
-                    default:
+                    default: {
+                        // Stretch fills the line only when the item's cross
+                        // size is auto (CSS Flexbox §9.4 step 11); a definite
+                        // height (or width, in a column) is kept and the item
+                        // sits at the line's start
+                        const LayoutLength& cross = isColumn ? child.cssWidth : child.cssHeight;
+                        bool definite = cross.isSet() && !cross.isAuto() && (isColumn || !cross.isPercent());
+                        if (definite) break;
                         if (isColumn)
                             child.width = contentWidth - child.marginLeft - child.marginRight;
                         else
                             child.height = line.crossSize - child.marginTop - child.marginBottom;
                         break;
+                    }
                 }
                 
                 if (isColumn) {
@@ -2553,19 +2591,22 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
                          box.contentWidth(), box.contentHeight(), box.domElement);
         }
     } else if (box.isImage) {
+        // The image fills the content box; padding and border surround it
+        float ix = screenX + box.borderLeft + box.paddingLeft, iy = screenY + box.borderTop + box.paddingTop;
+        float iw = std::max(0.0f, box.contentWidth()), ih = std::max(0.0f, box.contentHeight());
         if (!box.svgData.empty() && s_gfx_svg) {
             // SVG: rasterized on the main thread; currentColor is the element's color
             if (box.svgKey.empty()) {
                 std::hash<std::string> hasher;
                 box.svgKey = "web_svg_" + std::to_string(hasher(box.svgData));
             }
-            s_gfx_svg(screenX, screenY, box.width, box.height, box.svgData, box.svgKey, box.color);
+            s_gfx_svg(ix, iy, iw, ih, box.svgData, box.svgKey, box.color);
         } else if (box.textureId > 0 && s_gfx_texture) {
-            s_gfx_texture(screenX, screenY, box.width, box.height, box.textureId);
+            s_gfx_texture(ix, iy, iw, ih, box.textureId);
         } else if (s_gfx_rect && s_gfx_border) {
-            s_gfx_rect(screenX, screenY, box.width, box.height, box.bgColor);
+            s_gfx_rect(ix, iy, iw, ih, box.bgColor);
             // A 1px frame just inside the box (the stroke is centered on its path)
-            s_gfx_border(screenX + 0.5f, screenY + 0.5f, box.width - 1.0f, box.height - 1.0f, 0x000000, 1.0f);
+            s_gfx_border(ix + 0.5f, iy + 0.5f, iw - 1.0f, ih - 1.0f, 0x000000, 1.0f);
         }
     }
 
