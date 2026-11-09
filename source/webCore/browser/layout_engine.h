@@ -152,8 +152,10 @@ struct LayoutBox {
     uint32_t outlineColor = 0x000000;
     int outlineStyle = 2;        // as borderStyle
 
-    // Border radius (uniform for now)
-    float borderRadius = 0;
+    // Border radius (uniform for now); a percentage radius is resolved
+    // against the box's size when it is painted
+    mutable float borderRadius = 0;
+    float borderRadiusPercent = 0;
     
     // Opacity (0.0 = transparent, 1.0 = opaque)
     float opacity = 1.0f;

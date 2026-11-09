@@ -2186,6 +2186,11 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     // Save for hit testing
     box.screenX = screenX;
     box.screenY = screenY;
+
+    // border-radius: 50% and the like: a percentage of the box (of its
+    // smaller side, as corners here are circular)
+    if (box.borderRadiusPercent > 0)
+        box.borderRadius = std::min(box.width, box.height) * std::min(box.borderRadiusPercent, 50.0f) / 100.0f;
     
     // Skip if off-screen (culling)
     if (screenY + box.height < 0 || screenY > viewportHeight) {
@@ -2218,7 +2223,9 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     } else {
         if (!box.hasBgColor) {
             // no colour of its own
-        } else if (box.borderRadius > 0 && s_gfx_rrect) {
+        } else if ((box.borderRadius > 0 || alpha < 255) && s_gfx_rrect) {
+            // Translucent fills go through the rounded-rect path, the one that
+            // takes an alpha (a radius of 0 is a plain rectangle)
             s_gfx_rrect(screenX, screenY, box.width, box.height, box.borderRadius, box.bgColor, alpha);
         } else if (s_gfx_rect) {
             s_gfx_rect(screenX, screenY, box.width, box.height, box.bgColor);
