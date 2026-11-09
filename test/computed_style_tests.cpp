@@ -319,3 +319,10 @@ TEST(ComputedStyle, InsetSetsAllFourOffsets) {
     EXPECT_EQ(page.eval("box.style.inset = ''; box.style.insetInline = '5px 6px';"
                         "[cs.left, cs.right].join(' ')"), "5px 6px");
 }
+
+TEST(ComputedStyle, PercentageBorderRadiusIsKept) {
+    Page page(kPage);
+    page.eval("var box = document.getElementById('box'); var cs = getComputedStyle(box)");
+    EXPECT_EQ(page.eval("box.style.borderRadius = '50%'; cs.borderRadius"), "50%");
+    EXPECT_EQ(page.eval("box.style.borderRadius = '8px'; cs.borderRadius"), "8px");
+}

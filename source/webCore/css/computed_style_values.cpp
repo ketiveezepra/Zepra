@@ -220,7 +220,8 @@ std::vector<std::pair<std::string, std::string>> resolve(const CSSComputedStyle&
     add("border-bottom-style", kBorderStyles[(int)s.borderBottomStyle]);
     add("border-left-style", kBorderStyles[(int)s.borderLeftStyle]);
     add("border-top-color", colorStr(s.borderTopColor));
-    add("border-radius", formatComputedNumber(s.borderTopLeftRadius) + "px");
+    add("border-radius", s.borderTopLeftRadiusPercent > 0 ? formatComputedNumber(s.borderTopLeftRadiusPercent) + "%"
+                                                           : formatComputedNumber(s.borderTopLeftRadius) + "px");
     add("overflow-x", overflowStr(s.overflowX));
     add("overflow-y", overflowStr(s.overflowY));
     add("top", lengthStr(s.top));
