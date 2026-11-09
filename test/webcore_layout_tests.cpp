@@ -14,6 +14,7 @@
 
 #include "browser/blend_modes.h"
 #include "browser/dom.hpp"
+#include "browser/box_shadow.h"
 #include "browser/gradient_raster.h"
 #include "browser/layout_engine.h"
 #include "css/css_engine.hpp"
@@ -786,6 +787,129 @@ TEST(BlendModes, SeparableAndNonSeparable) {
     EXPECT_GT(col & 0xFF, (col >> 16) & 0xFF);
     // Alpha mixes the result with the backdrop
     EXPECT_EQ(blendPixel(BlendMode::Multiply, 0xFFFFFF, 0x000000, 128), 0x7F7F7Fu);
+// background-clip: text
+// ---------------------------------------------------------------------------
+
+struct GlyphCall {
+    std::string text;
+    uint32_t color;
+};
+std::vector<GlyphCall> g_glyphs;
+int g_clipTextFills = 0;
+
+TEST(ClipText, TextShowsTheGradientAndTheBoxDoesNot) {
+    g_glyphs.clear();
+    g_clipTextFills = 0;
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t) { g_clipTextFills++; }, [](float, float, float, float, uint32_t, float) {},
+        [](const std::string& t, float, float, uint32_t c, float, const LayoutBox*) { g_glyphs.push_back({t, c}); },
+        [](const std::string& t, float size, const LayoutBox*) { return t.size() * size * 0.5f; }, nullptr, nullptr);
+    LayoutBox box;
+    box.width = 200;
+    box.height = 20;
+    box.bgClipText = true;
+    box.hasBgGradient = true;
+    box.backgroundImage = "linear-gradient(to right, #ff0000, #0000ff)";
+    LayoutBox& run = addBox(box, LayoutType::Inline);
+    run.text = "ab";
+    run.fontSize = 20;
+    run.width = 20;
+    run.height = 20;
+    run.textFillTransparent = true;
+    ZepraBrowser::paintBox(box, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    EXPECT_EQ(g_clipTextFills, 0);  // no background rectangle
+    ASSERT_EQ(g_glyphs.size(), 2u);  // one call per character, in the gradient's colour there
+    EXPECT_EQ(g_glyphs[0].text, "a");
+    EXPECT_GT(g_glyphs[0].color >> 16, 0xE0u);
+    EXPECT_LT(g_glyphs[0].color & 0xFF, 0x20u);
+}
+
+TEST(ClipText, TransparentTextWithoutABackgroundIsNotDrawn) {
+    g_glyphs.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t) {}, [](float, float, float, float, uint32_t, float) {},
+        [](const std::string& t, float, float, uint32_t c, float, const LayoutBox*) { g_glyphs.push_back({t, c}); },
+        [](const std::string& t, float size, const LayoutBox*) { return t.size() * size * 0.5f; }, nullptr, nullptr);
+    LayoutBox run;
+    run.type = LayoutType::Inline;
+    run.text = "hidden";
+    run.width = 60;
+    run.height = 16;
+    run.textFillTransparent = true;
+    ZepraBrowser::paintBox(run, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    EXPECT_TRUE(g_glyphs.empty());
+// box-shadow (box_shadow.cpp)
+// ---------------------------------------------------------------------------
+
+TEST(BoxShadow, ParsesLayersLengthsAndColours) {
+    auto shadows = ZepraBrowser::parseBoxShadow("0 4px 16px rgba(255,100,0,0.7), inset 1px 2px #7c3aed", 0x123456);
+    ASSERT_EQ(shadows.size(), 2u);
+    EXPECT_FALSE(shadows[0].inset);
+    EXPECT_FLOAT_EQ(shadows[0].offsetY, 4);
+    EXPECT_FLOAT_EQ(shadows[0].blur, 16);
+    EXPECT_EQ(shadows[0].r, 255);
+    EXPECT_NEAR(shadows[0].a, 178, 1);
+    EXPECT_TRUE(shadows[1].inset);
+    EXPECT_FLOAT_EQ(shadows[1].blur, 0);
+    EXPECT_EQ(shadows[1].b, 0xED);
+    // No colour: currentColor
+    auto plain = ZepraBrowser::parseBoxShadow("2px 2px 3px 1px", 0x123456);
+    ASSERT_EQ(plain.size(), 1u);
+    EXPECT_EQ(plain[0].r, 0x12);
+    EXPECT_FLOAT_EQ(plain[0].spread, 1);
+    EXPECT_TRUE(ZepraBrowser::parseBoxShadow("none", 0).empty());
+    EXPECT_TRUE(ZepraBrowser::parseBoxShadow("4px red", 0).empty());  // one length: invalid
+}
+
+struct ShadowBitmap {
+    ZepraBrowser::ShadowRect rect;
+    int w = 0, h = 0;
+    std::vector<uint8_t> px;
+    // Alpha at a point in border-box coordinates
+    int alphaAt(float x, float y) const {
+        int i = (int)((x - rect.x) * w / rect.width), j = (int)((y - rect.y) * h / rect.height);
+        if (i < 0 || j < 0 || i >= w || j >= h) return 0;
+        return px[((size_t)j * w + i) * 4 + 3];
+    }
+};
+
+ShadowBitmap drawShadow(const std::string& css, float bw, float bh, float border = 0) {
+    ZepraBrowser::ShadowBox box;
+    box.width = bw;
+    box.height = bh;
+    box.borderTop = box.borderRight = box.borderBottom = box.borderLeft = border;
+    auto shadows = ZepraBrowser::parseBoxShadow(css, 0);
+    ShadowBitmap out;
+    if (shadows.empty()) return out;
+    out.rect = ZepraBrowser::shadowRect(box, shadows[0]);
+    ZepraBrowser::shadowPixelSize(out.rect, out.w, out.h);
+    ZepraBrowser::rasterizeShadow(box, shadows[0], out.w, out.h, out.px);
+    if (out.px.empty()) out.px.assign((size_t)out.w * out.h * 4, 0);
+    return out;
+}
+
+TEST(BoxShadow, OuterShadowIsOffsetAndNotUnderTheBox) {
+    ShadowBitmap s = drawShadow("10px 10px #000", 100, 50);
+    EXPECT_EQ(s.alphaAt(105, 55), 255);   // below-right of the box, inside the moved copy
+    EXPECT_EQ(s.alphaAt(50, 25), 0);      // under the box itself
+    EXPECT_EQ(s.alphaAt(5, 55), 0);       // left of the moved copy
+}
+
+TEST(BoxShadow, BlurFadesAcrossTheEdge) {
+    ShadowBitmap s = drawShadow("0 0 20px #000", 100, 100);
+    int atEdge = s.alphaAt(100.5f, 50), near = s.alphaAt(104, 50), far = s.alphaAt(118, 50);
+    EXPECT_NEAR(atEdge, 128, 30);
+    EXPECT_GT(near, far);
+    EXPECT_LT(far, 20);
+}
+
+TEST(BoxShadow, InsetShadowIsInsideThePaddingBox) {
+    ShadowBitmap s = drawShadow("inset 0 0 0 6px #000", 100, 60, 2);
+    EXPECT_EQ(s.alphaAt(1, 30), 0);       // on the border: not drawn
+    EXPECT_EQ(s.alphaAt(4, 30), 255);     // in the 6px band inside the border
+    EXPECT_EQ(s.alphaAt(50, 30), 0);      // the middle is clear
 }
 
 // ---------------------------------------------------------------------------
