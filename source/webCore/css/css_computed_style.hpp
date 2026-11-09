@@ -328,6 +328,16 @@ public:
 
     std::string gridTemplateColumns;
     std::string gridTemplateRows;
+    std::string gridTemplateAreas;
+    std::string gridAutoColumns;
+    std::string gridAutoRows;
+    bool gridAutoFlowColumn = false;  // grid-auto-flow: column
+    bool gridAutoFlowDense = false;
+    // grid-row/column-start/end as CSS text ("auto", "2", "-1", "span 2", "main")
+    std::string gridColumnStart, gridColumnEnd, gridRowStart, gridRowEnd;
+    JustifyAlign justifyItems = JustifyAlign::Stretch;  // normal
+    JustifyAlign justifySelf = JustifyAlign::Auto;
+    bool justifyContentNormal = true;  // justify-content: normal (grid tracks stretch)
     CSSLength gap;
     CSSLength rowGap;
     CSSLength columnGap;
@@ -348,6 +358,9 @@ public:
     int legacyAlign = 0;
     std::string textDecoration;
     std::string textTransform;
+    // -webkit-text-fill-color (inherited); without one, text fills with color
+    bool hasTextFillColor = false;
+    CSSColor textFillColor;
     float letterSpacing = 0;
     float wordSpacing = 0;
     std::string whiteSpace = "normal";
@@ -371,6 +384,7 @@ public:
     std::string backgroundPosition;
     std::string backgroundSize;
     std::string backgroundRepeat = "repeat";
+    bool backgroundClipText = false;   // background-clip: text (only under the glyphs)
 
     // =========================================================================
     // Effects
@@ -397,6 +411,7 @@ public:
     std::string placeItems;         // center, stretch, etc.
     std::string placeContent;       // center, space-between, etc.
     std::string isolation;          // auto, isolate
+    std::string mixBlendMode;       // normal, multiply, ... ("" = normal)
     std::string willChange;         // auto, transform, opacity
     std::string content;            // for ::before/::after
     std::string userSelect;         // none, auto, text

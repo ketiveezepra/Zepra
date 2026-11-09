@@ -12,7 +12,10 @@
 
 #include <array>
 
+#include "browser/css_utils.h"
+#include "browser/blend_modes.h"
 #include "browser/dom.hpp"
+#include "browser/box_shadow.h"
 #include "browser/gradient_raster.h"
 #include "browser/layout_engine.h"
 #include "css/css_engine.hpp"
@@ -356,6 +359,19 @@ TEST(AbsoluteLayout, InsetsStretchAnAutoSizedBox) {
     EXPECT_FLOAT_EQ(inset.height, 58);
     // The specified (auto) sizes are kept for the next layout pass
     EXPECT_FALSE(cover.cssWidth.isSet() && !cover.cssWidth.isAuto());
+}
+
+TEST(FlexLayout, TextAlignDoesNotMoveCentredItemsAgain) {
+    // display: flex; justify-content: center; text-align: center
+    LayoutBox flex = makeFlex(0, 3);
+    flex.justifyContent = 2;
+    flex.textAlign = 1;
+    flex.cssWidth = LayoutLength::px(110);
+    LayoutBox& run = addBox(flex, LayoutType::Inline);
+    run.text = "1px red";  // 7 bytes: 28px at 8px per byte
+    run.fontSize = 8;
+    ZepraBrowser::layoutBlock(flex, 1000, 0);
+    EXPECT_FLOAT_EQ(run.x, (110 - 28) / 2.0f);
 }
 
 TEST(FlexLayout, ColumnAlignCenterCentresHorizontally) {
@@ -759,6 +775,201 @@ TEST(Backgrounds, ColorAlphaAndOpacityReachTheFill) {
     auto both = paintFilledBox(128, 0.5f);
     ASSERT_EQ(both.size(), 1u);
     EXPECT_EQ(both[0].alpha, 64);
+}
+
+// ---------------------------------------------------------------------------
+// text-transform
+// ---------------------------------------------------------------------------
+
+TEST(TextTransform, UpperLowerAndCapitalize) {
+    using ZepraBrowser::applyTextTransform;
+    EXPECT_EQ(applyTextTransform("1 · Grayscale (0% → 100%)", "uppercase"), "1 · GRAYSCALE (0% → 100%)");
+    EXPECT_EQ(applyTextTransform("straße äöü αβγ жук", "uppercase"), "STRASSE ÄÖÜ ΑΒΓ ЖУК");
+    EXPECT_EQ(applyTextTransform("ÉCOLE ΣΟΦΙΑ ЖУК", "lowercase"), "école σοφια жук");
+    EXPECT_EQ(applyTextTransform("hello wide world 3d", "capitalize"), "Hello Wide World 3d");
+    EXPECT_EQ(applyTextTransform("Mixed Case", "none"), "Mixed Case");
+// mix-blend-mode (blend_modes.cpp)
+// ---------------------------------------------------------------------------
+
+TEST(BlendModes, SeparableAndNonSeparable) {
+    using ZepraBrowser::BlendMode;
+    using ZepraBrowser::blendPixel;
+    EXPECT_EQ(ZepraBrowser::parseBlendMode("Color-Dodge"), BlendMode::ColorDodge);
+    EXPECT_EQ(ZepraBrowser::parseBlendMode("bogus"), BlendMode::Normal);
+    // Opaque source: B(Cb, Cs) itself
+    EXPECT_EQ(blendPixel(BlendMode::Normal, 0x102030, 0x806040, 255), 0x806040u);
+    EXPECT_EQ(blendPixel(BlendMode::Multiply, 0xFF8000, 0x808080, 255), 0x804000u);
+    EXPECT_EQ(blendPixel(BlendMode::Screen, 0x000000, 0x336699, 255), 0x336699u);
+    EXPECT_EQ(blendPixel(BlendMode::Difference, 0xFFFFFF, 0x336699, 255), 0xCC9966u);
+    EXPECT_EQ(blendPixel(BlendMode::Darken, 0x20F020, 0x808080, 255), 0x208020u);
+    EXPECT_EQ(blendPixel(BlendMode::Exclusion, 0x000000, 0x123456, 255), 0x123456u);
+    // Luminosity of grey over a colour keeps the hue but takes the grey's light
+    uint32_t lum = blendPixel(BlendMode::Luminosity, 0xFF0000, 0x808080, 255);
+    EXPECT_GT((lum >> 16) & 0xFF, (lum >> 8) & 0xFF);
+    // Colour over grey: the grey's lightness, the source's hue
+    uint32_t col = blendPixel(BlendMode::Color, 0x808080, 0x0000FF, 255);
+    EXPECT_GT(col & 0xFF, (col >> 16) & 0xFF);
+    // Alpha mixes the result with the backdrop
+    EXPECT_EQ(blendPixel(BlendMode::Multiply, 0xFFFFFF, 0x000000, 128), 0x7F7F7Fu);
+// background-clip: text
+// ---------------------------------------------------------------------------
+
+struct GlyphCall {
+    std::string text;
+    uint32_t color;
+};
+std::vector<GlyphCall> g_glyphs;
+int g_clipTextFills = 0;
+
+TEST(ClipText, TextShowsTheGradientAndTheBoxDoesNot) {
+    g_glyphs.clear();
+    g_clipTextFills = 0;
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t) { g_clipTextFills++; }, [](float, float, float, float, uint32_t, float) {},
+        [](const std::string& t, float, float, uint32_t c, float, const LayoutBox*) { g_glyphs.push_back({t, c}); },
+        [](const std::string& t, float size, const LayoutBox*) { return t.size() * size * 0.5f; }, nullptr, nullptr);
+    LayoutBox box;
+    box.width = 200;
+    box.height = 20;
+    box.bgClipText = true;
+    box.hasBgGradient = true;
+    box.backgroundImage = "linear-gradient(to right, #ff0000, #0000ff)";
+    LayoutBox& run = addBox(box, LayoutType::Inline);
+    run.text = "ab";
+    run.fontSize = 20;
+    run.width = 20;
+    run.height = 20;
+    run.textFillTransparent = true;
+    ZepraBrowser::paintBox(box, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    EXPECT_EQ(g_clipTextFills, 0);  // no background rectangle
+    ASSERT_EQ(g_glyphs.size(), 2u);  // one call per character, in the gradient's colour there
+    EXPECT_EQ(g_glyphs[0].text, "a");
+    EXPECT_GT(g_glyphs[0].color >> 16, 0xE0u);
+    EXPECT_LT(g_glyphs[0].color & 0xFF, 0x20u);
+}
+
+TEST(ClipText, TransparentTextWithoutABackgroundIsNotDrawn) {
+    g_glyphs.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t) {}, [](float, float, float, float, uint32_t, float) {},
+        [](const std::string& t, float, float, uint32_t c, float, const LayoutBox*) { g_glyphs.push_back({t, c}); },
+        [](const std::string& t, float size, const LayoutBox*) { return t.size() * size * 0.5f; }, nullptr, nullptr);
+    LayoutBox run;
+    run.type = LayoutType::Inline;
+    run.text = "hidden";
+    run.width = 60;
+    run.height = 16;
+    run.textFillTransparent = true;
+    ZepraBrowser::paintBox(run, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    EXPECT_TRUE(g_glyphs.empty());
+// box-shadow (box_shadow.cpp)
+// ---------------------------------------------------------------------------
+
+TEST(BoxShadow, ParsesLayersLengthsAndColours) {
+    auto shadows = ZepraBrowser::parseBoxShadow("0 4px 16px rgba(255,100,0,0.7), inset 1px 2px #7c3aed", 0x123456);
+    ASSERT_EQ(shadows.size(), 2u);
+    EXPECT_FALSE(shadows[0].inset);
+    EXPECT_FLOAT_EQ(shadows[0].offsetY, 4);
+    EXPECT_FLOAT_EQ(shadows[0].blur, 16);
+    EXPECT_EQ(shadows[0].r, 255);
+    EXPECT_NEAR(shadows[0].a, 178, 1);
+    EXPECT_TRUE(shadows[1].inset);
+    EXPECT_FLOAT_EQ(shadows[1].blur, 0);
+    EXPECT_EQ(shadows[1].b, 0xED);
+    // No colour: currentColor
+    auto plain = ZepraBrowser::parseBoxShadow("2px 2px 3px 1px", 0x123456);
+    ASSERT_EQ(plain.size(), 1u);
+    EXPECT_EQ(plain[0].r, 0x12);
+    EXPECT_FLOAT_EQ(plain[0].spread, 1);
+    EXPECT_TRUE(ZepraBrowser::parseBoxShadow("none", 0).empty());
+    EXPECT_TRUE(ZepraBrowser::parseBoxShadow("4px red", 0).empty());  // one length: invalid
+}
+
+struct ShadowBitmap {
+    ZepraBrowser::ShadowRect rect;
+    int w = 0, h = 0;
+    std::vector<uint8_t> px;
+    // Alpha at a point in border-box coordinates
+    int alphaAt(float x, float y) const {
+        int i = (int)((x - rect.x) * w / rect.width), j = (int)((y - rect.y) * h / rect.height);
+        if (i < 0 || j < 0 || i >= w || j >= h) return 0;
+        return px[((size_t)j * w + i) * 4 + 3];
+    }
+};
+
+ShadowBitmap drawShadow(const std::string& css, float bw, float bh, float border = 0) {
+    ZepraBrowser::ShadowBox box;
+    box.width = bw;
+    box.height = bh;
+    box.borderTop = box.borderRight = box.borderBottom = box.borderLeft = border;
+    auto shadows = ZepraBrowser::parseBoxShadow(css, 0);
+    ShadowBitmap out;
+    if (shadows.empty()) return out;
+    out.rect = ZepraBrowser::shadowRect(box, shadows[0]);
+    ZepraBrowser::shadowPixelSize(out.rect, out.w, out.h);
+    ZepraBrowser::rasterizeShadow(box, shadows[0], out.w, out.h, out.px);
+    if (out.px.empty()) out.px.assign((size_t)out.w * out.h * 4, 0);
+    return out;
+}
+
+TEST(BoxShadow, OuterShadowIsOffsetAndNotUnderTheBox) {
+    ShadowBitmap s = drawShadow("10px 10px #000", 100, 50);
+    EXPECT_EQ(s.alphaAt(105, 55), 255);   // below-right of the box, inside the moved copy
+    EXPECT_EQ(s.alphaAt(50, 25), 0);      // under the box itself
+    EXPECT_EQ(s.alphaAt(5, 55), 0);       // left of the moved copy
+}
+
+TEST(BoxShadow, BlurFadesAcrossTheEdge) {
+    ShadowBitmap s = drawShadow("0 0 20px #000", 100, 100);
+    int atEdge = s.alphaAt(100.5f, 50), near = s.alphaAt(104, 50), far = s.alphaAt(118, 50);
+    EXPECT_NEAR(atEdge, 128, 30);
+    EXPECT_GT(near, far);
+    EXPECT_LT(far, 20);
+}
+
+TEST(BoxShadow, InsetShadowIsInsideThePaddingBox) {
+    ShadowBitmap s = drawShadow("inset 0 0 0 6px #000", 100, 60, 2);
+    EXPECT_EQ(s.alphaAt(1, 30), 0);       // on the border: not drawn
+    EXPECT_EQ(s.alphaAt(4, 30), 255);     // in the 6px band inside the border
+    EXPECT_EQ(s.alphaAt(50, 30), 0);      // the middle is clear
+}
+
+// ---------------------------------------------------------------------------
+// Outlines
+// ---------------------------------------------------------------------------
+
+struct RectCall {
+    float x, y, w, h;
+    uint32_t color;
+};
+std::vector<RectCall> g_outlineRects;
+
+TEST(Outlines, DrawnOutsideTheBorderBoxAtTheirOffset) {
+    g_outlineRects.clear();
+    ZepraBrowser::setLayoutCallbacks([](float x, float y, float w, float h, uint32_t c) { g_outlineRects.push_back({x, y, w, h, c}); },
+                                     [](float, float, float, float, uint32_t, float) {}, nullptr, nullptr, nullptr,
+                                     nullptr);
+    LayoutBox box;
+    box.x = 10;
+    box.y = 20;
+    box.width = 100;
+    box.height = 50;
+    box.outlineWidth = 2;
+    box.outlineOffset = 3;
+    box.outlineColor = 0xFF00FF;
+    ZepraBrowser::paintBox(box, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ASSERT_EQ(g_outlineRects.size(), 4u);
+    // Top side: 5px out from the box on every side, 2px thick
+    EXPECT_FLOAT_EQ(g_outlineRects[0].x, 5);
+    EXPECT_FLOAT_EQ(g_outlineRects[0].y, 15);
+    EXPECT_FLOAT_EQ(g_outlineRects[0].w, 110);
+    EXPECT_FLOAT_EQ(g_outlineRects[0].h, 2);
+    EXPECT_EQ(g_outlineRects[0].color, 0xFF00FFu);
+    // Right side
+    EXPECT_FLOAT_EQ(g_outlineRects[3].x, 113);
 }
 
 // ---------------------------------------------------------------------------
@@ -1316,4 +1527,211 @@ TEST(StickyPosition, SticksUntilItsParentEnds) {
     EXPECT_FLOAT_EQ(titleY(400), 10);     // stuck 10px from the top
     EXPECT_FLOAT_EQ(titleY(700), 10);
     EXPECT_FLOAT_EQ(titleY(780), -20);    // pushed out with the section's end (800 - 780 - 40)
+}
+
+// ---------------------------------------------------------------------------
+// CSS Grid
+// ---------------------------------------------------------------------------
+
+namespace {
+
+LayoutBox makeGrid(const std::string& columns, const std::string& rows = "", float gap = 0) {
+    LayoutBox grid;
+    grid.type = LayoutType::Grid;
+    grid.gridTemplateColumns = columns;
+    grid.gridTemplateRows = rows;
+    grid.rowGap = grid.columnGap = grid.gap = gap;
+    return grid;
+}
+
+LayoutBox& addItem(LayoutBox& grid, float height = 0, const std::string& text = "") {
+    LayoutBox& item = addBox(grid, LayoutType::Block);
+    if (height > 0) item.cssHeight = LayoutLength::px(height);
+    if (!text.empty()) addBox(item, LayoutType::Inline).text = text;
+    return item;
+}
+
+} // namespace
+
+TEST(GridLayout, FixedAndFlexibleColumnsShareTheWidthAfterGaps) {
+    LayoutBox grid = makeGrid("100px 1fr 2fr", "", 20);
+    LayoutBox& a = addItem(grid, 10);
+    LayoutBox& b = addItem(grid, 10);
+    LayoutBox& c = addItem(grid, 10);
+    ZepraBrowser::layoutBlock(grid, 700, 0);
+    EXPECT_FLOAT_EQ(a.x, 0);
+    EXPECT_FLOAT_EQ(a.width, 100);
+    EXPECT_FLOAT_EQ(b.x, 120);
+    EXPECT_NEAR(b.width, 560 / 3.0f, 0.01);
+    EXPECT_NEAR(c.x, 140 + 560 / 3.0f, 0.01);
+    EXPECT_NEAR(c.width, 1120 / 3.0f, 0.01);
+}
+
+TEST(GridLayout, AutoPlacementFillsRowsAndRowsTakeTheTallestItem) {
+    LayoutBox grid = makeGrid("1fr 1fr", "", 10);
+    LayoutBox& a = addItem(grid, 40);
+    LayoutBox& b = addItem(grid, 60);
+    LayoutBox& c = addItem(grid, 30);
+    LayoutBox& d = addItem(grid);  // auto height: stretched to its row
+    ZepraBrowser::layoutBlock(grid, 410, 0);
+    EXPECT_FLOAT_EQ(b.x, 210);
+    EXPECT_FLOAT_EQ(a.y, 0);
+    EXPECT_FLOAT_EQ(a.height, 40);  // a fixed height is not stretched
+    EXPECT_FLOAT_EQ(c.y, 70);
+    EXPECT_FLOAT_EQ(d.y, 70);
+    EXPECT_FLOAT_EQ(d.height, 30);
+    EXPECT_FLOAT_EQ(grid.height, 100);
+}
+
+TEST(GridLayout, LinesSpansAndNegativeLinesPlaceItems) {
+    LayoutBox grid = makeGrid("repeat(4, 50px)");
+    LayoutBox& wide = addItem(grid, 20);
+    wide.gridColumnStart = "2";
+    wide.gridColumnEnd = "span 2";
+    LayoutBox& last = addItem(grid, 20);
+    last.gridColumnStart = "-2";
+    last.gridColumnEnd = "-1";
+    last.gridRowStart = "1";
+    LayoutBox& next = addItem(grid, 20);  // auto: the first free cell after the cursor
+    ZepraBrowser::layoutBlock(grid, 400, 0);
+    EXPECT_FLOAT_EQ(wide.x, 50);
+    EXPECT_FLOAT_EQ(wide.width, 100);
+    EXPECT_FLOAT_EQ(last.x, 150);
+    EXPECT_FLOAT_EQ(last.y, 0);
+    EXPECT_FLOAT_EQ(next.x, 0);
+    EXPECT_FLOAT_EQ(next.y, 20);
+}
+
+TEST(GridLayout, TemplateAreasPlaceNamedItems) {
+    LayoutBox grid = makeGrid("120px 1fr", "50px auto");
+    grid.gridTemplateAreas = "\"head head\" \"side main\"";
+    LayoutBox& main = addItem(grid, 0, "main");
+    main.gridRowStart = main.gridRowEnd = main.gridColumnStart = main.gridColumnEnd = "main";
+    LayoutBox& head = addItem(grid);
+    head.gridRowStart = head.gridRowEnd = head.gridColumnStart = head.gridColumnEnd = "head";
+    LayoutBox& side = addItem(grid, 80);
+    side.gridRowStart = side.gridRowEnd = side.gridColumnStart = side.gridColumnEnd = "side";
+    ZepraBrowser::layoutBlock(grid, 620, 0);
+    EXPECT_FLOAT_EQ(head.y, 0);
+    EXPECT_FLOAT_EQ(head.width, 620);
+    EXPECT_FLOAT_EQ(head.height, 50);
+    EXPECT_FLOAT_EQ(side.y, 50);
+    EXPECT_FLOAT_EQ(main.x, 120);
+    EXPECT_FLOAT_EQ(main.y, 50);
+    EXPECT_FLOAT_EQ(main.width, 500);
+    EXPECT_FLOAT_EQ(main.height, 80);  // stretched to the row the 80px side sets
+}
+
+TEST(GridLayout, AutoFillRepeatsAsManyTracksAsFit) {
+    LayoutBox grid = makeGrid("repeat(auto-fill, minmax(200px, 1fr))", "", 10);
+    for (int i = 0; i < 4; ++i) addItem(grid, 20);
+    ZepraBrowser::layoutBlock(grid, 700, 0);
+    // floor((700 + 10) / 210) = 3 columns of (700 - 20) / 3
+    auto it = grid.children.begin();
+    EXPECT_NEAR(it->width, 680 / 3.0f, 0.01);
+    std::advance(it, 3);
+    EXPECT_FLOAT_EQ(it->x, 0);
+    EXPECT_FLOAT_EQ(it->y, 30);
+}
+
+TEST(GridLayout, AutoFitCollapsesEmptyRepeatedTracks) {
+    LayoutBox grid = makeGrid("repeat(auto-fit, minmax(100px, 1fr))");
+    LayoutBox& a = addItem(grid, 20);
+    LayoutBox& b = addItem(grid, 20);
+    ZepraBrowser::layoutBlock(grid, 500, 0);
+    EXPECT_FLOAT_EQ(a.width, 250);
+    EXPECT_FLOAT_EQ(b.x, 250);
+    EXPECT_FLOAT_EQ(b.width, 250);
+}
+
+TEST(GridLayout, AutoTracksFitContentThenStretchUnlessJustifyStart) {
+    LayoutBox grid = makeGrid("auto auto");
+    LayoutBox& a = addItem(grid, 0, "abc");       // 24px
+    LayoutBox& b = addItem(grid, 0, "abcdefgh");  // 64px
+    ZepraBrowser::layoutBlock(grid, 488, 0);
+    EXPECT_FLOAT_EQ(a.width, 24 + 200);
+    EXPECT_FLOAT_EQ(b.x, 224);
+    EXPECT_FLOAT_EQ(b.width, 64 + 200);
+
+    LayoutBox start = makeGrid("auto auto");
+    start.justifyContent = 6;  // start
+    LayoutBox& c = addItem(start, 0, "abc");
+    LayoutBox& d = addItem(start, 0, "abcdefgh");
+    ZepraBrowser::layoutBlock(start, 488, 0);
+    EXPECT_FLOAT_EQ(c.width, 24);
+    EXPECT_FLOAT_EQ(d.x, 24);
+    EXPECT_FLOAT_EQ(d.width, 64);
+}
+
+TEST(GridLayout, ItemsAlignInTheirAreas) {
+    LayoutBox grid = makeGrid("200px", "100px");
+    grid.justifyItems = 3;  // center
+    grid.alignItems = 2;    // end
+    LayoutBox& a = addItem(grid, 0, "abcde");  // 40px wide
+    ZepraBrowser::layoutBlock(grid, 500, 0);
+    EXPECT_FLOAT_EQ(a.width, 40);
+    EXPECT_FLOAT_EQ(a.x, 80);
+    EXPECT_FLOAT_EQ(a.y, 100 - a.height);
+
+    LayoutBox self = makeGrid("200px", "100px");
+    LayoutBox& b = addItem(self, 0, "abcde");
+    b.justifySelf = 2;  // end
+    b.alignSelf = 3;    // center
+    ZepraBrowser::layoutBlock(self, 500, 0);
+    EXPECT_FLOAT_EQ(b.x, 160);
+    EXPECT_FLOAT_EQ(b.y, (100 - b.height) / 2);
+}
+
+TEST(GridLayout, ColumnFlowFillsColumnsFirst) {
+    LayoutBox grid = makeGrid("100px 100px", "30px 30px");
+    grid.gridAutoFlowColumn = true;
+    LayoutBox& a = addItem(grid);
+    LayoutBox& b = addItem(grid);
+    LayoutBox& c = addItem(grid);
+    ZepraBrowser::layoutBlock(grid, 400, 0);
+    EXPECT_FLOAT_EQ(a.x, 0);
+    EXPECT_FLOAT_EQ(b.x, 0);
+    EXPECT_FLOAT_EQ(b.y, 30);
+    EXPECT_FLOAT_EQ(c.x, 100);
+    EXPECT_FLOAT_EQ(c.y, 0);
+}
+
+TEST(GridLayout, IntrinsicWidthSumsTheTracks) {
+    LayoutBox grid = makeGrid("100px auto", "", 10);
+    addItem(grid);
+    addItem(grid, 0, "abcdefghij");  // 80px
+    float minW, maxW;
+    ZepraBrowser::intrinsicWidths(grid, minW, maxW);
+    EXPECT_FLOAT_EQ(maxW, 190);
+    EXPECT_FLOAT_EQ(minW, 190);  // one unbreakable word
+}
+
+TEST(Cascade, GridPlacementShorthands) {
+    StyledDoc d("<!doctype html><div id=g><p id=a></p><p id=b></p><p id=c></p></div>",
+                "#g { display: grid; gap: 4px 12px; grid-template: \"x y\" 40px / 1fr 2fr; place-items: center start }"
+                " #a { grid-area: y } #b { grid-column: 1 / span 2; grid-row: 2 } #c { grid-area: 1 / 2 / 3 / 4;"
+                " place-self: end }");
+    const CSSComputedStyle* g = d.style("g");
+    EXPECT_EQ(g->rowGap.value, 4);
+    EXPECT_EQ(g->columnGap.value, 12);
+    EXPECT_EQ(g->gridTemplateAreas, "\"x y\"");
+    EXPECT_EQ(g->gridTemplateRows, "40px");
+    EXPECT_EQ(g->gridTemplateColumns, "1fr 2fr");
+    EXPECT_EQ(g->alignItems, JustifyAlign::Center);
+    EXPECT_EQ(g->justifyItems, JustifyAlign::Start);
+    const CSSComputedStyle* a = d.style("a");
+    EXPECT_EQ(a->gridRowStart, "y");
+    EXPECT_EQ(a->gridColumnEnd, "y");
+    const CSSComputedStyle* b = d.style("b");
+    EXPECT_EQ(b->gridColumnStart, "1");
+    EXPECT_EQ(b->gridColumnEnd, "span 2");
+    EXPECT_EQ(b->gridRowStart, "2");
+    EXPECT_EQ(b->gridRowEnd, "auto");
+    const CSSComputedStyle* c = d.style("c");
+    EXPECT_EQ(c->gridRowStart, "1");
+    EXPECT_EQ(c->gridColumnStart, "2");
+    EXPECT_EQ(c->gridRowEnd, "3");
+    EXPECT_EQ(c->gridColumnEnd, "4");
+    EXPECT_EQ(c->alignSelf, JustifyAlign::End);
+    EXPECT_EQ(c->justifySelf, JustifyAlign::End);
 }

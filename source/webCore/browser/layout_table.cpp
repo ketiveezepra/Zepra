@@ -369,6 +369,10 @@ void intrinsicWidths(const LayoutBox& box, float& minW, float& maxW) {
         float textW = box.text.empty() ? 0 : measureTextWidth(box.text, box.fontSize, &box);
         // Inline-level leaves are exactly as wide as their text in layoutBlock
         minW = maxW = isBlockLevel(box.type) ? textW + edges : textW;
+    } else if (box.type == LayoutType::Grid) {
+        gridIntrinsicWidths(box, minW, maxW);
+        minW += edges;
+        maxW += edges;
     } else if (box.type == LayoutType::Flex && (box.flexDirection == 0 || box.flexDirection == 2)) {
         int count = 0;
         for (const auto& child : box.children) {
