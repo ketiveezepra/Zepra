@@ -16,6 +16,8 @@
 #include <sstream>
 #include <cctype>
 #include <cstring>
+#include <functional>
+#include <unordered_set>
 
 namespace Zepra::WebCore {
 
@@ -678,6 +680,49 @@ std::vector<CSSEngine::WebFontFace> CSSEngine::fontFaces() const {
 void CSSEngine::addStyleSheetFromUrl(const std::string& url, StyleOrigin origin) {
     // Network fetch would go here — for now log
     std::cout << "[CSSEngine] External stylesheet: " << url << " (fetch not connected)" << std::endl;
+}
+
+void CSSEngine::syncShadowStyles(DOMDocument* document) {
+    if (!document || (!shadowRootsExist() && !resolver_.hasShadowStyleSheets())) return;
+    std::vector<std::pair<const DOMShadowRoot*, std::vector<std::shared_ptr<CSSStyleSheet>>>> scopes;
+    std::unordered_set<std::string> used;
+    // The <style> elements of one shadow tree, in tree order (not those of
+    // shadow trees nested in it, nor of template contents)
+    std::function<void(const DOMNode*, std::vector<std::shared_ptr<CSSStyleSheet>>&)> collectStyles =
+        [&](const DOMNode* node, std::vector<std::shared_ptr<CSSStyleSheet>>& sheets) {
+            for (const auto& child : node->childNodes()) {
+                if (child->nodeType() != NodeType::Element) continue;
+                auto* el = static_cast<const DOMElement*>(child.get());
+                if (el->tagName() == "style") {
+                    std::string css = el->textContent();
+                    auto& sheet = shadowSheetCache_[css];
+                    if (!sheet) sheet = parser_.parse(css);
+                    if (sheet) sheets.push_back(sheet);
+                    used.insert(css);
+                    continue;
+                }
+                collectStyles(el, sheets);
+            }
+        };
+    std::function<void(const DOMNode*)> findTrees = [&](const DOMNode* node) {
+        for (const auto& child : node->childNodes()) {
+            if (child->nodeType() != NodeType::Element) continue;
+            auto* el = static_cast<const DOMElement*>(child.get());
+            if (const DOMShadowRoot* shadow = el->shadowRoot()) {
+                std::vector<std::shared_ptr<CSSStyleSheet>> sheets;
+                collectStyles(shadow, sheets);
+                if (!sheets.empty()) scopes.push_back({shadow, std::move(sheets)});
+                findTrees(shadow);
+            }
+            findTrees(el);
+        }
+    };
+    findTrees(document);
+    // Forget sheets no tree uses any more
+    for (auto it = shadowSheetCache_.begin(); it != shadowSheetCache_.end();) {
+        it = used.count(it->first) ? std::next(it) : shadowSheetCache_.erase(it);
+    }
+    resolver_.setShadowStyleSheets(std::move(scopes));
 }
 
 void CSSEngine::computeStyles() {

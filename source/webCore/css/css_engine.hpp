@@ -26,6 +26,7 @@ namespace Zepra::WebCore {
 class DOMDocument;
 class DOMElement;
 class DOMNode;
+class DOMShadowRoot;
 
 /**
  * @brief Style origin (cascade layer)
@@ -137,6 +138,11 @@ public:
     
     /// Match compound selector (tag.class#id[attr]) against single element
     bool compoundSelectorMatches(DOMElement* element, const std::string& compound);
+
+    /// Matching rules of a shadow tree's style sheets: :host matches its
+    /// host, combinators climb from the tree's top to the host. Null (the
+    /// default) for the document's sheets, where :host matches nothing.
+    void setShadowScope(const DOMShadowRoot* scope) { shadowScope_ = scope; }
     
     /// Calculate specificity of a selector
     Selector::Specificity calculateSpecificity(const std::string& selector);
@@ -180,7 +186,11 @@ private:
     /// Extract the rightmost key selector tokens for indexing
     void indexSelector(const std::string& selector, size_t ruleIdx);
 
+    bool compoundMatches(DOMElement* element, const std::string& compound);
+
     bool indexed_ = false;
+    const DOMShadowRoot* shadowScope_ = nullptr;
+    bool inHostArgument_ = false;
     std::string pseudoElement_;
     SelectorIndex index_;
     std::vector<IndexedRule> indexedRules_;
@@ -229,7 +239,27 @@ public:
     void invalidateElement(DOMElement* element);
     void invalidateAll();
 
+    /// The style sheets of each shadow tree (its <style> elements), which
+    /// replace the ones set before. A shadow tree's elements match only
+    /// these (and the user-agent sheet); its host also matches their :host
+    /// rules, below the document's own rules.
+    void setShadowStyleSheets(std::vector<std::pair<const DOMShadowRoot*,
+                                                    std::vector<std::shared_ptr<CSSStyleSheet>>>> scopes);
+    bool hasShadowStyleSheets() const { return !shadowScopes_.empty(); }
+
 private:
+    /// A shadow tree's sheets and the cascade (selector index) over them;
+    /// shared by every tree with the same sheets (instances of one component)
+    struct ScopedCascade {
+        std::vector<std::shared_ptr<CSSStyleSheet>> sheets;
+        std::vector<std::pair<CSSStyleSheet*, StyleOrigin>> pairs;
+        CSSCascade cascade;
+    };
+    std::unordered_map<const DOMShadowRoot*, std::shared_ptr<ScopedCascade>> shadowScopes_;
+    /// The rules matching an element (or its pseudo-element), unsorted:
+    /// the document's cascade, then its shadow tree's or host's
+    std::vector<MatchedRule> collectRules(DOMElement* element, const std::string& pseudo);
+
     /// Which declarations of a block applyDeclarations applies
     enum class Importance { Any, Normal, Important };
     /// computeStyle() runs the cascade twice: custom properties first (var()
@@ -369,6 +399,11 @@ public:
     /// Style resolver
     StyleResolver& resolver() { return resolver_; }
 
+    /// Gives every shadow tree in the document its own <style> sheets
+    /// (call before computing styles; a page without shadow trees costs
+    /// nothing). Sheets are parsed once per distinct text.
+    void syncShadowStyles(DOMDocument* document);
+
     /// Whether any loaded stylesheet uses :hover / :active / :focus, i.e.
     /// whether a change of interaction state can change computed styles
     bool usesHoverSelectors() const { return usesHover_; }
@@ -387,6 +422,7 @@ private:
     DOMDocument* document_ = nullptr;
     CSSParser parser_;
     StyleResolver resolver_;
+    std::unordered_map<std::string, std::shared_ptr<CSSStyleSheet>> shadowSheetCache_;
     std::vector<std::shared_ptr<CSSStyleSheet>> stylesheets_;
     bool usesHover_ = false;
     bool usesActive_ = false;

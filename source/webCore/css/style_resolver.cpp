@@ -176,12 +176,7 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
     }
     
     // Step 2: Collect all matching rules WITH correct per-sheet origins
-    std::vector<std::pair<CSSStyleSheet*, StyleOrigin>> sheetPairs;
-    for (const auto& entry : stylesheets_) {
-        sheetPairs.push_back({entry.sheet.get(), entry.origin});
-    }
-    
-    auto matchedRules = cascade_.collectMatchingRulesWithOrigins(element, sheetPairs);
+    auto matchedRules = collectRules(element, "");
     
     // Step 3: Sort by cascade order
     cascade_.sortByCascade(matchedRules);
@@ -291,7 +286,9 @@ const CSSComputedStyle* StyleResolver::getComputedStyle(DOMElement* element) {
     
     // Compute parent style first (for inheritance)
     const CSSComputedStyle* parentStyle = nullptr;
-    if (auto* parent = dynamic_cast<DOMElement*>(element->parentNode())) {
+    // The flat tree parent: a slotted child inherits from its slot, a
+    // shadow root's children from the host
+    if (DOMElement* parent = flatTreeParentElement(element)) {
         parentStyle = getComputedStyle(parent);
     }
     
@@ -318,11 +315,7 @@ const CSSComputedStyle* StyleResolver::getPseudoElementStyle(DOMElement* element
     CSSComputedStyle computed = elementStyle ? CSSComputedStyle::inherit(*elementStyle) : CSSComputedStyle();
     computed.display = DisplayValue::Inline;
 
-    std::vector<std::pair<CSSStyleSheet*, StyleOrigin>> sheetPairs;
-    for (const auto& entry : stylesheets_) sheetPairs.push_back({entry.sheet.get(), entry.origin});
-    cascade_.setMatchPseudoElement(pseudo);
-    auto matched = cascade_.collectMatchingRulesWithOrigins(element, sheetPairs);
-    cascade_.setMatchPseudoElement("");
+    auto matched = collectRules(element, pseudo);
     cascade_.sortByCascade(matched);
 
     // Normal declarations, then !important ones in reverse origin order (no
@@ -362,13 +355,71 @@ const CSSComputedStyle* StyleResolver::getPseudoElementStyle(DOMElement* element
 }
 
 std::vector<MatchedRule> StyleResolver::matchedRules(DOMElement* element) {
+    auto rules = collectRules(element, "");
+    cascade_.sortByCascade(rules);
+    return rules;
+}
+
+std::vector<MatchedRule> StyleResolver::collectRules(DOMElement* element, const std::string& pseudo) {
     std::vector<std::pair<CSSStyleSheet*, StyleOrigin>> sheetPairs;
     for (const auto& entry : stylesheets_) {
         sheetPairs.push_back({entry.sheet.get(), entry.origin});
     }
-    auto rules = cascade_.collectMatchingRulesWithOrigins(element, sheetPairs);
-    cascade_.sortByCascade(rules);
-    return rules;
+    cascade_.setMatchPseudoElement(pseudo);
+    auto matched = cascade_.collectMatchingRulesWithOrigins(element, sheetPairs);
+    cascade_.setMatchPseudoElement("");
+
+    // Shadow trees (CSS Scoping §3): the document's author rules stop at a
+    // shadow tree, whose own sheets apply inside it and to its host (:host)
+    DOMShadowRoot* tree = asShadowRoot(treeRoot(element));
+    if (tree) {
+        matched.erase(std::remove_if(matched.begin(), matched.end(),
+                                     [](const MatchedRule& m) { return m.origin == StyleOrigin::Author; }),
+                      matched.end());
+    }
+    if (shadowScopes_.empty()) return matched;
+    auto collectScoped = [&](const DOMShadowRoot* scope, bool forHost) {
+        auto found = shadowScopes_.find(scope);
+        if (found == shadowScopes_.end()) return;
+        ScopedCascade& scoped = *found->second;
+        scoped.cascade.setShadowScope(scope);
+        scoped.cascade.setMatchPseudoElement(pseudo);
+        auto rules = scoped.cascade.collectMatchingRulesWithOrigins(element, scoped.pairs);
+        scoped.cascade.setMatchPseudoElement("");
+        scoped.cascade.setShadowScope(nullptr);
+        for (auto& rule : rules) {
+            // :host rules lose to the document's rules for the host
+            // (outer tree context first), whatever their specificity
+            if (forHost) rule.specificity.a -= 1000;
+            matched.push_back(rule);
+        }
+    };
+    if (tree) collectScoped(tree, false);
+    if (DOMShadowRoot* hosted = element->shadowRoot()) collectScoped(hosted, true);
+    return matched;
+}
+
+void StyleResolver::setShadowStyleSheets(
+        std::vector<std::pair<const DOMShadowRoot*, std::vector<std::shared_ptr<CSSStyleSheet>>>> scopes) {
+    // Trees with the same sheets share one cascade (and its selector index)
+    std::unordered_map<const DOMShadowRoot*, std::shared_ptr<ScopedCascade>> next;
+    std::vector<std::shared_ptr<ScopedCascade>> pool;
+    for (const auto& [root, existing] : shadowScopes_) pool.push_back(existing);
+    for (auto& [root, sheets] : scopes) {
+        if (sheets.empty()) continue;
+        std::shared_ptr<ScopedCascade> match;
+        auto same = [&](const std::shared_ptr<ScopedCascade>& c) { return c && c->sheets == sheets; };
+        for (const auto& [r, c] : next) if (same(c)) { match = c; break; }
+        if (!match) for (const auto& c : pool) if (same(c)) { match = c; break; }
+        if (!match) {
+            match = std::make_shared<ScopedCascade>();
+            match->sheets = sheets;
+            for (const auto& sheet : sheets) match->pairs.push_back({sheet.get(), StyleOrigin::Author});
+        }
+        next[root] = match;
+    }
+    shadowScopes_ = std::move(next);
+    invalidateAll();
 }
 
 bool isInheritedProperty(const std::string& property) {

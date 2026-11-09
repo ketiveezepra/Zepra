@@ -57,6 +57,16 @@ std::vector<DOMElement*> selectDescendants(const DOMNode* root, const std::strin
 /// Elements below `root` that carry every class in a space-separated list
 std::vector<DOMElement*> descendantsWithClasses(const DOMNode* root, const std::string& classNames);
 
+/// Where an element is in the custom element life cycle (HTML §4.13.4):
+/// a name that cannot be a custom element is uncustomized; a valid custom
+/// element name is undefined until its definition upgrades it (custom), or
+/// its constructor threw (failed)
+enum class CustomElementState : uint8_t { Uncustomized, Undefined, Failed, Custom };
+
+/// A valid custom element name: lowercase ASCII letter first, a hyphen,
+/// no uppercase, and not one of the reserved SVG/MathML names (HTML §4.13.2)
+bool isValidCustomElementName(const std::string& name);
+
 /**
  * @brief DOM node types
  */
@@ -200,7 +210,20 @@ public:
 
     std::string nodeName() const override { return "#document-fragment"; }
     std::unique_ptr<DOMNode> cloneNode(bool deep) const override;
+
+    /// A shadow root (DOMShadowRoot) rather than a plain fragment
+    virtual bool isShadowRoot() const { return false; }
+    /// The <template> whose contents this fragment is (template.content);
+    /// null for any other fragment. Template contents are inert: never
+    /// connected, never rendered, their custom elements never upgraded.
+    DOMElement* templateHost() const { return templateHost_; }
+    void setTemplateHost(DOMElement* host) { templateHost_ = host; }
+
+private:
+    DOMElement* templateHost_ = nullptr;
 };
+
+class DOMShadowRoot;
 
 /**
  * @brief DOM element
@@ -208,6 +231,7 @@ public:
 class DOMElement : public DOMNode {
 public:
     explicit DOMElement(const std::string& tagName);
+    ~DOMElement() override;
     
     std::string nodeName() const override { return tagName_; }
     const std::string& tagName() const { return tagName_; }
@@ -244,8 +268,34 @@ public:
     std::string style(const std::string& property) const;
     void setStyle(const std::string& property, const std::string& value);
     
-    // Cloning
+    // Cloning (a <template>'s contents are cloned with it when deep)
     std::unique_ptr<DOMNode> cloneNode(bool deep) const override;
+
+    // Shadow DOM: the shadow root attached to this element (the host), or null
+    DOMShadowRoot* shadowRoot() const { return shadowRoot_.get(); }
+    /// Attaches a new, empty shadow root (the caller checks this element may
+    /// host one and has none yet)
+    DOMShadowRoot* attachShadow(bool open);
+
+    /// A <template>'s contents (made on first use); null for other elements
+    DOMDocumentFragment* templateContent();
+    DOMDocumentFragment* existingTemplateContent() const { return templateContent_.get(); }
+
+    // Custom elements
+    CustomElementState customElementState() const { return ceState_; }
+    /// (a change can change what :defined matches: the page restyles)
+    void setCustomElementState(CustomElementState state) {
+        if (ceState_ == state) return;
+        ceState_ = state;
+        noteDomMutation();
+    }
+    /// :defined - a built-in element or an upgraded custom element
+    bool isDefined() const {
+        return ceState_ == CustomElementState::Uncustomized || ceState_ == CustomElementState::Custom;
+    }
+    /// An element made in the SVG namespace (createElementNS)
+    bool svgNamespace() const { return svgNamespace_; }
+    void setSvgNamespace(bool svg) { svgNamespace_ = svg; }
 
     // Element state (for CSS pseudo-class matching)
     bool hovered() const { return hovered_; }
@@ -299,6 +349,10 @@ private:
     std::unordered_map<std::string, std::string> attributes_;
     std::unordered_map<std::string, std::string> styleMap_;
     std::string dirtyValue_;
+    std::unique_ptr<DOMShadowRoot> shadowRoot_;
+    std::unique_ptr<DOMDocumentFragment> templateContent_;
+    CustomElementState ceState_ = CustomElementState::Uncustomized;
+    bool svgNamespace_ = false;
     bool valueDirty_ = false;
     bool checkedDirty_ = false;
     size_t selectionStart_ = 0;
@@ -315,6 +369,60 @@ private:
     bool checked_  = false;
     bool disabled_ = false;
 };
+
+/**
+ * @brief A shadow root: the root of a shadow tree attached to a host element.
+ * It is a document fragment with no parent; its host owns it. What renders
+ * for the host is the shadow tree, with each <slot> showing the host's
+ * children assigned to it (see flatTreeChildren).
+ */
+class DOMShadowRoot final : public DOMDocumentFragment {
+public:
+    DOMShadowRoot(DOMElement* host, bool open) : host_(host), open_(open) {}
+
+    bool isShadowRoot() const override { return true; }
+    DOMElement* host() const { return host_; }
+    bool isOpen() const { return open_; }
+    /// Shadow roots are not cloned (a plain fragment of their children)
+    std::unique_ptr<DOMNode> cloneNode(bool deep) const override { return DOMDocumentFragment::cloneNode(deep); }
+
+private:
+    DOMElement* host_;
+    bool open_;
+};
+
+// ----------------------------------------------------------------------------
+// Shadow trees and the flat tree (DOM §4.2.2, CSS Scoping §2)
+// ----------------------------------------------------------------------------
+
+/// The HTML serialization of a node's children (innerHTML of an element,
+/// a template's contents, a shadow root or any fragment)
+std::string serializeChildNodes(const DOMNode* node);
+/// Whether any element ever got a shadow root (lets style and layout skip
+/// shadow work on the pages that have none)
+bool shadowRootsExist();
+/// The node as a shadow root, or null
+DOMShadowRoot* asShadowRoot(const DOMNode* node);
+/// The root of the node's tree, stepping from each shadow root to its host
+/// (the document for every connected node)
+DOMNode* shadowIncludingRoot(const DOMNode* node);
+/// The root of the node's own tree (a shadow root for nodes in a shadow tree)
+DOMNode* treeRoot(const DOMNode* node);
+/// The slot name a host's child asks for: its slot attribute (text: "")
+std::string slotNameOf(const DOMNode* node);
+/// The host children a <slot> in a shadow tree gets, in tree order; with
+/// `flatten`, slots among them are replaced by their own assigned nodes
+/// (or fallback children). Empty for a slot outside a shadow tree.
+std::vector<DOMNode*> assignedNodes(const DOMElement* slot, bool flatten);
+/// The slot a host's child is assigned to, or null
+DOMElement* assignedSlot(const DOMNode* node);
+/// The children as rendered: a host's shadow tree instead of its children,
+/// each <slot> of a shadow tree replaced by what is assigned to it, or its
+/// own children when nothing is
+std::vector<DOMNode*> flatTreeChildren(const DOMNode* node);
+/// The element a node inherits style from: its assigned slot, the host
+/// for a shadow root's children, else the parent element
+DOMElement* flatTreeParentElement(const DOMNode* node);
 
 /**
  * @brief DOM document

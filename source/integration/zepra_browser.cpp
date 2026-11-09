@@ -1196,7 +1196,8 @@ static bool g_layoutPending = true;  // the tree was rebuilt and not laid out si
 static void rebuildLayoutTree() {
     g_layoutPainted = false;
     g_layoutPending = true;
-    // Compute styles
+    // Compute styles (shadow trees bring their own <style> sheets)
+    g_cssEngine->syncShadowStyles(g_document.get());
     g_cssEngine->computeStyles();
     // std::cout << "[CSS] Styles computed" << std::endl;
     
@@ -1885,9 +1886,11 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
     std::string target = isAnchor ? element->getAttribute("target") : linkTarget;
     bool nowInLink = inLink || isAnchor;
     
-    // Process child nodes
-    for (size_t i = 0; i < element->childNodes().size(); i++) {
-        DOMNode* child = element->childNodes()[i].get();
+    // Process child nodes, as rendered: a shadow host's shadow tree, with
+    // each <slot> replaced by the host children assigned to it
+    const std::vector<DOMNode*> flatChildren = Zepra::WebCore::flatTreeChildren(element);
+    for (size_t i = 0; i < flatChildren.size(); i++) {
+        DOMNode* child = flatChildren[i];
         // Text boxes belong to this element; element children own their boxes
         auto* childAsElement = dynamic_cast<DOMElement*>(child);
         g_layoutOwner = childAsElement ? childAsElement : element;

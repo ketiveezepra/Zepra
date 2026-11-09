@@ -2011,3 +2011,83 @@ TEST(TextWrap, EachLineIsPaintedAtItsPosition) {
     EXPECT_FLOAT_EQ(g_drawn[0].x, 10);
     EXPECT_FLOAT_EQ(g_drawn[1].y - g_drawn[0].y, 20);
 }
+
+// ---------------------------------------------------------------------------
+// Web components: <template> contents, custom element names, shadow trees
+// ---------------------------------------------------------------------------
+
+TEST(TemplateContents, ParserPutsChildrenInTheContentFragment) {
+    HTMLParser parser;
+    auto doc = parser.parse("<!doctype html><template id=t><p id=inner>x</p><!--c--></template>");
+    DOMElement* t = doc->getElementById("t");
+    ASSERT_NE(t, nullptr);
+    EXPECT_FALSE(t->hasChildNodes());
+    DOMDocumentFragment* content = t->templateContent();
+    ASSERT_NE(content, nullptr);
+    EXPECT_EQ(content->childNodes().size(), 2u);
+    EXPECT_EQ(content->templateHost(), t);
+    EXPECT_EQ(doc->getElementById("inner"), nullptr);  // inert: not in the document
+    EXPECT_EQ(t->innerHTML(), "<p id=\"inner\">x</p><!--c-->");
+    auto clone = t->cloneNode(true);
+    EXPECT_EQ(static_cast<DOMElement*>(clone.get())->templateContent()->childNodes().size(), 2u);
+}
+
+TEST(CustomElementNames, ValidAndReserved) {
+    EXPECT_TRUE(isValidCustomElementName("x-foo"));
+    EXPECT_TRUE(isValidCustomElementName("ytd-app"));
+    EXPECT_FALSE(isValidCustomElementName("div"));
+    EXPECT_FALSE(isValidCustomElementName("X-foo"));
+    EXPECT_FALSE(isValidCustomElementName("1-a"));
+    EXPECT_FALSE(isValidCustomElementName("font-face"));
+    EXPECT_EQ(DOMElement("x-a").customElementState(), CustomElementState::Undefined);
+    EXPECT_EQ(DOMElement("div").customElementState(), CustomElementState::Uncustomized);
+}
+
+TEST(CustomElements, DefinedPseudoClass) {
+    StyledDoc d("<!doctype html><x-a id=a>x</x-a><x-b id=b>y</x-b>", "x-a:not(:defined) { display: none; } :defined { padding-left: 3px; }");
+    EXPECT_EQ(d.style("a")->display, DisplayValue::None);
+    EXPECT_FLOAT_EQ(d.style("b")->paddingLeft.value, 0.0f);
+    d.doc->getElementById("a")->setCustomElementState(CustomElementState::Custom);
+    d.css->invalidate();
+    EXPECT_NE(d.style("a")->display, DisplayValue::None);
+    EXPECT_FLOAT_EQ(d.style("a")->paddingLeft.value, 3.0f);
+}
+
+TEST(ShadowTrees, FlatTreeSlotsAndScopedStyles) {
+    StyledDoc d("<!doctype html><div id=host><span id=named slot=s>n</span><b id=plain>p</b></div>",
+                "span { color: #ff0000; } i { font-size: 30px; } div { border-top: 1px solid #000; }");
+    DOMElement* host = d.doc->getElementById("host");
+    DOMShadowRoot* root = host->attachShadow(true);
+    HTMLParser parser;
+    for (auto& n : parser.parseFragmentNodes(
+             "<style>:host { border-top: 5px solid #000; padding-left: 7px; } i { color: #00ff00; } :host > p { font-size: 12px; } .x span { color: #00ff00; }</style>"
+             "<p id=top class=x><slot name=s></slot></p><i id=em><slot>fallback</slot></i>", "div")) {
+        root->appendChild(std::move(n));
+    }
+    // Flat tree: the shadow tree's children, slots replaced by what they get
+    std::vector<DOMNode*> kids = flatTreeChildren(host);
+    ASSERT_EQ(kids.size(), 3u);  // <style>, <p>, <i>
+    auto* p = static_cast<DOMElement*>(kids[1]);
+    std::vector<DOMNode*> pKids = flatTreeChildren(p);
+    ASSERT_EQ(pKids.size(), 1u);
+    EXPECT_EQ(pKids[0], d.doc->getElementById("named"));
+    std::vector<DOMNode*> iKids = flatTreeChildren(kids[2]);
+    ASSERT_EQ(iKids.size(), 1u);
+    EXPECT_EQ(iKids[0], d.doc->getElementById("plain"));
+    EXPECT_EQ(assignedSlot(d.doc->getElementById("plain"))->getAttribute("name"), "");
+    EXPECT_EQ(flatTreeParentElement(p), host);
+    EXPECT_EQ(shadowIncludingRoot(p), d.doc.get());
+
+    d.css->syncShadowStyles(d.doc.get());
+    d.css->invalidate();
+    DOMElement* em = static_cast<DOMElement*>(kids[2]);
+    // The shadow tree's sheet applies inside; the document's does not
+    EXPECT_EQ(d.css->getComputedStyle(em)->color.g, 0xff);
+    EXPECT_FLOAT_EQ(d.css->getComputedStyle(em)->fontSize, 16.0f);
+    EXPECT_FLOAT_EQ(d.css->getComputedStyle(p)->fontSize, 12.0f);
+    // The document's rules win over :host for the host
+    EXPECT_FLOAT_EQ(d.css->getComputedStyle(host)->borderTopWidth, 1.0f);
+    EXPECT_FLOAT_EQ(d.css->getComputedStyle(host)->paddingLeft.value, 7.0f);
+    // A slotted element keeps the document's rules (shadow rules don't reach it)
+    EXPECT_EQ(d.css->getComputedStyle(d.doc->getElementById("named"))->color.r, 0xff);
+}

@@ -183,6 +183,14 @@ std::pair<DOMNode*, DOMNode*> HTML5TreeConstructor::appropriateInsertionLocation
         }
     }
 
+    // Inside a <template> nodes go to its contents (HTML §13.2.6.1, step 3)
+    if (target->nodeType() == NodeType::Element) {
+        if (DOMDocumentFragment* content = static_cast<DOMElement*>(target)->templateContent()) {
+            target = content;
+            if (before && before->parentNode() != content) before = nullptr;
+        }
+    }
+
     return {target, before};
 }
 
@@ -244,8 +252,11 @@ void HTML5TreeConstructor::insertCharacter(char32_t c) {
 
 void HTML5TreeConstructor::insertComment(const std::string& data, DOMNode* parent) {
     auto comment = doc_->createComment(data);
-    (parent ? parent : currentNode() ? (DOMNode*)currentNode() : (DOMNode*)doc_.get())
-        ->appendChild(std::move(comment));
+    DOMNode* target = parent ? parent : currentNode() ? (DOMNode*)currentNode() : (DOMNode*)doc_.get();
+    if (target->nodeType() == NodeType::Element) {
+        if (DOMDocumentFragment* content = static_cast<DOMElement*>(target)->templateContent()) target = content;
+    }
+    target->appendChild(std::move(comment));
 }
 
 // ============================================================================

@@ -543,6 +543,8 @@ bool CSSCascade::selectorGroupMatches(DOMElement* element, const std::string& se
             // Child combinator — parent must match
             DOMNode* parentNode = current->parentNode();
             current = parentNode ? dynamic_cast<DOMElement*>(parentNode) : nullptr;
+            // From the top of a shadow tree its rules reach the host (:host > x)
+            if (!current && shadowScope_ && parentNode == shadowScope_) current = shadowScope_->host();
             if (!current || !compoundSelectorMatches(current, parts[p])) return false;
         } else if (comb == '+') {
             // Adjacent sibling combinator — previous element sibling must match
@@ -568,6 +570,7 @@ bool CSSCascade::selectorGroupMatches(DOMElement* element, const std::string& se
             // Descendant combinator — any ancestor must match
             DOMNode* parentNode = current->parentNode();
             DOMElement* ancestor = parentNode ? dynamic_cast<DOMElement*>(parentNode) : nullptr;
+            if (!ancestor && shadowScope_ && parentNode == shadowScope_) ancestor = shadowScope_->host();
             bool found = false;
             while (ancestor) {
                 if (compoundSelectorMatches(ancestor, parts[p])) {
@@ -575,8 +578,11 @@ bool CSSCascade::selectorGroupMatches(DOMElement* element, const std::string& se
                     found = true;
                     break;
                 }
+                // The host is the last ancestor a shadow tree's rules see
+                if (shadowScope_ && ancestor == shadowScope_->host()) break;
                 parentNode = ancestor->parentNode();
                 ancestor = parentNode ? dynamic_cast<DOMElement*>(parentNode) : nullptr;
+                if (!ancestor && shadowScope_ && parentNode == shadowScope_) ancestor = shadowScope_->host();
             }
             if (!found) return false;
         }
@@ -603,8 +609,18 @@ static bool knownPseudoClass(const std::string& name) {
     return false;
 }
 
-// Match a compound selector ("div.class#id[attr]") against a single element
+// Seen from its shadow tree, the host is featureless: only :host,
+// :host() and :host-context() match it (CSS Scoping §3.1)
 bool CSSCascade::compoundSelectorMatches(DOMElement* element, const std::string& compound) {
+    if (shadowScope_ && !inHostArgument_ && element && element == shadowScope_->host() &&
+        compound.find(":host") == std::string::npos) {
+        return false;
+    }
+    return compoundMatches(element, compound);
+}
+
+// Match a compound selector ("div.class#id[attr]") against a single element
+bool CSSCascade::compoundMatches(DOMElement* element, const std::string& compound) {
     if (!element || compound.empty()) return false;
     
     // Universal selector
@@ -832,6 +848,24 @@ bool CSSCascade::compoundSelectorMatches(DOMElement* element, const std::string&
                 std::string tag = element->tagName();
                 std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
                 if (tag != "html") return false;
+            } else if (pseudoName == "host" || pseudoName == "host-context") {
+                // The shadow host, only for rules of its own shadow tree
+                if (!shadowScope_ || element != shadowScope_->host()) return false;
+                if (!pseudoArg.empty()) {
+                    bool saved = inHostArgument_;
+                    inHostArgument_ = true;
+                    bool ok = false;
+                    if (pseudoName == "host") {
+                        ok = selectorMatches(element, pseudoArg);
+                    } else {
+                        for (DOMElement* a = element; a && !ok; a = flatTreeParentElement(a)) ok = selectorMatches(a, pseudoArg);
+                    }
+                    inHostArgument_ = saved;
+                    if (!ok) return false;
+                }
+            } else if (pseudoName == "defined") {
+                // Built-in elements and upgraded custom elements
+                if (!element->isDefined()) return false;
             } else if (pseudoName == "empty") {
                 if (element->firstChild()) return false;
             } else if (pseudoName == "not" && !pseudoArg.empty()) {

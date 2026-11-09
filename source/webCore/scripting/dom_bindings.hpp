@@ -33,6 +33,7 @@ namespace Zepra::Runtime { class Object; class Value; class VM; class FunctionCa
 namespace Zepra::WebCore {
 
 class CanvasRegistry;
+class CustomElements;
 class MutationObservers;
 class CSSComputedStyle;
 class NodeWrapper;
@@ -199,12 +200,14 @@ public:
     void adoptDetachedNode(std::unique_ptr<DOMNode> root) { park(std::move(root)); }
 
 private:
+    friend class CustomElements;
     using Args = std::vector<Zepra::Runtime::Value>;
     using Info = Zepra::Runtime::FunctionCallInfo;
 
     Zepra::Runtime::VM* vm_;
     ErrorReporter reportError_;
     std::unique_ptr<MutationObservers> mutationObservers_;
+    std::unique_ptr<CustomElements> customElements_;
     DOMElement* pressed_ = nullptr;
     DOMElement* pointer_ = nullptr;
     FunctionCompiler compileFunction_;
@@ -233,6 +236,10 @@ private:
     Zepra::Runtime::Object* documentProto_ = nullptr;
     Zepra::Runtime::Object* htmlDocumentProto_ = nullptr;
     Zepra::Runtime::Object* fragmentProto_ = nullptr;
+    Zepra::Runtime::Object* shadowRootProto_ = nullptr;
+    Zepra::Runtime::Object* svgElementProto_ = nullptr;
+    /// SVG element interfaces (SVGSVGElement, SVGPathElement, ...) by tag
+    std::unordered_map<std::string, std::pair<std::string, Zepra::Runtime::Object*>> svgInterfaces_;
     Zepra::Runtime::Object* tokenListProto_ = nullptr;
     Zepra::Runtime::Object* eventProto_ = nullptr;
     Zepra::Runtime::Object* mouseEventProto_ = nullptr;
@@ -262,6 +269,13 @@ private:
     void installComputedStyle();
     void installGeometry();
     void installMediaQueries();
+    void installShadowDOM();
+    void installTraversal();
+    /// Documents made by document.implementation.createHTMLDocument()
+    std::vector<std::unique_ptr<DOMDocument>> extraDocuments_;
+    void installSVG();
+    /// The SVG interface of an element in the SVG namespace (or under <svg>), else null
+    const std::pair<std::string, Zepra::Runtime::Object*>* svgInterfaceOf(const DOMElement* element) const;
 
     // window.matchMedia(): the lists made, in creation order
     std::vector<Zepra::Runtime::Object*> mediaQueryLists_;
@@ -282,6 +296,8 @@ private:
     NodeWrapper* wrapperOf(DOMNode* node);
     DOMNode* nodeArg(const Info& info, size_t index, const char* method, bool nullable);
     std::unique_ptr<DOMNode> take(DOMNode* node);
+    /// The wrapper of a new node no tree holds; the wrapper keeps it
+    Zepra::Runtime::Value own(std::unique_ptr<DOMNode> node);
     void park(std::unique_ptr<DOMNode> root);
     void removeAllChildren(DOMNode* parent);
     void insert(DOMNode* parent, DOMNode* child, DOMNode* before, const char* method);
