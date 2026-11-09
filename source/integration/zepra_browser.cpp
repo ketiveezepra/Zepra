@@ -1748,6 +1748,20 @@ static int usedBorderStyle(const CSSComputedStyle& style) {
     return (int)style.borderLeftStyle;
 }
 
+// outline-* on a box (an outline style of none or hidden draws nothing;
+// auto, a focus ring, is drawn solid)
+static void setOutline(LayoutBox* box, const CSSComputedStyle& style) {
+    Zepra::WebCore::BorderStyle b = Zepra::WebCore::BorderStyle::Solid;
+    if (style.outlineStyle != "auto" && !Zepra::WebCore::parseBorderStyle(style.outlineStyle, b)) return;
+    // none and hidden (X11 defines None as a macro here)
+    if (b == Zepra::WebCore::BorderStyle{} || b == Zepra::WebCore::BorderStyle::Hidden) return;
+    if (style.outlineWidth <= 0 || style.outlineColor.a == 0) return;
+    box->outlineWidth = style.outlineWidth;
+    box->outlineOffset = style.outlineOffset;
+    box->outlineColor = cssColorToRGB(style.outlineColor);
+    box->outlineStyle = (int)b;
+}
+
 // Table display values → table box types (CSS 2.1 §17.2)
 static void applyTableDisplay(LayoutBox* box, DOMElement* element, const std::string& tag,
                               const CSSComputedStyle* style) {
@@ -2662,6 +2676,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     }
                     blockBox->borderRadius = childStyle->borderTopLeftRadius;
                     blockBox->blendMode = (uint8_t)ZepraBrowser::parseBlendMode(childStyle->mixBlendMode);
+                    setOutline(blockBox, *childStyle);
                     blockBox->borderRadiusPercent = childStyle->borderTopLeftRadiusPercent;
                     
                     // Visual
@@ -2825,6 +2840,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     }
                     inlineBox->borderRadius = childStyle->borderTopLeftRadius;
                     inlineBox->blendMode = (uint8_t)ZepraBrowser::parseBlendMode(childStyle->mixBlendMode);
+                    setOutline(inlineBox, *childStyle);
                     inlineBox->borderRadiusPercent = childStyle->borderTopLeftRadiusPercent;
                     inlineBox->opacity = childStyle->opacity;
                     inlineBox->visibilityHidden = (childStyle->visibility == Visibility::Hidden);

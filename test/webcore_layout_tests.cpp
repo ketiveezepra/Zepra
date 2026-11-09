@@ -789,6 +789,42 @@ TEST(BlendModes, SeparableAndNonSeparable) {
 }
 
 // ---------------------------------------------------------------------------
+// Outlines
+// ---------------------------------------------------------------------------
+
+struct RectCall {
+    float x, y, w, h;
+    uint32_t color;
+};
+std::vector<RectCall> g_outlineRects;
+
+TEST(Outlines, DrawnOutsideTheBorderBoxAtTheirOffset) {
+    g_outlineRects.clear();
+    ZepraBrowser::setLayoutCallbacks([](float x, float y, float w, float h, uint32_t c) { g_outlineRects.push_back({x, y, w, h, c}); },
+                                     [](float, float, float, float, uint32_t, float) {}, nullptr, nullptr, nullptr,
+                                     nullptr);
+    LayoutBox box;
+    box.x = 10;
+    box.y = 20;
+    box.width = 100;
+    box.height = 50;
+    box.outlineWidth = 2;
+    box.outlineOffset = 3;
+    box.outlineColor = 0xFF00FF;
+    ZepraBrowser::paintBox(box, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ASSERT_EQ(g_outlineRects.size(), 4u);
+    // Top side: 5px out from the box on every side, 2px thick
+    EXPECT_FLOAT_EQ(g_outlineRects[0].x, 5);
+    EXPECT_FLOAT_EQ(g_outlineRects[0].y, 15);
+    EXPECT_FLOAT_EQ(g_outlineRects[0].w, 110);
+    EXPECT_FLOAT_EQ(g_outlineRects[0].h, 2);
+    EXPECT_EQ(g_outlineRects[0].color, 0xFF00FFu);
+    // Right side
+    EXPECT_FLOAT_EQ(g_outlineRects[3].x, 113);
+}
+
+// ---------------------------------------------------------------------------
 // Percentage border radius
 // ---------------------------------------------------------------------------
 
