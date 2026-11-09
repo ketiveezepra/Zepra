@@ -998,6 +998,51 @@ TEST(Backgrounds, PercentRadiusResolvesAgainstTheBox) {
 }
 
 // ---------------------------------------------------------------------------
+// Rounded overflow clips
+// ---------------------------------------------------------------------------
+
+std::vector<std::array<float, 5>> g_savedCorners;
+int g_restoredCorners = 0;
+
+TEST(RoundedClip, ContentIsClippedToTheInnerCurve) {
+    g_savedCorners.clear();
+    g_restoredCorners = 0;
+    ZepraBrowser::setLayoutCallbacks([](float, float, float, float, uint32_t) {},
+                                     [](float, float, float, float, uint32_t, float) {}, nullptr, nullptr, nullptr,
+                                     nullptr);
+    ZepraBrowser::setRoundedClipCallbacks(
+        [](float x, float y, float w, float h, float r) {
+            g_savedCorners.push_back({x, y, w, h, r});
+            return (int)g_savedCorners.size() - 1;
+        },
+        [](int) { g_restoredCorners++; });
+    StyledDoc d("<!doctype html><div id=clip></div>");
+    LayoutBox box;
+    box.domElement = d.doc->getElementById("clip");
+    box.width = 120;
+    box.height = 80;
+    box.borderRadius = 10;
+    box.borderTop = box.borderRight = box.borderBottom = box.borderLeft = 2;
+    box.overflowX = box.overflowY = ZepraBrowser::kOverflowHidden;
+    box.overflowHidden = true;
+    LayoutBox& inner = addBox(box, LayoutType::Block);
+    inner.x = 2;
+    inner.y = 2;
+    inner.width = 116;
+    inner.height = 76;
+    inner.hasBgColor = true;
+    ZepraBrowser::paintBox(box, 0, 0, 10000, 0);
+    ZepraBrowser::setRoundedClipCallbacks(nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ASSERT_EQ(g_savedCorners.size(), 1u);
+    EXPECT_EQ(g_restoredCorners, 1);
+    // The padding box, with the radius less the border width
+    EXPECT_FLOAT_EQ(g_savedCorners[0][0], 2);
+    EXPECT_FLOAT_EQ(g_savedCorners[0][2], 116);
+    EXPECT_FLOAT_EQ(g_savedCorners[0][4], 8);
+}
+
+// ---------------------------------------------------------------------------
 // Serialization (inline <svg> is drawn from its outerHTML)
 // ---------------------------------------------------------------------------
 
