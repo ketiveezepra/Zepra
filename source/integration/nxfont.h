@@ -127,7 +127,10 @@ public:
     
     // Draw text at position with color
     // Returns width of rendered text
-    float drawText(const std::string& text, float x, float y, uint8_t red, uint8_t green, uint8_t blue) {
+    /// `letterSpacing` is added after every character, `wordSpacing` after
+    /// every space (CSS Text 3 §8)
+    float drawText(const std::string& text, float x, float y, uint8_t red, uint8_t green, uint8_t blue,
+                   float letterSpacing = 0, float wordSpacing = 0) {
         if (!face_) return 0;
         
         // Save OpenGL state
@@ -142,7 +145,7 @@ public:
         float startX = x;
         
         eachGlyph(text, [&](const Glyph* found) {
-            if (!found) { x += spaceAdvance(); return; }
+            if (!found) { x += spaceAdvance() + letterSpacing + wordSpacing; return; }
             const Glyph& glyph = *found;
             
             if (glyph.textureId && glyph.width > 0 && glyph.height > 0) {
@@ -175,7 +178,7 @@ public:
                 glEnd();
             }
             
-            x += glyph.advance;
+            x += glyph.advance + letterSpacing;
         });
         
         // Restore OpenGL state
@@ -186,7 +189,6 @@ public:
         return x - startX;
     }
     
-    // Measure text width
     /// Calls `f(glyph)` for each glyph of `text` in order (nullptr for a space),
     /// emoji sequences shaped into their ligatures
     template <typename F>
@@ -207,9 +209,12 @@ public:
         }
     }
 
-    float measureText(const std::string& text) {
+    // Measure text width, with the same spacing as drawText
+    float measureText(const std::string& text, float letterSpacing = 0, float wordSpacing = 0) {
         float width = 0;
-        eachGlyph(text, [&](const Glyph* glyph) { width += glyph ? glyph->advance : spaceAdvance(); });
+        eachGlyph(text, [&](const Glyph* glyph) {
+            width += glyph ? glyph->advance + letterSpacing : spaceAdvance() + letterSpacing + wordSpacing;
+        });
         return width;
     }
     

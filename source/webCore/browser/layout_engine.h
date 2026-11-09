@@ -145,6 +145,8 @@ struct LayoutBox {
     bool italic = false;
     std::string fontFamily;      // CSS font-family list ("" = the system font)
     int fontWeight = 400;        // 100..900; bold is set too at 600 and above
+    float letterSpacing = 0;     // px added after each character (text runs)
+    float wordSpacing = 0;       // px added to each space
     bool hasBgColor = false;
     
     // Outline (CSS UI 4 §5): drawn outside the border box, over the content
