@@ -715,6 +715,9 @@ TEST(GradientRaster, OnlyGradientLayersAreDrawn) {
     ZepraBrowser::gradientPixelSize(4000, 4000, w, h);
     EXPECT_LE((double)w * h, 2.6e6);
     EXPECT_EQ(w, h);
+}
+
+// ---------------------------------------------------------------------------
 // Background colour alpha
 // ---------------------------------------------------------------------------
 
@@ -756,6 +759,31 @@ TEST(Backgrounds, ColorAlphaAndOpacityReachTheFill) {
     auto both = paintFilledBox(128, 0.5f);
     ASSERT_EQ(both.size(), 1u);
     EXPECT_EQ(both[0].alpha, 64);
+}
+
+// ---------------------------------------------------------------------------
+// Percentage border radius
+// ---------------------------------------------------------------------------
+
+float g_paintedRadius = -1;
+
+TEST(Backgrounds, PercentRadiusResolvesAgainstTheBox) {
+    g_paintedRadius = -1;
+    ZepraBrowser::setLayoutCallbacks([](float, float, float, float, uint32_t) {},
+                                     [](float, float, float, float, uint32_t, float) {}, nullptr, nullptr, nullptr,
+                                     nullptr);
+    ZepraBrowser::setLayoutCallbacks2(
+        [](float, float, float, float, float r, uint32_t, uint8_t) { g_paintedRadius = r; }, nullptr);
+    LayoutBox box;
+    box.width = 56;
+    box.height = 40;
+    box.hasBgColor = true;
+    box.borderRadiusPercent = 50;
+    ZepraBrowser::paintBox(box, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setLayoutCallbacks2(nullptr, nullptr);
+    // Corners are circular here: half the smaller side
+    EXPECT_FLOAT_EQ(g_paintedRadius, 20);
 }
 
 // ---------------------------------------------------------------------------
