@@ -302,6 +302,8 @@ TEST(ComputedStyle, BorderStyleAndUnstyledWidths) {
     EXPECT_EQ(page.eval("box.removeAttribute('style'); box.style.border = 'solid'; cs.borderLeftWidth"), "3px");
     EXPECT_EQ(page.eval("box.style.borderLeftStyle = 'none'; [cs.borderLeftWidth, cs.borderRightWidth].join(' ')"),
               "0px 3px");
+}
+
 TEST(ComputedStyle, InsetSetsAllFourOffsets) {
     Page page(kPage);
     page.eval("var box = document.getElementById('box'); var cs = getComputedStyle(box);"
@@ -316,4 +318,11 @@ TEST(ComputedStyle, InsetSetsAllFourOffsets) {
     EXPECT_EQ(offsets("1px 2px 3px 4px"), "1px 2px 3px 4px");
     EXPECT_EQ(page.eval("box.style.inset = ''; box.style.insetInline = '5px 6px';"
                         "[cs.left, cs.right].join(' ')"), "5px 6px");
+}
+
+TEST(ComputedStyle, PercentageBorderRadiusIsKept) {
+    Page page(kPage);
+    page.eval("var box = document.getElementById('box'); var cs = getComputedStyle(box)");
+    EXPECT_EQ(page.eval("box.style.borderRadius = '50%'; cs.borderRadius"), "50%");
+    EXPECT_EQ(page.eval("box.style.borderRadius = '8px'; cs.borderRadius"), "8px");
 }

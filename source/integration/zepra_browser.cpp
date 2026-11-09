@@ -2662,6 +2662,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         blockBox->borderStyle = usedBorderStyle(*childStyle);
                     }
                     blockBox->borderRadius = childStyle->borderTopLeftRadius;
+                    blockBox->borderRadiusPercent = childStyle->borderTopLeftRadiusPercent;
                     
                     // Visual
                     blockBox->opacity = childStyle->opacity;
@@ -2823,6 +2824,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         inlineBox->borderStyle = usedBorderStyle(*childStyle);
                     }
                     inlineBox->borderRadius = childStyle->borderTopLeftRadius;
+                    inlineBox->borderRadiusPercent = childStyle->borderTopLeftRadiusPercent;
                     inlineBox->opacity = childStyle->opacity;
                     inlineBox->visibilityHidden = (childStyle->visibility == Visibility::Hidden);
                 }
