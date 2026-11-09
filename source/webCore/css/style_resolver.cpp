@@ -165,6 +165,16 @@ void StyleResolver::addStyleSheet(std::shared_ptr<CSSStyleSheet> sheet, StyleOri
     cascade_.invalidateIndex();
 }
 
+void StyleResolver::setStyleSheets(std::vector<StyleSheetEntry> sheets) {
+    registered_.clear();
+    for (const auto& entry : sheets) {
+        if (!entry.sheet) continue;
+        for (const auto& [name, reg] : entry.sheet->propertyRegistrations()) registered_[name] = reg;
+    }
+    stylesheets_ = std::move(sheets);
+    cascade_.invalidateIndex();
+}
+
 CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSComputedStyle* parentStyle) {
     CSSComputedStyle computed;
     

@@ -96,6 +96,8 @@ std::unique_ptr<DOMDocument> HTML5TreeConstructor::construct(const std::string& 
     templateInsertionModes_.clear();
     pendingTableChars_.clear();
     pendingTableCharsHaveNonWhitespace_ = false;
+    pendingTextNode_ = nullptr;
+    pendingText_.clear();
     framesetOk_ = true;
     quirksMode_ = false;
 
@@ -106,6 +108,7 @@ std::unique_ptr<DOMDocument> HTML5TreeConstructor::construct(const std::string& 
         processToken(std::move(token));
     });
     tok.tokenize();
+    flushPendingText();
 
     tokenizer_ = nullptr;
     doc_->setQuirksMode(quirksMode_);
@@ -117,6 +120,8 @@ std::unique_ptr<DOMDocument> HTML5TreeConstructor::construct(const std::string& 
 // ============================================================================
 
 void HTML5TreeConstructor::processToken(HTML5Token tok) {
+    // Only character tokens add to the text being gathered
+    if (tok.type != HTML5TokenType::Character) flushPendingText();
     switch (mode_) {
     case InsertionMode::Initial:           processInitial(tok); break;
     case InsertionMode::BeforeHTML:        processBeforeHTML(tok); break;
@@ -224,21 +229,35 @@ void HTML5TreeConstructor::insertCharacters(const std::string& text) {
     if (text.empty()) return;
     auto [target, before] = appropriateInsertionLocation();
 
-    // Merge with last text node if possible
+    // Merge with last text node if possible. Characters come one token at
+    // a time: they gather in pendingText_ and go into the node at once
+    // (appending each to the node copied its whole text every time, which
+    // made a 700 KB inline script take seconds)
     if (!before) {
         auto& children = target->childNodes();
         if (!children.empty() && children.back()->nodeType() == NodeType::Text) {
             DOMText* textNode = static_cast<DOMText*>(children.back().get());
-            textNode->appendData(text);
+            if (textNode != pendingTextNode_) {
+                flushPendingText();
+                pendingTextNode_ = textNode;
+            }
+            pendingText_ += text;
             return;
         }
     }
+    flushPendingText();
 
     auto textNode = doc_->createTextNode(text);
     if (before)
         target->insertBefore(std::move(textNode), before);
     else
         target->appendChild(std::move(textNode));
+}
+
+void HTML5TreeConstructor::flushPendingText() {
+    if (pendingTextNode_ && !pendingText_.empty()) pendingTextNode_->appendData(pendingText_);
+    pendingTextNode_ = nullptr;
+    pendingText_.clear();
 }
 
 void HTML5TreeConstructor::insertCharacter(char32_t c) {

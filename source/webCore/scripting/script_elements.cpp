@@ -7,10 +7,13 @@
  *
  * Every script an element carries runs through executeScriptElement(), from
  * one of three places:
- *  - prepareScript(), right away: inline classic scripts, and the parser's
- *    blocking external scripts (fetched, waited for, run)
- *  - runDeferredScripts(), when the parser is done: defer scripts and
- *    parser-inserted modules, in document order
+ *  - prepareScript(), right away: inline classic scripts
+ *  - the parser's driver: the parser's blocking external scripts, once
+ *    fetched, before the next parser script; then, when the parser is done,
+ *    defer scripts and parser-inserted modules, in document order. The
+ *    browser drives it with advanceParsing() from its event loop, which
+ *    returns instead of waiting for a source (the page paints and takes
+ *    input meanwhile); runParserScripts()/runDeferredScripts() block instead
  *  - runReadyScripts(), from the timer pump: async scripts and the ones other
  *    scripts insert, each as a task of its own once its source arrived
  *    (those that set async = false in insertion order, the rest as they come)
@@ -63,6 +66,7 @@ struct PendingScript {
     std::string source;
     std::string error;
     uint32_t firstLine = 1;
+    std::chrono::steady_clock::time_point prepared = std::chrono::steady_clock::now();
 };
 
 namespace {
@@ -189,8 +193,7 @@ void ScriptContext::prepareScript(DOMElement* element, bool parserInserted, uint
     } else if (parserInserted && !async) {
         // Parser-blocking: the parser is not interleaved with scripts yet, so
         // "blocking" means it runs before the next script the walk reaches
-        waitForScript(*script, kScriptWaitMs);
-        runTask([&] { executeScriptElement(*script); }, "script");
+        parserBlockingScript_ = script;
     } else if (!async && !element->scriptForceAsync()) {
         orderedScripts_.push_back(script);
     } else {
@@ -198,7 +201,11 @@ void ScriptContext::prepareScript(DOMElement* element, bool parserInserted, uint
     }
 }
 
-void ScriptContext::runParserScripts(const std::function<uint32_t(DOMElement*)>& firstLineOf) {
+void ScriptContext::collectParserScripts(std::function<uint32_t(DOMElement*)> firstLineOf) {
+    parserScriptCount_ = parserScriptNext_ = 0;
+    parserBlockingScript_.reset();
+    parserFirstLine_ = std::move(firstLineOf);
+    parsePhase_ = ParsePhase::Idle;
     if (!document_ || !vm_ || !domBindings_ || !pendingScriptStore_) return;
     // The scripts the parser made, in document order. Taken before any of
     // them runs: a script that removes itself (Cloudflare's email-decode,
@@ -219,14 +226,87 @@ void ScriptContext::runParserScripts(const std::function<uint32_t(DOMElement*)>&
     for (size_t i = 0; i < scripts.size(); i++) {
         pendingScriptStore_->set("p" + std::to_string(i), domBindings_->wrap(scripts[i]));
     }
-    for (size_t i = 0; i < scripts.size(); i++) {
-        const std::string key = "p" + std::to_string(i);
+    parserScriptCount_ = scripts.size();
+    parsePhase_ = ParsePhase::ParserScripts;
+}
+
+bool ScriptContext::scriptSourceReady(PendingScript& script, bool wait) {
+    collectArrivedScripts();
+    if (script.ready) return true;
+    if (wait) {
+        waitForScript(script, kScriptWaitMs);
+        return true;
+    }
+    if (std::chrono::steady_clock::now() - script.prepared < std::chrono::milliseconds(kScriptWaitMs)) return false;
+    // Given up on, as the blocking wait would: it gets its error event
+    fetchingScripts_.erase(script.id);
+    script.ready = script.failed = true;
+    script.error = "timed out";
+    return true;
+}
+
+bool ScriptContext::advanceParserScripts(bool wait, std::chrono::steady_clock::time_point deadline) {
+    if (!pendingScriptStore_) return true;
+    auto pastDeadline = [&] { return !wait && std::chrono::steady_clock::now() >= deadline; };
+    for (;;) {
+        if (std::shared_ptr<PendingScript> blocking = parserBlockingScript_) {
+            if (!scriptSourceReady(*blocking, wait)) return false;
+            parserBlockingScript_.reset();
+            runTask([&] { executeScriptElement(*blocking); }, "script");
+            if (pastDeadline()) return parserScriptNext_ >= parserScriptCount_;
+            continue;
+        }
+        if (parserScriptNext_ >= parserScriptCount_) return true;
+        const std::string key = "p" + std::to_string(parserScriptNext_++);
         Value wrapper = pendingScriptStore_->get(key);
         pendingScriptStore_->deleteProperty(key);
         auto* element = wrapper.isObject() ? static_cast<DOMElement*>(DOMBindings::nodeOf(wrapper.asObject())) : nullptr;
         // One an earlier script removed does not run (prepareScript checks)
-        if (element) prepareScript(element, true, firstLineOf ? firstLineOf(element) : 1);
+        if (!element) continue;
+        prepareScript(element, true, parserFirstLine_ ? parserFirstLine_(element) : 1);
+        if (!parserBlockingScript_ && pastDeadline()) return parserScriptNext_ >= parserScriptCount_;
     }
+}
+
+bool ScriptContext::advanceDeferredScripts(bool wait, std::chrono::steady_clock::time_point deadline) {
+    // In order; a defer script cannot add another one (only the parser can)
+    while (!deferredScripts_.empty()) {
+        std::shared_ptr<PendingScript> script = deferredScripts_.front();
+        if (script->external && !scriptSourceReady(*script, wait)) return false;
+        deferredScripts_.erase(deferredScripts_.begin());
+        runTask([&] { executeScriptElement(*script); }, "script");
+        if (!wait && std::chrono::steady_clock::now() >= deadline) return deferredScripts_.empty();
+    }
+    return true;
+}
+
+void ScriptContext::runParserScripts(const std::function<uint32_t(DOMElement*)>& firstLineOf) {
+    collectParserScripts(firstLineOf);
+    advanceParserScripts(true, {});
+    parsePhase_ = ParsePhase::Idle;
+}
+
+void ScriptContext::beginParsing(std::function<uint32_t(DOMElement*)> firstLineOf) {
+    collectParserScripts(std::move(firstLineOf));
+}
+
+bool ScriptContext::advanceParsing(std::chrono::steady_clock::time_point deadline) {
+    if (parsePhase_ == ParsePhase::ParserScripts) {
+        if (!advanceParserScripts(false, deadline)) return false;
+        parsePhase_ = ParsePhase::DeferredScripts;
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+    }
+    if (parsePhase_ == ParsePhase::DeferredScripts) {
+        if (!advanceDeferredScripts(false, deadline)) return false;
+        // Parsing is over: DOMContentLoaded; then the async and
+        // script-inserted scripts that already arrived. The window's load
+        // event waits for the rest (runReadyScripts runs them as they come).
+        parsePhase_ = ParsePhase::Done;
+        fireDOMContentLoaded();
+        runReadyScripts();
+        fireLoadEvent();
+    }
+    return true;
 }
 
 void ScriptContext::startScriptFetch(const std::shared_ptr<PendingScript>& script) {
@@ -326,14 +406,7 @@ void ScriptContext::executeScriptElement(PendingScript& script) {
 }
 
 void ScriptContext::runDeferredScripts() {
-    // Runs in order; a defer script cannot add another one (only the parser can)
-    std::vector<std::shared_ptr<PendingScript>> deferred;
-    deferred.swap(deferredScripts_);
-    for (auto& script : deferred) {
-        collectArrivedScripts();
-        if (script->external) waitForScript(*script, kScriptWaitMs);
-        runTask([&] { executeScriptElement(*script); }, "script");
-    }
+    advanceDeferredScripts(true, {});
 }
 
 void ScriptContext::runReadyScripts() {
@@ -362,6 +435,11 @@ void ScriptContext::runReadyScripts() {
         loadEventDelayed_ = false;
         fireLoadEventNow();
     }
+}
+
+void ScriptContext::fireElementEvent(DOMElement* element, const std::string& type) {
+    if (!element || !vm_ || !domBindings_) return;
+    runTask([&] { domBindings_->fireEvent(element, type, false, false); }, "event listener");
 }
 
 size_t ScriptContext::pendingScriptCount() const {

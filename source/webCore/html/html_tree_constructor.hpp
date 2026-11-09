@@ -173,6 +173,8 @@ private:
      */
     void insertCharacter(char32_t c);
     void insertCharacters(const std::string& text);
+    /// Puts the characters gathered for the last text node into it
+    void flushPendingText();
 
     /**
      * @brief Insert comment
@@ -265,6 +267,8 @@ private:
 
     // Table-related accumulated character data
     std::string pendingTableChars_;
+    DOMText* pendingTextNode_ = nullptr;   // the text node characters are gathered for
+    std::string pendingText_;
     bool pendingTableCharsHaveNonWhitespace_ = false;
 
     // Template insertion mode stack

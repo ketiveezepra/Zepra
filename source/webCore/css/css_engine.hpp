@@ -238,6 +238,9 @@ public:
         StyleOrigin origin;
     };
     const std::vector<StyleSheetEntry>& styleSheets() const { return stylesheets_; }
+    /// Replaces every sheet (a document's sheets changed: <style>/<link>
+    /// added, removed or edited), keeping the parsed sheets given
+    void setStyleSheets(std::vector<StyleSheetEntry> sheets);
 
     /// The style rules that match an element, sorted by the cascade (lowest priority first)
     std::vector<MatchedRule> matchedRules(DOMElement* element);

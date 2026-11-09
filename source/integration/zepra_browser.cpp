@@ -33,6 +33,8 @@
 #include <mutex>
 #include <optional>
 #include <future>
+#include <condition_variable>
+#include <unordered_set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -65,6 +67,7 @@
 #include "browser/dom.hpp"
 #include "css/css_engine.hpp"
 #include "rendering/web_font_loader.hpp"
+#include "rendering/web_font_decoder.hpp"
 #include "css/ua_stylesheet.h"
 #include "css/media_query.hpp"
 #include "scripting/script_context.hpp"
@@ -74,6 +77,9 @@
 #include "dom/form_controls.hpp"
 #include "page_keys.hpp"
 #include "select_popup.hpp"
+#include "load_trace.hpp"
+#include "fetch_pool.hpp"
+#include "page_styles.hpp"
 #include "nxgfx/canvas2d/canvas_context.h"
 #include "nxgfx/webgl/webgl_context.h"
 using namespace Zepra::WebCore;
@@ -749,48 +755,113 @@ HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& optio
 // ----------------------------------------------------------------------------
 // Sub-resource prefetch
 // ----------------------------------------------------------------------------
-// The parser loads stylesheets and scripts one after another, in document
-// order. Before it starts, every one of them is requested at once on its own
-// thread (they share the keep-alive pool), so the page waits for the slowest
-// request instead of the sum of all of them. httpGet() picks up the result.
+// As soon as a page's HTML is parsed, every stylesheet and script it names
+// is requested at once (a preload scan), on the fetch pool: at most 6
+// requests per host and 16 in all at a time, sheets first. The loads that
+// need them later pick the answer up, done or still under way:
+// fetchAsync() without waiting, httpGet() waiting (@import is preloaded so
+// that the UI thread does not).
+struct Prefetch {
+    bool done = false;
+    bool cancelled = false;   // a navigation dropped it before it started
+    HttpResponse response;
+    std::function<void(HttpResponse)> taker;   // fetchAsync took it before it was done
+};
 static std::mutex g_prefetchMutex;
-static std::unordered_map<std::string, std::shared_future<HttpResponse>> g_prefetched;
-static constexpr size_t kMaxPrefetchThreads = 12;
+static std::condition_variable g_prefetchDone;
+static std::unordered_map<std::string, std::shared_ptr<Prefetch>> g_prefetched;
 
 HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& options);
 
-static void prefetchResource(const std::string& url, Zepra::WebCore::ResourceKind kind, int tabId) {
-    std::lock_guard<std::mutex> lock(g_prefetchMutex);
-    if (g_prefetched.size() >= kMaxPrefetchThreads || g_prefetched.count(url)) return;
+// The pool for page subresources (never destroyed: its threads may be in a
+// request when the browser exits)
+static ZepraBrowser::FetchPool& fetchPool() {
+    static ZepraBrowser::FetchPool* pool = new ZepraBrowser::FetchPool(16, 6);
+    return *pool;
+}
+
+static void prefetchResource(const std::string& url, Zepra::WebCore::ResourceKind kind, int tabId,
+                             ZepraBrowser::FetchPool::Priority priority = ZepraBrowser::FetchPool::Priority::Normal) {
+    auto entry = std::make_shared<Prefetch>();
+    {
+        std::lock_guard<std::mutex> lock(g_prefetchMutex);
+        if (g_prefetched.count(url)) return;
+        g_prefetched[url] = entry;
+    }
     HttpRequestOptions options;
     options.kind = kind;
     options.tabId = tabId;
-    // A promise, not std::async: a future from std::async blocks when its last
-    // reference goes, which would make dropPrefetches() wait for stale downloads
-    std::promise<HttpResponse> promise;
-    g_prefetched[url] = promise.get_future().share();
-    std::thread([url, options, promise = std::move(promise)]() mutable {
-        promise.set_value(httpRequest(url, options));
-    }).detach();
+    fetchPool().post(ZepraBrowser::FetchPool::hostOf(url), priority, [url, options, entry] {
+        bool skip;
+        {
+            std::lock_guard<std::mutex> lock(g_prefetchMutex);
+            skip = entry->cancelled && !entry->taker;
+            if (skip) entry->done = true;
+        }
+        if (skip) {
+            g_prefetchDone.notify_all();
+            return;
+        }
+        HttpResponse response = httpRequest(url, options);
+        std::function<void(HttpResponse)> taker;
+        {
+            std::lock_guard<std::mutex> lock(g_prefetchMutex);
+            taker = std::move(entry->taker);
+            entry->taker = nullptr;
+            if (!taker) entry->response = std::move(response);
+            entry->done = true;
+        }
+        g_prefetchDone.notify_all();
+        if (taker) taker(std::move(response));
+    });
 }
 
+// Takes a preloaded answer, waiting for it if it is still on its way
 static bool takePrefetched(const std::string& url, HttpResponse& out) {
-    std::shared_future<HttpResponse> future;
-    {
-        std::lock_guard<std::mutex> lock(g_prefetchMutex);
-        auto it = g_prefetched.find(url);
-        if (it == g_prefetched.end()) return false;
-        future = it->second;
-        g_prefetched.erase(it);
-    }
-    out = future.get();
+    std::unique_lock<std::mutex> lock(g_prefetchMutex);
+    auto it = g_prefetched.find(url);
+    if (it == g_prefetched.end()) return false;
+    std::shared_ptr<Prefetch> entry = it->second;
+    g_prefetched.erase(it);
+    g_prefetchDone.wait(lock, [&] { return entry->done; });
+    out = std::move(entry->response);
     return true;
 }
 
-// Forgets prefetches a navigation left behind (their threads finish on their own)
+// Forgets prefetches a navigation left behind: the ones not started yet
+// are skipped, the others finish on their own
 static void dropPrefetches() {
     std::lock_guard<std::mutex> lock(g_prefetchMutex);
+    for (auto& [url, entry] : g_prefetched) entry->cancelled = true;
     g_prefetched.clear();
+}
+
+// Fetches `url` on the fetch pool (or takes its preload) and calls `done`
+// with the answer, on a fetch thread or, for a preload that is done, now
+static void fetchAsync(const std::string& url, Zepra::WebCore::ResourceKind kind, int tabId,
+                       ZepraBrowser::FetchPool::Priority priority, std::function<void(HttpResponse)> done) {
+    std::shared_ptr<Prefetch> entry;
+    {
+        std::lock_guard<std::mutex> lock(g_prefetchMutex);
+        auto it = g_prefetched.find(url);
+        if (it != g_prefetched.end()) {
+            entry = it->second;
+            g_prefetched.erase(it);
+            if (!entry->done) {
+                entry->taker = std::move(done);
+                return;
+            }
+        }
+    }
+    if (entry) {
+        done(std::move(entry->response));
+        return;
+    }
+    HttpRequestOptions options;
+    options.kind = kind;
+    options.tabId = tabId;
+    fetchPool().post(ZepraBrowser::FetchPool::hostOf(url), priority,
+                     [url, options, done = std::move(done)] { done(httpRequest(url, options)); });
 }
 
 HttpResponse httpGet(const std::string& url,
@@ -1107,6 +1178,8 @@ std::string resolveUrl(const std::string& base, const std::string& href) {
 
 // The page's @font-face fonts, downloaded in parallel before the first
 // layout so text is laid out once, in its real font (font-display: block)
+static const std::unordered_map<std::string, HttpResponse>* pageFontDownloads();
+
 static void loadPageWebFonts() {
     auto& fonts = Zepra::Fonts::FontManager::instance();
     fonts.clearWebFonts();
@@ -1131,9 +1204,23 @@ static void loadPageWebFonts() {
     }
 
     int tabId = g_activeTabId;
-    auto fetch = [tabId](const std::vector<std::string>& urls) {
+    // pumpPageFonts() downloaded the fonts in the background; a source it
+    // did not foresee (a face's fallback src) is fetched here
+    const std::unordered_map<std::string, HttpResponse>* downloaded = pageFontDownloads();
+    auto fetch = [tabId, downloaded](const std::vector<std::string>& urls) {
         std::vector<std::future<HttpResponse>> inFlight;
         for (const auto& url : urls) {
+            const HttpResponse* have = nullptr;
+            if (downloaded) {
+                auto found = downloaded->find(url);
+                if (found != downloaded->end()) have = &found->second;
+            }
+            if (have) {
+                std::promise<HttpResponse> ready;
+                ready.set_value(*have);
+                inFlight.push_back(ready.get_future());
+                continue;
+            }
             inFlight.push_back(std::async(std::launch::async, [url, tabId] {
                 HttpRequestOptions options;
                 options.kind = Zepra::WebCore::ResourceKind::Font;
@@ -1193,9 +1280,13 @@ static uint64_t g_layoutDomVersion = 0;
 static uint64_t g_layoutPass = 0;
 static bool g_layoutPending = true;  // the tree was rebuilt and not laid out since
 
+// The page's sheets follow its <style>/<link> elements (defined with the loader)
+static void syncPageStyleSheets();
+
 static void rebuildLayoutTree() {
     g_layoutPainted = false;
     g_layoutPending = true;
+    syncPageStyleSheets();
     // Compute styles (shadow trees bring their own <style> sheets)
     g_cssEngine->syncShadowStyles(g_document.get());
     g_cssEngine->computeStyles();
@@ -1364,52 +1455,368 @@ static Zepra::WebCore::PageGeometry* pageGeometry();
 // Media queries match the page viewport's size (defined below)
 static void updateMediaViewport();
 
+// ============================================================================
+// PAGE LOADING
+// ============================================================================
+// A load is a state machine the frame loop drives (pumpPageLoad), so the
+// window paints and takes input between its steps:
+//  1. Styles: the HTML is parsed into a document kept aside, and a preload
+//     scan requests every stylesheet and script in it at once (fetch pool).
+//     The old page stays on screen until the new one's sheets are in.
+//  2. Commit: the new document replaces the old one; styles, boxes: first
+//     paint. Its script context is set up.
+//  3. Scripts: the parser's scripts run in document order as their sources
+//     arrive (ScriptContext::advanceParsing; a few ms of script per frame,
+//     cut between scripts), then defer scripts, DOMContentLoaded, load.
+// Fetch threads only move bytes (into ScriptContext's inbox or
+// g_arrivedResources); DOM, CSS and JS are touched on the UI thread only.
+
+// ZEPRA_TRACE_LOAD: the window load event of the page is still to come
+static bool g_traceLoadPending = false;
+
+/// What a tab's current page loads besides scripts: its style sheets and
+/// web fonts (by tab id, so tab switches need not move it)
+struct PageResources {
+    uint64_t pageId = 0;
+    bool committed = false;   // its document is the tab's document
+    std::unique_ptr<ZepraBrowser::PageStyleSheets> styles;
+    std::unordered_map<std::string, HttpResponse> fonts;   // downloaded, by URL
+    std::unordered_set<std::string> fontsRequested;
+    std::string fontsApplied;   // the font URLs the web fonts were last loaded from
+    bool fontsDirty = false;    // sheets or downloads changed: check the fonts
+};
+static std::unordered_map<int, PageResources> g_pageResources;
+
+/// A page between its HTML and DOMContentLoaded
+struct PageLoad {
+    enum class Phase { Styles, Scripts };
+    Phase phase = Phase::Styles;
+    uint64_t pageId = 0;
+    std::string url;
+    std::shared_ptr<const std::string> html;
+    std::unique_ptr<DOMDocument> document;   // until it is committed
+    bool scriptsStarted = false;             // advanceParsing ran once
+};
+static std::unordered_map<int, PageLoad> g_pageLoads;
+static uint64_t g_nextPageId = 1;
+
+/// Style sheets and fonts that arrived, for the UI thread
+struct ArrivedResource {
+    int tabId = 0;
+    uint64_t pageId = 0;
+    bool font = false;
+    std::string url;
+    HttpResponse response;
+};
+static std::mutex g_arrivedMutex;
+static std::vector<ArrivedResource> g_arrivedResources;
+
+static PageResources* activePageResources() {
+    auto it = g_pageResources.find(g_activeTabId);
+    return it != g_pageResources.end() && it->second.committed ? &it->second : nullptr;
+}
+
+static const std::unordered_map<std::string, HttpResponse>* pageFontDownloads() {
+    PageResources* res = activePageResources();
+    return res ? &res->fonts : nullptr;
+}
+
+static void syncPageStyleSheets() {
+    PageResources* res = activePageResources();
+    if (!res || !g_document || !g_cssEngine) return;
+    if (res->styles->sync(g_document.get(), g_cssEngine.get())) res->fontsDirty = true;
+}
+
+static bool responseOk(const HttpResponse& r) {
+    return r.success && (r.statusCode == 0 || (r.statusCode >= 200 && r.statusCode < 300));
+}
+
+// A stylesheet or font for a page: the answer lands in g_arrivedResources
+static void fetchPageResource(int tabId, uint64_t pageId, bool font, const std::string& url) {
+    using Zepra::WebCore::ResourceKind;
+    fetchAsync(url, font ? ResourceKind::Font : ResourceKind::Stylesheet, tabId,
+               font ? ZepraBrowser::FetchPool::Priority::Normal : ZepraBrowser::FetchPool::Priority::High,
+               [tabId, pageId, font, url](HttpResponse response) {
+                   std::lock_guard<std::mutex> lock(g_arrivedMutex);
+                   g_arrivedResources.push_back({tabId, pageId, font, url, std::move(response)});
+               });
+}
+
+// Hands the sheets and fonts that arrived to their pages; the active page
+// is laid out again when one of its sheets came
+static void takeArrivedResources() {
+    std::vector<ArrivedResource> arrived;
+    {
+        std::lock_guard<std::mutex> lock(g_arrivedMutex);
+        if (g_arrivedResources.empty()) return;
+        arrived.swap(g_arrivedResources);
+    }
+    bool restyle = false;
+    for (ArrivedResource& a : arrived) {
+        auto it = g_pageResources.find(a.tabId);
+        if (it == g_pageResources.end() || it->second.pageId != a.pageId) continue;   // an old page's
+        PageResources& res = it->second;
+        if (a.font) {
+            res.fonts[a.url] = std::move(a.response);
+            res.fontsDirty = true;
+            continue;
+        }
+        if (!responseOk(a.response)) {
+            std::cerr << "[CSS] Failed to load " << a.url << ": "
+                      << (a.response.error.empty() ? "HTTP " + std::to_string(a.response.statusCode) : a.response.error)
+                      << std::endl;
+        }
+        bool ok = responseOk(a.response);
+        res.styles->resourceArrived(a.url, ok, std::move(a.response.data), a.response.finalUrl);
+        if (a.tabId == g_activeTabId && res.committed) restyle = true;
+    }
+    if (restyle && g_layoutRoot) relayoutDocument(true);
+}
+
+// The text a page shows, for @font-face unicode-range
+static Zepra::Fonts::TextCoverage pageTextCoverage() {
+    Zepra::Fonts::TextCoverage text;
+    if (!g_document) return text;
+    std::function<void(DOMNode*)> collect = [&](DOMNode* node) {
+        if (auto* t = dynamic_cast<DOMText*>(node)) text.addUtf8(t->data());
+        for (const auto& child : node->childNodes()) collect(child.get());
+    };
+    if (g_document->body()) collect(g_document->body());
+    if (auto* head = g_document->head()) {
+        for (const auto& child : head->childNodes()) {
+            auto* el = dynamic_cast<DOMElement*>(child.get());
+            if (!el) continue;
+            std::string tag = el->tagName();
+            std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
+            if (tag == "title") collect(el);
+        }
+    }
+    return text;
+}
+
+// The font files loadWebFonts will want: each face the text uses, its first
+// downloadable source (a face that turns out to need its next source
+// downloads that one itself)
+static std::vector<std::string> wantedFontUrls() {
+    std::vector<std::string> urls;
+    if (!g_cssEngine) return urls;
+    auto faces = g_cssEngine->fontFaces();
+    if (faces.empty()) return urls;
+    Zepra::Fonts::TextCoverage text = pageTextCoverage();
+    std::unordered_set<std::string> seen;
+    for (const auto& face : faces) {
+        if (!text.wants(face.descriptors)) continue;
+        for (const auto& src : face.descriptors.sources) {
+            if (src.isLocal || src.url.compare(0, 5, "data:") == 0) continue;
+            bool formatOk = src.formats.empty();
+            for (const auto& f : src.formats) {
+                if (Zepra::Fonts::isSupportedFontFormatHint(f)) formatOk = true;
+            }
+            if (!formatOk || !Zepra::Fonts::isSupportedFontTech(src.techs)) continue;
+            std::string url = resolveUrl(face.baseUrl, src.url);
+            if (seen.insert(url).second) urls.push_back(url);
+            break;
+        }
+    }
+    return urls;
+}
+
+// Web fonts load in the background: the page paints with fallback fonts
+// and is laid out again once every font it wants has arrived
+static void pumpPageFonts() {
+    PageResources* res = activePageResources();
+    if (!res || !res->fontsDirty || !g_document || !g_cssEngine) return;
+    res->fontsDirty = false;
+    std::vector<std::string> wanted = wantedFontUrls();
+    bool missing = false;
+    std::string key;
+    for (const auto& url : wanted) {
+        key += url + "\n";
+        if (res->fonts.count(url)) continue;
+        missing = true;
+        if (res->fontsRequested.insert(url).second) fetchPageResource(g_activeTabId, res->pageId, true, url);
+    }
+    if (missing || key == res->fontsApplied) return;   // an arrival sets fontsDirty again
+    res->fontsApplied = key;
+    ZepraBrowser::LoadTrace::mark("web fonts arrived (" + std::to_string(wanted.size()) + ")");
+    loadPageWebFonts();
+    relayoutDocument(true);
+}
+
+// load/error at <link rel=stylesheet> elements whose sheet arrived, as tasks
+static void fireLinkEvents() {
+    PageResources* res = activePageResources();
+    if (!res || !g_scriptContext || !g_document) return;
+    // The parser's links load before its first script runs; their events
+    // come once scripts had a chance to listen (the order is a race in
+    // browsers too, but the first head script usually wins it)
+    auto load = g_pageLoads.find(g_activeTabId);
+    if (load != g_pageLoads.end() && !load->second.scriptsStarted) return;
+    auto events = res->styles->takeLinkEvents();
+    if (events.empty()) return;
+    // Only at links still in the document (a removed one may be freed)
+    std::unordered_set<DOMElement*> connected;
+    std::function<void(DOMNode*)> collect = [&](DOMNode* node) {
+        for (const auto& child : node->childNodes()) {
+            if (auto* el = dynamic_cast<DOMElement*>(child.get())) {
+                connected.insert(el);
+                collect(el);
+            }
+        }
+    };
+    collect(g_document.get());
+    for (const auto& [element, ok] : events) {
+        if (connected.count(element)) g_scriptContext->fireElementEvent(element, ok ? "load" : "error");
+    }
+}
+
+static void commitPageLoad(int tabId, PageLoad& load);
+
+// Moves the active tab's load on: commits it once its sheets are in, then
+// runs its parser scripts a slice at a time
+static void pumpPageLoad() {
+    auto it = g_pageLoads.find(g_activeTabId);
+    if (it == g_pageLoads.end()) return;
+    PageLoad& load = it->second;
+    if (load.phase == PageLoad::Phase::Styles) {
+        auto res = g_pageResources.find(g_activeTabId);
+        if (res != g_pageResources.end() && res->second.pageId == load.pageId &&
+            !res->second.styles->allSettled(load.document.get())) {
+            return;
+        }
+        ZepraBrowser::LoadTrace::mark("stylesheets loaded");
+        commitPageLoad(g_activeTabId, load);
+        return;   // paint first
+    }
+    if (!g_scriptContext) {
+        g_pageLoads.erase(it);
+        return;
+    }
+    // A slice of script work, then the frame goes on (a single script can
+    // still take longer: scripts are not interrupted)
+    constexpr auto kScriptSlice = std::chrono::milliseconds(8);
+    load.scriptsStarted = true;
+    if (!g_scriptContext->advanceParsing(std::chrono::steady_clock::now() + kScriptSlice)) return;
+    ZepraBrowser::LoadTrace::mark("DOMContentLoaded");
+    g_traceLoadPending = true;
+    std::cout << "[JS] DOMContentLoaded fired; window load "
+              << (g_scriptContext->pendingScriptCount() ? "waits for " + std::to_string(g_scriptContext->pendingScriptCount()) + " script(s)" : std::string("fired"))
+              << std::endl;
+    g_pageLoads.erase(it);
+}
+
+// Starts loading `html` as the active tab's page (see PAGE LOADING): parses
+// it, requests its sheets and scripts, and commits it as soon as nothing
+// blocks rendering (at once for a page without external sheets)
 void parseWithWebCore(const std::string& html) {
+    const int tabId = g_activeTabId;
+    PageLoad load;
+    load.pageId = g_nextPageId++;
+    load.url = g_currentUrl;
+    load.html = std::make_shared<const std::string>(html);
+
+    HTMLParser parser;
+    load.document = parser.parse(html);
+    if (!load.document) {
+        std::cerr << "[WebCore] Failed to parse HTML" << std::endl;
+        return;
+    }
+    DOMDocument* document = load.document.get();
+
+    // Preload scan: every sheet and script the document names, requested
+    // now and in parallel (render-blocking sheets first); the loads below
+    // find them on the way or done
+    dropPrefetches();
+    size_t sheets = 0, scripts = 0;
+    bool hasStyleElement = false;
+    {
+        using Priority = ZepraBrowser::FetchPool::Priority;
+        using Zepra::WebCore::ResourceKind;
+        std::function<void(DOMNode*)> scan = [&](DOMNode* node) {
+            if (auto* el = dynamic_cast<DOMElement*>(node)) {
+                std::string tag = el->tagName();
+                std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
+                if (tag == "style") {
+                    hasStyleElement = true;
+                } else if (tag == "link") {
+                    std::string rel = el->getAttribute("rel");
+                    std::transform(rel.begin(), rel.end(), rel.begin(), ::tolower);
+                    std::string as = el->getAttribute("as");
+                    std::transform(as.begin(), as.end(), as.begin(), ::tolower);
+                    std::string href = el->getAttribute("href");
+                    if (href.empty()) {
+                    } else if (rel.find("stylesheet") != std::string::npos ||
+                               (rel.find("preload") != std::string::npos && as == "style")) {
+                        prefetchResource(resolveUrl(g_currentUrl, href), ResourceKind::Stylesheet, tabId, Priority::High);
+                        sheets++;
+                    } else if (rel.find("preload") != std::string::npos && as == "script") {
+                        prefetchResource(resolveUrl(g_currentUrl, href), ResourceKind::Script, tabId, Priority::Normal);
+                        scripts++;
+                    }
+                } else if (tag == "script") {
+                    std::string type = el->getAttribute("type");
+                    std::string src = el->getAttribute("src");
+                    bool runnable = type.empty() || type == "text/javascript" || type == "application/javascript" || type == "module";
+                    if (runnable && !src.empty()) {
+                        prefetchResource(resolveUrl(g_currentUrl, src), ResourceKind::Script, tabId,
+                                         el->hasAttribute("async") ? Priority::Low : Priority::Normal);
+                        scripts++;
+                    }
+                }
+            }
+            for (const auto& child : node->childNodes()) scan(child.get());
+        };
+        scan(document);
+    }
+
+    // The raw-HTML fallbacks: <style> text when the parser kept no <style>
+    // element, the body's inline style when it lost it
+    std::vector<std::string> extraSheets;
+    if (!hasStyleElement) extraSheets = extractStylesFromRawHTML(html);
+    std::string bodyStyle = extractBodyInlineStyle(html);
+    if (!bodyStyle.empty() && !(document->body() && document->body()->hasAttribute("style"))) {
+        extraSheets.push_back(bodyStyle);
+    }
+
+    PageResources res;
+    res.pageId = load.pageId;
+    uint64_t pageId = load.pageId;
+    res.styles = std::make_unique<ZepraBrowser::PageStyleSheets>(
+        load.url,
+        [tabId, pageId](const std::string& url) { fetchPageResource(tabId, pageId, false, url); },
+        [](const std::string& base, const std::string& href) { return resolveUrl(base, href); });
+    res.styles->setExtraSheets(std::move(extraSheets));
+    res.styles->requestSheets(document);
+    g_pageResources[tabId] = std::move(res);
+    ZepraBrowser::LoadTrace::mark("parsed; preload " + std::to_string(sheets) + " sheet(s), " +
+                                  std::to_string(scripts) + " script(s)");
+
+    g_pageLoads[tabId] = std::move(load);
+    takeArrivedResources();
+    pumpPageLoad();
+}
+
+// The load's document becomes the page: styles, boxes, script context
+static void commitPageLoad(int tabId, PageLoad& load) {
+    PageResources& res = g_pageResources[tabId];
     updateMediaViewport();
     // CRITICAL: Cancel this tab's pending image loads before clearing its layout boxes
     // Prevents use-after-free when worker threads hold stale pointers; other
     // tabs keep their boxes (and their loads) in Tab::layoutRoot
-    ZepraBrowser::g_lazyImageLoader.cancelTab(g_activeTabId);
+    ZepraBrowser::g_lazyImageLoader.cancelTab(tabId);
     ZepraBrowser::g_lazyImageLoader.newPageLoad();
-    
     g_styledLines.clear();
-    
-    // WORKAROUND: Extract CSS from raw HTML before parsing (HTMLParser drops head children)
-    std::vector<std::string> rawStyles = extractStylesFromRawHTML(html);
-
-    // Extract body inline styles (e.g. background-color) before parsing 
-    std::string bodyStyle = extractBodyInlineStyle(html);
-    
     // The old document's elements are about to be destroyed
     Zepra::WebCore::interactionState() = {};
+    g_document = std::move(load.document);
+    const std::string& html = *load.html;
 
-    // Parse HTML to DOM (use original HTML - HTMLParser handles structure correctly)
-    HTMLParser parser;
-    g_document = parser.parse(html);
-    
-    if (!g_document) {
-        std::cerr << "[WebCore] Failed to parse HTML" << std::endl;
-        return;
-    }
-    
     // Initialize CSS engine
     g_cssEngine = std::make_unique<CSSEngine>();
     g_cssEngine->initialize(g_document.get());
-    // @import rules load their sheets as <link> sheets do
-    g_cssEngine->setBaseUrl(g_currentUrl);
-    g_cssEngine->setImportFetcher([](const std::string& href, const std::string& base,
-                                     std::string& url, std::string& css) {
-        url = resolveUrl(base, href);
-        HttpResponse r = httpGet(url, Zepra::WebCore::ResourceKind::Stylesheet);
-        if (!r.success || r.data.empty()) {
-            std::cerr << "[CSS] Failed to load @import " << url << ": " << r.error << std::endl;
-            return false;
-        }
-        if (!r.finalUrl.empty()) url = r.finalUrl;
-        css = std::move(r.data);
-        return true;
-    });
-    
+    // @import rules load their sheets as <link> sheets do (fetched already)
+    g_cssEngine->setBaseUrl(load.url);
+    g_cssEngine->setImportFetcher(res.styles->importFetcher());
     // Load user-agent stylesheet (browser defaults)
     g_cssEngine->addStyleSheet(
         Zepra::WebCore::ZepraUAStylesheet::getStylesheet(),
@@ -1419,113 +1826,14 @@ void parseWithWebCore(const std::string& html) {
         g_cssEngine->addStyleSheet(Zepra::WebCore::ZepraUAStylesheet::getQuirksStylesheet(),
                                    StyleOrigin::UserAgent);
     }
-    
-    // Request every external stylesheet and script now, in parallel; the
-    // passes below find them loaded or in flight (see prefetchResource)
-    dropPrefetches();
-    {
-        std::function<void(DOMNode*)> prefetchFrom = [&](DOMNode* node) {
-            if (auto* el = dynamic_cast<DOMElement*>(node)) {
-                std::string tag = el->tagName();
-                std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
-                if (tag == "link") {
-                    std::string rel = el->getAttribute("rel");
-                    std::transform(rel.begin(), rel.end(), rel.begin(), ::tolower);
-                    std::string href = el->getAttribute("href");
-                    if (rel.find("stylesheet") != std::string::npos && !href.empty()) {
-                        prefetchResource(resolveUrl(g_currentUrl, href), Zepra::WebCore::ResourceKind::Stylesheet, g_activeTabId);
-                    }
-                } else if (tag == "script") {
-                    std::string type = el->getAttribute("type");
-                    std::string src = el->getAttribute("src");
-                    bool runnable = type.empty() || type == "text/javascript" || type == "application/javascript" || type == "module";
-                    if (runnable && !src.empty()) {
-                        prefetchResource(resolveUrl(g_currentUrl, src), Zepra::WebCore::ResourceKind::Script, g_activeTabId);
-                    }
-                }
-            }
-            for (const auto& child : node->childNodes()) prefetchFrom(child.get());
-        };
-        if (g_document->head()) prefetchFrom(g_document->head());
-        if (g_document->body()) prefetchFrom(g_document->body());
-    }
+    res.committed = true;
+    res.fontsDirty = true;
+    Zepra::Fonts::FontManager::instance().clearWebFonts();
 
-    // Extract <style> elements and load <link rel="stylesheet"> external CSS
-    size_t domStyleSheets = 0;
-    auto addStyleElement = [&](DOMElement* el) {
-        // Custom properties and var() are resolved by the cascade
-        g_cssEngine->addStyleSheet(el->textContent(), StyleOrigin::Author);
-        domStyleSheets++;
-    };
-    auto* headEl = g_document->head();
-    if (headEl) {
-        for (size_t i = 0; i < headEl->childNodes().size(); i++) {
-            if (auto* el = dynamic_cast<DOMElement*>(headEl->childNodes()[i].get())) {
-                std::string tag = el->tagName();
-                std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
-                
-                // Inline <style> elements
-                if (tag == "style") {
-                    addStyleElement(el);
-                }
-                // External <link rel="stylesheet"> elements
-                else if (tag == "link") {
-                    std::string rel = el->getAttribute("rel");
-                    std::transform(rel.begin(), rel.end(), rel.begin(), ::tolower);
-                    if (rel == "stylesheet" || rel.find("stylesheet") != std::string::npos) {
-                        std::string href = el->getAttribute("href");
-                        if (!href.empty()) {
-                            // Resolve relative URL
-                            std::string cssUrl = resolveUrl(g_currentUrl, href);
-                            // std::cout << "[CSS] Loading external stylesheet: " << cssUrl << std::endl;
-                            
-                            // Fetch the CSS file
-                            HttpResponse cssResult = httpGet(cssUrl, Zepra::WebCore::ResourceKind::Stylesheet);
-                            if (cssResult.success && !cssResult.data.empty()) {
-                                // std::cout << "[CSS] Loaded " << cssResult.data.size() << " bytes of CSS" << std::endl;
-                                g_cssEngine->addStyleSheet(cssResult.data, StyleOrigin::Author, cssUrl);
-                            } else {
-                                std::cerr << "[CSS] Failed to load: " << cssResult.error << std::endl;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // <style> elements in the body, in document order
-    if (g_document->body()) {
-        std::function<void(DOMNode*)> findStyles = [&](DOMNode* node) {
-            if (auto* el = dynamic_cast<DOMElement*>(node)) {
-                std::string tag = el->tagName();
-                std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
-                if (tag == "style") { addStyleElement(el); return; }
-            }
-            for (const auto& child : node->childNodes()) findStyles(child.get());
-        };
-        findStyles(g_document->body());
-    }
-
-    // FALLBACK: Add CSS extracted from raw HTML, only when the parser kept no
-    // <style> element (adding both registered every sheet twice)
-    if (domStyleSheets == 0 && rawStyles.size() > 0) {
-        // std::cout << "[CSS] Adding " << rawStyles.size() << " stylesheets from raw HTML extraction" << std::endl;
-        for (const auto& css : rawStyles) {
-            g_cssEngine->addStyleSheet(css, StyleOrigin::Author);
-        }
-    }
-    
-    // Add extracted body element style
-    if (!bodyStyle.empty() && !(g_document->body() && g_document->body()->hasAttribute("style"))) {
-        // std::cout << "[CSS] Adding extracted body inline style: " << bodyStyle << std::endl;
-        g_cssEngine->addStyleSheet(bodyStyle, StyleOrigin::Author);
-    }
-
-    loadPageWebFonts();
-    
+    // The author sheets come in with the style pass (PageStyleSheets::sync)
     rebuildLayoutTree();
-    
+    ZepraBrowser::LoadTrace::documentLaidOut();
+
     // Debug DOM children
     if (g_document->body()) {
         std::cout << "[DOM] body has " << g_document->body()->childNodes().size() << " children" << std::endl;
@@ -1542,7 +1850,7 @@ void parseWithWebCore(const std::string& html) {
     g_scriptContext = std::make_unique<ScriptContext>();
     
     // Route console output to this page's tab (by id: g_tabs reallocates as tabs open)
-    int pageTabId = g_activeTabId;
+    int pageTabId = tabId;
     g_scriptContext->setConsoleMessageHandler(
         [pageTabId](const Zepra::WebCore::ConsoleMessage& msg) {
             for (Tab& t : g_tabs) {
@@ -1560,6 +1868,7 @@ void parseWithWebCore(const std::string& html) {
         [pageCss, styledVersion = g_layoutDomVersion](DOMElement* element) mutable -> const CSSComputedStyle* {
             uint64_t version = Zepra::WebCore::domMutationVersion();
             if (version != g_layoutDomVersion && version != styledVersion) {
+                if (pageCss == g_cssEngine.get()) syncPageStyleSheets();
                 pageCss->computeStyles();
                 styledVersion = version;
             }
@@ -1570,6 +1879,7 @@ void parseWithWebCore(const std::string& html) {
             -> const CSSComputedStyle* {
             uint64_t version = Zepra::WebCore::domMutationVersion();
             if (version != g_layoutDomVersion && version != styledVersion) {
+                if (pageCss == g_cssEngine.get()) syncPageStyleSheets();
                 pageCss->computeStyles();
                 styledVersion = version;
             }
@@ -1644,13 +1954,13 @@ void parseWithWebCore(const std::string& html) {
     // Set location globals from current URL
     g_scriptContext->setPageUrl(g_currentUrl);
     
-    // External scripts (the parser's and those scripts insert) load on a
-    // thread of their own; the script context runs them from its queue
+    // External scripts (the parser's and those scripts insert) load on the
+    // fetch pool (a preloaded one is picked up there); the script context runs them from its queue
     // (prepareScript / runReadyScripts), never inside the call that asked
     g_scriptContext->setScriptFetcher(
         [pageTabId](const std::string& url, Zepra::WebCore::ScriptFetchDone done) {
-            std::thread([url, pageTabId, done = std::move(done)]() mutable {
-                HttpResponse response = httpGet(url, Zepra::WebCore::ResourceKind::Script, pageTabId);
+            fetchAsync(url, Zepra::WebCore::ResourceKind::Script, pageTabId, ZepraBrowser::FetchPool::Priority::Normal,
+                       [done = std::move(done)](HttpResponse response) {
                 Zepra::WebCore::ScriptFetchResult result;
                 result.ok = response.success;
                 result.body = std::move(response.data);
@@ -1659,40 +1969,28 @@ void parseWithWebCore(const std::string& html) {
                                                            : "HTTP " + std::to_string(response.statusCode);
                 }
                 done(std::move(result));
-            }).detach();
+            });
         });
 
     // Execute page scripts (inline + external). The document's text is kept
     // for the DevTools source view (inline scripts point into it).
-    g_scriptContext->registerSource(g_currentUrl, html);
+    g_scriptContext->registerSource(load.url, html);
     // The parser's scripts, in document order (<head> ones define the
     // globals — ytcfg, __next_f, polyfills — that <body> ones call).
     // script_elements.cpp decides what runs now, after parsing, or once
-    // loaded; scripts a script inserted, which ran already, are skipped.
+    // loaded; pumpPageLoad() moves them on from the frame loop.
     // Lines count from the document, so console links land on the page source.
-    g_scriptContext->runParserScripts([&html](DOMElement* script) -> uint32_t {
+    std::shared_ptr<const std::string> source = load.html;
+    g_scriptContext->beginParsing([source](DOMElement* script) -> uint32_t {
         if (script->hasAttribute("src")) return 1;
         std::string code = script->textContent();
-        size_t at = code.empty() ? std::string::npos : html.find(code);
+        const std::string& page = *source;
+        size_t at = code.empty() ? std::string::npos : page.find(code);
         if (at == std::string::npos) return 1;
-        return 1 + (uint32_t)std::count(html.begin(), html.begin() + (long)at, '\n');
+        return 1 + (uint32_t)std::count(page.begin(), page.begin() + (long)at, '\n');
     });
-    
-    // Parsing is over: defer scripts, then DOMContentLoaded; then the async
-    // and script-inserted scripts that already arrived. The window's load
-    // event waits for the rest (the frame loop runs them as they arrive).
-    g_scriptContext->runDeferredScripts();
-    g_scriptContext->fireDOMContentLoaded();
-    g_scriptContext->runReadyScripts();
-    g_scriptContext->fireLoadEvent();
-    std::cout << "[JS] DOMContentLoaded fired; window load "
-              << (g_scriptContext->pendingScriptCount() ? "waits for " + std::to_string(g_scriptContext->pendingScriptCount()) + " script(s)" : std::string("fired"))
-              << std::endl;
-
-    // The box tree was built before scripts ran; show their DOM changes
-    if (Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
-        relayoutDocument();
-    }
+    load.phase = PageLoad::Phase::Scripts;
+    ZepraBrowser::LoadTrace::mark("committed; parser scripts start");
 }
 
 // =============================================================================
@@ -4354,6 +4652,7 @@ void renderSidebar() {
 // Main render
 void render() {
   try {
+    ZepraBrowser::LoadTrace::frameStart();
     // Track last URL for crash context
     g_crash_url = g_currentUrl.c_str();
 
@@ -4400,6 +4699,7 @@ void render() {
             }
 
             const std::string& loadedContent = result.content;
+            ZepraBrowser::LoadTrace::mark("document received (" + std::to_string(result.content.size()) + " bytes)");
             const std::string& loadedTitle = result.title;
             const std::string& loadedUrl = result.url;
             const std::string& loadedError = result.error;
@@ -4486,9 +4786,18 @@ void render() {
         }
     }
     
+    // === PAGE LOADING: arrived sheets and fonts, the next load step ===
+    takeArrivedResources();
+    pumpPageLoad();
+
     // === SCRIPT TIMERS AND ANIMATION FRAMES ===
     if (g_scriptContext) {
         g_scriptContext->processTimers();
+        if (g_traceLoadPending && g_scriptContext->pendingScriptCount() == 0) {
+            g_traceLoadPending = false;
+            ZepraBrowser::LoadTrace::mark("load");
+            ZepraBrowser::LoadTrace::summary("load");
+        }
         g_scriptContext->runAnimationFrames();
         if (g_layoutRoot && Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
             relayoutDocument();
@@ -4505,6 +4814,8 @@ void render() {
     if (g_layoutRoot && Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
         relayoutDocument();
     }
+    pumpPageFonts();
+    fireLinkEvents();
     // localStorage changes reach the disk (at most once a second per origin)
     Zepra::WebCore::flushLocalStorage();
     // A form submitted during the last script task
@@ -4797,6 +5108,7 @@ void render() {
     }
     
     gfx::present();
+    ZepraBrowser::LoadTrace::framePresented(g_layoutRoot && g_layoutPainted);
     
     // Update cursor based on hover state
     bool isOverLink = false;
@@ -5040,6 +5352,8 @@ void onCloseTab(int tabId) {
         }
     }
     g_tabContentCache.erase(tabId);
+    g_pageLoads.erase(tabId);
+    g_pageResources.erase(tabId);
     if (g_activeTabId != tabId) return;
 
     // The globals still hold the closed tab's page; nothing may save it back
@@ -5198,6 +5512,7 @@ void onNavigate(const std::string& input, const NavigationPost* post) {
         }
         
         std::cout << "[Browser] Loading (async): " << (post ? "POST " : "") << url << std::endl;
+        ZepraBrowser::LoadTrace::beginNavigation(url);
         
         // Update tab state to show loading
         for (Tab& tab : g_tabs) {

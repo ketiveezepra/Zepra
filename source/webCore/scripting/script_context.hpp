@@ -14,6 +14,7 @@
 #include <deque>
 #include <unordered_map>
 #include <memory>
+#include <chrono>
 
 // Forward declarations for ZepraScript internals
 namespace Zepra::Runtime { 
@@ -202,8 +203,9 @@ public:
      * page); the DOM calls it for scripts other scripts insert.
      *  - inline classic scripts run now (a script-inserted one inside the
      *    appendChild that connected it, as browsers do)
-     *  - parser-inserted external classic scripts without async/defer block:
-     *    they are fetched and run before this returns
+     *  - parser-inserted external classic scripts without async/defer block
+     *    the parser: the parser's driver (advanceParsing, runParserScripts)
+     *    runs them, once fetched, before it prepares the next script
      *  - defer scripts and parser-inserted modules wait for runDeferredScripts()
      *  - async scripts, and scripts other scripts insert (async unless they
      *    set async = false, which keeps those in insertion order), run from
@@ -214,16 +216,33 @@ public:
     /// Prepares the parser's scripts (those in the document now), in
     /// document order, as the parser would on reaching each one.
     /// `firstLineOf` gives an inline script's first line in the page.
+    /// It waits (blocks) for each parser-blocking script's source.
     void runParserScripts(const std::function<uint32_t(DOMElement*)>& firstLineOf);
     /// The parser is done: runs the defer scripts in document order (waiting
     /// for any still loading). Call before fireDOMContentLoaded().
     void runDeferredScripts();
+
+    /// The same load without blocking, driven from the event loop: takes the
+    /// parser's scripts (those in the document now, in document order), then
+    /// each advanceParsing() call moves on as far as it can: parser scripts
+    /// in order (a parser-blocking one stops it until its source arrived),
+    /// then the defer scripts, then DOMContentLoaded, the async scripts
+    /// already here and the window load event (which waits for pending
+    /// scripts). It returns between two scripts once `deadline` passed.
+    /// Returns true once DOMContentLoaded fired (at once on later calls).
+    void beginParsing(std::function<uint32_t(DOMElement*)> firstLineOf);
+    bool advanceParsing(std::chrono::steady_clock::time_point deadline);
+    /// Whether a load begun with beginParsing() is past DOMContentLoaded
+    bool parsingDone() const { return parsePhase_ == ParsePhase::Idle || parsePhase_ == ParsePhase::Done; }
     /// Runs the async and script-inserted scripts whose source arrived, each
     /// as a task (processTimers() calls this). Fires the window's load event
     /// once the last script it was waiting for ran.
     void runReadyScripts();
     /// Scripts prepared but not run yet (defer, async, script-inserted)
     size_t pendingScriptCount() const;
+    /// Fires a simple event (no bubbling, not cancelable) at an element, as
+    /// a task: `load`/`error` of a resource the browser loaded for it
+    void fireElementEvent(DOMElement* element, const std::string& type);
 
     // Timers
     int setTimeout(std::function<void()> callback, int delay);
@@ -516,6 +535,22 @@ private:
     Zepra::Runtime::Object* pendingScriptStore_ = nullptr;
     bool loadEventDelayed_ = false;   // fireLoadEvent() came while scripts were pending
     bool runningReadyScripts_ = false;
+    /// The parser's walk: its scripts wait in pendingScriptStore_ as p<i>
+    enum class ParsePhase { Idle, ParserScripts, DeferredScripts, Done };
+    ParsePhase parsePhase_ = ParsePhase::Idle;
+    size_t parserScriptCount_ = 0;
+    size_t parserScriptNext_ = 0;
+    std::function<uint32_t(DOMElement*)> parserFirstLine_;
+    /// The parser-blocking script the walk waits for
+    std::shared_ptr<PendingScript> parserBlockingScript_;
+    void collectParserScripts(std::function<uint32_t(DOMElement*)> firstLineOf);
+    /// Without `wait`, false when it stopped: a script's source is not here
+    /// yet, or `deadline` passed. With `wait`, it blocks for sources.
+    bool advanceParserScripts(bool wait, std::chrono::steady_clock::time_point deadline);
+    bool advanceDeferredScripts(bool wait, std::chrono::steady_clock::time_point deadline);
+    /// A script's source is here (or the wait gave up after kScriptWaitMs);
+    /// without `wait` it only looks
+    bool scriptSourceReady(PendingScript& script, bool wait);
     void setupScriptElements();
     void startScriptFetch(const std::shared_ptr<PendingScript>& script);
     /// Takes the fetch results that arrived and marks their scripts ready

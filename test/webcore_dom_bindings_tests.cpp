@@ -1017,3 +1017,61 @@ TEST(ScriptElements, ParserScriptsDeferAndSelfRemoval) {
     page.script->fireDOMContentLoaded();
     EXPECT_EQ(page.eval("log.join()"), "self:self,next:next:false,b.js,b loaded,body,d.js,DCL");
 }
+
+TEST(ScriptElements, AdvanceParsingWaitsWithoutBlocking) {
+    Page page(R"HTML(<html><head>
+        <script>var log = []; document.addEventListener('DOMContentLoaded', function () { log.push('DCL:' + document.readyState); });
+        window.addEventListener('load', function () { log.push('load'); });</script>
+        <script src="blocking.js"></script>
+        <script defer src="d.js"></script>
+        <script async src="async.js"></script>
+        <script>log.push('after-blocking')</script>
+        </head><body><script src="b.js"></script><script>log.push('body')</script></body></html>)HTML");
+    page.script->setPageUrl("https://example.test/");
+    HeldFetches net;
+    net.files["/blocking.js"] = "log.push('blocking')";
+    net.files["/d.js"] = "log.push('defer')";
+    net.files["/async.js"] = "log.push('async')";
+    net.files["/b.js"] = "log.push('b')";
+    page.script->setScriptFetcher(net.fetcher());
+    auto later = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+
+    page.script->beginParsing(nullptr);
+    // Stops at the parser-blocking script, which is not here yet (the
+    // browser's preload scan has requested the later ones already)
+    EXPECT_FALSE(page.script->advanceParsing(later));
+    EXPECT_EQ(page.eval("log.join()"), "");
+    EXPECT_FALSE(page.script->parsingDone());
+    EXPECT_FALSE(page.script->advanceParsing(later));
+    net.answer("/blocking.js");
+    EXPECT_FALSE(page.script->advanceParsing(later));   // now waits for b.js
+    EXPECT_EQ(page.eval("log.join()"), "blocking,after-blocking");
+    // An async script runs while the parser waits (from the timer pump)
+    net.answer("/async.js");
+    page.script->processTimers();
+    EXPECT_EQ(page.eval("log.join()"), "blocking,after-blocking,async");
+    // The defer script answered first still waits for the parser
+    net.answer("/d.js");
+    EXPECT_FALSE(page.script->advanceParsing(later));
+    EXPECT_EQ(page.eval("log.join()"), "blocking,after-blocking,async");
+    net.answer("/b.js");
+    EXPECT_TRUE(page.script->advanceParsing(later));
+    EXPECT_TRUE(page.script->parsingDone());
+    EXPECT_EQ(page.eval("log.join()"), "blocking,after-blocking,async,b,body,defer,DCL:interactive,load");
+    EXPECT_TRUE(page.script->advanceParsing(later));   // done stays done
+}
+
+TEST(ScriptElements, AdvanceParsingYieldsAtTheDeadline) {
+    Page page(R"HTML(<html><head><script>var log = ['1']</script><script>log.push('2')</script>
+        <script>log.push('3')</script></head><body></body></html>)HTML");
+    page.script->beginParsing(nullptr);
+    // A deadline already past: one script per call
+    auto past = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    EXPECT_FALSE(page.script->advanceParsing(past));
+    EXPECT_EQ(page.eval("log.join()"), "1");
+    EXPECT_FALSE(page.script->advanceParsing(past));
+    EXPECT_EQ(page.eval("log.join()"), "1,2");
+    int calls = 0;
+    while (!page.script->advanceParsing(past) && calls < 10) calls++;
+    EXPECT_EQ(page.eval("log.join()"), "1,2,3");
+}
