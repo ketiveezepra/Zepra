@@ -1300,8 +1300,10 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         }
     }
     
-    // Apply text-align: center/right to inline children
-    if (box.textAlign > 0 && contentWidth > 0) {
+    // Apply text-align: center/right to inline children. Not in a flex
+    // container: its items are placed by justify-content, and its text
+    // runs are anonymous flex items (CSS Flexbox 1 §4), not lines
+    if (box.textAlign > 0 && contentWidth > 0 && box.type != LayoutType::Flex) {
         // Group children into lines by Y position and shift their X
         float currentLineY = -1;
         float lineMaxRight = 0;

@@ -361,6 +361,19 @@ TEST(AbsoluteLayout, InsetsStretchAnAutoSizedBox) {
     EXPECT_FALSE(cover.cssWidth.isSet() && !cover.cssWidth.isAuto());
 }
 
+TEST(FlexLayout, TextAlignDoesNotMoveCentredItemsAgain) {
+    // display: flex; justify-content: center; text-align: center
+    LayoutBox flex = makeFlex(0, 3);
+    flex.justifyContent = 2;
+    flex.textAlign = 1;
+    flex.cssWidth = LayoutLength::px(110);
+    LayoutBox& run = addBox(flex, LayoutType::Inline);
+    run.text = "1px red";  // 7 bytes: 28px at 8px per byte
+    run.fontSize = 8;
+    ZepraBrowser::layoutBlock(flex, 1000, 0);
+    EXPECT_FLOAT_EQ(run.x, (110 - 28) / 2.0f);
+}
+
 TEST(FlexLayout, ColumnAlignCenterCentresHorizontally) {
     LayoutBox flex = makeFlex(1, 3);
     LayoutBox& item = addBox(flex, LayoutType::Block);
