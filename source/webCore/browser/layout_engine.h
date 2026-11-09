@@ -160,6 +160,12 @@ struct LayoutBox {
     // Opacity (0.0 = transparent, 1.0 = opaque)
     float opacity = 1.0f;
     
+    // background-clip: text: the background shows through the text of the
+    // box and its descendants only
+    bool bgClipText = false;
+    // Text (runs): -webkit-text-fill-color is transparent, so the glyphs show
+    // the background of an enclosing background-clip: text box
+    bool textFillTransparent = false;
     // box-shadow (CSS text; drawn by setShadowPaintCallback)
     std::string boxShadow;
 
