@@ -759,6 +759,62 @@ TEST(Backgrounds, ColorAlphaAndOpacityReachTheFill) {
 }
 
 // ---------------------------------------------------------------------------
+// background-clip: text
+// ---------------------------------------------------------------------------
+
+struct GlyphCall {
+    std::string text;
+    uint32_t color;
+};
+std::vector<GlyphCall> g_glyphs;
+int g_clipTextFills = 0;
+
+TEST(ClipText, TextShowsTheGradientAndTheBoxDoesNot) {
+    g_glyphs.clear();
+    g_clipTextFills = 0;
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t) { g_clipTextFills++; }, [](float, float, float, float, uint32_t, float) {},
+        [](const std::string& t, float, float, uint32_t c, float, const LayoutBox*) { g_glyphs.push_back({t, c}); },
+        [](const std::string& t, float size, const LayoutBox*) { return t.size() * size * 0.5f; }, nullptr, nullptr);
+    LayoutBox box;
+    box.width = 200;
+    box.height = 20;
+    box.bgClipText = true;
+    box.hasBgGradient = true;
+    box.backgroundImage = "linear-gradient(to right, #ff0000, #0000ff)";
+    LayoutBox& run = addBox(box, LayoutType::Inline);
+    run.text = "ab";
+    run.fontSize = 20;
+    run.width = 20;
+    run.height = 20;
+    run.textFillTransparent = true;
+    ZepraBrowser::paintBox(box, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    EXPECT_EQ(g_clipTextFills, 0);  // no background rectangle
+    ASSERT_EQ(g_glyphs.size(), 2u);  // one call per character, in the gradient's colour there
+    EXPECT_EQ(g_glyphs[0].text, "a");
+    EXPECT_GT(g_glyphs[0].color >> 16, 0xE0u);
+    EXPECT_LT(g_glyphs[0].color & 0xFF, 0x20u);
+}
+
+TEST(ClipText, TransparentTextWithoutABackgroundIsNotDrawn) {
+    g_glyphs.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t) {}, [](float, float, float, float, uint32_t, float) {},
+        [](const std::string& t, float, float, uint32_t c, float, const LayoutBox*) { g_glyphs.push_back({t, c}); },
+        [](const std::string& t, float size, const LayoutBox*) { return t.size() * size * 0.5f; }, nullptr, nullptr);
+    LayoutBox run;
+    run.type = LayoutType::Inline;
+    run.text = "hidden";
+    run.width = 60;
+    run.height = 16;
+    run.textFillTransparent = true;
+    ZepraBrowser::paintBox(run, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    EXPECT_TRUE(g_glyphs.empty());
+}
+
+// ---------------------------------------------------------------------------
 // Serialization (inline <svg> is drawn from its outerHTML)
 // ---------------------------------------------------------------------------
 

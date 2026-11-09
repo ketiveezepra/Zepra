@@ -1934,6 +1934,11 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 // Typography
                 box->fontSize = style->fontSize;
                 box->color = cssColorToRGB(style->color);
+                if (style->hasTextFillColor) {
+                    // -webkit-text-fill-color paints the glyphs instead of color
+                    if (style->textFillColor.a == 0) box->textFillTransparent = true;
+                    else box->color = cssColorToRGB(style->textFillColor);
+                }
                 box->fontWeight = static_cast<int>(style->fontWeight);
                 box->fontFamily = style->fontFamily;
                 box->bold = (box->fontWeight >= 600);
@@ -2660,6 +2665,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         blockBox->borderStyle = usedBorderStyle(*childStyle);
                     }
                     blockBox->borderRadius = childStyle->borderTopLeftRadius;
+                    blockBox->bgClipText = childStyle->backgroundClipText;
                     
                     // Visual
                     blockBox->opacity = childStyle->opacity;

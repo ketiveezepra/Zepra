@@ -345,6 +345,9 @@ public:
     int legacyAlign = 0;
     std::string textDecoration;
     std::string textTransform;
+    // -webkit-text-fill-color (inherited); without one, text fills with color
+    bool hasTextFillColor = false;
+    CSSColor textFillColor;
     float letterSpacing = 0;
     float wordSpacing = 0;
     std::string whiteSpace = "normal";
@@ -368,6 +371,7 @@ public:
     std::string backgroundPosition;
     std::string backgroundSize;
     std::string backgroundRepeat = "repeat";
+    bool backgroundClipText = false;   // background-clip: text (only under the glyphs)
 
     // =========================================================================
     // Effects
