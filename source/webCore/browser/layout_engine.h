@@ -146,6 +146,12 @@ struct LayoutBox {
     int fontWeight = 400;        // 100..900; bold is set too at 600 and above
     bool hasBgColor = false;
     
+    // Outline (CSS UI 4 §5): drawn outside the border box, over the content
+    float outlineWidth = 0;      // 0: none
+    float outlineOffset = 0;
+    uint32_t outlineColor = 0x000000;
+    int outlineStyle = 2;        // as borderStyle
+
     // Border radius (uniform for now); a percentage radius is resolved
     // against the box's size when it is painted
     mutable float borderRadius = 0;
