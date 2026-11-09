@@ -1936,6 +1936,8 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 box->color = cssColorToRGB(style->color);
                 box->fontWeight = static_cast<int>(style->fontWeight);
                 box->fontFamily = style->fontFamily;
+                box->letterSpacing = style->letterSpacing;
+                box->wordSpacing = style->wordSpacing;
                 box->bold = (box->fontWeight >= 600);
                 box->italic = (style->fontStyle == FontStyle::Italic);
                 box->textDecoration = style->textDecoration;
@@ -3042,12 +3044,13 @@ static nxfont::Font* fontFor(float size, const LayoutBox* style) {
 
 void text(const std::string& str, float x, float y, uint32_t c, float size = 14.0f, const LayoutBox* style = nullptr) {
     auto* font = fontFor(size, style);
-    if (font) font->drawText(str, x, y, R(c), G(c), B(c));
+    if (font) font->drawText(str, x, y, R(c), G(c), B(c), style ? style->letterSpacing : 0, style ? style->wordSpacing : 0);
 }
 
 float textWidth(const std::string& str, float size = 14.0f, const LayoutBox* style = nullptr) {
     auto* font = fontFor(size, style);
-    return font ? font->measureText(str) : str.length() * (size * 0.6f);
+    if (font) return font->measureText(str, style ? style->letterSpacing : 0, style ? style->wordSpacing : 0);
+    return str.length() * (size * 0.6f);
 }
 
 // ============================================================================

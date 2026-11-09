@@ -121,7 +121,10 @@ public:
     
     // Draw text at position with color
     // Returns width of rendered text
-    float drawText(const std::string& text, float x, float y, uint8_t red, uint8_t green, uint8_t blue) {
+    /// `letterSpacing` is added after every character, `wordSpacing` after
+    /// every space (CSS Text 3 §8)
+    float drawText(const std::string& text, float x, float y, uint8_t red, uint8_t green, uint8_t blue,
+                   float letterSpacing = 0, float wordSpacing = 0) {
         if (!face_) return 0;
         
         // Save OpenGL state
@@ -137,7 +140,7 @@ public:
         
         for (size_t i = 0; i < text.size();) {
             uint32_t c = nextCodepoint(text, i);
-            if (c == ' ') { x += spaceAdvance(); continue; }
+            if (c == ' ') { x += spaceAdvance() + letterSpacing + wordSpacing; continue; }
             const Glyph* found = glyphFor(c);
             if (!found) continue;
             const Glyph& glyph = *found;
@@ -171,7 +174,7 @@ public:
                 glEnd();
             }
             
-            x += glyph.advance;
+            x += glyph.advance + letterSpacing;
         }
         
         // Restore OpenGL state
@@ -183,12 +186,12 @@ public:
     }
     
     // Measure text width
-    float measureText(const std::string& text) {
+    float measureText(const std::string& text, float letterSpacing = 0, float wordSpacing = 0) {
         float width = 0;
         for (size_t i = 0; i < text.size();) {
             uint32_t c = nextCodepoint(text, i);
-            if (c == ' ') { width += spaceAdvance(); continue; }
-            if (const Glyph* glyph = glyphFor(c)) width += glyph->advance;
+            if (c == ' ') { width += spaceAdvance() + letterSpacing + wordSpacing; continue; }
+            if (const Glyph* glyph = glyphFor(c)) width += glyph->advance + letterSpacing;
         }
         return width;
     }
