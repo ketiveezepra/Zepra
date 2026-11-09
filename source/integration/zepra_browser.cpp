@@ -1946,6 +1946,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
             LayoutBox* box = addChild(parentBox);
             box->text = normalized;
             box->type = LayoutType::Inline;
+            if (style) box->noWrap = style->whiteSpace == "nowrap" || style->whiteSpace == "pre";
             
             // Apply ALL CSS styles from computed style
             if (style) {

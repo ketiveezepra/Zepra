@@ -367,8 +367,21 @@ void intrinsicWidths(const LayoutBox& box, float& minW, float& maxW) {
         minW = maxW = w < 0 ? box.width : w;
     } else if (box.children.empty()) {
         float textW = box.text.empty() ? 0 : measureTextWidth(box.text, box.fontSize, &box);
-        // Inline-level leaves are exactly as wide as their text in layoutBlock
-        minW = maxW = isBlockLevel(box.type) ? textW + edges : textW;
+        // Inline-level leaves are exactly as wide as their text in layoutBlock;
+        // a run that can wrap is at least as wide as its widest word
+        float wordW = textW;
+        if (!box.noWrap && !box.isLink && box.text.find(' ') != std::string::npos) {
+            wordW = 0;
+            size_t i = 0;
+            while (i <= box.text.size()) {
+                size_t end = std::min(box.text.find(' ', i), box.text.size());
+                if (end > i) wordW = std::max(wordW, measureTextWidth(box.text.substr(i, end - i), box.fontSize, &box));
+                i = end + 1;
+            }
+        }
+        float e = isBlockLevel(box.type) ? edges : 0;
+        minW = wordW + e;
+        maxW = textW + e;
     } else if (box.type == LayoutType::Grid) {
         gridIntrinsicWidths(box, minW, maxW);
         minW += edges;

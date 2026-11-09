@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Text wrapping</title>
+<style>
+  body { margin: 16px; font-family: sans-serif; font-size: 16px; }
+  .narrow { width: 240px; background: #fbe9e7; padding: 12px; margin-bottom: 12px; }
+  .center { text-align: center; }
+  .right { text-align: right; }
+  .nowrap { white-space: nowrap; }
+  .cols { display: grid; grid-template-columns: 200px 1fr 1fr; gap: 16px; }
+  .cols div { background: #f1f3f4; padding: 8px; }
+  .flex { display: flex; gap: 12px; margin-top: 12px; }
+  .flex div { width: 180px; background: #e6f4ea; padding: 8px; }
+</style>
+</head>
+<body>
+<div class="narrow">A long sentence in a 240px box breaks at spaces onto as many lines as it needs, with <a href="#">a link that wraps across the line end</a> and more text after it.</div>
+<div class="narrow center">Centred text: every line is centred on its own, including the short last one.</div>
+<div class="narrow right">Right-aligned text lines up on the right edge of the box.</div>
+<div class="narrow nowrap">white-space: nowrap keeps this on a single line.</div>
+<div class="cols">
+  <div>Sidebar text in a 200px grid column wraps inside the column.</div>
+  <div>The middle column is 1fr. Its paragraph is long enough to need a few lines at this width.</div>
+  <div>The last column also wraps its text and stretches to the row's height.</div>
+</div>
+<div class="flex">
+  <div>Flex item one with a 180px width and wrapping text.</div>
+  <div>Flex item two, also wrapping onto a second line.</div>
+</div>
+</body>
+</html>
