@@ -12,6 +12,7 @@
 
 #include <array>
 
+#include "browser/css_utils.h"
 #include "browser/dom.hpp"
 #include "browser/gradient_raster.h"
 #include "browser/layout_engine.h"
@@ -756,6 +757,19 @@ TEST(Backgrounds, ColorAlphaAndOpacityReachTheFill) {
     auto both = paintFilledBox(128, 0.5f);
     ASSERT_EQ(both.size(), 1u);
     EXPECT_EQ(both[0].alpha, 64);
+}
+
+// ---------------------------------------------------------------------------
+// text-transform
+// ---------------------------------------------------------------------------
+
+TEST(TextTransform, UpperLowerAndCapitalize) {
+    using ZepraBrowser::applyTextTransform;
+    EXPECT_EQ(applyTextTransform("1 · Grayscale (0% → 100%)", "uppercase"), "1 · GRAYSCALE (0% → 100%)");
+    EXPECT_EQ(applyTextTransform("straße äöü αβγ жук", "uppercase"), "STRASSE ÄÖÜ ΑΒΓ ЖУК");
+    EXPECT_EQ(applyTextTransform("ÉCOLE ΣΟΦΙΑ ЖУК", "lowercase"), "école σοφια жук");
+    EXPECT_EQ(applyTextTransform("hello wide world 3d", "capitalize"), "Hello Wide World 3d");
+    EXPECT_EQ(applyTextTransform("Mixed Case", "none"), "Mixed Case");
 }
 
 // ---------------------------------------------------------------------------

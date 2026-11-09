@@ -1923,6 +1923,8 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
             
             // Decode HTML entities (&nbsp; &amp; etc.)
             normalized = decodeHtmlEntities(normalized);
+            if (style && !style->textTransform.empty())
+                normalized = ZepraBrowser::applyTextTransform(normalized, style->textTransform);
             
             // CREATE LAYOUTBOX
             LayoutBox* box = addChild(parentBox);
