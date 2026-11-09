@@ -109,6 +109,7 @@ extern "C" {
 #include "browser/lazy_image_loader.h"
 #include "browser/svg_raster.h"
 #include "browser/gradient_raster.h"
+#include "browser/box_shadow.h"
 #include "browser/clipboard.h"
 #include "browser/css_utils.h"
 #include "devtools/devtools_panel.hpp"
@@ -2680,6 +2681,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     }
                     blockBox->borderRadius = childStyle->borderTopLeftRadius;
                     blockBox->bgClipText = childStyle->backgroundClipText;
+                    blockBox->boxShadow = childStyle->boxShadow;
                     setOutline(blockBox, *childStyle);
                     blockBox->borderRadiusPercent = childStyle->borderTopLeftRadiusPercent;
                     
@@ -2843,6 +2845,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         inlineBox->borderStyle = usedBorderStyle(*childStyle);
                     }
                     inlineBox->borderRadius = childStyle->borderTopLeftRadius;
+                    inlineBox->boxShadow = childStyle->boxShadow;
                     setOutline(inlineBox, *childStyle);
                     inlineBox->borderRadiusPercent = childStyle->borderTopLeftRadiusPercent;
                     inlineBox->opacity = childStyle->opacity;
@@ -3018,15 +3021,15 @@ void svgImage(const std::string& key, const std::string& svgText, float x, float
 
 // A gradient background, drawn on the CPU once per size and kept as a
 // texture (sharing the SVG textures' memory budget)
-void gradientBackground(float x, float y, const ZepraBrowser::GradientBackground& bg) {
-    int pw = 0, ph = 0;
-    ZepraBrowser::gradientPixelSize(bg.width, bg.height, pw, ph);
-    std::string cacheKey = "grad|" + ZepraBrowser::gradientBackgroundKey(bg, pw, ph);
+// A bitmap drawn on the CPU once per key and kept as a texture (sharing the
+// SVG textures' memory budget); `draw` fills it, false when it is empty
+static void cachedRaster(const std::string& cacheKey, int pw, int ph, const NXRender::Rect& dest,
+                         const std::function<bool(std::vector<uint8_t>&)>& draw) {
     auto it = g_svgTextures.find(cacheKey);
     if (it == g_svgTextures.end()) {
         SvgTexture tex;
         std::vector<uint8_t> rgba;
-        if (ZepraBrowser::rasterizeGradientBackground(bg, pw, ph, rgba)) {
+        if (draw(rgba)) {
             tex.id = g_nxGpu.createTexture(pw, ph, rgba.data());
             tex.bytes = rgba.size();
         }
@@ -3042,7 +3045,25 @@ void gradientBackground(float x, float y, const ZepraBrowser::GradientBackground
         it = g_svgTextures.emplace(cacheKey, tex).first;
     }
     it->second.lastUse = ++g_svgUseClock;
-    if (it->second.id) g_nxGpu.drawTexture(it->second.id, NXRender::Rect(x, y, bg.width, bg.height));
+    if (it->second.id) g_nxGpu.drawTexture(it->second.id, dest);
+}
+
+// A gradient background (gradient_raster.cpp)
+void gradientBackground(float x, float y, const ZepraBrowser::GradientBackground& bg) {
+    int pw = 0, ph = 0;
+    ZepraBrowser::gradientPixelSize(bg.width, bg.height, pw, ph);
+    cachedRaster("grad|" + ZepraBrowser::gradientBackgroundKey(bg, pw, ph), pw, ph,
+                 NXRender::Rect(x, y, bg.width, bg.height),
+                 [&](std::vector<uint8_t>& rgba) { return ZepraBrowser::rasterizeGradientBackground(bg, pw, ph, rgba); });
+}
+
+// One box-shadow (box_shadow.cpp)
+void boxShadow(float x, float y, const ZepraBrowser::ShadowBox& box, const ZepraBrowser::BoxShadow& shadow) {
+    ZepraBrowser::ShadowRect r = ZepraBrowser::shadowRect(box, shadow);
+    int pw = 0, ph = 0;
+    ZepraBrowser::shadowPixelSize(r, pw, ph);
+    cachedRaster(ZepraBrowser::shadowKey(box, shadow, pw, ph), pw, ph, NXRender::Rect(x + r.x, y + r.y, r.width, r.height),
+                 [&](std::vector<uint8_t>& rgba) { return ZepraBrowser::rasterizeShadow(box, shadow, pw, ph, rgba); });
 }
 
 } // namespace gfx
@@ -3251,6 +3272,7 @@ static void initLayoutEngine() {
         g_nxGpu.fillPath(points, NXRender::Color(color).withAlpha(alpha));
     });
     ZepraBrowser::setGradientPaintCallback(gfx::gradientBackground);
+    ZepraBrowser::setShadowPaintCallback(gfx::boxShadow);
     
     std::cout << "[Layout] Layout engine initialized (rounded rect + gradient support)" << std::endl;
     

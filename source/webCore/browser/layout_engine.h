@@ -166,6 +166,8 @@ struct LayoutBox {
     // Text (runs): -webkit-text-fill-color is transparent, so the glyphs show
     // the background of an enclosing background-clip: text box
     bool textFillTransparent = false;
+    // box-shadow (CSS text; drawn by setShadowPaintCallback)
+    std::string boxShadow;
 
     // Background image / gradient (CSS string)
     std::string backgroundImage;
@@ -413,6 +415,12 @@ struct GradientBackground;
 /// Set the callback that paints a gradient background (gradient_raster.h)
 /// over a box's border box at (x, y)
 void setGradientPaintCallback(void (*gfx_gradient_bg)(float x, float y, const GradientBackground& bg));
+
+struct ShadowBox;
+struct BoxShadow;
+/// Set the callback that paints one box-shadow (box_shadow.h) of the box
+/// whose border box is at (x, y)
+void setShadowPaintCallback(void (*gfx_shadow)(float x, float y, const ShadowBox& box, const BoxShadow& shadow));
 
 /// Set the callback that paints a <canvas> bitmap into its content box
 void setCanvasPaintCallback(
