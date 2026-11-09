@@ -18,6 +18,8 @@
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#include FT_TRUETYPE_TABLES_H
+#include FT_TRUETYPE_TAGS_H
 #include FT_OUTLINE_H
 
 #include "rendering/font_manager.hpp"
@@ -139,11 +141,8 @@ public:
         
         float startX = x;
         
-        for (size_t i = 0; i < text.size();) {
-            uint32_t c = nextCodepoint(text, i);
-            if (c == ' ') { x += spaceAdvance(); continue; }
-            const Glyph* found = glyphFor(wantsEmoji(c, text, i) && emojiFace() ? (c | kEmojiVariant) : c);
-            if (!found) continue;
+        eachGlyph(text, [&](const Glyph* found) {
+            if (!found) { x += spaceAdvance(); return; }
             const Glyph& glyph = *found;
             
             if (glyph.textureId && glyph.width > 0 && glyph.height > 0) {
@@ -177,7 +176,7 @@ public:
             }
             
             x += glyph.advance;
-        }
+        });
         
         // Restore OpenGL state
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -188,14 +187,29 @@ public:
     }
     
     // Measure text width
-    float measureText(const std::string& text) {
-        float width = 0;
+    /// Calls `f(glyph)` for each glyph of `text` in order (nullptr for a space),
+    /// emoji sequences shaped into their ligatures
+    template <typename F>
+    void eachGlyph(const std::string& text, F f) {
         for (size_t i = 0; i < text.size();) {
             uint32_t c = nextCodepoint(text, i);
-            if (c == ' ') { width += spaceAdvance(); continue; }
-            if (const Glyph* glyph = glyphFor(wantsEmoji(c, text, i) && emojiFace() ? (c | kEmojiVariant) : c))
-                width += glyph->advance;
+            if (c == ' ') { f(nullptr); continue; }
+            if (wantsEmoji(c, text, i) && emojiFace()) {
+                size_t j = i;
+                std::vector<const Glyph*> seq = emojiSequence(c, text, j);
+                if (!seq.empty()) {
+                    i = j;
+                    for (const Glyph* g : seq) if (g) f(g);
+                    continue;
+                }
+            }
+            if (const Glyph* g = glyphFor(c)) f(g);
         }
+    }
+
+    float measureText(const std::string& text) {
+        float width = 0;
+        eachGlyph(text, [&](const Glyph* glyph) { width += glyph ? glyph->advance : spaceAdvance(); });
         return width;
     }
     
@@ -385,8 +399,15 @@ private:
     /// RGBA texture, scaled to the text size. False when there is none.
     bool cacheColorGlyph(uint32_t c) {
         FT_Face face = emojiFace();
-        if (!face || !FT_Get_Char_Index(face, c)) return false;
-        if (FT_Load_Char(face, c, FT_LOAD_COLOR | FT_LOAD_RENDER)) return false;
+        FT_UInt index = face ? FT_Get_Char_Index(face, c) : 0;
+        if (!index) return false;
+        return cacheColorGlyphIndex(index, c | kEmojiVariant);
+    }
+
+    /// The emoji font's glyph `index` as a colour glyph, cached under `key`
+    bool cacheColorGlyphIndex(FT_UInt index, uint32_t key) {
+        FT_Face face = emojiFace();
+        if (!face || FT_Load_Glyph(face, index, FT_LOAD_COLOR | FT_LOAD_RENDER)) return false;
         FT_GlyphSlot slot = face->glyph;
         FT_Bitmap& bitmap = slot->bitmap;
         if (bitmap.pixel_mode != FT_PIXEL_MODE_BGRA || !bitmap.buffer || bitmap.width == 0) return false;
@@ -420,8 +441,164 @@ private:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glBindTexture(GL_TEXTURE_2D, 0);
-        glyphs_[c | kEmojiVariant] = glyph;
+        glyphs_[key] = glyph;
         return true;
+    }
+
+    /// Cache key for a glyph of the emoji font by index (after ligatures)
+    static constexpr uint32_t kEmojiGlyphIndex = 0x40000000u;
+
+    const Glyph* emojiGlyphByIndex(FT_UInt index) {
+        uint32_t key = kEmojiGlyphIndex | index;
+        auto it = glyphs_.find(key);
+        if (it == glyphs_.end()) {
+            if (!cacheColorGlyphIndex(index, key)) glyphs_[key] = Glyph();  // remember the miss
+            it = glyphs_.find(key);
+        }
+        return &it->second;
+    }
+
+    // -------------------------------------------------------------------------
+    // Emoji sequences: skin tones, flags, ZWJ families and keycaps are
+    // ligatures in the emoji font (OpenType GSUB lookup type 4, possibly in
+    // type 7 extensions). They are read once and applied to each sequence.
+    // -------------------------------------------------------------------------
+
+    struct Ligature {
+        std::vector<uint16_t> rest;  // the components after the first
+        uint16_t glyph = 0;
+    };
+
+    static uint16_t be16(const std::vector<uint8_t>& t, size_t at) {
+        return at + 1 < t.size() ? (uint16_t)((t[at] << 8) | t[at + 1]) : 0;
+    }
+    static uint32_t be32(const std::vector<uint8_t>& t, size_t at) {
+        return ((uint32_t)be16(t, at) << 16) | be16(t, at + 2);
+    }
+
+    /// The glyphs an OpenType coverage table lists, in coverage-index order
+    static std::vector<uint16_t> coverageGlyphs(const std::vector<uint8_t>& t, size_t at) {
+        std::vector<uint16_t> out;
+        uint16_t format = be16(t, at);
+        if (format == 1) {
+            uint16_t n = be16(t, at + 2);
+            for (uint16_t i = 0; i < n; i++) out.push_back(be16(t, at + 4 + 2 * i));
+        } else if (format == 2) {
+            uint16_t n = be16(t, at + 2);
+            for (uint16_t i = 0; i < n; i++) {
+                size_t r = at + 4 + 6 * i;
+                uint16_t first = be16(t, r), last = be16(t, r + 2), startIndex = be16(t, r + 4);
+                if (last < first || last - first > 0x4000) continue;
+                if (out.size() < (size_t)startIndex + (last - first + 1)) out.resize((size_t)startIndex + (last - first + 1));
+                for (uint32_t g = first; g <= last; g++) out[startIndex + (g - first)] = (uint16_t)g;
+            }
+        }
+        return out;
+    }
+
+    void loadEmojiLigatures() {
+        if (ligaturesLoaded_) return;
+        ligaturesLoaded_ = true;
+        FT_Face face = emojiFace();
+        if (!face) return;
+        FT_ULong length = 0;
+        if (FT_Load_Sfnt_Table(face, TTAG_GSUB, 0, nullptr, &length) || length < 10) return;
+        std::vector<uint8_t> t(length);
+        if (FT_Load_Sfnt_Table(face, TTAG_GSUB, 0, t.data(), &length)) return;
+        size_t lookupList = be16(t, 8);
+        uint16_t lookups = be16(t, lookupList);
+        for (uint16_t l = 0; l < lookups; l++) {
+            size_t lookup = lookupList + be16(t, lookupList + 2 + 2 * l);
+            uint16_t type = be16(t, lookup), subtables = be16(t, lookup + 4);
+            for (uint16_t k = 0; k < subtables; k++) {
+                size_t sub = lookup + be16(t, lookup + 6 + 2 * k);
+                uint16_t subType = type;
+                if (type == 7) {  // extension: the real subtable is further away
+                    subType = be16(t, sub + 2);
+                    sub += be32(t, sub + 4);
+                }
+                if (subType != 4 || be16(t, sub) != 1 || sub >= t.size()) continue;
+                std::vector<uint16_t> firsts = coverageGlyphs(t, sub + be16(t, sub + 2));
+                uint16_t sets = be16(t, sub + 4);
+                for (uint16_t i = 0; i < sets && i < firsts.size(); i++) {
+                    size_t set = sub + be16(t, sub + 6 + 2 * i);
+                    uint16_t count = be16(t, set);
+                    for (uint16_t j = 0; j < count; j++) {
+                        size_t lig = set + be16(t, set + 2 + 2 * j);
+                        Ligature L;
+                        L.glyph = be16(t, lig);
+                        uint16_t components = be16(t, lig + 2);
+                        for (uint16_t c = 1; c < components; c++) L.rest.push_back(be16(t, lig + 4 + 2 * (c - 1)));
+                        ligatures_[firsts[i]].push_back(std::move(L));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Glyph indices for a sequence of glyphs, with the font's ligatures
+    /// applied left to right, the longest match first
+    std::vector<uint16_t> applyLigatures(std::vector<uint16_t> glyphs) {
+        loadEmojiLigatures();
+        for (size_t i = 0; i < glyphs.size();) {
+            auto it = ligatures_.find(glyphs[i]);
+            const Ligature* best = nullptr;
+            if (it != ligatures_.end()) {
+                for (const Ligature& L : it->second) {
+                    if (L.rest.empty() || i + 1 + L.rest.size() > glyphs.size()) continue;
+                    if (!std::equal(L.rest.begin(), L.rest.end(), glyphs.begin() + (long)i + 1)) continue;
+                    if (!best || L.rest.size() > best->rest.size()) best = &L;
+                }
+            }
+            if (!best) { i++; continue; }
+            // Replace the matched run and look again here: a ligature's result
+            // can start a longer one (ZWJ families are built up that way)
+            glyphs.erase(glyphs.begin() + (long)i + 1, glyphs.begin() + (long)(i + 1 + best->rest.size()));
+            glyphs[i] = best->glyph;
+        }
+        return glyphs;
+    }
+
+    static bool isRegionalIndicator(uint32_t c) { return c >= 0x1F1E6 && c <= 0x1F1FF; }
+    static bool isSkinTone(uint32_t c) { return c >= 0x1F3FB && c <= 0x1F3FF; }
+
+    /// An emoji sequence starting with `first` (its following characters
+    /// read from `text` at `i`, which moves past them): its glyphs after the
+    /// font's ligatures. Empty when the emoji font lacks the first character.
+    std::vector<const Glyph*> emojiSequence(uint32_t first, const std::string& text, size_t& i) {
+        FT_Face face = emojiFace();
+        std::vector<uint16_t> gids;
+        auto add = [&](uint32_t c) {
+            if (FT_UInt g = FT_Get_Char_Index(face, c)) gids.push_back((uint16_t)g);
+        };
+        add(first);
+        if (gids.empty()) return {};
+        bool flag = isRegionalIndicator(first);
+        size_t j = i;
+        while (j < text.size()) {
+            size_t k = j;
+            uint32_t c = nextCodepoint(text, k);
+            bool part = false;
+            if (flag) {
+                part = isRegionalIndicator(c);
+                flag = false;
+            } else if (c == 0xFE0F || c == 0x20E3 || isSkinTone(c) || (c >= 0xE0020 && c <= 0xE007F)) {
+                part = true;
+            } else if (c == 0x200D && k < text.size()) {
+                // A joiner and the character after it
+                add(c);
+                j = k;
+                c = nextCodepoint(text, k);
+                part = true;
+            }
+            if (!part) break;
+            if (c != 0xFE0F) add(c);
+            j = k;
+        }
+        i = j;
+        std::vector<const Glyph*> out;
+        for (uint16_t g : applyLigatures(gids)) out.push_back(emojiGlyphByIndex(g));
+        return out;
     }
 
     void cacheGlyph(uint32_t c) {
@@ -514,6 +691,8 @@ private:
     bool fallbacksLoaded_ = false;
     FT_Face emojiFace_ = nullptr;
     bool emojiLoaded_ = false;
+    std::unordered_map<uint16_t, std::vector<Ligature>> ligatures_;
+    bool ligaturesLoaded_ = false;
     bool syntheticBold_ = false;
     bool syntheticItalic_ = false;
     float spaceAdvance_ = 0;
