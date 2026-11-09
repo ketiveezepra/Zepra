@@ -24,6 +24,13 @@ namespace ZepraBrowser {
 uint32_t cssColorToRGB(const Zepra::WebCore::CSSColor& c);
 
 /**
+ * @brief text-transform (CSS Text 3 §2.1): uppercase, lowercase or
+ * capitalize applied to UTF-8 text, for Latin, Greek and Cyrillic letters.
+ * Other values (none, full-width, ...) leave the text as it is.
+ */
+std::string applyTextTransform(const std::string& text, const std::string& transform);
+
+/**
  * @brief Polyfill CSS shorthands (background -> background-color, etc.)
  */
 std::string polyfillCSSShorthands(const std::string& css);

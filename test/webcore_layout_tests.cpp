@@ -12,6 +12,7 @@
 
 #include <array>
 
+#include "browser/css_utils.h"
 #include "browser/blend_modes.h"
 #include "browser/dom.hpp"
 #include "browser/box_shadow.h"
@@ -764,6 +765,16 @@ TEST(Backgrounds, ColorAlphaAndOpacityReachTheFill) {
 }
 
 // ---------------------------------------------------------------------------
+// text-transform
+// ---------------------------------------------------------------------------
+
+TEST(TextTransform, UpperLowerAndCapitalize) {
+    using ZepraBrowser::applyTextTransform;
+    EXPECT_EQ(applyTextTransform("1 · Grayscale (0% → 100%)", "uppercase"), "1 · GRAYSCALE (0% → 100%)");
+    EXPECT_EQ(applyTextTransform("straße äöü αβγ жук", "uppercase"), "STRASSE ÄÖÜ ΑΒΓ ЖУК");
+    EXPECT_EQ(applyTextTransform("ÉCOLE ΣΟΦΙΑ ЖУК", "lowercase"), "école σοφια жук");
+    EXPECT_EQ(applyTextTransform("hello wide world 3d", "capitalize"), "Hello Wide World 3d");
+    EXPECT_EQ(applyTextTransform("Mixed Case", "none"), "Mixed Case");
 // mix-blend-mode (blend_modes.cpp)
 // ---------------------------------------------------------------------------
 

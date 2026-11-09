@@ -51,6 +51,9 @@ CSSComputedStyle CSSComputedStyle::inherit(const CSSComputedStyle& parent) {
     style.textAlign = parent.textAlign;
     style.legacyAlign = parent.legacyAlign;
     style.whiteSpace = parent.whiteSpace;
+    style.textTransform = parent.textTransform;
+    style.letterSpacing = parent.letterSpacing;
+    style.wordSpacing = parent.wordSpacing;
     style.visibility = parent.visibility;
     style.borderSpacingH = parent.borderSpacingH;
     style.borderSpacingV = parent.borderSpacingV;

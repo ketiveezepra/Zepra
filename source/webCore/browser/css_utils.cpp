@@ -12,6 +12,85 @@ uint32_t cssColorToRGB(const Zepra::WebCore::CSSColor& c) {
     return (c.r << 16) | (c.g << 8) | c.b;
 }
 
+namespace {
+
+uint32_t decodeUtf8(const std::string& s, size_t& i) {
+    unsigned char lead = (unsigned char)s[i];
+    int extra = lead < 0x80 ? 0 : (lead >> 5) == 0x6 ? 1 : (lead >> 4) == 0xE ? 2 : (lead >> 3) == 0x1E ? 3 : -1;
+    if (extra == 0) { i++; return lead; }
+    if (extra < 0 || i + extra >= s.size()) { i++; return 0xFFFD; }
+    uint32_t c = lead & (0x3F >> extra);
+    for (int k = 1; k <= extra; k++) c = (c << 6) | ((unsigned char)s[i + k] & 0x3F);
+    i += extra + 1;
+    return c;
+}
+
+void encodeUtf8(uint32_t c, std::string& out) {
+    if (c < 0x80) out += (char)c;
+    else if (c < 0x800) { out += (char)(0xC0 | (c >> 6)); out += (char)(0x80 | (c & 0x3F)); }
+    else if (c < 0x10000) {
+        out += (char)(0xE0 | (c >> 12)); out += (char)(0x80 | ((c >> 6) & 0x3F)); out += (char)(0x80 | (c & 0x3F));
+    } else {
+        out += (char)(0xF0 | (c >> 18)); out += (char)(0x80 | ((c >> 12) & 0x3F));
+        out += (char)(0x80 | ((c >> 6) & 0x3F)); out += (char)(0x80 | (c & 0x3F));
+    }
+}
+
+uint32_t toUpper(uint32_t c) {
+    if (c >= 'a' && c <= 'z') return c - 32;
+    if (c >= 0xE0 && c <= 0xFE && c != 0xF7) return c - 32;       // Latin-1
+    if (c == 0xFF) return 0x178;
+    if (c >= 0x100 && c <= 0x17F && (c & 1) && c != 0x131 && c != 0x138 && c != 0x149 && c != 0x17F &&
+        !(c >= 0x139 && c <= 0x148) && !(c >= 0x179)) return c - 1;  // Latin Extended-A pairs
+    if (((c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E)) && !(c & 1)) return c - 1;
+    if (c == 0x3C2) return 0x3A3;                                  // final sigma
+    if (c >= 0x3B1 && c <= 0x3C9) return c - 32;                   // Greek
+    if (c >= 0x430 && c <= 0x44F) return c - 32;                   // Cyrillic
+    if (c >= 0x450 && c <= 0x45F) return c - 80;
+    return c;
+}
+
+uint32_t toLower(uint32_t c) {
+    if (c >= 'A' && c <= 'Z') return c + 32;
+    if (c >= 0xC0 && c <= 0xDE && c != 0xD7) return c + 32;
+    if (c == 0x178) return 0xFF;
+    if (c >= 0x100 && c <= 0x17F && !(c & 1) && c != 0x130 && c != 0x138 && !(c >= 0x139 && c <= 0x148) &&
+        !(c >= 0x179)) return c + 1;
+    if (((c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E)) && (c & 1)) return c + 1;
+    if (c >= 0x391 && c <= 0x3A9 && c != 0x3A2) return c + 32;
+    if (c >= 0x410 && c <= 0x42F) return c + 32;
+    if (c >= 0x400 && c <= 0x40F) return c + 80;
+    return c;
+}
+
+bool isLetter(uint32_t c) { return toUpper(c) != c || toLower(c) != c || c == 0xDF; }
+
+} // namespace
+
+std::string applyTextTransform(const std::string& text, const std::string& transform) {
+    std::string t = transform;
+    for (char& ch : t) ch = (char)std::tolower((unsigned char)ch);
+    bool upper = t == "uppercase", lowerCase = t == "lowercase", capitalize = t == "capitalize";
+    if (!upper && !lowerCase && !capitalize) return text;
+    std::string out;
+    out.reserve(text.size());
+    bool wordStart = true;
+    for (size_t i = 0; i < text.size();) {
+        uint32_t c = decodeUtf8(text, i);
+        if (upper) {
+            if (c == 0xDF) { out += "SS"; continue; }  // ß
+            encodeUtf8(toUpper(c), out);
+        } else if (lowerCase) {
+            encodeUtf8(toLower(c), out);
+        } else {
+            encodeUtf8(wordStart && isLetter(c) ? toUpper(c) : c, out);
+            if (isLetter(c) || (c >= '0' && c <= '9')) wordStart = false;
+            else if (c == ' ' || c == '\t' || c == '\n' || c == 0xA0) wordStart = true;
+        }
+    }
+    return out;
+}
+
 std::string polyfillCSSShorthands(const std::string& css) {
     std::string result = css;
     
