@@ -1798,6 +1798,7 @@ static LayoutBox* wrapInAnonymousBox(LayoutBox* parent, std::list<LayoutBox>::it
     box.anonymous = true;
     box.domElement = parent->domElement;
     box.fontSize = parent->fontSize;
+    box.lineHeight = parent->lineHeight;
     box.color = parent->color;
     box.bold = parent->bold;
     box.italic = parent->italic;
@@ -1899,22 +1900,44 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
             // TEXT NODE → Create LayoutBox directly
             std::string text = textNode->data();
             
-            // Normalize whitespace
+            // Normalize whitespace. white-space: pre, pre-wrap and pre-line
+            // keep the newlines (as '\n', which the layout breaks lines at)
+            // and collapse the spaces around them (pre-line's rule; pre's
+            // spaces are collapsed too, which is approximate)
+            bool keepNewlines = style && (style->whiteSpace == "pre-line" || style->whiteSpace == "pre-wrap" ||
+                                          style->whiteSpace == "pre");
             std::string normalized;
             bool lastSpace = true;
             for (char c : text) {
-                if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                if (c == '\n' && keepNewlines) {
+                    while (!normalized.empty() && normalized.back() == ' ') normalized.pop_back();
+                    normalized += '\n';
+                    lastSpace = true;
+                } else if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
                     if (!lastSpace) { normalized += ' '; lastSpace = true; }
                 } else {
                     normalized += c; lastSpace = false;
                 }
             }
+            // A newline at either end is a line break against nothing
+            while (!normalized.empty() && normalized.back() == '\n') normalized.pop_back();
+            while (!normalized.empty() && normalized.front() == '\n') normalized.erase(normalized.begin());
+            // White space at either end collapses into one space between this
+            // run and its neighbours on the line (CSS Text 3 §4.1.1); the
+            // inline layout adds that space's width
+            auto isSpace = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+            bool leadingSpace = !text.empty() && isSpace(text.front());
+            bool trailingSpace = !normalized.empty() && normalized.back() == ' ';
             if (!normalized.empty() && normalized.back() == ' ') normalized.pop_back();
             if (!normalized.empty() && normalized.front() == ' ') normalized = normalized.substr(1);
             
             // Every text node is page text: <script>, <style> and the like
             // never get here, so nothing is guessed away by its content
-            if (normalized.empty()) continue;
+            if (normalized.empty()) {
+                // Only white space: a space after whatever came before
+                if (leadingSpace && !parentBox->children.empty()) parentBox->children.back().spaceAfter = true;
+                continue;
+            }
             
             // Decode HTML entities (&nbsp; &amp; etc.)
             normalized = decodeHtmlEntities(normalized);
@@ -1925,12 +1948,15 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
             LayoutBox* box = addChild(parentBox);
             box->text = normalized;
             box->type = LayoutType::Inline;
+            box->spaceBefore = leadingSpace;
+            box->spaceAfter = trailingSpace;
             if (style) box->noWrap = style->whiteSpace == "nowrap" || style->whiteSpace == "pre";
             
             // Apply ALL CSS styles from computed style
             if (style) {
                 // Typography
                 box->fontSize = style->fontSize;
+                box->lineHeight = style->usedLineHeight();
                 box->color = cssColorToRGB(style->color);
                 if (style->hasTextFillColor) {
                     // -webkit-text-fill-color paints the glyphs instead of color
@@ -2562,11 +2588,17 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
             const CSSComputedStyle* childStyle = g_cssEngine ? 
                 g_cssEngine->getComputedStyle(childElement) : nullptr;
             
-            // Columns and column groups make no boxes (their widths aren't used yet)
+            // Columns and column groups make no boxes (their widths aren't used yet),
+            // nor does display: none (<div hidden> under Tailwind's preflight, whose
+            // [hidden] rule is !important, was a block with an empty line's height)
+#pragma push_macro("None")
+#undef None
             if (childStyle && (childStyle->display == DisplayValue::TableColumn ||
-                               childStyle->display == DisplayValue::TableColumnGroup)) {
+                               childStyle->display == DisplayValue::TableColumnGroup ||
+                               childStyle->display == DisplayValue::None)) {
                 continue;
             }
+#pragma pop_macro("None")
 
             // 1. CSS display property (highest priority)
             if (childStyle) {
@@ -2616,6 +2648,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 // Apply CSS styles to this block container
                 if (childStyle) {
                     blockBox->fontSize = childStyle->fontSize;
+                    blockBox->lineHeight = childStyle->usedLineHeight();
                     blockBox->color = cssColorToRGB(childStyle->color);
                     blockBox->fontWeight = static_cast<int>(childStyle->fontWeight);
                     blockBox->fontFamily = childStyle->fontFamily;
@@ -2642,6 +2675,8 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     blockBox->marginTopAuto = childStyle->marginTop.isAuto();
                     blockBox->marginBottomAuto = childStyle->marginBottom.isAuto();
                     
+                    blockBox->noWrap = childStyle->whiteSpace == "nowrap" || childStyle->whiteSpace == "pre";
+
                     // Padding
                     blockBox->paddingTop = childStyle->paddingTop.value;
                     blockBox->paddingBottom = childStyle->paddingBottom.value;
@@ -2873,6 +2908,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 
                 if (childStyle) {
                     inlineBox->fontSize = childStyle->fontSize;
+                    inlineBox->lineHeight = childStyle->usedLineHeight();
                     inlineBox->color = cssColorToRGB(childStyle->color);
                     inlineBox->fontWeight = static_cast<int>(childStyle->fontWeight);
                     inlineBox->fontFamily = childStyle->fontFamily;
@@ -2890,6 +2926,14 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     inlineBox->paddingBottom = childStyle->paddingBottom.value;
                     inlineBox->paddingLeft = childStyle->paddingLeft.value;
                     inlineBox->paddingRight = childStyle->paddingRight.value;
+                    // Horizontal margins push the neighbours on the line apart;
+                    // vertical ones do nothing on an inline box (CSS 2.1 §8.3)
+                    auto inlineMargin = [](const Zepra::WebCore::CSSLength& m) {
+                        return m.isAuto() || m.unit == Zepra::WebCore::CSSLength::Unit::Percent ? 0.0f : m.value;
+                    };
+                    inlineBox->marginLeft = inlineMargin(childStyle->marginLeft);
+                    inlineBox->marginRight = inlineMargin(childStyle->marginRight);
+                    inlineBox->noWrap = childStyle->whiteSpace == "nowrap" || childStyle->whiteSpace == "pre";
                     
                     inlineBox->borderTop = childStyle->borderTopWidth;
                     inlineBox->borderRight = childStyle->borderRightWidth;
@@ -3498,15 +3542,27 @@ static float pageViewportHeight() {
     return (float)g_height - TOPBAR_HEIGHT - (g_devTools.visible() ? g_devTools.height() : 0.0f);
 }
 
+// The page's vertical scrollbar: shown while the page is taller than the
+// viewport, over the right edge of the content area. Like a classic
+// scrollbar it takes its width from the page's layout width (and from the
+// containing block of fixed boxes). The height is the last layout's, which
+// runs every frame.
+static constexpr float kPageScrollbarWidth = 15;
+static float pageScrollbarWidth() {
+    bool isStart = g_currentUrl == "zepra://start" || g_currentUrl.empty();
+    if (isStart || !g_layoutRoot) return 0;
+    return g_layoutRoot->height > pageViewportHeight() + 0.5f ? kPageScrollbarWidth : 0;
+}
+
 // Where the root box goes in the content area and the width it is laid out
-// at: the start page fills the area, web pages keep a 20px gutter
+// at: the content area's top left, as wide as the area less the scrollbar
+// (the root's own margins, body's 8px from the UA sheet, place it inside)
 struct PageFrame {
     float originX, originY, layoutWidth;
 };
 static PageFrame pageFrame() {
     float contentW = g_width - getSidebarOffset();
-    bool isStart = g_currentUrl == "zepra://start" || g_currentUrl.empty();
-    return isStart ? PageFrame{0, 0, contentW} : PageFrame{20, 20, contentW - 40};
+    return PageFrame{0, 0, std::max(0.0f, contentW - pageScrollbarWidth())};
 }
 
 // Tells media queries the page viewport's size (what window.innerWidth/innerHeight
@@ -3521,7 +3577,8 @@ static void updateMediaViewport() {
 
 static void layoutPage() {
     PageFrame frame = pageFrame();
-    ZepraBrowser::setLayoutViewport(g_width - getSidebarOffset(), pageViewportHeight(), frame.originX, frame.originY);
+    ZepraBrowser::setLayoutViewport(g_width - getSidebarOffset(), pageViewportHeight(), frame.originX, frame.originY,
+                                    pageScrollbarWidth());
     ZepraBrowser::layoutBlock(*g_layoutRoot, frame.layoutWidth, 0);
     g_layoutPending = false;
     g_layoutPass++;
@@ -4554,7 +4611,7 @@ void render() {
             g_cursorIsPointer = false;
             
             if (g_layoutRoot) {
-                // Run layout algorithm (20px gutter, see pageFrame)
+                // Run layout algorithm (see pageFrame)
                 layoutPage();
                 
                 // Paint the layout tree
@@ -4608,8 +4665,8 @@ void render() {
     for (const auto& t : g_tabs) { if (t.id == g_activeTabId) { activeTabPtr = &t; break; } }
     if (g_layoutRoot && activeTabPtr && activeTabPtr->url != "zepra://start") {
         float viewportHeight = contentH;
-        float pageHeight = g_layoutRoot->height + 40; // Add padding at the bottom
-        if (pageHeight > viewportHeight) {
+        float pageHeight = g_layoutRoot->height;
+        if (pageScrollbarWidth() > 0 && pageHeight > viewportHeight) {
             float scrollY = 0;
             for (const auto& tab : g_tabs) {
                 if (tab.id == g_activeTabId) { scrollY = tab.scrollY; break; }
@@ -4623,9 +4680,10 @@ void render() {
             float thumbY = contentY + scrollPercent * (viewportHeight - thumbHeight);
             
             // Track
-            gfx::rect(contentX + contentW - 14, contentY, 14, viewportHeight, 0xF5F5F5);
+            gfx::rect(contentX + contentW - kPageScrollbarWidth, contentY, kPageScrollbarWidth, viewportHeight, 0xF5F5F5);
             // Thumb
-            gfx::rrect(contentX + contentW - 12, thumbY, 10, thumbHeight, 5, 0xCCCCCC);
+            gfx::rrect(contentX + contentW - kPageScrollbarWidth + 2, thumbY, kPageScrollbarWidth - 4, thumbHeight, 5,
+                       0xCCCCCC);
         }
     }
     

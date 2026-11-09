@@ -143,6 +143,22 @@ struct LayoutBox {
     uint8_t borderAlpha = 255;   // the border colour's alpha (rgba(), #rrggbbaa)
     int borderStyle = 2;         // Zepra::WebCore::BorderStyle of the painted sides: 2 solid, 3 dashed, 4 dotted, 5 double
     float fontSize = 16.0f;
+    float lineHeight = 0;        // used line-height in px; 0 = normal (fontSize + 4)
+    // Collapsed white space at the start/end of a text run (or a white-space
+    // only text node after this box): one space between it and its neighbour
+    bool spaceBefore = false;
+    bool spaceAfter = false;
+    /// Height of one line of this box's text: its line-height, or the
+    /// font's own spacing for normal
+    float lineBoxHeight() const { return lineHeight > 0 ? lineHeight : fontSize + 4; }
+    /// How far a set line-height moves the baseline from where normal puts
+    /// it (fontSize below the line's top). The glyphs' content area is
+    /// centred in the line (CSS Inline 3 §5.2, half-leading on each side),
+    /// with typical sans metrics: ascent 0.93em, descent 0.24em, so the
+    /// baseline sits lineHeight/2 + 0.345em below the top.
+    float halfLeadingShift() const {
+        return lineHeight > 0 ? lineHeight / 2.0f + 0.345f * fontSize - fontSize : 0.0f;
+    }
     bool bold = false;
     bool italic = false;
     std::string fontFamily;      // CSS font-family list ("" = the system font)
@@ -469,8 +485,12 @@ void setCanvasPaintCallback(
  * against: the page's content area, not the whole window. Until it is set,
  * the window size (g_width x g_height) is used.
  */
-// rootOffset: where the root box sits inside the viewport (page gutter)
-void setLayoutViewport(float width, float height, float rootOffsetX = 0, float rootOffsetY = 0);
+// rootOffset: where the root box sits inside the viewport (page gutter);
+// scrollbarWidth: the part of the width the page's scrollbar covers, which
+// position: fixed boxes do not lay out under (their containing block is the
+// viewport minus its scrollbar, CSS 2.1 §10.1; vw units still include it)
+void setLayoutViewport(float width, float height, float rootOffsetX = 0, float rootOffsetY = 0,
+                       float scrollbarWidth = 0);
 float layoutViewportWidth();
 float layoutViewportHeight();
 
@@ -531,6 +551,15 @@ void invalidateIntrinsicWidths();
 /// Block-level in a block formatting context (blocks, flex, tables; stray
 /// table-internal boxes are treated as blocks)
 bool isBlockLevel(LayoutType type);
+
+/// The space between two inline-level boxes next to each other on a line:
+/// one space of the font on the side the collapsed white space came from,
+/// or 0 when there was none between them
+float inlineSpacing(const LayoutBox& before, const LayoutBox& after);
+
+/// The width of the widest line of a text run whose preserved newlines
+/// (white-space: pre, pre-wrap, pre-line) break it; 0 when it has none
+float widestForcedLine(const LayoutBox& box);
 
 /**
  * @brief Paint a layout box and its children

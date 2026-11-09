@@ -389,7 +389,15 @@ public:
     float fontSize = 16.0f;
     FontWeight fontWeight = FontWeight::Normal;
     FontStyle fontStyle = FontStyle::Normal;
-    float lineHeight = 1.2f;
+    float lineHeight = 1.2f;         // as a multiple of font-size
+    bool lineHeightNormal = true;    // line-height: normal (the font's own spacing)
+    float lineHeightPx = 0;          // a length/percentage line-height in px (inherited
+                                     // as is); 0 for normal and plain numbers
+    /// The used line-height in px, or 0 for normal
+    float usedLineHeight() const {
+        if (lineHeightNormal) return 0;
+        return lineHeightPx > 0 ? lineHeightPx : lineHeight * fontSize;
+    }
     TextAlign textAlign = TextAlign::Start;
     // HTML "align descendants" (<center>, align attributes, -webkit-center):
     // block children are aligned too. 0=none, 1=left, 2=center, 3=right

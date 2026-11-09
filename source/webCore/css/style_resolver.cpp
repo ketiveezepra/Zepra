@@ -221,11 +221,8 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
         // Step 6: !important declarations, in reverse origin order: author rules,
         // the inline style, user rules, user-agent rules (CSS Cascade 4, 6.4)
         auto applyImportant = [&](StyleOrigin origin) {
-            for (const auto& match : matchedRules) {
-                if (match.origin == origin && match.rule && match.rule->style() && match.rule->style()->hasImportant()) {
-                    applyDeclarations(computed, match.rule->style(), parentStyle, Importance::Important);
-                }
-            }
+            for (const MatchedRule* match : CSSCascade::importantOrder(matchedRules, origin))
+                applyDeclarations(computed, match->rule->style(), parentStyle, Importance::Important);
         };
         applyImportant(StyleOrigin::Author);
         if (inlineDecl && inlineDecl->hasImportant()) {
@@ -326,11 +323,8 @@ const CSSComputedStyle* StyleResolver::getPseudoElementStyle(DOMElement* element
         }
     }
     for (StyleOrigin origin : {StyleOrigin::Author, StyleOrigin::User, StyleOrigin::UserAgent}) {
-        for (const auto& match : matched) {
-            if (match.origin == origin && match.rule && match.rule->style() && match.rule->style()->hasImportant()) {
-                applyDeclarations(computed, match.rule->style(), elementStyle, Importance::Important);
-            }
-        }
+        for (const MatchedRule* match : CSSCascade::importantOrder(matched, origin))
+            applyDeclarations(computed, match->rule->style(), elementStyle, Importance::Important);
     }
 
     for (CSSLength* len : {&computed.marginTop, &computed.marginRight, &computed.marginBottom,
@@ -390,7 +384,11 @@ std::vector<MatchedRule> StyleResolver::collectRules(DOMElement* element, const 
         for (auto& rule : rules) {
             // :host rules lose to the document's rules for the host
             // (outer tree context first), whatever their specificity
-            if (forHost) rule.specificity.a -= 1000;
+            // (the lowest layer rank too: layers are compared first)
+            if (forHost) {
+                rule.specificity.a -= 1000;
+                rule.layer = 0;
+            }
             matched.push_back(rule);
         }
     };
@@ -507,7 +505,11 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         else if (property == "font-size") style.fontSize = parentStyle->fontSize;
         else if (property == "font-weight") style.fontWeight = parentStyle->fontWeight;
         else if (property == "font-style") style.fontStyle = parentStyle->fontStyle;
-        else if (property == "line-height") style.lineHeight = parentStyle->lineHeight;
+        else if (property == "line-height") {
+            style.lineHeight = parentStyle->lineHeight;
+            style.lineHeightNormal = parentStyle->lineHeightNormal;
+            style.lineHeightPx = parentStyle->lineHeightPx;
+        }
         else if (property == "text-align") {
             style.textAlign = parentStyle->textAlign;
             style.legacyAlign = parentStyle->legacyAlign;
@@ -523,6 +525,12 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         else if (property == "border-collapse") style.borderCollapse = parentStyle->borderCollapse;
         else if (property == "visibility") style.visibility = parentStyle->visibility;
         else if (property == "cursor") style.cursor = parentStyle->cursor;
+        // Not inherited by default, but 'inherit' still takes the parent's
+        // value: preflight's a{text-decoration:inherit} removes the UA underline
+        else if (property == "text-decoration" || property == "text-decoration-line")
+            style.textDecoration = parentStyle->textDecoration.empty() ? "none" : parentStyle->textDecoration;
+        else if (property == "text-transform") style.textTransform = parentStyle->textTransform;
+        else if (property == "background-color") style.backgroundColor = parentStyle->backgroundColor;
         return;
     }
     
@@ -535,7 +543,11 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         else if (property == "position") style.position = PositionValue::Static;
         else if (property == "opacity") style.opacity = 1.0f;
         else if (property == "font-style") style.fontStyle = FontStyle::Normal;
-        else if (property == "line-height") style.lineHeight = 1.2f;
+        else if (property == "line-height") {
+            style.lineHeight = 1.2f;
+            style.lineHeightNormal = true;
+            style.lineHeightPx = 0;
+        }
         else if (property == "white-space") style.whiteSpace = "normal";
         else if (property == "vertical-align") style.verticalAlign = "baseline";
         else if (property == "text-align") {
@@ -729,24 +741,46 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     else if (property == "border-collapse") { style.borderCollapse = (value == "collapse"); }
     else if (property == "table-layout") { style.tableLayoutFixed = (value == "fixed"); }
     else if (property == "line-height") {
-        if (value == "normal") { style.lineHeight = 1.2f; }
-        else if (isCSSMathFunction(value)) {
+        // A number inherits as a number (scaling with each element's font
+        // size); a length or percentage computes to px here and inherits as
+        // that px value (CSS Inline 3 §4.3)
+        auto setNumber = [&](float n) {
+            if (!(n >= 0)) return;
+            style.lineHeight = n;
+            style.lineHeightNormal = false;
+            style.lineHeightPx = 0;
+        };
+        auto setPx = [&](float px) {
+            if (!(px >= 0)) return;
+            style.lineHeightPx = std::max(px, 0.001f);
+            style.lineHeight = style.fontSize > 0 ? px / style.fontSize : 1.2f;
+            style.lineHeightNormal = false;
+        };
+        if (value == "normal") {
+            style.lineHeight = 1.2f;
+            style.lineHeightNormal = true;
+            style.lineHeightPx = 0;
+        } else if (isCSSMathFunction(value)) {
             // calc(2 / 1.5) is a number; calc(1rem + 2px) a length
             CSSMathValue math;
             if (evaluateCSSMath(value, lengthContext_, math)) {
-                if (math.isNumber) style.lineHeight = math.number;
-                else if (math.length.unit == CSSLength::Unit::Percent) style.lineHeight = math.length.value / 100.0f;
-                else style.lineHeight = math.length.toPx(style.fontSize, 16.0f, lengthContext_.viewportWidth,
-                                                         lengthContext_.viewportHeight, 0) / style.fontSize;
+                if (math.isNumber) setNumber(math.number);
+                else if (math.length.unit == CSSLength::Unit::Percent) setPx(math.length.value / 100.0f * style.fontSize);
+                else setPx(math.length.toPx(style.fontSize, 16.0f, lengthContext_.viewportWidth,
+                                            lengthContext_.viewportHeight, 0));
             }
-        }
-        else if (value.find_first_of("0123456789.") != std::string::npos) {
-            try {
-                float val = std::stof(value);
-                if (value.back() == '%') style.lineHeight = val / 100.0f;
-                else if (value.find("px") != std::string::npos) style.lineHeight = val / style.fontSize;
-                else style.lineHeight = val;
-            } catch (...) {}
+        } else if (value.find_first_of("0123456789.") != std::string::npos) {
+            char* end = nullptr;
+            float val = std::strtof(value.c_str(), &end);
+            std::string unit = end ? std::string(end) : "";
+            if (end == value.c_str()) return;
+            if (unit.empty()) setNumber(val);
+            else if (unit == "%") setPx(val / 100.0f * style.fontSize);
+            else {
+                CSSLength len = parseLength(value);
+                if (!len.isAuto()) setPx(len.toPx(style.fontSize, 16.0f, lengthContext_.viewportWidth,
+                                                  lengthContext_.viewportHeight, 0));
+            }
         }
     }
 

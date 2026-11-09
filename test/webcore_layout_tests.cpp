@@ -1914,17 +1914,33 @@ TEST(TextWrap, LongRunBreaksAtSpacesToFitTheWidth) {
 
 TEST(TextWrap, RunStartsOnTheLineItJoins) {
     LayoutBox block;
-    addRun(block, "xxxxxxxx");  // 64px, then 4px between runs
+    addRun(block, "xxxxxxx").spaceAfter = true;  // 56px, then a space (8px)
     LayoutBox& run = addRun(block, "aaaa bbbb cccc");
+    run.spaceAfter = true;
     LayoutBox& after = addRun(block, "zz");
     ZepraBrowser::layoutBlock(block, 100, 0);
     EXPECT_EQ(lineTexts(run), (std::vector<std::string>{"aaaa", "bbbb cccc"}));
     EXPECT_FLOAT_EQ(run.x, 0);
-    EXPECT_FLOAT_EQ(run.textLines[0].x, 68);
+    EXPECT_FLOAT_EQ(run.textLines[0].x, 64);
     EXPECT_FLOAT_EQ(run.textLines[1].x, 0);
-    // The next run follows the last line
-    EXPECT_FLOAT_EQ(after.x, 72 + 4);
+    // The next run follows the last line, after the space
+    EXPECT_FLOAT_EQ(after.x, 72 + 8);
     EXPECT_FLOAT_EQ(after.y, 20);
+}
+
+TEST(TextWrap, InlineBoxesAreSeparatedOnlyByTheirWhiteSpace) {
+    // "ab<b>cd</b> ef" + "gh": a space only where the source had white space
+    LayoutBox block;
+    LayoutBox& a = addRun(block, "ab");
+    LayoutBox& b = addBox(block, LayoutType::Inline);
+    addRun(b, "cd").spaceAfter = true;
+    LayoutBox& c = addRun(block, "ef");
+    LayoutBox& d = addRun(block, "gh");
+    ZepraBrowser::layoutBlock(block, 400, 0);
+    EXPECT_FLOAT_EQ(a.x, 0);
+    EXPECT_FLOAT_EQ(b.x, 16);       // no space: "abcd"
+    EXPECT_FLOAT_EQ(c.x, 32 + 8);   // the space at the end of <b>'s text
+    EXPECT_FLOAT_EQ(d.x, 56);       // runs that touch stay together
 }
 
 TEST(TextWrap, RunMovesToANewLineWhenItsFirstWordDoesNotFit) {
@@ -2090,4 +2106,158 @@ TEST(ShadowTrees, FlatTreeSlotsAndScopedStyles) {
     EXPECT_FLOAT_EQ(d.css->getComputedStyle(host)->paddingLeft.value, 7.0f);
     // A slotted element keeps the document's rules (shadow rules don't reach it)
     EXPECT_EQ(d.css->getComputedStyle(d.doc->getElementById("named"))->color.r, 0xff);
+}
+
+// ---------------------------------------------------------------------------
+// Tailwind v4 cascade: layers, selector lists, color-mix(), line-height
+// ---------------------------------------------------------------------------
+
+TEST(CascadeLayers, LaterLayersAndUnlayeredRulesWin) {
+    // Preflight's "*,:after,:before" zeroes padding in the base layer; the
+    // utilities layer comes later and wins whatever the specificity
+    StyledDoc d("<!doctype html><div id=a class=p6>x</div><div id=b class=p6 data-x>y</div>"
+                "<div id=c class=imp>z</div>",
+                "@layer theme, base, components, utilities;"
+                "@layer utilities { .p6 { padding-left: 24px; } }"
+                "@layer base { *, :after, :before { padding: 0; } [data-x] { padding-left: 1px; } }"
+                "#b { padding-left: 5px; }"
+                "@layer base { .imp { color: #00ff00 !important; } }"
+                "@layer utilities { .imp { color: #0000ff !important; } }");
+    EXPECT_FLOAT_EQ(d.style("a")->paddingLeft.value, 24.0f);
+    // Unlayered beats every layer
+    EXPECT_FLOAT_EQ(d.style("b")->paddingLeft.value, 5.0f);
+    // !important reverses the layer order: the earlier layer wins
+    EXPECT_EQ(d.style("c")->color.g, 0xff);
+    EXPECT_EQ(d.style("c")->color.b, 0);
+}
+
+TEST(Cascade, SelectorListUsesTheMatchingSelectorsSpecificity) {
+    // "*, :before, :after" is (0,0,0) for an element: :before and :after
+    // are pseudo-elements, and a list counts only the selector that matches
+    StyledDoc d("<!doctype html><div id=a class=p>x</div>",
+                ".p { margin-left: 8px; } *, :before, :after { margin: 0; } #z, div { margin-top: 3px; }");
+    EXPECT_FLOAT_EQ(d.style("a")->marginLeft.value, 8.0f);
+    EXPECT_FLOAT_EQ(d.style("a")->marginTop.value, 3.0f);
+}
+
+TEST(Colors, ColorMixWithTransparentKeepsTheHue) {
+    StyledDoc d("<!doctype html><div id=a>x</div><div id=b>y</div>",
+                ":root { --ink: #0a0a0b; }"
+                "#a { background-color: color-mix(in oklab, var(--ink) 70%, transparent); }"
+                "#b { background-color: color-mix(in srgb, #ff0000, #0000ff); }");
+    CSSColor a = d.style("a")->backgroundColor;
+    EXPECT_EQ(a.r, 0x0a);
+    EXPECT_EQ(a.b, 0x0b);
+    EXPECT_EQ(a.a, 179);  // 70% of 255
+    CSSColor b = d.style("b")->backgroundColor;
+    EXPECT_EQ(b.r, 128);
+    EXPECT_EQ(b.b, 128);
+    EXPECT_EQ(b.a, 255);
+}
+
+TEST(Cascade, TextDecorationInheritDropsTheLinkUnderline) {
+    StyledDoc d("<!doctype html><p><a id=a href=x>x</a></p><u><a id=b href=y>y</a></u>",
+                "a { text-decoration: inherit; }");
+    EXPECT_EQ(d.style("a")->textDecoration, "none");
+    EXPECT_NE(d.style("b")->textDecoration.find("underline"), std::string::npos);
+}
+
+TEST(LineHeight, NumbersScaleAndLengthsInheritAsPx) {
+    StyledDoc d("<!doctype html><div id=a><h1 id=b>x</h1></div><div id=c><h1 id=e>y</h1></div><p id=f>z</p>",
+                "#a { line-height: 1.5; } #b { font-size: 40px; } #c { line-height: 20px; } #e { font-size: 40px; }");
+    EXPECT_FLOAT_EQ(d.style("b")->usedLineHeight(), 60.0f);  // 1.5 x 40px
+    EXPECT_FLOAT_EQ(d.style("e")->usedLineHeight(), 20.0f);  // 20px, inherited as is
+    EXPECT_FLOAT_EQ(d.style("f")->usedLineHeight(), 0.0f);   // normal
+}
+
+TEST(LineHeight, SetsTheTextLineBoxHeight) {
+    LayoutBox block;
+    block.type = LayoutType::Block;
+    LayoutBox& run = addBox(block, LayoutType::Inline);
+    run.text = "aaaa bbbb cccc";
+    run.lineHeight = 30;
+    ZepraBrowser::layoutBlock(block, 80, 0);  // 2 lines at 8px per byte
+    EXPECT_FLOAT_EQ(run.textLines[1].y, 30);
+    EXPECT_FLOAT_EQ(block.height, 60);
+}
+
+TEST(FlexLayout, ColumnItemsDoNotShrinkBelowTheirContent) {
+    // body { min-height: 100vh; display: flex; flex-direction: column }
+    // main { flex: 1 } holding more than the viewport: main and the column
+    // grow to the content (min-height: auto, CSS Flexbox §4.5)
+    LayoutBox flex = makeFlex(1, 0);
+    flex.cssMinHeight = LayoutLength::px(100);
+    LayoutBox& main = addBox(flex, LayoutType::Block);
+    main.flexGrow = 1;
+    main.flexBasis = LayoutLength::px(0);
+    LayoutBox& content = addBox(main, LayoutType::Block);
+    content.cssHeight = LayoutLength::px(300);
+    LayoutBox& footer = addBox(flex, LayoutType::Block);
+    footer.cssHeight = LayoutLength::px(20);
+    ZepraBrowser::layoutBlock(flex, 500, 0);
+    EXPECT_FLOAT_EQ(main.height, 300);
+    EXPECT_FLOAT_EQ(footer.y, 300);
+    EXPECT_FLOAT_EQ(flex.height, 320);
+}
+
+TEST(FlexLayout, NonShrinkingRowItemKeepsItsMaxContentWidth) {
+    // A shrink-0 track wider than the line keeps its items on one line each
+    LayoutBox flex = makeFlex(0, 0);
+    LayoutBox& track = addBox(flex, LayoutType::Flex);
+    track.flexShrink = 0;
+    for (int i = 0; i < 3; i++) {
+        LayoutBox& item = addBox(track, LayoutType::Inline);
+        item.flexShrink = 0;
+        LayoutBox& run = addBox(item, LayoutType::Inline);
+        run.text = "aaaa bbbb";  // 72px
+    }
+    ZepraBrowser::layoutBlock(flex, 100, 0);
+    EXPECT_FLOAT_EQ(track.width, 216);
+    for (const auto& item : track.children) EXPECT_FLOAT_EQ(item.height, 20);
+}
+
+TEST(FixedLayout, ContainingBlockLeavesOutThePageScrollbar) {
+    ZepraBrowser::setLayoutViewport(1000, 600, 0, 0, 15);
+    LayoutBox root;
+    root.type = LayoutType::Block;
+    LayoutBox& nav = addBox(root, LayoutType::Flex);
+    nav.positionType = 3;
+    nav.cssTop = nav.cssLeft = nav.cssRight = LayoutLength::px(0);
+    nav.paddingLeft = nav.paddingRight = 48;
+    nav.justifyContent = 3;  // space-between
+    LayoutBox& a = addBox(nav, LayoutType::Block);
+    a.cssWidth = a.cssHeight = LayoutLength::px(20);
+    LayoutBox& b = addBox(nav, LayoutType::Block);
+    b.cssWidth = b.cssHeight = LayoutLength::px(20);
+    ZepraBrowser::layoutBlock(root, 985, 0);
+    EXPECT_FLOAT_EQ(nav.x, 0);
+    EXPECT_FLOAT_EQ(nav.width, 985);
+    EXPECT_FLOAT_EQ(b.x + b.width, 985 - 48);
+    ZepraBrowser::setLayoutViewport(0, 0);
+}
+
+TEST(TextWrap, PreservedNewlinesBreakTheRun) {
+    // white-space: pre-line keeps "\n" in the run
+    LayoutBox block;
+    block.type = LayoutType::Block;
+    LayoutBox& run = addBox(block, LayoutType::Inline);
+    run.text = "ab cd\nefg";
+    ZepraBrowser::layoutBlock(block, 1000, 0);
+    EXPECT_EQ(lineTexts(run), (std::vector<std::string>{"ab cd", "efg"}));
+    EXPECT_FLOAT_EQ(run.width, 40);
+    EXPECT_FLOAT_EQ(block.height, 40);
+}
+
+TEST(TextWrap, InlineElementAroundOneRunBreaksAcrossLines) {
+    // "xxxxxx <em>aaaa bbbb cccc</em>" in 100px: <em> starts on the first line
+    LayoutBox block;
+    block.type = LayoutType::Block;
+    addRun(block, "xxxxxx").spaceAfter = true;  // 48px + 8px space
+    LayoutBox& em = addBox(block, LayoutType::Inline);
+    LayoutBox& run = addRun(em, "aaaa bbbb cccc");
+    ZepraBrowser::layoutBlock(block, 100, 0);
+    EXPECT_EQ(lineTexts(run), (std::vector<std::string>{"aaaa", "bbbb cccc"}));
+    EXPECT_FLOAT_EQ(run.textLines[0].x, 56);
+    EXPECT_FLOAT_EQ(em.x, 0);
+    EXPECT_FLOAT_EQ(em.height, 40);
 }

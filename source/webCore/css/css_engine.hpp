@@ -98,6 +98,10 @@ struct MatchedRule {
     StyleOrigin origin;
     Selector::Specificity specificity;
     size_t order;   // Source order
+    /// Cascade layer order within the origin: layers in declaration order,
+    /// unlayered rules last (kUnlayered), so they win over every layer
+    static constexpr unsigned kUnlayered = ~0u;
+    unsigned layer = kUnlayered;
     
     /// Compare for cascade ordering
     bool operator<(const MatchedRule& other) const;
@@ -147,6 +151,22 @@ public:
     /// Calculate specificity of a selector
     Selector::Specificity calculateSpecificity(const std::string& selector);
 
+    /// The specificity a selector list has for an element: that of its most
+    /// specific group that matches the element (Selectors 4 §17)
+    Selector::Specificity matchingSpecificity(DOMElement* element, const std::string& selectorList);
+
+    /// The order of cascade layers named by the sheets (in sheet order): each
+    /// dotted path's rank, a layer's sublayers before its own rules
+    /// (CSS Cascade 5 §6.4.3)
+    static std::unordered_map<std::string, unsigned> layerRanks(
+        const std::vector<std::pair<CSSStyleSheet*, StyleOrigin>>& sheets);
+
+    /// The matched rules of one origin whose !important declarations apply,
+    /// in the order to apply them (last wins): layer order reversed, so
+    /// earlier layers win and unlayered rules lose (CSS Cascade 5 §6.4)
+    static std::vector<const MatchedRule*> importantOrder(const std::vector<MatchedRule>& sorted,
+                                                          StyleOrigin origin);
+
     /// Invalidate selector index (call when stylesheets change)
     void invalidateIndex() { indexed_ = false; }
 
@@ -170,6 +190,7 @@ private:
         const CSSStyleRule* rule;
         StyleOrigin origin;
         size_t order;
+        unsigned layer = MatchedRule::kUnlayered;
     };
     
     /// Selector index — maps class/tag/id tokens to candidate rule indices
@@ -308,6 +329,10 @@ private:
     std::vector<std::shared_ptr<const MediaQueryList>> mediaStack_;
     /// A rule other than @import was seen (later @import rules are ignored)
     bool sawRule_ = false;
+    /// Path of the @layer block being parsed ("" outside any layer) and the
+    /// count of anonymous layers so far (each gets a name of its own)
+    std::string layerPath_;
+    int anonymousLayers_ = 0;
 
     void skipWhitespace();
     void skipComment();

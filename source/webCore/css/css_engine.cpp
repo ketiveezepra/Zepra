@@ -437,6 +437,8 @@ std::unique_ptr<CSSStyleSheet> CSSParser::parse(const std::string& css) {
     
     mediaStack_.clear();
     sawRule_ = false;
+    layerPath_.clear();
+    anonymousLayers_ = 0;
     auto sheet = std::make_unique<CSSStyleSheet>();
     parseRulesInto(sheet.get(), 0);
     return sheet;
@@ -483,11 +485,47 @@ void CSSParser::parseRulesInto(CSSStyleSheet* sheet, int depth) {
                 continue;
             }
 
-            if (atWord == "layer" || atWord == "supports" || atWord == "theme") {
-                // Skip name/condition
+            // @layer: a statement names layers (fixing their order), a block
+            // puts its rules in one (CSS Cascade 5 §6.4). Names nest as a
+            // dotted path under the enclosing layer.
+            if (atWord == "layer") {
+                std::string prelude;
+                while (!eof() && peek() != '{' && peek() != ';') prelude += consume();
+                auto fullName = [&](std::string name) {
+                    size_t a = name.find_first_not_of(" \t\r\n\f"), b = name.find_last_not_of(" \t\r\n\f");
+                    name = a == std::string::npos ? "" : name.substr(a, b - a + 1);
+                    if (name.empty()) name = "\x01anonymous" + std::to_string(++anonymousLayers_);
+                    return layerPath_.empty() ? name : layerPath_ + "." + name;
+                };
+                if (peek() == ';') {
+                    consume();
+                    size_t start = 0;
+                    for (size_t i = 0; i <= prelude.size(); i++) {
+                        if (i == prelude.size() || prelude[i] == ',') {
+                            std::string name = fullName(prelude.substr(start, i - start));
+                            if (name.find('\x01') == std::string::npos) sheet->declareLayer(name);
+                            start = i + 1;
+                        }
+                    }
+                    continue;
+                }
+                if (peek() == '{') {
+                    consume();
+                    sawRule_ = true;
+                    std::string saved = layerPath_;
+                    layerPath_ = fullName(prelude);
+                    sheet->declareLayer(layerPath_);
+                    parseRulesInto(sheet, depth + 1);
+                    layerPath_ = saved;
+                    continue;
+                }
+            }
+
+            if (atWord == "supports" || atWord == "theme") {
+                // Skip the condition; the block's rules apply as if unconditional
                 while (!eof() && peek() != '{' && peek() != ';') consume();
                 if (peek() == ';') {
-                    consume(); // Forward declaration: @layer name;
+                    consume();
                     continue;
                 }
                 if (peek() == '{') {
@@ -508,6 +546,9 @@ void CSSParser::parseRulesInto(CSSStyleSheet* sheet, int depth) {
         // (@charset and @layer statements aside)
         if (rule && rule->type() == CSSRuleType::Import && (depth > 0 || sawRule_)) rule.reset();
         if (rule && depth == 0 && rule->type() != CSSRuleType::Import) sawRule_ = true;
+        if (rule && !layerPath_.empty()) {
+            if (auto* styleRule = dynamic_cast<CSSStyleRule*>(rule.get())) styleRule->setLayer(layerPath_);
+        }
         if (rule && !mediaStack_.empty()) {
             if (auto* styleRule = dynamic_cast<CSSStyleRule*>(rule.get())) styleRule->setMedia(mediaStack_);
             else if (auto* fontRule = dynamic_cast<CSSFontFaceRule*>(rule.get())) fontRule->setMedia(mediaStack_);

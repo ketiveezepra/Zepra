@@ -512,12 +512,14 @@ static float s_viewportH = 0;
 // Where the root box sits inside the viewport (the browser's page gutter)
 static float s_rootOffsetX = 0;
 static float s_rootOffsetY = 0;
+static float s_scrollbarW = 0;
 
-void setLayoutViewport(float width, float height, float rootOffsetX, float rootOffsetY) {
+void setLayoutViewport(float width, float height, float rootOffsetX, float rootOffsetY, float scrollbarWidth) {
     s_viewportW = width;
     s_viewportH = height;
     s_rootOffsetX = rootOffsetX;
     s_rootOffsetY = rootOffsetY;
+    s_scrollbarW = scrollbarWidth;
 }
 
 float layoutViewportWidth() { return s_viewportW > 0 ? s_viewportW : (float)g_width; }
@@ -526,6 +528,11 @@ float layoutViewportHeight() { return s_viewportH > 0 ? s_viewportH : (float)g_h
 // =============================================================================
 // LAYOUT ALGORITHM
 // =============================================================================
+
+// Content that is this much wider than the line still fits it: widths are
+// sums of float glyph advances, and a shrink-to-fit box exactly as wide as
+// its content must not wrap its last word from rounding
+static constexpr float kLineFitSlop = 0.01f;
 
 // Restores what a layout pass overwrites to the values the box was built
 // with (recording them on the first pass)
@@ -573,21 +580,26 @@ static void layoutAtWidth(LayoutBox& item, float width) {
 // Greedy line breaking at spaces (CSS Text 3 §5): the first line has
 // `firstWidth`, the rest `width`. A word wider than a line gets a line of
 // its own. Line ranges leave out the spaces they break at. The first line
-// is empty when not even the first word fits in `firstWidth`.
-static std::vector<LayoutBox::TextLine> breakTextLines(const LayoutBox& box, float firstWidth, float width) {
+// is empty when not even the first word fits in `firstWidth`. A '\n' (kept
+// by white-space: pre, pre-wrap and pre-line) always ends its line; with
+// `wrap` false the text breaks only there.
+static std::vector<LayoutBox::TextLine> breakTextLines(const LayoutBox& box, float firstWidth, float width,
+                                                       bool wrap = true) {
     std::vector<LayoutBox::TextLine> lines;
     const std::string& text = box.text;
     float space = measureTextWidth(" ", box.fontSize, &box);
     LayoutBox::TextLine line;
+    bool open = false;  // a line has been started
     float avail = firstWidth;
     size_t i = 0;
     bool first = true;
     while (i < text.size()) {
-        size_t end = text.find(' ', i);
+        size_t end = text.find_first_of(wrap ? " \n" : "\n", i);
         if (end == std::string::npos) end = text.size();
+        bool hardBreak = end < text.size() && text[end] == '\n';
         float w = measureTextWidth(text.substr(i, end - i), box.fontSize, &box);
-        if (line.length == 0) {
-            if (w > avail && first && avail < width) {
+        if (!open) {
+            if (wrap && w > avail && first && avail < width) {
                 // Nothing fits on the first (partial) line
                 line.start = i;
                 lines.push_back(line);
@@ -598,20 +610,37 @@ static std::vector<LayoutBox::TextLine> breakTextLines(const LayoutBox& box, flo
             line.start = i;
             line.length = end - i;
             line.width = w;
+            open = true;
         } else if (line.width + space + w <= avail) {
             line.length = end - line.start;
             line.width += space + w;
         } else {
             lines.push_back(line);
             line = LayoutBox::TextLine{};
+            open = false;
             avail = width;
             first = false;
             continue;  // this word starts the next line
         }
         i = end + 1;
+        if (hardBreak) {
+            lines.push_back(line);
+            line = LayoutBox::TextLine{};
+            open = false;
+            avail = width;
+            first = false;
+        }
     }
-    if (line.length > 0) lines.push_back(line);
+    if (open) lines.push_back(line);
     return lines;
+}
+
+/// The widest line of a text with preserved newlines (0 when it has none)
+float widestForcedLine(const LayoutBox& box) {
+    if (box.text.find('\n') == std::string::npos) return 0;
+    float widest = 0;
+    for (const auto& line : breakTextLines(box, FLT_MAX, FLT_MAX, false)) widest = std::max(widest, line.width);
+    return widest;
 }
 
 void layoutBoxAtWidth(LayoutBox& box, float width) { layoutAtWidth(box, width); }
@@ -673,15 +702,17 @@ void imageSize(const LayoutBox& img, float containingWidth, float& width, float&
 }
 
 // A position: fixed box, laid out against the viewport (CSS 2.1 §10.3.7,
-// §10.6.4). x and y are viewport coordinates; paintBox draws it there.
-static void layoutFixed(LayoutBox& box, float vpW, float vpH) {
+// §10.6.4) less the page's scrollbar. x and y are viewport coordinates;
+// paintBox draws it there.
+static void layoutFixed(LayoutBox& box, float viewportW, float vpH) {
+    const float vpW = std::max(0.0f, viewportW - s_scrollbarW);  // the containing block
     auto given = [](const LayoutLength& l) { return l.isSet() && !l.isAuto(); };
     bool hasL = given(box.cssLeft), hasR = given(box.cssRight);
     bool hasT = given(box.cssTop), hasB = given(box.cssBottom);
-    float left = hasL ? box.cssLeft.resolve(vpW, box.fontSize, vpW, vpH) : 0;
-    float right = hasR ? box.cssRight.resolve(vpW, box.fontSize, vpW, vpH) : 0;
-    float top = hasT ? box.cssTop.resolve(vpH, box.fontSize, vpW, vpH) : 0;
-    float bottom = hasB ? box.cssBottom.resolve(vpH, box.fontSize, vpW, vpH) : 0;
+    float left = hasL ? box.cssLeft.resolve(vpW, box.fontSize, viewportW, vpH) : 0;
+    float right = hasR ? box.cssRight.resolve(vpW, box.fontSize, viewportW, vpH) : 0;
+    float top = hasT ? box.cssTop.resolve(vpH, box.fontSize, viewportW, vpH) : 0;
+    float bottom = hasB ? box.cssBottom.resolve(vpH, box.fontSize, viewportW, vpH) : 0;
 
     bool autoWidth = !box.cssWidth.isSet() || box.cssWidth.isAuto();
     if (autoWidth && hasL && hasR) {
@@ -705,6 +736,40 @@ static void layoutFixed(LayoutBox& box, float vpW, float vpH) {
     if (hasT) box.y = top + box.marginTop;
     else if (hasB) box.y = vpH - bottom - box.height - box.marginBottom;
     else box.y = box.marginTop;
+}
+
+// An inline element box that draws nothing itself (no padding, border,
+// margin or background) around exactly one in-flow child
+static bool isPlainInlineWrapper(const LayoutBox& box) {
+    if (box.type != LayoutType::Inline || !box.text.empty() || box.isImage || box.children.size() != 1) return false;
+    const LayoutBox& only = box.children.front();
+    if (only.type == LayoutType::None || only.positionType != 0) return false;
+    return box.paddingLeft == 0 && box.paddingRight == 0 && box.paddingTop == 0 && box.paddingBottom == 0 &&
+           box.borderLeft == 0 && box.borderRight == 0 && box.borderTop == 0 && box.borderBottom == 0 &&
+           box.marginLeft == 0 && box.marginRight == 0 && !box.hasBgColor && box.backgroundImage.empty() &&
+           box.positionType == 0;
+}
+
+// Whether collapsed white space sits at the start (end) of an inline-level
+// box's content: its own text run's, or for an inline element with
+// children, its first (last) child's. Atomic inlines (inline-block,
+// images) keep their inner white space to themselves.
+static bool edgeSpace(const LayoutBox& box, bool atStart) {
+    if (atStart ? box.spaceBefore : box.spaceAfter) return true;
+    if (box.type != LayoutType::Inline || !box.text.empty() || box.isImage || box.children.empty()) return false;
+    const LayoutBox* edge = nullptr;
+    for (const auto& child : box.children) {
+        if (child.type == LayoutType::None || child.positionType == 2 || child.positionType == 3) continue;
+        if (!edge || !atStart) edge = &child;
+        if (atStart) break;
+    }
+    return edge && edgeSpace(*edge, atStart);
+}
+
+float inlineSpacing(const LayoutBox& before, const LayoutBox& after) {
+    if (edgeSpace(before, false)) return measureTextWidth(" ", before.fontSize, &before);
+    if (edgeSpace(after, true)) return measureTextWidth(" ", after.fontSize, &after);
+    return 0;
 }
 
 bool isBlockLevel(LayoutType type) {
@@ -840,6 +905,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
             float flexShrink;
             int alignSelf;
             int order;
+            float contentMain = 0;  // column items: the height laid out before flexing
         };
         
         struct FlexLine {
@@ -883,7 +949,11 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 float minW, maxW;
                 intrinsicWidths(child, minW, maxW);
                 float available = childAvailableWidth - child.marginLeft - child.marginRight;
-                layoutAtWidth(child, std::min(maxW, std::max(minW, available)));
+                // A row item that may not shrink keeps its max-content width
+                // even past the line (its flex base size, §9.2 step 3)
+                bool keepsMaxContent = !isColumn && child.flexShrink <= 0 &&
+                                       (!child.flexBasis.isSet() || child.flexBasis.isAuto());
+                layoutAtWidth(child, keepsMaxContent ? maxW : std::min(maxW, std::max(minW, available)));
             } else {
                 layoutBlock(child, childAvailableWidth, 0);
             }
@@ -933,6 +1003,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
             }
             
             fc.mainSize = fc.flexBasis;
+            if (isColumn) fc.contentMain = child.height + child.marginTop + child.marginBottom;
             fc.crossSize = isColumn
                 ? (child.width + child.marginLeft + child.marginRight)
                 : (child.height + child.marginTop + child.marginBottom);
@@ -1030,13 +1101,20 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
             // its min/max. A clamped item is frozen at that size and the others
             // are resolved again in the space that leaves (CSS Flexbox §9.7), so
             // a minimum one item keeps is taken from its siblings, not overflow
-            auto mainLimits = [&](const LayoutBox& child, float& minMain, float& maxMain) {
+            auto mainLimits = [&](const FlexChild& fc, float& minMain, float& maxMain) {
+                const LayoutBox& child = *fc.ptr;
                 minMain = 0;
                 maxMain = FLT_MAX;
                 if (isColumn) {
                     if (child.cssMinHeight.isSet() && !child.cssMinHeight.isAuto()) {
                         float minH = child.cssMinHeight.resolve(containerMainSize, child.fontSize, vpW, vpH);
                         minMain = minH + child.marginTop + child.marginBottom;
+                    } else if (!mainSizeAuto && !child.overflowHidden && child.overflowY == 0) {
+                        // min-height: auto (CSS Flexbox §4.5): an item that
+                        // does not clip its overflow never gets shorter than
+                        // its content, so `flex: 1` (a 0% basis) in a column
+                        // with only a min-height grows the column instead
+                        minMain = fc.contentMain;
                     }
                     if (child.cssMaxHeight.isSet() && !child.cssMaxHeight.isAuto()) {
                         float maxH = child.cssMaxHeight.resolve(containerMainSize, child.fontSize, vpW, vpH);
@@ -1098,7 +1176,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                     if (frozen[i]) continue;
                     FlexChild& fc = line.items[i];
                     float minMain, maxMain;
-                    mainLimits(*fc.ptr, minMain, maxMain);
+                    mainLimits(fc, minMain, maxMain);
                     if (fc.mainSize < minMain) { fc.mainSize = minMain; frozen[i] = violated = true; }
                     else if (fc.mainSize > maxMain) { fc.mainSize = maxMain; frozen[i] = violated = true; }
                 }
@@ -1258,6 +1336,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     } else {
     // Block/Inline flow layout
     float prevBlockMarginBottom = 0;
+    const LayoutBox* prevInline = nullptr;  // the inline-level box before this one on the line
     float floatLeftX = 0, floatRightX = contentWidth;
     float floatLeftBottom = 0, floatRightBottom = 0;
     
@@ -1287,6 +1366,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         }
         
         if (isBlockLevel(child.type)) {
+            prevInline = nullptr;
             // Flush any inline content first
             if (lineHeight > 0) {
                 childY += lineHeight;
@@ -1338,7 +1418,39 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
             
         } else if (child.type == LayoutType::Inline || child.type == LayoutType::Text || child.type == LayoutType::InlineBlock) {
             // Inline/Text/InlineBlock: flow horizontally with wrapping
-            
+
+            // An inline element that only wraps one text run (<em>text</em>,
+            // nested ones too) and draws nothing of its own breaks across
+            // lines as that run does; its box takes the run's geometry
+            std::vector<LayoutBox*> wrappers;
+            LayoutBox* wrappedRun = nullptr;
+            if (child.type == LayoutType::Inline && !child.isImage && !child.isInput && !child.isSelect) {
+                LayoutBox* cur = &child;
+                while (isPlainInlineWrapper(*cur)) {
+                    wrappers.push_back(cur);
+                    cur = &cur->children.front();
+                }
+                if (!wrappers.empty() && cur->type == LayoutType::Inline && cur->children.empty() &&
+                    !cur->text.empty() && !cur->isImage && !cur->isInput && !cur->isSelect) {
+                    wrappedRun = cur;
+                } else {
+                    wrappers.clear();
+                }
+            }
+            LayoutBox& run = wrappedRun ? *wrappedRun : child;
+            // Gives the wrappers the run's place and size (the run sits at
+            // their origin)
+            auto fitWrappers = [&]() {
+                if (!wrappedRun) return;
+                for (size_t w = 0; w < wrappers.size(); ++w) {
+                    LayoutBox* outer = wrappers[w];
+                    outer->width = run.width;
+                    outer->height = run.height;
+                    if (w > 0) outer->x = outer->y = 0;
+                }
+                run.x = run.y = 0;
+            };
+
             // Measure width/height
             if (child.isInput || child.isSelect) {
                 // Input defaults (form controls keep the size they were given)
@@ -1346,7 +1458,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 if (child.height == 0) child.height = std::max(24.0f, child.fontSize + 8);
             } else if (child.isImage) {
                 imageSize(child, contentWidth, child.width, child.height);
-            } else if (!child.children.empty()) {
+            } else if (!child.children.empty() && !wrappedRun) {
                 // Inline element with children — recursive layout
                 float availWidth = contentWidth > 0 ? contentWidth : containingWidth;
                 child.width = availWidth;
@@ -1361,57 +1473,74 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 if (contentW > 0 && contentW < availWidth)
                     child.width = contentW;
             } else {
-                float textW = measureTextWidth(child.text, child.fontSize, &child);
-                child.width = textW;
-                child.height = child.fontSize + 4;
-                child.textLines.clear();
-                if (lineWidth + textW > contentWidth && !child.noWrap && contentWidth > 0 &&
-                    child.text.find(' ') != std::string::npos) {
-                    // Too long for the rest of the line: break it at spaces
-                    auto lines = breakTextLines(child, contentWidth - lineWidth, contentWidth);
-                    if (lineWidth > 0 && !lines.empty() && lines[0].length == 0) {
+                bool forcedBreaks = run.text.find('\n') != std::string::npos;
+                float textW = forcedBreaks ? widestForcedLine(run) : measureTextWidth(run.text, run.fontSize, &run);
+                run.width = textW;
+                run.height = run.lineBoxHeight();
+                run.textLines.clear();
+                float gap = lineWidth > 0 && prevInline ? inlineSpacing(*prevInline, child) : 0;
+                bool wraps = !run.noWrap && !box.noWrap && contentWidth > 0;
+                if (forcedBreaks || (lineWidth + gap + textW > contentWidth + kLineFitSlop && wraps &&
+                                     run.text.find(' ') != std::string::npos)) {
+                    // Too long for the rest of the line (or holding preserved
+                    // newlines): break it at spaces
+                    float firstAvail = wraps ? contentWidth - lineWidth - gap : FLT_MAX;
+                    float avail = wraps ? contentWidth : FLT_MAX;
+                    auto lines = breakTextLines(run, firstAvail, avail, wraps);
+                    if (lineWidth > 0 && !lines.empty() && lines[0].length == 0 && wraps) {
                         // Not even its first word fits here: start on a new line
                         childY += lineHeight;
                         lineWidth = 0;
                         lineHeight = 0;
-                        lines = breakTextLines(child, contentWidth, contentWidth);
+                        gap = 0;
+                        lines = breakTextLines(run, contentWidth, contentWidth);
                     }
                     if (lines.size() > 1) {
-                        float lh = child.fontSize + 4;
+                        float lh = run.lineBoxHeight();
                         float firstHeight = std::max(lineHeight, lh);
-                        child.x = childX;
-                        child.y = childY;
                         float right = 0;
                         for (size_t i = 0; i < lines.size(); ++i) {
-                            lines[i].x = i == 0 ? lineWidth : 0;
+                            lines[i].x = i == 0 ? lineWidth + gap : 0;
                             lines[i].y = i == 0 ? 0 : firstHeight + lh * static_cast<float>(i - 1);
                             right = std::max(right, lines[i].x + lines[i].width);
                         }
-                        child.width = right;
-                        child.height = lines.back().y + lh;
+                        run.width = right;
+                        run.height = lines.back().y + lh;
+                        run.textLines = std::move(lines);
+                        fitWrappers();
+                        child.x = childX;
+                        child.y = childY;
                         // The line box goes on after the last line
-                        childY += lines.back().y;
-                        lineWidth = lines.back().width + 4;
+                        childY += run.textLines.back().y;
+                        lineWidth = run.textLines.back().width;
                         lineHeight = lh;
-                        child.textLines = std::move(lines);
+                        prevInline = &child;
                         continue;
                     }
                 }
+                fitWrappers();
             }
             
+            // The collapsed space before this box, if there is one; a box
+            // that starts a new line drops it (CSS Text 3 §4.1.2)
+            float gap = lineWidth > 0 && prevInline ? inlineSpacing(*prevInline, child) : 0;
+
             // Check for line wrap
-            if (lineWidth > 0 && lineWidth + child.width > contentWidth) {
+            if (lineWidth > 0 && !box.noWrap &&
+                lineWidth + gap + child.width + child.marginLeft + child.marginRight > contentWidth + kLineFitSlop) {
                 // Start new line
                 childY += lineHeight;
                 lineWidth = 0;
                 lineHeight = 0;
+                gap = 0;
             }
             
-            child.x = childX + lineWidth + child.marginLeft;
+            child.x = childX + lineWidth + gap + child.marginLeft;
             child.y = childY + child.marginTop;
             
-            lineWidth += child.width + child.marginLeft + child.marginRight + 4; // Spacing
+            lineWidth += gap + child.width + child.marginLeft + child.marginRight;
             lineHeight = std::max(lineHeight, child.height + child.marginTop + child.marginBottom);
+            prevInline = &child;
         }
     }
     
@@ -1528,7 +1657,8 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     
     // If block has no children but has text (leaf block), ensure minimum height
     if (box.type == LayoutType::Block && box.children.empty() && (!box.text.empty() || box.isInput)) {
-        box.height = std::max(box.height, box.fontSize + box.paddingTop + box.paddingBottom + 4);
+        box.height = std::max(box.height, (box.isInput ? box.fontSize + 4 : box.lineBoxHeight()) +
+                                              box.paddingTop + box.paddingBottom);
     }
     
     // Post-layout: apply CSS positioning offsets
@@ -2655,7 +2785,7 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
          box.type == LayoutType::FlexItem)) {
         
         float textX = screenX + box.paddingLeft + (box.isInput ? 4 : 0);
-        float textY = screenY + box.paddingTop + box.fontSize + (box.isInput ? 2 : 0);
+        float textY = screenY + box.paddingTop + box.fontSize + (box.isInput ? 2 : box.halfLeadingShift());
         
         std::string drawText = box.text;
         uint32_t drawColor = box.color;
@@ -2696,10 +2826,11 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
         bool wrapped = !box.textLines.empty() && !box.isInput && drawText == box.text;
         if (wrapped) {
             for (const auto& tl : box.textLines) {
-                drawLine(drawText.substr(tl.start, tl.length), screenX + tl.x, screenY + tl.y + box.fontSize, tl.width);
+                drawLine(drawText.substr(tl.start, tl.length), screenX + tl.x,
+                         screenY + tl.y + box.fontSize + box.halfLeadingShift(), tl.width);
                 // Each line is its own link area
                 if (box.isLink && !box.href.empty() && s_register_link) {
-                    float lx = screenX + tl.x, ly = screenY + tl.y, lw = tl.width, lh = box.fontSize + 4;
+                    float lx = screenX + tl.x, ly = screenY + tl.y, lw = tl.width, lh = box.lineBoxHeight();
                     if (insideClip(lx, ly, lw, lh)) s_register_link(lx, ly, lw, lh, box.href, box.target);
                 }
             }

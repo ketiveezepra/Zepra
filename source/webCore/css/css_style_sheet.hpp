@@ -133,8 +133,17 @@ public:
         propertyRegistrations_.emplace_back(std::move(name), std::move(reg));
     }
 
+    /// The cascade layers the sheet names (@layer blocks and statements),
+    /// as dotted paths in the order they first appear
+    const std::vector<std::string>& layerNames() const { return layerNames_; }
+    void declareLayer(const std::string& name) {
+        for (const auto& known : layerNames_) if (known == name) return;
+        layerNames_.push_back(name);
+    }
+
 private:
     CSSRule* ownerRule_ = nullptr;
+    std::vector<std::string> layerNames_;
     std::unique_ptr<CSSRuleList> cssRules_;
     std::vector<std::pair<std::string, RegisteredCustomProperty>> propertyRegistrations_;
 };

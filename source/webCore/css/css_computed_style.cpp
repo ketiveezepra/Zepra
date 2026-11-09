@@ -37,7 +37,130 @@ uint8_t channel(float v) {
     return static_cast<uint8_t>(v);
 }
 
+std::string trimmed(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n\f"), b = s.find_last_not_of(" \t\r\n\f");
+    return a == std::string::npos ? "" : s.substr(a, b - a + 1);
+}
+
+// The arguments inside a function's parentheses, split at top-level commas
+std::vector<std::string> splitArguments(const std::string& inner) {
+    std::vector<std::string> parts;
+    std::string current;
+    int depth = 0;
+    for (char c : inner) {
+        if (c == '(') depth++;
+        else if (c == ')') depth--;
+        if (c == ',' && depth == 0) {
+            parts.push_back(trimmed(current));
+            current.clear();
+        } else {
+            current += c;
+        }
+    }
+    parts.push_back(trimmed(current));
+    return parts;
+}
+
+// sRGB <-> OKLab through linear-light sRGB and LMS (CSS Color 4 §17)
+float toLinear(float c) { return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f); }
+float fromLinear(float c) { return c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f; }
+
+void srgbToOklab(const float rgb[3], float lab[3]) {
+    float r = toLinear(rgb[0]), g = toLinear(rgb[1]), b = toLinear(rgb[2]);
+    float l = std::cbrt(0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * b);
+    float m = std::cbrt(0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * b);
+    float s = std::cbrt(0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * b);
+    lab[0] = 0.2104542553f * l + 0.7936177850f * m - 0.0040720468f * s;
+    lab[1] = 1.9779984951f * l - 2.4285922050f * m + 0.4505937099f * s;
+    lab[2] = 0.0259040371f * l + 0.7827717662f * m - 0.8086757660f * s;
+}
+
+void oklabToSrgb(const float lab[3], float rgb[3]) {
+    float l = lab[0] + 0.3963377774f * lab[1] + 0.2158037573f * lab[2];
+    float m = lab[0] - 0.1055613458f * lab[1] - 0.0638541728f * lab[2];
+    float s = lab[0] - 0.0894841775f * lab[1] - 1.2914855480f * lab[2];
+    l = l * l * l;
+    m = m * m * m;
+    s = s * s * s;
+    rgb[0] = fromLinear(4.0767416621f * l - 3.3077115913f * m + 0.2309699292f * s);
+    rgb[1] = fromLinear(-1.2684380046f * l + 2.6097574011f * m - 0.3413193965f * s);
+    rgb[2] = fromLinear(-0.0041960863f * l - 0.7034186147f * m + 1.7076147010f * s);
+}
+
+// One color-mix() argument, "<color> [<percentage>]" with the percentage on
+// either side; percent is -1 when it is not given
+bool colorMixArgument(const std::string& arg, std::string& color, float& percent) {
+    percent = -1;
+    color = arg;
+    auto readPercent = [&](const std::string& token) {
+        if (token.size() < 2 || token.back() != '%') return false;
+        char* end = nullptr;
+        float v = std::strtof(token.c_str(), &end);
+        if (end != token.c_str() + token.size() - 1 || !(v >= 0 && v <= 100)) return false;
+        percent = v;
+        return true;
+    };
+    size_t lastSpace = arg.find_last_of(' ');
+    size_t firstSpace = arg.find(' ');
+    if (lastSpace != std::string::npos && arg.find(')', lastSpace) == std::string::npos &&
+        readPercent(arg.substr(lastSpace + 1))) {
+        color = trimmed(arg.substr(0, lastSpace));
+    } else if (firstSpace != std::string::npos && readPercent(arg.substr(0, firstSpace))) {
+        color = trimmed(arg.substr(firstSpace + 1));
+    }
+    return !color.empty();
+}
+
 } // namespace
+
+// color-mix(in <space>, <color> [p1], <color> [p2]) (CSS Color 5 §2): the
+// two colors interpolated with premultiplied alpha in the given space,
+// sRGB-family and polar spaces read as sRGB and lab as OKLab. The text is
+// lower case; false when it is not a valid color-mix().
+static bool parseColorMix(const std::string& text, CSSColor& out) {
+    size_t open = text.find('(');
+    if (open == std::string::npos || text.back() != ')') return false;
+    auto args = splitArguments(text.substr(open + 1, text.size() - open - 2));
+    if (args.size() != 3 || args[0].rfind("in ", 0) != 0) return false;
+    std::string space = trimmed(args[0].substr(3));
+    bool oklab = space.rfind("oklab", 0) == 0 || space.rfind("lab", 0) == 0 ||
+                 space.rfind("oklch", 0) == 0 || space.rfind("lch", 0) == 0;
+
+    std::string colorText[2];
+    float pct[2];
+    if (!colorMixArgument(args[1], colorText[0], pct[0]) || !colorMixArgument(args[2], colorText[1], pct[1]))
+        return false;
+    // Percentages: a missing one is the rest of 100%, both missing are
+    // 50/50; a sum below 100% scales the result's alpha
+    if (pct[0] < 0 && pct[1] < 0) pct[0] = pct[1] = 50;
+    else if (pct[0] < 0) pct[0] = 100 - pct[1];
+    else if (pct[1] < 0) pct[1] = 100 - pct[0];
+    float sum = pct[0] + pct[1];
+    if (sum <= 0) return false;
+    float alphaScale = std::min(sum, 100.0f) / 100.0f;
+    float w1 = pct[1] / sum;  // weight of the second color
+
+    float comp[2][3], alpha[2];
+    for (int i = 0; i < 2; i++) {
+        CSSColor c = CSSColor::parse(colorText[i]);
+        float rgb[3] = {c.r / 255.0f, c.g / 255.0f, c.b / 255.0f};
+        alpha[i] = c.a / 255.0f;
+        if (oklab) srgbToOklab(rgb, comp[i]);
+        else std::copy(rgb, rgb + 3, comp[i]);
+    }
+    float a = alpha[0] * (1 - w1) + alpha[1] * w1;
+    float mixed[3] = {0, 0, 0};
+    if (a > 0) {
+        for (int k = 0; k < 3; k++)
+            mixed[k] = (comp[0][k] * alpha[0] * (1 - w1) + comp[1][k] * alpha[1] * w1) / a;
+    }
+    float rgb[3];
+    if (oklab) oklabToSrgb(mixed, rgb);
+    else std::copy(mixed, mixed + 3, rgb);
+    auto to8 = [](float v) { return static_cast<uint8_t>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); };
+    out = {to8(rgb[0]), to8(rgb[1]), to8(rgb[2]), to8(a * alphaScale)};
+    return true;
+}
 
 CSSComputedStyle::CSSComputedStyle() = default;
 
@@ -49,6 +172,8 @@ CSSComputedStyle CSSComputedStyle::inherit(const CSSComputedStyle& parent) {
     style.fontWeight = parent.fontWeight;
     style.fontStyle = parent.fontStyle;
     style.lineHeight = parent.lineHeight;
+    style.lineHeightNormal = parent.lineHeightNormal;
+    style.lineHeightPx = parent.lineHeightPx;
     style.textAlign = parent.textAlign;
     style.legacyAlign = parent.legacyAlign;
     style.whiteSpace = parent.whiteSpace;
@@ -769,6 +894,9 @@ CSSColor CSSColor::parse(const std::string& str) {
 
     auto it = named.find(lower);
     if (it != named.end()) return it->second;
+
+    CSSColor mixed;
+    if (lower.rfind("color-mix(", 0) == 0 && parseColorMix(lower, mixed)) return mixed;
 
     return black();
 }

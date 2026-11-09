@@ -87,6 +87,9 @@ bool MatchedRule::operator<(const MatchedRule& other) const {
     if (origin != other.origin) {
         return static_cast<int>(origin) < static_cast<int>(other.origin);
     }
+
+    // 2. Cascade layer (CSS Cascade 5 §6.4): later layers win, unlayered last
+    if (layer != other.layer) return layer < other.layer;
     
     // 2. Specificity (higher specificity wins)
     // Compare (a, b, c) tuple: IDs, Classes, Elements
@@ -136,7 +139,7 @@ std::vector<MatchedRule> CSSCascade::collectMatchingRules(
                 MatchedRule match;
                 match.rule = styleRule;
                 match.origin = origin;
-                match.specificity = calculateSpecificity(styleRule->selectorText());
+                match.specificity = matchingSpecificity(element, styleRule->selectorText());
                 match.order = ruleOrder++;
                 
                 matched.push_back(match);
@@ -170,8 +173,9 @@ std::vector<MatchedRule> CSSCascade::collectMatchingRulesWithOrigins(
             MatchedRule match;
             match.rule = ir.rule;
             match.origin = ir.origin;
-            match.specificity = calculateSpecificity(ir.rule->selectorText());
+            match.specificity = matchingSpecificity(element, ir.rule->selectorText());
             match.order = ir.order;
+            match.layer = ir.layer;
             matched.push_back(match);
         }
     };
@@ -224,6 +228,7 @@ void CSSCascade::buildIndex(
     indexedRules_.clear();
     
     size_t ruleOrder = 0;
+    auto ranks = layerRanks(sheets);
     
     for (const auto& [sheet, origin] : sheets) {
         if (!sheet || !sheet->cssRules()) continue;
@@ -237,7 +242,12 @@ void CSSCascade::buildIndex(
             if (!styleRule) continue;
             
             size_t ruleIdx = indexedRules_.size();
-            indexedRules_.push_back({styleRule, origin, ruleOrder++});
+            unsigned layer = MatchedRule::kUnlayered;
+            if (!styleRule->layer().empty()) {
+                auto rank = ranks.find(styleRule->layer());
+                if (rank != ranks.end()) layer = rank->second;
+            }
+            indexedRules_.push_back({styleRule, origin, ruleOrder++, layer});
             // Index every selector of a list ("td, th"), not just the last
             const std::string& text = styleRule->selectorText();
             size_t partStart = 0;
@@ -356,6 +366,93 @@ void CSSCascade::indexSelector(const std::string& selector, size_t ruleIdx) {
     if (!indexed) {
         index_.universal.push_back(ruleIdx);
     }
+}
+
+std::unordered_map<std::string, unsigned> CSSCascade::layerRanks(
+    const std::vector<std::pair<CSSStyleSheet*, StyleOrigin>>& sheets) {
+    // The layer tree in first-declaration order: a path's parents are
+    // declared with it ("a.b" declares "a" first)
+    struct Node {
+        std::string path;
+        std::vector<size_t> children;
+    };
+    std::vector<Node> nodes(1);  // nodes[0]: the root (unlayered)
+    std::unordered_map<std::string, size_t> byPath;
+    for (const auto& [sheet, origin] : sheets) {
+        if (!sheet) continue;
+        for (const std::string& name : sheet->layerNames()) {
+            size_t parent = 0;
+            size_t pos = 0;
+            while (pos <= name.size()) {
+                size_t dot = name.find('.', pos);
+                if (dot == std::string::npos) dot = name.size();
+                std::string path = name.substr(0, dot);
+                auto it = byPath.find(path);
+                if (it == byPath.end()) {
+                    nodes.push_back({path, {}});
+                    it = byPath.emplace(path, nodes.size() - 1).first;
+                    nodes[parent].children.push_back(it->second);
+                }
+                parent = it->second;
+                pos = dot + 1;
+            }
+        }
+    }
+    // Post-order: sublayers rank before the layer's own rules
+    std::unordered_map<std::string, unsigned> ranks;
+    unsigned next = 0;
+    std::vector<std::pair<size_t, size_t>> stack = {{0, 0}};  // node, next child
+    while (!stack.empty()) {
+        auto& [node, child] = stack.back();
+        if (child < nodes[node].children.size()) {
+            size_t c = nodes[node].children[child++];
+            stack.push_back({c, 0});
+            continue;
+        }
+        if (node != 0) ranks[nodes[node].path] = next++;
+        stack.pop_back();
+    }
+    return ranks;
+}
+
+std::vector<const MatchedRule*> CSSCascade::importantOrder(const std::vector<MatchedRule>& sorted,
+                                                           StyleOrigin origin) {
+    std::vector<const MatchedRule*> out;
+    for (const auto& match : sorted) {
+        if (match.origin == origin && match.rule && match.rule->style() && match.rule->style()->hasImportant())
+            out.push_back(&match);
+    }
+    // Stable: within a layer the normal order (specificity, then source) stays
+    std::stable_sort(out.begin(), out.end(), [](const MatchedRule* a, const MatchedRule* b) {
+        return a->layer > b->layer;
+    });
+    return out;
+}
+
+Selector::Specificity CSSCascade::matchingSpecificity(DOMElement* element, const std::string& selectorList) {
+    // Groups at top-level commas
+    std::vector<std::string> groups;
+    int depth = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= selectorList.size(); i++) {
+        char c = i < selectorList.size() ? selectorList[i] : ',';
+        if (c == '(' || c == '[') depth++;
+        else if ((c == ')' || c == ']') && depth > 0) depth--;
+        else if (c == ',' && depth == 0) {
+            groups.push_back(selectorList.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    if (groups.size() <= 1) return calculateSpecificity(selectorList);
+    Selector::Specificity best = {0, 0, 0};
+    bool any = false;
+    for (const auto& group : groups) {
+        if (element && !selectorMatches(element, group)) continue;
+        Selector::Specificity spec = calculateSpecificity(group);
+        if (!any || best < spec) best = spec;
+        any = true;
+    }
+    return best;
 }
 
 void CSSCascade::sortByCascade(std::vector<MatchedRule>& rules) {
@@ -951,14 +1048,18 @@ Selector::Specificity CSSCascade::calculateSpecificity(const std::string& select
                 if (i < selector.length()) i++;
             }
             
-            if (isPseudoElement) {
+            std::string lowerName = pseudoName;
+            for (char& ch : lowerName) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            bool legacyElement = lowerName == "before" || lowerName == "after" ||
+                                 lowerName == "first-line" || lowerName == "first-letter";
+            if (isPseudoElement || legacyElement) {
                 spec.c++;
             } else if (pseudoName == "where") {
                 // :where() contributes zero specificity (CSS Selectors L4)
-            } else if (pseudoName == "not" || pseudoName == "is" || pseudoName == "matches") {
-                // Specificity = max specificity of arguments
+            } else if (pseudoName == "not" || pseudoName == "is" || pseudoName == "matches" || pseudoName == "has") {
+                // The most specific selector of the argument list
                 if (!pseudoArg.empty()) {
-                    auto argSpec = calculateSpecificity(pseudoArg);
+                    auto argSpec = matchingSpecificity(nullptr, pseudoArg);
                     spec.a += argSpec.a;
                     spec.b += argSpec.b;
                     spec.c += argSpec.c;
