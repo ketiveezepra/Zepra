@@ -41,6 +41,8 @@ struct Glyph {
     int bearingX = 0;
     int bearingY = 0;
     int advance = 0;  // In pixels (already converted from 26.6)
+    bool color = false;  // a colour bitmap (emoji): drawn as is, not tinted
+    float scale = 1;     // bitmap pixels to screen pixels (emoji strikes are big)
 };
 
 // Font class - loads TTF and renders to OpenGL textures
@@ -114,6 +116,8 @@ public:
         for (FT_Face face : fallbacks_) FT_Done_Face(face);
         fallbacks_.clear();
         fallbacksLoaded_ = false;
+        if (emojiFace_) { FT_Done_Face(emojiFace_); emojiFace_ = nullptr; }
+        emojiLoaded_ = false;
         if (face_) { FT_Done_Face(face_); face_ = nullptr; }
         if (ft_) { FT_Done_FreeType(ft_); ft_ = nullptr; }
         memory_.reset();
@@ -138,7 +142,7 @@ public:
         for (size_t i = 0; i < text.size();) {
             uint32_t c = nextCodepoint(text, i);
             if (c == ' ') { x += spaceAdvance(); continue; }
-            const Glyph* found = glyphFor(c);
+            const Glyph* found = glyphFor(wantsEmoji(c, text, i) && emojiFace() ? (c | kEmojiVariant) : c);
             if (!found) continue;
             const Glyph& glyph = *found;
             
@@ -146,13 +150,14 @@ public:
                 // Calculate position
                 // x is pen position, bearingX is horizontal offset
                 // y is baseline, bearingY is distance from baseline to top of glyph
-                float xpos = x + glyph.bearingX;
-                float ypos = y - glyph.bearingY;  // Baseline - bearingY = top of glyph
-                float w = (float)glyph.width;
-                float h = (float)glyph.height;
+                float xpos = x + glyph.bearingX * glyph.scale;
+                float ypos = y - glyph.bearingY * glyph.scale;  // Baseline - bearingY = top of glyph
+                float w = (float)glyph.width * glyph.scale;
+                float h = (float)glyph.height * glyph.scale;
                 
                 glBindTexture(GL_TEXTURE_2D, glyph.textureId);
-                glColor4ub(red, green, blue, 255);
+                if (glyph.color) glColor4ub(255, 255, 255, 255);
+                else glColor4ub(red, green, blue, 255);
                 
                 // Render textured quad
                 glBegin(GL_QUADS);
@@ -188,7 +193,8 @@ public:
         for (size_t i = 0; i < text.size();) {
             uint32_t c = nextCodepoint(text, i);
             if (c == ' ') { width += spaceAdvance(); continue; }
-            if (const Glyph* glyph = glyphFor(c)) width += glyph->advance;
+            if (const Glyph* glyph = glyphFor(wantsEmoji(c, text, i) && emojiFace() ? (c | kEmojiVariant) : c))
+                width += glyph->advance;
         }
         return width;
     }
@@ -231,8 +237,13 @@ private:
     /// The glyph for a character: from this font, else from the first
     /// fallback font that has it, else the font's missing-glyph box. Null
     /// for control characters, which draw nothing.
-    const Glyph* glyphFor(uint32_t c) {
+    const Glyph* glyphFor(uint32_t key) {
+        uint32_t c = key & ~kEmojiVariant;
         if (c < 32 || c == 0x7F || (c >= 0x80 && c < 0xA0)) return nullptr;
+        // Variation selectors and the zero-width joiner shape emoji; alone
+        // they draw nothing
+        if ((c >= 0xFE00 && c <= 0xFE0F) || c == 0x200D || (c >= 0xE0020 && c <= 0xE007F)) return nullptr;
+        c = key;
         auto it = glyphs_.find(c);
         if (it == glyphs_.end()) {
             cacheGlyph(c);
@@ -299,8 +310,129 @@ private:
         return nullptr;
     }
 
+    /// Characters drawn from the colour emoji font when there is one: those
+    /// whose default presentation is emoji (Unicode TR51, Emoji_Presentation),
+    /// the pictographs of U+1F000-1FAFF and these in the BMP
+    /// Glyph-cache key bit for a character drawn in emoji presentation
+    static constexpr uint32_t kEmojiVariant = 0x80000000u;
+
+    static bool isEmoji(uint32_t c) {
+        if (c >= 0x1F000 && c <= 0x1FAFF) return true;
+        if (c < 0x231A || c > 0x2B55) return false;
+        static const uint32_t kRanges[][2] = {
+            {0x231A, 0x231B}, {0x23E9, 0x23EC}, {0x23F0, 0x23F0}, {0x23F3, 0x23F3}, {0x25FD, 0x25FE},
+            {0x2614, 0x2615}, {0x2648, 0x2653}, {0x267F, 0x267F}, {0x2693, 0x2693}, {0x26A1, 0x26A1},
+            {0x26AA, 0x26AB}, {0x26BD, 0x26BE}, {0x26C4, 0x26C5}, {0x26CE, 0x26CE}, {0x26D4, 0x26D4},
+            {0x26EA, 0x26EA}, {0x26F2, 0x26F3}, {0x26F5, 0x26F5}, {0x26FA, 0x26FA}, {0x26FD, 0x26FD},
+            {0x2705, 0x2705}, {0x270A, 0x270B}, {0x2728, 0x2728}, {0x274C, 0x274C}, {0x274E, 0x274E},
+            {0x2753, 0x2755}, {0x2757, 0x2757}, {0x2795, 0x2797}, {0x27B0, 0x27B0}, {0x27BF, 0x27BF},
+            {0x2B1B, 0x2B1C}, {0x2B50, 0x2B50}, {0x2B55, 0x2B55},
+        };
+        for (const auto& r : kRanges)
+            if (c >= r[0] && c <= r[1]) return true;
+        return false;
+    }
+
+    /// The character at `i` asks for emoji presentation: one that has it by
+    /// default, or any followed by U+FE0F (VARIATION SELECTOR-16, as in ❤️)
+    static bool wantsEmoji(uint32_t c, const std::string& text, size_t next) {
+        if (isEmoji(c)) return true;
+        return next + 3 <= text.size() && (unsigned char)text[next] == 0xEF &&
+               (unsigned char)text[next + 1] == 0xB8 && (unsigned char)text[next + 2] == 0x8F;
+    }
+
+    /// The system's colour emoji font, opened once (CBDT/sbix bitmap
+    /// strikes, or COLR layers that FreeType renders in colour)
+    FT_Face emojiFace() {
+        if (emojiLoaded_) return emojiFace_;
+        emojiLoaded_ = true;
+        static const char* const kEmojiFonts[] = {
+#ifdef _WIN32
+            "C:\\Windows\\Fonts\\seguiemj.ttf",
+#elif defined(__APPLE__)
+            "/System/Library/Fonts/Apple Color Emoji.ttc",
+#else
+            "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+            "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+            "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
+            "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf",
+            "/usr/share/fonts/TTF/NotoColorEmoji.ttf",
+            "/usr/share/fonts/truetype/twemoji/TwitterColorEmoji-SVGinOT.ttf",
+#endif
+            nullptr
+        };
+        for (int i = 0; kEmojiFonts[i]; i++) {
+            FT_Face face = nullptr;
+            if (FT_New_Face(ft_, kEmojiFonts[i], 0, &face) != 0) continue;
+            if (FT_HAS_FIXED_SIZES(face) && !FT_IS_SCALABLE(face)) {
+                // Bitmap strikes: the one closest above the text size
+                int best = 0;
+                for (int k = 0; k < face->num_fixed_sizes; k++) {
+                    int h = face->available_sizes[k].height, bh = face->available_sizes[best].height;
+                    if ((h >= size_ && (bh < size_ || h < bh)) || (bh < size_ && h > bh)) best = k;
+                }
+                FT_Select_Size(face, best);
+            } else {
+                FT_Set_Pixel_Sizes(face, 0, size_);
+            }
+            emojiFace_ = face;
+            break;
+        }
+        return emojiFace_;
+    }
+
+    /// A colour emoji glyph: its BGRA (premultiplied) bitmap as a straight
+    /// RGBA texture, scaled to the text size. False when there is none.
+    bool cacheColorGlyph(uint32_t c) {
+        FT_Face face = emojiFace();
+        if (!face || !FT_Get_Char_Index(face, c)) return false;
+        if (FT_Load_Char(face, c, FT_LOAD_COLOR | FT_LOAD_RENDER)) return false;
+        FT_GlyphSlot slot = face->glyph;
+        FT_Bitmap& bitmap = slot->bitmap;
+        if (bitmap.pixel_mode != FT_PIXEL_MODE_BGRA || !bitmap.buffer || bitmap.width == 0) return false;
+        Glyph glyph;
+        glyph.color = true;
+        glyph.width = (int)bitmap.width;
+        glyph.height = (int)bitmap.rows;
+        glyph.bearingX = slot->bitmap_left;
+        glyph.bearingY = slot->bitmap_top;
+        // A strike drawn at about the text's em, as other browsers size emoji
+        float strike = face->size->metrics.y_ppem > 0 ? (float)face->size->metrics.y_ppem : (float)glyph.height;
+        glyph.scale = std::min(1.0f, (float)size_ * 1.15f / strike);
+        glyph.advance = (int)std::lround((slot->advance.x >> 6) * glyph.scale);
+        std::vector<uint8_t> rgba((size_t)glyph.width * glyph.height * 4);
+        for (int row = 0; row < glyph.height; row++) {
+            const uint8_t* src = bitmap.buffer + (size_t)row * bitmap.pitch;
+            for (int col = 0; col < glyph.width; col++) {
+                uint8_t b = src[col * 4], g = src[col * 4 + 1], r = src[col * 4 + 2], a = src[col * 4 + 3];
+                uint8_t* d = &rgba[((size_t)row * glyph.width + col) * 4];
+                d[0] = a ? (uint8_t)std::min(255, r * 255 / a) : 0;
+                d[1] = a ? (uint8_t)std::min(255, g * 255 / a) : 0;
+                d[2] = a ? (uint8_t)std::min(255, b * 255 / a) : 0;
+                d[3] = a;
+            }
+        }
+        glGenTextures(1, &glyph.textureId);
+        glBindTexture(GL_TEXTURE_2D, glyph.textureId);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, glyph.width, glyph.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glyphs_[c | kEmojiVariant] = glyph;
+        return true;
+    }
+
     void cacheGlyph(uint32_t c) {
         if (!face_) return;
+        if (c & kEmojiVariant) {
+            // A colour glyph, else the plain one
+            if (cacheColorGlyph(c & ~kEmojiVariant)) return;
+            const Glyph* plain = glyphFor(c & ~kEmojiVariant);
+            if (plain) glyphs_[c] = *plain;
+            return;
+        }
         
         // Load glyph with rendering; a character no font has shows the
         // missing-glyph box rather than vanishing
@@ -380,6 +512,8 @@ private:
     std::unordered_map<uint32_t, Glyph> glyphs_;
     std::vector<FT_Face> fallbacks_;
     bool fallbacksLoaded_ = false;
+    FT_Face emojiFace_ = nullptr;
+    bool emojiLoaded_ = false;
     bool syntheticBold_ = false;
     bool syntheticItalic_ = false;
     float spaceAdvance_ = 0;
