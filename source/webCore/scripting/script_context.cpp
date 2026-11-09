@@ -482,6 +482,8 @@ void ScriptContext::clearInterval(int id) {
 
 void ScriptContext::processTimers() {
     processNetworkResponses();
+    // Scripts whose source arrived run before the timers that came due
+    runReadyScripts();
     double now = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     
@@ -589,6 +591,16 @@ void ScriptContext::fireDOMContentLoaded() {
 }
 
 void ScriptContext::fireLoadEvent() {
+    // The load event waits for the scripts still loading (async ones and
+    // those other scripts inserted): runReadyScripts() fires it after the last
+    if (pendingScriptCount() > 0) {
+        loadEventDelayed_ = true;
+        return;
+    }
+    fireLoadEventNow();
+}
+
+void ScriptContext::fireLoadEventNow() {
     if (vm_ && domBindings_) {
         domBindings_->setReadyState("complete");
         runTask([this] { domBindings_->fireEvent(nullptr, "load", false, false); }, "load listener");
@@ -1068,6 +1080,8 @@ void ScriptContext::setupDocumentGlobals() {
     });
     domBindings_->installDocument(document_);
     if (document_) vm_->setGlobal("__document_ref__", vm_->getGlobal("document"));
+    // <script> elements scripts insert run (script_elements.cpp)
+    setupScriptElements();
 }
 
 // ============================================================================

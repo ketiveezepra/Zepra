@@ -512,6 +512,8 @@ std::unique_ptr<DOMNode> DOMElement::cloneNode(bool deep) const {
     clone->valueDirty_ = valueDirty_;
     clone->checkedDirty_ = checkedDirty_;
     clone->checked_ = checked_;
+    // A cloned script that already ran does not run again
+    clone->scriptAlreadyStarted_ = scriptAlreadyStarted_;
 
     if (deep) {
         for (const auto& child : children_) {

@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -857,4 +858,162 @@ TEST(History, PushAndReplaceStateChangeTheUrl) {
                         " catch (e) { return e.name; } })()"),
               "SecurityError");
     EXPECT_EQ(page.eval("location.host"), "app.test");
+}
+
+// ============================================================================
+// <script> elements: prepare / execute (script_elements.cpp)
+// ============================================================================
+
+namespace {
+
+/// A ScriptFetcher that answers when the test says so
+struct HeldFetches {
+    std::vector<std::pair<std::string, ScriptFetchDone>> pending;
+    std::map<std::string, std::string> files;   // url suffix -> body (missing: 404)
+
+    ScriptFetcher fetcher() {
+        return [this](const std::string& url, ScriptFetchDone done) { pending.emplace_back(url, std::move(done)); };
+    }
+    /// Answers the request whose URL ends in `suffix`
+    void answer(const std::string& suffix) {
+        for (auto it = pending.begin(); it != pending.end(); ++it) {
+            if (it->first.size() < suffix.size() || it->first.compare(it->first.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
+            ScriptFetchResult result;
+            auto file = files.find(suffix);
+            result.ok = file != files.end();
+            if (result.ok) result.body = file->second;
+            else result.error = "HTTP 404";
+            ScriptFetchDone done = std::move(it->second);
+            pending.erase(it);
+            done(std::move(result));
+            return;
+        }
+        ADD_FAILURE() << "no request for " << suffix;
+    }
+};
+
+}  // namespace
+
+TEST(ScriptElements, ScriptInsertedInlineRunsInsideAppendChild) {
+    Page page("<html><head></head><body></body></html>");
+    page.script->setPageUrl("https://example.test/index.html");
+    EXPECT_EQ(page.eval(R"JS(
+        var log = [];
+        var s = document.createElement('script');
+        s.id = 'inl';
+        s.textContent = "log.push('run:' + document.currentScript.id)";
+        log.push('before'); document.head.appendChild(s); log.push('after');
+        log.push('cs:' + document.currentScript);
+        log.join())JS"), "before,run:inl,after,cs:null");
+    // Already started: moving it does not run it again
+    EXPECT_EQ(page.eval("document.body.appendChild(s); log.length"), "4");
+}
+
+TEST(ScriptElements, ScriptInsertedExternalRunsAfterTheInsertingScript) {
+    Page page("<html><head></head><body></body></html>");
+    page.script->setPageUrl("https://example.test/dir/index.html");
+    HeldFetches net;
+    net.files["/dir/a.js"] = "log.push('a:' + (document.currentScript && document.currentScript.id))";
+    page.script->setScriptFetcher(net.fetcher());
+    EXPECT_EQ(page.eval(R"JS(
+        var log = [];
+        var a = document.createElement('script');
+        a.id = 'A'; a.src = 'a.js';
+        a.onload = function (e) { log.push('onload:' + (e.target === a)); };
+        a.addEventListener('load', function () { log.push('listener'); });
+        document.head.appendChild(a);
+        log.push('appended async=' + a.async + ' src=' + a.src);
+        log.join())JS"), "appended async=true src=https://example.test/dir/a.js");
+    ASSERT_EQ(net.pending.size(), 1u);
+    EXPECT_EQ(net.pending[0].first, "https://example.test/dir/a.js");
+    net.answer("/dir/a.js");
+    // The answer only lands in the inbox; the script runs as a task of its own
+    EXPECT_EQ(page.eval("log.length"), "1");
+    page.script->processTimers();
+    EXPECT_EQ(page.eval("log.join()"), "appended async=true src=https://example.test/dir/a.js,a:A,listener,onload:true");
+    EXPECT_EQ(page.script->pendingScriptCount(), 0u);
+}
+
+TEST(ScriptElements, FailedFetchFiresErrorAndAsyncFalseKeepsOrder) {
+    Page page("<html><head></head><body></body></html>");
+    page.script->setPageUrl("https://example.test/");
+    HeldFetches net;
+    net.files["/1.js"] = "log.push('1')";
+    net.files["/2.js"] = "log.push('2')";
+    page.script->setScriptFetcher(net.fetcher());
+    page.eval(R"JS(
+        var log = [];
+        function add(src, ordered) {
+            var s = document.createElement('script');
+            if (ordered) s.async = false;
+            s.src = src;
+            s.onload = function () { log.push('load ' + src); };
+            s.onerror = function (e) { log.push('error ' + src + ' ' + e.type); };
+            document.body.appendChild(s);
+        }
+        add('1.js', true); add('2.js', true); add('missing.js', false);
+        var e = document.createElement('script'); e.setAttribute('src', '');
+        e.onerror = function () { log.push('empty src error'); };
+        document.body.appendChild(e);
+        0)JS");
+    // The second arrives first: it still waits for the first
+    net.answer("/2.js");
+    page.script->processTimers();
+    EXPECT_EQ(page.eval("log.join()"), "empty src error");
+    net.answer("/missing.js");
+    net.answer("/1.js");
+    page.script->processTimers();
+    EXPECT_EQ(page.eval("log.join()"), "empty src error,error missing.js error,1,load 1.js,2,load 2.js");
+}
+
+TEST(ScriptElements, TypesInnerHTMLAndLateText) {
+    Page page("<html><head></head><body></body></html>");
+    EXPECT_EQ(page.eval(R"JS(
+        var log = [];
+        function dyn(type, code) {
+            var s = document.createElement('script');
+            if (type) s.type = type;
+            s.text = code;
+            document.body.appendChild(s);
+            return s;
+        }
+        dyn('application/json', "log.push('json')");
+        dyn('text/plain', "log.push('plain')");
+        dyn(' TEXT/JavaScript ', "log.push('js')");
+        var nm = document.createElement('script'); nm.setAttribute('nomodule', ''); nm.text = "log.push('nomodule')";
+        document.body.appendChild(nm);
+        var d = document.createElement('div');
+        d.innerHTML = '<script>log.push("innerHTML")<\/script>';
+        document.body.appendChild(d);
+        var late = document.createElement('script');
+        document.body.appendChild(late);
+        late.textContent = "log.push('late')";
+        late.textContent = "log.push('late again')";
+        var detached = document.createElement('div');
+        var ds = document.createElement('script'); ds.text = "log.push('connected')";
+        detached.appendChild(ds);
+        log.push('|');
+        document.body.appendChild(detached);
+        log.push(document.scripts.length);
+        log.join())JS"), "js,late,|,connected,7");
+}
+
+TEST(ScriptElements, ParserScriptsDeferAndSelfRemoval) {
+    Page page(R"HTML(<html><head>
+        <script>var log = []; document.addEventListener('DOMContentLoaded', function () { log.push('DCL'); });</script>
+        <script defer src="d.js"></script>
+        <script id="self">var me = document.currentScript; me.parentNode.removeChild(me); log.push('self:' + me.id);</script>
+        <script id="next">log.push('next:' + document.currentScript.id + ':' + document.currentScript.async);</script>
+        </head><body><script src="b.js" onload="log.push('b loaded')"></script><script>log.push('body')</script></body></html>)HTML");
+    page.script->setPageUrl("https://example.test/");
+    page.script->setScriptFetcher([](const std::string& url, ScriptFetchDone done) {
+        ScriptFetchResult result;
+        result.ok = true;
+        result.body = "log.push('" + url.substr(url.rfind('/') + 1) + "')";
+        done(std::move(result));
+    });
+    page.script->runParserScripts(nullptr);
+    page.script->runDeferredScripts();
+    page.script->fireDOMContentLoaded();
+    EXPECT_EQ(page.eval("log.join()"), "self:self,next:next:false,b.js,b loaded,body,d.js,DCL");
 }

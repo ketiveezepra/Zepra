@@ -108,6 +108,20 @@ public:
     std::vector<std::pair<std::string, std::string>> computedValues(DOMElement* element,
                                                                     const std::string& pseudo = "") const;
 
+    /// Called for each <script> element that may need preparing (HTML
+    /// "prepare the script element"): one a script connected to the
+    /// document (appendChild, insertBefore, append, ...), and a connected
+    /// one whose text or src a script set. Runs after the insertion is
+    /// complete; the hook decides whether the script runs (already started,
+    /// type, ...). Scripts made by innerHTML and friends never get here.
+    using ScriptElementHook = std::function<void(DOMElement* script)>;
+    void setScriptElementHook(ScriptElementHook hook) { scriptHook_ = std::move(hook); }
+    /// document.currentScript (null outside a classic <script>'s run)
+    DOMElement* currentScript() const { return currentScript_; }
+    void setCurrentScript(DOMElement* script) { currentScript_ = script; }
+    /// The document's URL, which script.src resolves against
+    void setDocumentUrlSource(std::function<std::string()> source) { documentUrlSource_ = std::move(source); }
+
     /// The JS object of a node: made on first use, the same one afterwards
     Zepra::Runtime::Value wrap(DOMNode* node);
     /// The node behind a wrapper object; null for any other object (or a destroyed node)
@@ -201,6 +215,9 @@ private:
     PageGeometry* geometry_ = nullptr;
     std::string readyState_ = "loading";
     SubmitHandler submitHandler_;
+    ScriptElementHook scriptHook_;
+    DOMElement* currentScript_ = nullptr;
+    std::function<std::string()> documentUrlSource_;
     /// The focused control's value when it got focus (or last committed);
     /// a different value when it loses focus fires change
     std::string valueAtFocus_;
@@ -269,6 +286,11 @@ private:
     void removeAllChildren(DOMNode* parent);
     void insert(DOMNode* parent, DOMNode* child, DOMNode* before, const char* method);
     void insertNodes(DOMNode* parent, const Info& info, DOMNode* before, const char* method);
+    /// Script steps after `nodes` went into `parent` (see setScriptElementHook)
+    void nodesInserted(DOMNode* parent, const std::vector<DOMNode*>& nodes);
+    void scriptChildrenChanged(DOMNode* node);
+    void scriptAttributeChanged(DOMElement* element, const std::string& name);
+    std::string documentUrl() const;
     std::vector<std::unique_ptr<DOMNode>> parseFragment(const std::string& html, DOMNode* context);
     void setText(DOMNode* node, const std::string& text);
     Zepra::Runtime::Value nodeList(const std::vector<DOMNode*>& nodes);

@@ -805,7 +805,12 @@ Token Lexer::scanOperator() {
                 if (match('=')) return makeToken(TokenType::QuestionQuestionAssign);
                 return makeToken(TokenType::QuestionQuestion);
             }
-            if (match('.')) return makeToken(TokenType::QuestionDot);
+            // `?.` followed by a digit is a conditional and a number:
+            // `k===void 0?.01:k` (YouTube's base module)
+            if (current() == '.' && !(peek(1) >= '0' && peek(1) <= '9')) {
+                advance();
+                return makeToken(TokenType::QuestionDot);
+            }
             return makeToken(TokenType::Question);
     }
     

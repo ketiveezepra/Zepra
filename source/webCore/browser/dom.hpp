@@ -279,6 +279,14 @@ public:
         selectionStart_ = start; selectionEnd_ = end; selectionBackward_ = backward; selectionSet_ = true;
     }
     void clearSelection() { selectionSet_ = selectionBackward_ = false; selectionStart_ = selectionEnd_ = 0; }
+
+    // <script> processing state (HTML "prepare the script element"): a
+    // script runs at most once ("already started"), and one a script created
+    // is async unless the script says otherwise ("force async")
+    bool scriptAlreadyStarted() const { return scriptAlreadyStarted_; }
+    void setScriptAlreadyStarted(bool v) { scriptAlreadyStarted_ = v; }
+    bool scriptForceAsync() const { return scriptForceAsync_; }
+    void setScriptForceAsync(bool v) { scriptForceAsync_ = v; }
     /// Back to the attributes (form reset)
     void resetControlState() {
         dirtyValue_.clear();
@@ -297,6 +305,8 @@ private:
     size_t selectionEnd_ = 0;
     bool selectionBackward_ = false;
     bool selectionSet_ = false;
+    bool scriptAlreadyStarted_ = false;
+    bool scriptForceAsync_ = false;
 
     // Pseudo-class state
     bool hovered_  = false;

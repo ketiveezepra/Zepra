@@ -8,6 +8,7 @@
 #include "scripting/dom_bindings.hpp"
 #include "scripting/canvas_bindings.hpp"
 #include "scripting/mutation_observer.hpp"
+#include "scripting/page_url.hpp"
 #include "css/computed_style_values.hpp"
 #include "css/css_engine.hpp"
 #include "css/css_style_declaration.hpp"
@@ -227,6 +228,17 @@ void collectByTag(const DOMNode& node, const std::string& tag, std::vector<DOMEl
             collectByTag(*e, tag, out);
         }
     }
+}
+
+bool isScriptElement(const DOMNode* node) {
+    return node && node->nodeType() == NodeType::Element &&
+           lower(static_cast<const DOMElement*>(node)->tagName()) == "script";
+}
+
+// The <script> elements of a subtree (`node` included), in tree order
+void collectScripts(DOMNode* node, std::vector<DOMElement*>& out) {
+    if (isScriptElement(node)) out.push_back(static_cast<DOMElement*>(node));
+    for (const auto& c : node->childNodes()) collectScripts(c.get(), out);
 }
 
 std::string textOf(const DOMNode& node) {
@@ -1068,6 +1080,7 @@ void DOMBindings::installElement() {
         }
         e.setAttribute(name, argString(info, 1));
         if (canvases_) canvases_->attributeChanged(&e, name);
+        scriptAttributeChanged(&e, name);
         return Value::undefined();
     }));
     method(p, "setAttributeNS", 3, on<DOMElement>("setAttributeNS", [this](DOMElement& e, const Info& info) {
@@ -1109,6 +1122,7 @@ void DOMBindings::installElement() {
             Value v = info.argument(0);
             removeAllChildren(&e);
             for (auto& node : parseFragment(v.isNull() ? "" : v.toString(), &e)) e.appendChild(std::move(node));
+            scriptChildrenChanged(&e);
             return Value::undefined();
         }));
     accessor(p, "outerHTML",
@@ -1898,7 +1912,17 @@ void DOMBindings::installDocumentInterface() {
     defineHidden(p, "hidden", Value::boolean(false));
     defineHidden(p, "visibilityState", str("visible"));
     defineHidden(p, "doctype", Value::null());
-    defineHidden(p, "currentScript", Value::null());
+    // The <script> whose classic script is running (null in callbacks,
+    // events and module scripts)
+    accessor(p, "currentScript", on<DOMDocument>("currentScript", [this](DOMDocument&, const Info&) {
+        return currentScript_ ? wrap(currentScript_) : Value::null();
+    }));
+    // document.scripts: the <script> elements, in tree order
+    accessor(p, "scripts", on<DOMDocument>("scripts", [this](DOMDocument& d, const Info&) {
+        std::vector<DOMElement*> found;
+        collectByTag(d, "script", found);
+        return elementList(found);
+    }));
 
     method(p, "hasFocus", 0, [](const FunctionCallInfo&) -> Value { return Value::boolean(true); });
     // document.write is not supported (the page is parsed before scripts run)
@@ -1910,6 +1934,8 @@ void DOMBindings::installDocumentInterface() {
             throwDOMException("InvalidCharacterError", "Failed to execute 'createElement' on 'Document': The tag name provided ('') is not a valid name.");
         }
         std::unique_ptr<DOMNode> el = d.createElement(lower(tag));
+        // A script a script made is async unless it sets async = false
+        if (isScriptElement(el.get())) static_cast<DOMElement*>(el.get())->setScriptForceAsync(true);
         DOMNode* raw = el.get();
         NodeWrapper* w = wrapperOf(raw);
         w->owned = std::move(el);
@@ -2150,6 +2176,47 @@ void DOMBindings::installForms() {
         ctor->set("prototype", Value::object(option));
         vm_->setGlobal("Option", Value::object(ctor));
         if (global_) defineHidden(global_, "Option", Value::object(ctor));
+    }
+    // HTMLScriptElement: src reads as an absolute URL; async is true for a
+    // script a script made until it says otherwise ("force async"); text is
+    // the script's source. Setting src or text on a connected script that has
+    // not run yet prepares it.
+    {
+        Object* script = tagInterfaces_["script"].second;
+        accessor(script, "src",
+            on<DOMElement>("src", [this](DOMElement& e, const Info&) {
+                if (!e.hasAttribute("src")) return str("");
+                std::string src = e.getAttribute("src");
+                PageUrl url = PageUrl::resolve(documentUrl(), src);
+                return str(url.valid ? url.href() : src);
+            }),
+            on<DOMElement>("src", [this](DOMElement& e, const Info& info) {
+                e.setAttribute("src", info.argument(0).toString());
+                scriptAttributeChanged(&e, "src");
+                return Value::undefined();
+            }));
+        accessor(script, "async",
+            on<DOMElement>("async", [](DOMElement& e, const Info&) {
+                return Value::boolean(e.scriptForceAsync() || e.hasAttribute("async"));
+            }),
+            on<DOMElement>("async", [](DOMElement& e, const Info& info) {
+                e.setScriptForceAsync(false);
+                if (info.argument(0).toBoolean()) e.setAttribute("async", "");
+                else e.removeAttribute("async");
+                return Value::undefined();
+            }));
+        accessor(script, "text",
+            on<DOMElement>("text", [](DOMElement& e, const Info&) {
+                std::string text;
+                for (const auto& c : e.childNodes()) {
+                    if (c->nodeType() == NodeType::Text) text += c->nodeValue();
+                }
+                return str(text);
+            }),
+            on<DOMElement>("text", [this](DOMElement& e, const Info& info) {
+                setText(&e, info.argument(0).toString());
+                return Value::undefined();
+            }));
     }
     // new Image(width, height): an <img> element (YouTube's ytcsi beacon
     // code threw "Image is not defined")
@@ -2746,13 +2813,53 @@ void DOMBindings::insert(DOMNode* parent, DOMNode* child, DOMNode* before, const
     if (!error.first.empty()) throwDOMException(error.first, error.second);
 
     if (child->nodeType() == NodeType::DocumentFragment) {
-        while (DOMNode* first = child->firstChild()) parent->insertBefore(child->removeChild(first), before);
+        std::vector<DOMNode*> moved;
+        while (DOMNode* first = child->firstChild()) {
+            moved.push_back(first);
+            parent->insertBefore(child->removeChild(first), before);
+        }
+        nodesInserted(parent, moved);
         return;
     }
     if (before == child) before = child->nextSibling();
     std::unique_ptr<DOMNode> owned = take(child);
     if (!owned) throwDOMException("HierarchyRequestError", std::string("Failed to execute '") + method + "' on 'Node': The node cannot be inserted here.");
     parent->insertBefore(std::move(owned), before);
+    nodesInserted(parent, {child});
+}
+
+// After an insertion (the HTML "children changed" and "post-connection"
+// steps): a <script> whose text just arrived, and every <script> the inserted
+// nodes brought into the document, get prepared. This runs once the whole
+// insertion is done, so a script that runs here sees the final tree.
+void DOMBindings::nodesInserted(DOMNode* parent, const std::vector<DOMNode*>& nodes) {
+    if (!scriptHook_) return;
+    if (isScriptElement(parent)) scriptChildrenChanged(parent);
+    if (!isConnectedTo(parent, document_)) return;
+    std::vector<DOMElement*> scripts;
+    for (DOMNode* n : nodes) collectScripts(n, scripts);
+    for (DOMElement* script : scripts) {
+        // An earlier script may have moved a later one out of the document
+        if (isConnectedTo(script, document_)) scriptHook_(script);
+    }
+}
+
+void DOMBindings::scriptChildrenChanged(DOMNode* node) {
+    if (scriptHook_ && isScriptElement(node) && isConnectedTo(node, document_)) {
+        scriptHook_(static_cast<DOMElement*>(node));
+    }
+}
+
+// A src (or async) attribute set on a <script>: one that is connected and has
+// not run yet gets prepared, as setting src on an empty connected script does
+void DOMBindings::scriptAttributeChanged(DOMElement* element, const std::string& name) {
+    if (!isScriptElement(element)) return;
+    if (name == "async") element->setScriptForceAsync(false);
+    if (name == "src") scriptChildrenChanged(element);
+}
+
+std::string DOMBindings::documentUrl() const {
+    return documentUrlSource_ ? documentUrlSource_() : std::string();
 }
 
 // append(), prepend(), before(), after(), replaceWith(): nodes, and strings as text
@@ -2766,6 +2873,7 @@ void DOMBindings::insertNodes(DOMNode* parent, const Info& info, DOMNode* before
         } else {
             if (parent->nodeType() == NodeType::Text || parent->nodeType() == NodeType::Comment) continue;
             parent->insertBefore(std::make_unique<DOMText>(v.toString()), before);
+            scriptChildrenChanged(parent);
         }
     }
 }
@@ -2773,7 +2881,12 @@ void DOMBindings::insertNodes(DOMNode* parent, const Info& info, DOMNode* before
 std::vector<std::unique_ptr<DOMNode>> DOMBindings::parseFragment(const std::string& html, DOMNode* context) {
     DOMElement* el = asElement(context);
     HTMLParser parser;
-    return parser.parseFragmentNodes(html, el ? el->tagName() : "div");
+    std::vector<std::unique_ptr<DOMNode>> nodes = parser.parseFragmentNodes(html, el ? el->tagName() : "div");
+    // Scripts from innerHTML, outerHTML and insertAdjacentHTML never run
+    std::vector<DOMElement*> scripts;
+    for (const auto& n : nodes) collectScripts(n.get(), scripts);
+    for (DOMElement* script : scripts) script->setScriptAlreadyStarted(true);
+    return nodes;
 }
 
 void DOMBindings::setText(DOMNode* node, const std::string& text) {
@@ -2791,10 +2904,12 @@ void DOMBindings::setText(DOMNode* node, const std::string& text) {
     const auto& kids = node->childNodes();
     if (kids.size() == 1 && kids[0]->nodeType() == NodeType::Text && !kids[0]->binding() && !text.empty()) {
         if (kids[0]->nodeValue() != text) kids[0]->setNodeValue(text);
+        scriptChildrenChanged(node);
         return;
     }
     removeAllChildren(node);
     if (!text.empty()) node->appendChild(std::make_unique<DOMText>(text));
+    scriptChildrenChanged(node);
 }
 
 Value DOMBindings::nodeList(const std::vector<DOMNode*>& nodes) {

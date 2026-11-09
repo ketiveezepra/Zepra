@@ -1643,80 +1643,50 @@ void parseWithWebCore(const std::string& html) {
     // Set location globals from current URL
     g_scriptContext->setPageUrl(g_currentUrl);
     
+    // External scripts (the parser's and those scripts insert) load on a
+    // thread of their own; the script context runs them from its queue
+    // (prepareScript / runReadyScripts), never inside the call that asked
+    g_scriptContext->setScriptFetcher(
+        [pageTabId](const std::string& url, Zepra::WebCore::ScriptFetchDone done) {
+            std::thread([url, pageTabId, done = std::move(done)]() mutable {
+                HttpResponse response = httpGet(url, Zepra::WebCore::ResourceKind::Script, pageTabId);
+                Zepra::WebCore::ScriptFetchResult result;
+                result.ok = response.success;
+                result.body = std::move(response.data);
+                if (!result.ok) {
+                    result.error = !response.error.empty() ? response.error
+                                                           : "HTTP " + std::to_string(response.statusCode);
+                }
+                done(std::move(result));
+            }).detach();
+        });
+
     // Execute page scripts (inline + external). The document's text is kept
     // for the DevTools source view (inline scripts point into it).
     g_scriptContext->registerSource(g_currentUrl, html);
-    std::function<void(DOMElement*)> executePageScripts = [&](DOMElement* el) {
-        if (!el) return;
-        for (size_t i = 0; i < el->childNodes().size(); i++) {
-            if (auto* child = dynamic_cast<DOMElement*>(el->childNodes()[i].get())) {
-                std::string tag = child->tagName();
-                std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
-                if (tag == "script") {
-                    // Check type attribute — skip non-JS types (JSON-LD, module preloads, etc.)
-                    std::string type = child->getAttribute("type");
-                    if (!type.empty() && type != "text/javascript" && type != "application/javascript"
-                        && type != "module") {
-                        continue;
-                    }
-                    // `nomodule` scripts are legacy fallbacks for browsers
-                    // without module support; a browser that runs
-                    // type="module" scripts must skip them (they usually
-                    // re-run the same bundle, ES5-transpiled)
-                    if (child->hasAttribute("nomodule")) continue;
-                    
-                    std::string src = child->getAttribute("src");
-                    if (src.empty()) {
-                        // Inline script
-                        std::string code = child->textContent();
-                        if (!code.empty()) {
-                            std::cout << "[JS] Executing inline script (" << code.size() << " bytes)" << std::endl;
-                            // Lines count from the document, so console links land on the page source
-                            size_t at = html.find(code);
-                            uint32_t firstLine = at == std::string::npos ? 1 :
-                                1 + (uint32_t)std::count(html.begin(), html.begin() + (long)at, '\n');
-                            auto result = g_scriptContext->evaluate(code, g_currentUrl, firstLine);
-                            if (!result.success) {
-                                std::cerr << "[JS] Uncaught error in inline script: " << result.error << std::endl;
-                            }
-                        }
-                    } else {
-                        // External script — resolve URL and fetch
-                        std::string scriptUrl = resolveUrl(g_currentUrl, src);
-                        std::cout << "[JS] Fetching external script: " << scriptUrl << std::endl;
-                        HttpResponse scriptResp = httpGet(scriptUrl, Zepra::WebCore::ResourceKind::Script);
-                        if (scriptResp.success && !scriptResp.data.empty()) {
-                            std::cout << "[JS] Executing external script (" 
-                                      << scriptResp.data.size() << " bytes)" << std::endl;
-                            g_scriptContext->registerSource(scriptUrl, scriptResp.data);
-                            auto result = g_scriptContext->evaluate(scriptResp.data, scriptUrl);
-                            if (!result.success) {
-                                std::cerr << "[JS] Uncaught error in " << scriptUrl << ": " << result.error << std::endl;
-                            }
-                        } else {
-                            std::cerr << "[JS] Failed to load: " << scriptUrl << std::endl;
-                        }
-                    }
-                } else {
-                    executePageScripts(child);
-                }
-            }
-        }
-    };
+    // The parser's scripts, in document order (<head> ones define the
+    // globals — ytcfg, __next_f, polyfills — that <body> ones call).
+    // script_elements.cpp decides what runs now, after parsing, or once
+    // loaded; scripts a script inserted, which ran already, are skipped.
+    // Lines count from the document, so console links land on the page source.
+    g_scriptContext->runParserScripts([&html](DOMElement* script) -> uint32_t {
+        if (script->hasAttribute("src")) return 1;
+        std::string code = script->textContent();
+        size_t at = code.empty() ? std::string::npos : html.find(code);
+        if (at == std::string::npos) return 1;
+        return 1 + (uint32_t)std::count(html.begin(), html.begin() + (long)at, '\n');
+    });
     
-    // Document order: <head> scripts first (they define the globals —
-    // ytcfg, __next_f, polyfills — that <body> scripts call), then <body>
-    if (g_document->head()) {
-        executePageScripts(g_document->head());
-    }
-    if (g_document->body()) {
-        executePageScripts(g_document->body());
-    }
-    
-    // DOMContentLoaded, then load (listeners and on* handlers)
+    // Parsing is over: defer scripts, then DOMContentLoaded; then the async
+    // and script-inserted scripts that already arrived. The window's load
+    // event waits for the rest (the frame loop runs them as they arrive).
+    g_scriptContext->runDeferredScripts();
     g_scriptContext->fireDOMContentLoaded();
+    g_scriptContext->runReadyScripts();
     g_scriptContext->fireLoadEvent();
-    std::cout << "[JS] DOMContentLoaded and Window Load fired" << std::endl;
+    std::cout << "[JS] DOMContentLoaded fired; window load "
+              << (g_scriptContext->pendingScriptCount() ? "waits for " + std::to_string(g_scriptContext->pendingScriptCount()) + " script(s)" : std::string("fired"))
+              << std::endl;
 
     // The box tree was built before scripts ran; show their DOM changes
     if (Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {

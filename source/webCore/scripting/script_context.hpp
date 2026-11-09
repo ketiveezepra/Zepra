@@ -118,6 +118,22 @@ using FetchDone = std::function<void(FetchResponse response)>;
 using FetchHandler = std::function<void(const FetchRequest& request, FetchDone done)>;
 struct FetchInbox;
 struct XhrState;
+
+/// An external script's source as the network gave it (ScriptFetcher)
+struct ScriptFetchResult {
+    bool ok = false;          ///< a successful response (2xx, or a file that could be read)
+    std::string body;
+    std::string error;        ///< why not, when !ok
+};
+using ScriptFetchDone = std::function<void(ScriptFetchResult result)>;
+/**
+ * @brief Fetches the external script at `url` (absolute) and calls `done`
+ * once, from any thread. The script context runs the script later, from its
+ * own queue (runReadyScripts), never inside the fetcher's call.
+ */
+using ScriptFetcher = std::function<void(const std::string& url, ScriptFetchDone done)>;
+struct ScriptInbox;     // script_elements.cpp
+struct PendingScript;
 struct DragState;   // drag_drop.cpp
 
 using AlertHandler = std::function<void(const std::string& message)>;
@@ -173,6 +189,41 @@ public:
     /// Sets the console's $0 (the element selected in the Inspector)
     void setInspectedNode(DOMNode* node);
     
+    // ====== <script> elements (script_elements.cpp) ======
+
+    /// Where external scripts come from. Without one they fail (error event).
+    void setScriptFetcher(ScriptFetcher fetcher) { scriptFetcher_ = std::move(fetcher); }
+    /**
+     * @brief HTML "prepare the script element": decides whether `script`
+     * runs (connected, not already started, a JavaScript or module type, not
+     * nomodule) and when. The parser calls it for each <script> it reaches
+     * (`parserInserted`; `firstLine` is an inline script's line in the
+     * page); the DOM calls it for scripts other scripts insert.
+     *  - inline classic scripts run now (a script-inserted one inside the
+     *    appendChild that connected it, as browsers do)
+     *  - parser-inserted external classic scripts without async/defer block:
+     *    they are fetched and run before this returns
+     *  - defer scripts and parser-inserted modules wait for runDeferredScripts()
+     *  - async scripts, and scripts other scripts insert (async unless they
+     *    set async = false, which keeps those in insertion order), run from
+     *    runReadyScripts() once their source arrived, each as its own task
+     * External scripts get `load` after they ran, `error` when the fetch failed.
+     */
+    void prepareScript(DOMElement* script, bool parserInserted, uint32_t firstLine = 1);
+    /// Prepares the parser's scripts (those in the document now), in
+    /// document order, as the parser would on reaching each one.
+    /// `firstLineOf` gives an inline script's first line in the page.
+    void runParserScripts(const std::function<uint32_t(DOMElement*)>& firstLineOf);
+    /// The parser is done: runs the defer scripts in document order (waiting
+    /// for any still loading). Call before fireDOMContentLoaded().
+    void runDeferredScripts();
+    /// Runs the async and script-inserted scripts whose source arrived, each
+    /// as a task (processTimers() calls this). Fires the window's load event
+    /// once the last script it was waiting for ran.
+    void runReadyScripts();
+    /// Scripts prepared but not run yet (defer, async, script-inserted)
+    size_t pendingScriptCount() const;
+
     // Timers
     int setTimeout(std::function<void()> callback, int delay);
     int setInterval(std::function<void()> callback, int interval);
@@ -440,6 +491,33 @@ private:
     /// from the page's only in its fragment changes the URL in place and
     /// queues hashchange instead
     void navigateFromScript(const std::string& url, NavigationKind kind);
+
+    // <script> elements (script_elements.cpp)
+    ScriptFetcher scriptFetcher_;
+    std::shared_ptr<ScriptInbox> scriptInbox_;
+    /// The HTML spec's lists: defer scripts (parser order), scripts that run
+    /// in insertion order (async = false), and the async set
+    std::vector<std::shared_ptr<PendingScript>> deferredScripts_;
+    std::vector<std::shared_ptr<PendingScript>> orderedScripts_;
+    std::vector<std::shared_ptr<PendingScript>> asyncScripts_;
+    int nextScriptId_ = 1;
+    /// Scripts whose fetch is under way, by id
+    std::unordered_map<int, std::weak_ptr<PendingScript>> fetchingScripts_;
+    /// Wrappers of the elements of pending scripts, so a script removed from
+    /// the document before it loads stays alive until it ran
+    Zepra::Runtime::Object* pendingScriptStore_ = nullptr;
+    bool loadEventDelayed_ = false;   // fireLoadEvent() came while scripts were pending
+    bool runningReadyScripts_ = false;
+    void setupScriptElements();
+    void startScriptFetch(const std::shared_ptr<PendingScript>& script);
+    /// Takes the fetch results that arrived and marks their scripts ready
+    void collectArrivedScripts();
+    bool waitForScript(PendingScript& script, int timeoutMs);
+    /// HTML "execute the script element": runs it with document.currentScript
+    /// set, then fires load (or error for a failed fetch). The one place
+    /// scripts from <script> elements run.
+    void executeScriptElement(PendingScript& script);
+    void fireLoadEventNow();
 
     // Dialog handlers
     AlertHandler alertHandler_;
