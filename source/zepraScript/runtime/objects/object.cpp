@@ -7,6 +7,7 @@
 
 #include "runtime/objects/object.hpp"
 #include "runtime/objects/string_utf16.hpp"
+#include "runtime/objects/proxy.hpp"
 #include "runtime/objects/function.hpp"
 #include "builtins/array.hpp"
 #include <algorithm>
@@ -231,6 +232,7 @@ static bool isInternalPropertyKey(const std::string& key) {
 }
 
 std::vector<std::string> Object::getOwnPropertyNames() const {
+    if (objectType_ == ObjectType::Proxy) return static_cast<const Proxy*>(this)->proxyOwnKeys();
     std::vector<std::string> names;
     names.reserve(properties_.size() + elements_.size());
     
@@ -251,6 +253,7 @@ std::vector<std::string> Object::getOwnPropertyNames() const {
 }
 
 std::vector<std::string> Object::keys() const {
+    if (objectType_ == ObjectType::Proxy) return static_cast<const Proxy*>(this)->proxyEnumerableKeys();
     std::vector<std::string> result;
     
     // Add indexed properties
@@ -700,7 +703,10 @@ void Array::set(size_t index, Value value) {
 }
 
 void Array::setLength(size_t len) {
+    const size_t old = elements_.size();
     elements_.resize(len, Value::undefined());
+    if (holes_.size() > len) holes_.resize(len);
+    if (len > old) markHoles(old, len);  // a.length = n adds empty slots
 }
 
 // =============================================================================

@@ -12,6 +12,8 @@
 #include "builtins/builtin_helpers.hpp"
 
 #include <functional>
+#include <cstdlib>
+#include <iostream>
 
 namespace Zepra::Builtins {
 
@@ -230,7 +232,11 @@ Value RegExpBuiltin::constructor(Runtime::Context*, const std::vector<Value>& ar
     // Regex literals evaluate to `new RegExp(...)`. A pattern this engine cannot
     // compile (lookbehind, named groups, ...) yields a RegExp that never
     // matches, rather than throwing and aborting the page's whole script.
-    return Value::object(new RegExpObject(pattern, flags));
+    auto* re = new RegExpObject(pattern, flags);
+    // ZEPRA_JS_STACKS=1: report patterns the engine cannot compile
+    static const bool report = std::getenv("ZEPRA_JS_STACKS") != nullptr;
+    if (report && !re->isValid()) std::cerr << "[regexp] cannot compile /" << pattern.substr(0, 300) << "/" << flags << std::endl;
+    return Value::object(re);
 }
 
 Value RegExpBuiltin::test(Runtime::Context*, const std::vector<Value>& args) {

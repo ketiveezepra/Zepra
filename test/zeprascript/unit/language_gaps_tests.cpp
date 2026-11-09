@@ -169,3 +169,65 @@ TEST_F(LanguageGaps, UnicodeIdentifiers) {
 TEST_F(LanguageGaps, HtmlCommentsAndHashbang) {
     EXPECT_EQ(run("var x=1 <!-- comment\n--> also a comment\nr=x;"), "1");
 }
+
+// ---- jsparse2: jump/constant limits, finally, holes, sloppy this, Proxy, ... ----
+
+TEST_F(LanguageGaps, LargeFunctionsJumpAndConstants) {
+    // More than 64 KB of bytecode inside one branch and more than 65536 constants
+    std::string body = "var a=[]; if (a.length === 0) {";
+    for (int i = 0; i < 70000; ++i) body += "a.push('s" + std::to_string(i) + "');";
+    body += "} r = a.length + ':' + a[69999];";
+    EXPECT_EQ(run(body), "70000:s69999");
+}
+
+TEST_F(LanguageGaps, FinallyRunsOnReturnBreakContinue) {
+    EXPECT_EQ(run("var log=[]; function f(){ try { return 1 } finally { log.push('f') } }"
+                  " function g(){ for(var i=0;i<3;i++){ try { if(i==1) continue; if(i==2) break } finally { log.push('g'+i) } } }"
+                  " function k(){ try { try { throw 1 } catch(e) { throw 2 } finally { log.push('k') } } catch(e) { return e } }"
+                  " function m(){ try { return 1 } finally { return 5 } }"
+                  " r=[f(),g(),k(),m()].join()+'|'+log.join();"),
+              "1,,2,5|f,g0,g1,g2,k");
+}
+
+TEST_F(LanguageGaps, ArrayHoles) {
+    EXPECT_EQ(run("var n=0; var a=Array(3).concat('x').map(function(v){ n++; return v+'!' }); r=n+':'+a.length+':'+a[3]+':'+[undefined].map(function(){return 1})[0];"),
+              "1:4:x!:1");
+}
+
+TEST_F(LanguageGaps, SloppyThisIsGlobal) {
+    EXPECT_EQ(run("r=[typeof (function(){return this})(), typeof (function(){'use strict'; return this})(),"
+                  " typeof Function('return this')(), typeof (class { static m(){ return (function(){ return this })() } }).m()].join();"),
+              "object,undefined,object,undefined");
+}
+
+TEST_F(LanguageGaps, ProxyTraps) {
+    EXPECT_EQ(run("var t={}; var p=new Proxy(t,{get:function(o,k){return 'got '+String(k)}, set:function(o,k,v){o[k]=v*2; return true}, has:function(){return true}});"
+                  " p.x=2; var f=new Proxy(function(a){return a},{apply:function(t,th,args){return args[0]*10}});"
+                  " r=[p.foo, 'zz' in p, t.x, f(2), new Proxy({a:1},{}).a].join();"),
+              "got foo,true,4,20,1");
+}
+
+TEST_F(LanguageGaps, ProtoAndDescriptorsAndNewTarget) {
+    EXPECT_EQ(run("var p={a:1}; var o={__proto__:p}; var q={}; q.__proto__=p;"
+                  " var d=Object.getOwnPropertyDescriptors({x:1});"
+                  " function F(){ return new.target === F }"
+                  " r=[o.a, Object.getPrototypeOf(q)===p, d.x.value, F(), Object.keys(o).length].join();"),
+              "1,true,1,false,0");
+    EXPECT_EQ(run("function G(){ this.t = new.target === G } r = new G().t;"), "true");
+}
+
+TEST_F(LanguageGaps, RegexLiteralBraces) {
+    EXPECT_EQ(run("r=JSON.stringify([/u{[\\dA-F]+}/.exec('xu{1F}')[0], /a{2}/.test('aa'), /x{,2}/.test('x{,2}')]);"),
+              "[\"u{1F}\",true,true]");
+}
+
+TEST_F(LanguageGaps, ReflectConstructNewTarget) {
+    EXPECT_EQ(run("function A(){ this.a=1 } function B(){} B.prototype.hi=function(){return 2};"
+                  " var o=Reflect.construct(A,[],B); r=[o.a, o.hi(), o instanceof B].join();"), "1,2,true");
+}
+
+TEST_F(LanguageGaps, DataView) {
+    EXPECT_EQ(run("var b=new ArrayBuffer(8); var d=new DataView(b); d.setUint16(0,0x1234); d.setFloat32(4,1.5,true);"
+                  " var u=new Uint8Array(b); r=[u[0],u[1],d.getUint16(0,true),d.getFloat32(4,true),d.byteLength].join();"),
+              "18,52,13330,1.5,8");
+}

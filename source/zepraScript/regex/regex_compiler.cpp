@@ -100,7 +100,7 @@ bool RegexCompiler::parseTerm() {
     // Check for quantifier
     if (!atEnd()) {
         char32_t c = current();
-        if (c == '*' || c == '+' || c == '?' || c == '{') {
+        if (c == '*' || c == '+' || c == '?' || (c == '{' && braceQuantifierAhead())) {
             return parseQuantifier(atomStart);
         }
     }
@@ -135,10 +135,20 @@ bool RegexCompiler::parseAtom() {
         case ')':
         case '|':
             return true; // End of alternative/group
+        case '{':
+            // Annex B: a brace that does not start {n}, {n,} or {n,m} is literal
+            if (!braceQuantifierAhead()) {
+                advance();
+                RegexInstr instr(RegexOp::Char);
+                instr.ch = '{';
+                emit(instr);
+                return true;
+            }
+            setError("Quantifier without preceding atom");
+            return false;
         case '*':
         case '+':
         case '?':
-        case '{':
             setError("Quantifier without preceding atom");
             return false;
         default: {
@@ -149,6 +159,19 @@ bool RegexCompiler::parseAtom() {
             return true;
         }
     }
+}
+
+// At a '{': whether {digits[,[digits]]} follows
+bool RegexCompiler::braceQuantifierAhead() const {
+    size_t i = pos_ + 1;
+    size_t digits = 0;
+    while (i < pattern_.size() && pattern_[i] >= '0' && pattern_[i] <= '9') { ++i; ++digits; }
+    if (!digits) return false;
+    if (i < pattern_.size() && pattern_[i] == ',') {
+        ++i;
+        while (i < pattern_.size() && pattern_[i] >= '0' && pattern_[i] <= '9') ++i;
+    }
+    return i < pattern_.size() && pattern_[i] == '}';
 }
 
 bool RegexCompiler::parseQuantifier(size_t atomStart) {

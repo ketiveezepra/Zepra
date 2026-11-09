@@ -40,6 +40,7 @@ private:
     // Helpers
     char32_t current() const;
     size_t sequenceLength() const;
+    bool braceQuantifierAhead() const;
     char32_t advance();
     bool match(char32_t c);
     bool atEnd() const;

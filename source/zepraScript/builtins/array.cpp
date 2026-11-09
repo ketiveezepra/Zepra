@@ -242,10 +242,12 @@ Runtime::Value ArrayBuiltin::slice(const Runtime::FunctionCallInfo& info) {
 Runtime::Value ArrayBuiltin::concat(const Runtime::FunctionCallInfo& info) {
     Runtime::Value thisVal = info.thisValue();
     std::vector<Runtime::Value> result;
+    std::vector<size_t> holes;  // concat keeps holes where they were
     
     if (thisVal.isObject()) {
         if (auto* arr = dynamic_cast<Runtime::Array*>(thisVal.asObject())) {
             for (size_t i = 0; i < arr->length(); i++) {
+                if (arr->isHole(i)) holes.push_back(result.size());
                 result.push_back(arr->at(i));
             }
         }
@@ -256,6 +258,7 @@ Runtime::Value ArrayBuiltin::concat(const Runtime::FunctionCallInfo& info) {
         if (arg.isObject()) {
             if (auto* arr = dynamic_cast<Runtime::Array*>(arg.asObject())) {
                 for (size_t j = 0; j < arr->length(); j++) {
+                    if (arr->isHole(j)) holes.push_back(result.size());
                     result.push_back(arr->at(j));
                 }
                 continue;
@@ -264,7 +267,9 @@ Runtime::Value ArrayBuiltin::concat(const Runtime::FunctionCallInfo& info) {
         result.push_back(arg);
     }
     
-    return Runtime::Value::object(new Runtime::Array(std::move(result)));
+    auto* joined = new Runtime::Array(std::move(result));
+    for (size_t h : holes) joined->markHoles(h, h + 1);
+    return Runtime::Value::object(joined);
 }
 
 // indexOf(searchElement, fromIndex?)
@@ -416,6 +421,7 @@ Runtime::Value ArrayBuiltin::forEach(const Runtime::FunctionCallInfo& info) {
     Runtime::Value callThisArg = info.argumentCount() > 1 ? info.argument(1) : Runtime::Value::undefined();
     
     for (size_t i = 0; i < arr->length(); i++) {
+        if (arr->isHole(i)) continue;
         std::vector<Runtime::Value> args = {
             arr->at(i),
             Runtime::Value::number(static_cast<double>(i)),
@@ -454,8 +460,10 @@ Runtime::Value ArrayBuiltin::map(const Runtime::FunctionCallInfo& info) {
     
     Runtime::Value callThisArg = info.argumentCount() > 1 ? info.argument(1) : Runtime::Value::undefined();
     std::vector<Runtime::Value> result;
+    std::vector<size_t> holes;  // map keeps the source's holes
     
     for (size_t i = 0; i < arr->length(); i++) {
+        if (arr->isHole(i)) { result.push_back(Runtime::Value::undefined()); holes.push_back(i); continue; }
         std::vector<Runtime::Value> args = {
             arr->at(i),
             Runtime::Value::number(static_cast<double>(i)),
@@ -468,7 +476,9 @@ Runtime::Value ArrayBuiltin::map(const Runtime::FunctionCallInfo& info) {
         result.push_back(mapped);
     }
     
-    return Runtime::Value::object(new Runtime::Array(std::move(result)));
+    auto* mapped = new Runtime::Array(std::move(result));
+    for (size_t h : holes) mapped->markHoles(h, h + 1);
+    return Runtime::Value::object(mapped);
 }
 
 // filter(callback, thisArg?)
@@ -497,6 +507,7 @@ Runtime::Value ArrayBuiltin::filter(const Runtime::FunctionCallInfo& info) {
     std::vector<Runtime::Value> result;
     
     for (size_t i = 0; i < arr->length(); i++) {
+        if (arr->isHole(i)) continue;
         Runtime::Value element = arr->at(i);
         std::vector<Runtime::Value> args = {
             element,
@@ -548,6 +559,7 @@ Runtime::Value ArrayBuiltin::reduce(const Runtime::FunctionCallInfo& info) {
     }
     
     for (size_t i = startIndex; i < arr->length(); i++) {
+        if (arr->isHole(i)) continue;
         std::vector<Runtime::Value> args = {
             accumulator,
             arr->at(i),
@@ -703,6 +715,7 @@ Runtime::Value ArrayBuiltin::every(const Runtime::FunctionCallInfo& info) {
     Runtime::Value callThisArg = info.argumentCount() > 1 ? info.argument(1) : Runtime::Value::undefined();
     
     for (size_t i = 0; i < arr->length(); i++) {
+        if (arr->isHole(i)) continue;
         Runtime::Value element = arr->at(i);
         std::vector<Runtime::Value> args = {element, Runtime::Value::number(static_cast<double>(i)), thisVal};
         Runtime::Value result = Runtime::Value::boolean(true);
@@ -738,6 +751,7 @@ Runtime::Value ArrayBuiltin::some(const Runtime::FunctionCallInfo& info) {
     Runtime::Value callThisArg = info.argumentCount() > 1 ? info.argument(1) : Runtime::Value::undefined();
     
     for (size_t i = 0; i < arr->length(); i++) {
+        if (arr->isHole(i)) continue;
         Runtime::Value element = arr->at(i);
         std::vector<Runtime::Value> args = {element, Runtime::Value::number(static_cast<double>(i)), thisVal};
         Runtime::Value result = Runtime::Value::boolean(false);
@@ -1091,6 +1105,7 @@ Runtime::Value ArrayBuiltin::reduceRight(const Runtime::FunctionCallInfo& info) 
     }
     
     for (int64_t i = startIndex; i >= 0; i--) {
+        if (arr->isHole(static_cast<size_t>(i))) continue;
         std::vector<Runtime::Value> args = {
             accumulator,
             arr->at(static_cast<size_t>(i)),

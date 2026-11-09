@@ -124,8 +124,16 @@ struct CompilerState {
     bool usesArguments = false;      // The body reads `arguments`
     std::vector<JumpContext> jumps;  // break/continue targets; never cross a function
     size_t tryDepth = 0;             // Try blocks open at the current point
+    // finally blocks of the try statements being compiled, outermost first:
+    // return/break/continue that leave one run it on the way out
+    struct Finally {
+        const Frontend::BlockStmt* block = nullptr;
+        size_t outerTryDepth = 0;    // tryDepth outside the try statement
+    };
+    std::vector<Finally> finallies;
     std::string pendingLabel;        // Label for the loop being compiled next
     int completionSlot = -1;         // Script only: slot holding the completion value so far
+    bool strict = false;             // Strict mode code ("use strict", class bodies)
 };
 
 /**
@@ -232,6 +240,7 @@ private:
         bool staticFields = false;
     };
     void compileFunction(const FunctionSource& source, Runtime::Function* fn);
+    int classDepth_ = 0;  // > 0 while compiling a class: its code is strict
     void compileClass(const Frontend::ClassDecl* decl);  // Leaves the constructor
     void compileClassExpression(const Frontend::ClassExpr* expr);
     void emitStaticFields(const Frontend::ClassDecl* decl);
@@ -273,6 +282,7 @@ private:
     JumpContext& pushJumpContext(bool isLoop, bool takesPlainBreak);
     void popJumpContext();
     void patchContinueJumps();
+    void emitFinallyBlocks(size_t targetTryDepth);
     void emitExitScopes(int targetDepth, size_t targetTryDepth);
     JumpContext* findJumpContext(const std::string& label, bool forContinue);
     void compileLoopBody(const Frontend::ASTNode* left, const Frontend::Statement* body);
@@ -288,6 +298,7 @@ private:
     void emitArgCount(size_t count);
     void emitLocal(Opcode op, int slot);   // Local and upvalue opcodes: 16-bit slot
     void emitClosureOperands(Runtime::Function* fn, const std::vector<Upvalue>& upvalues);
+    void emitIndexed(Opcode op, size_t index);
     void emitNameOperand(Opcode op, const std::string& name);
     size_t nameConstant(const std::string& name);
 

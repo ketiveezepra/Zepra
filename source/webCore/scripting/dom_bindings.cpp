@@ -5,6 +5,9 @@
  * @brief Live DOM wrappers and DOM events for page scripts (see dom_bindings.hpp)
  */
 
+#include <typeinfo>
+#include <cstdlib>
+#include <iostream>
 #include "scripting/dom_bindings.hpp"
 #include "scripting/canvas_bindings.hpp"
 #include "scripting/custom_elements.hpp"
@@ -146,10 +149,34 @@ void method(Object* obj, const std::string& name, size_t arity, BuiltinFn fn) {
     defineHidden(obj, name, Value::object(new Function(name, withReactions(std::move(fn)), arity)));
 }
 
+// An assignment that reaches a DOM accessor through a plain object's
+// prototype chain (`Sub.prototype.async = fn`, where Sub's prototype inherits
+// from HTMLElement.prototype) creates an own data property on that object.
+// Some reflected attributes live higher in our prototype chain than in other
+// browsers (async, open, value, ... on HTMLElement), and libraries such as
+// Polymer assign methods with those names to their class prototypes.
+BuiltinFn shadowingSetter(std::string name, BuiltinFn setter) {
+    return [name, setter = std::move(setter)](const FunctionCallInfo& info) -> Value {
+        Value self = info.thisValue();
+        if (self.isObject() && typeid(*self.asObject()) == typeid(Object)) {
+            PropertyDescriptor own;
+            own.value = info.argument(0);
+            own.attributes = PropertyAttribute::Writable | PropertyAttribute::Enumerable |
+                             PropertyAttribute::Configurable;
+            self.asObject()->defineProperty(name, own);
+            return Value::undefined();
+        }
+        return setter(info);
+    };
+}
+
 void accessor(Object* obj, const std::string& name, BuiltinFn getter, BuiltinFn setter = nullptr) {
     PropertyDescriptor desc;
     desc.getter = Value::object(new Function("get " + name, std::move(getter), 0));
-    if (setter) desc.setter = Value::object(new Function("set " + name, withReactions(std::move(setter)), 1));
+    if (setter) {
+        desc.setter = Value::object(new Function("set " + name,
+            shadowingSetter(name, withReactions(std::move(setter))), 1));
+    }
     desc.attributes = PropertyAttribute::Configurable | PropertyAttribute::Enumerable;
     obj->defineProperty(name, desc);
 }
@@ -3861,6 +3888,14 @@ void DOMBindings::callHandler(Object* target, EventObject* e, bool) {
 }
 
 void DOMBindings::reportException(const std::exception& ex) {
+    // ZEPRA_JS_STACKS=1: the thrown value's stack on stderr
+    static const bool printStacks = std::getenv("ZEPRA_JS_STACKS") != nullptr;
+    if (printStacks) {
+        if (const auto* thrown = dynamic_cast<const ThrownException*>(&ex); thrown && thrown->value().isObject()) {
+            Value stack = thrown->value().asObject()->get("stack");
+            if (stack.isString()) std::cerr << "[JS stack] " << stack.toString() << std::endl;
+        }
+    }
     if (reportError_) reportError_(std::string("Uncaught ") + ex.what());
 }
 

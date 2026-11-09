@@ -119,6 +119,8 @@ const char* opcodeName(Opcode op) {
         case Opcode::OP_FINALLY: return "FINALLY";
         case Opcode::OP_GET_ITERATOR: return "GET_ITERATOR";
         case Opcode::OP_ITERATOR_NEXT: return "ITERATOR_NEXT";
+        case Opcode::OP_WIDE: return "WIDE";
+        case Opcode::OP_NEW_TARGET: return "NEW_TARGET";
         case Opcode::OP_FOR_IN: return "FOR_IN";
         case Opcode::OP_FOR_OF: return "FOR_OF";
         case Opcode::OP_YIELD: return "YIELD";
@@ -147,8 +149,7 @@ int opcodeOperandCount(Opcode op) {
         case Opcode::OP_DEFINE_MEMBER:
         case Opcode::OP_GET_SUPER_BASE:
             return 1;
-        // 2-byte operand: constant-pool index, local/upvalue slot, count or
-        // jump offset
+        // 2-byte operand: constant-pool index, local/upvalue slot or count
         case Opcode::OP_CONSTANT_LONG:
         case Opcode::OP_GET_LOCAL:
         case Opcode::OP_SET_LOCAL:
@@ -174,6 +175,9 @@ int opcodeOperandCount(Opcode op) {
         case Opcode::OP_IMPORT:
         case Opcode::OP_EXPORT:
         case Opcode::OP_IMPORT_BINDING:
+        case Opcode::OP_LINE:
+            return 2;
+        // 4-byte jump offset
         case Opcode::OP_JUMP:
         case Opcode::OP_JUMP_IF_FALSE:
         case Opcode::OP_JUMP_IF_TRUE:
@@ -185,8 +189,7 @@ int opcodeOperandCount(Opcode op) {
         case Opcode::OP_CASE:
         case Opcode::OP_TRY_BEGIN:
         case Opcode::OP_ITERATOR_NEXT:
-        case Opcode::OP_LINE:
-            return 2;
+            return 4;
         // Method name index (2 bytes) + argument count (1 byte)
         case Opcode::OP_CALL_METHOD:
             return 3;

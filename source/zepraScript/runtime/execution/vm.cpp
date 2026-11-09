@@ -8,6 +8,8 @@
 #include "runtime/execution/vm.hpp"
 #include "runtime/execution/js_error.hpp"
 #include <fstream>
+#include <cstdlib>
+#include <cstdio>
 #include "runtime/objects/object.hpp"
 #include "runtime/objects/function.hpp"
 #include "runtime/async/async_function.hpp"
@@ -383,6 +385,16 @@ void VM::throwValue(Value exception) {
     ExceptionHandler handler = exceptionHandlers_.back();
     exceptionHandlers_.pop_back();
 
+    // ZEPRA_JS_CAUGHT=1 (debugging): every exception a script catches, with
+    // its stack, on stderr. Bundles that wrap each module in try/catch
+    // otherwise hide the first failure.
+    static const bool traceCaught = std::getenv("ZEPRA_JS_CAUGHT") != nullptr;
+    if (traceCaught) {
+        std::string text = exception.isObject() ? getProperty(exception, "stack").toString() : exception.toString();
+        if (text == "undefined") text = exception.toString();
+        std::fprintf(stderr, "[JS caught] %s\n", text.substr(0, 1500).c_str());
+    }
+
     while (callDepth() > handler.callStackLevel) popCallFrame();
     if (stack_.size() > handler.stackLevel) {
         closeUpvalues(stack_.data() + handler.stackLevel);
@@ -570,7 +582,7 @@ void VM::dispatch(Opcode op) {
         }
         
         case Opcode::OP_CONSTANT_LONG: {
-            uint16_t constant = readShort();
+            uint32_t constant = readShort();
             push(chunk_->constant(constant));
             break;
         }
@@ -596,13 +608,13 @@ void VM::dispatch(Opcode op) {
             break;
             
         case Opcode::OP_GET_LOCAL: {
-            uint16_t slot = readShort();
+            uint32_t slot = readShort();
             push(getLocal(slot));
             break;
         }
 
         case Opcode::OP_SET_LOCAL: {
-            uint16_t slot = readShort();
+            uint32_t slot = readShort();
             setLocal(slot, peek());
             break;
         }
@@ -659,7 +671,7 @@ void VM::dispatch(Opcode op) {
         }
 
         case Opcode::OP_GET_UPVALUE: {
-            uint16_t slot = readShort();
+            uint32_t slot = readShort();
             RuntimeUpvalue* upvalue = currentFrame().function
                 ? currentFrame().function->upvalue(slot) : nullptr;
             push(upvalue ? upvalue->get() : Value::undefined());
@@ -667,7 +679,7 @@ void VM::dispatch(Opcode op) {
         }
 
         case Opcode::OP_SET_UPVALUE: {
-            uint16_t slot = readShort();
+            uint32_t slot = readShort();
             RuntimeUpvalue* upvalue = currentFrame().function
                 ? currentFrame().function->upvalue(slot) : nullptr;
             if (upvalue) upvalue->set(peek());
@@ -894,14 +906,18 @@ void VM::dispatch(Opcode op) {
         }
 
         // Jumps
+        case Opcode::OP_WIDE:
+            wideOperand_ = true;
+            break;
+
         case Opcode::OP_JUMP: {
-            uint16_t offset = readShort();
+            uint32_t offset = readJumpOffset();
             ip_ += offset;
             break;
         }
         
         case Opcode::OP_JUMP_IF_FALSE: {
-            uint16_t offset = readShort();
+            uint32_t offset = readJumpOffset();
             if (peek().isFalsy()) {
                 ip_ += offset;
             }
@@ -909,7 +925,7 @@ void VM::dispatch(Opcode op) {
         }
         
         case Opcode::OP_JUMP_IF_NIL: {
-            uint16_t offset = readShort();
+            uint32_t offset = readJumpOffset();
             if (peek().isNull() || peek().isUndefined()) {
                 ip_ += offset;
             }
@@ -917,7 +933,7 @@ void VM::dispatch(Opcode op) {
         }
         
         case Opcode::OP_LOOP: {
-            uint16_t offset = readShort();
+            uint32_t offset = readJumpOffset();
             ip_ -= offset;
             break;
         }
@@ -987,15 +1003,15 @@ void VM::dispatch(Opcode op) {
 
         case Opcode::OP_CLOSURE: {
             // Each evaluation makes a new closure with its own upvalues
-            uint16_t funcIdx = readShort();
-            uint16_t upvalueCount = readShort();
+            uint32_t funcIdx = readShort();
+            uint32_t upvalueCount = readShort();
             auto* fnTemplate = static_cast<Function*>(chunk_->constant(funcIdx).asObject());
             Function* closure = fnTemplate->instantiateClosure();
 
             VMCallFrame& frame = currentFrame();
             for (uint16_t i = 0; i < upvalueCount; i++) {
                 uint8_t isLocal = readByte();
-                uint16_t index = readShort();
+                uint32_t index = readShort();
                 RuntimeUpvalue* upvalue = nullptr;
                 if (isLocal) {
                     upvalue = captureUpvalue(&stack_[frame.slotBase + index]);
@@ -1068,7 +1084,7 @@ void VM::dispatch(Opcode op) {
             
         // Object creation
         case Opcode::OP_CREATE_ARRAY: {
-            uint16_t count = readShort();
+            uint32_t count = readShort();
             push(Value::object(new Array(takeArguments(count))));
             break;
         }
@@ -1103,7 +1119,7 @@ void VM::dispatch(Opcode op) {
         }
 
         case Opcode::OP_ITERATOR_NEXT: {
-            uint16_t exitOffset = readShort();
+            uint32_t exitOffset = readJumpOffset();
             Value iterator = pop();
             Value value;
             if (iteratorStep(iterator, value)) {
@@ -1207,7 +1223,7 @@ void VM::dispatch(Opcode op) {
         }
             
         case Opcode::OP_TRY_BEGIN: {
-            uint16_t catchOffset = readShort();
+            uint32_t catchOffset = readJumpOffset();
             ExceptionHandler handler;
             handler.catchAddress = ip_ + catchOffset;
             handler.stackLevel = stack_.size();
@@ -1239,7 +1255,7 @@ void VM::dispatch(Opcode op) {
         
         case Opcode::OP_IMPORT: {
             // Read module path constant index
-            uint16_t pathIdx = readShort();
+            uint32_t pathIdx = readShort();
             Value pathValue = chunk_->constant(pathIdx);
             if (!pathValue.isString()) {
                 throw std::runtime_error("Invalid module path");
@@ -1260,7 +1276,7 @@ void VM::dispatch(Opcode op) {
         
         case Opcode::OP_EXPORT: {
             // Read export name constant index
-            uint16_t nameIdx = readShort();
+            uint32_t nameIdx = readShort();
             Value nameValue = chunk_->constant(nameIdx);
             Value exportValue = pop();
             
@@ -1304,7 +1320,7 @@ void VM::dispatch(Opcode op) {
         case Opcode::OP_DEFINE_STATIC:
         case Opcode::OP_DEFINE_GETTER:
         case Opcode::OP_DEFINE_SETTER: {
-            uint16_t nameIdx = readShort();
+            uint32_t nameIdx = readShort();
             Value methodName = chunk_->constant(nameIdx);
             Value methodFunc = pop();
             Value classConstructor = peek(0);
@@ -1478,6 +1494,12 @@ void VM::dispatch(Opcode op) {
             break;
         }
 
+        case Opcode::OP_NEW_TARGET: {
+            const VMCallFrame& frame = currentFrame();
+            push(frame.isConstruct && frame.function ? Value::object(frame.function) : Value::undefined());
+            break;
+        }
+
         case Opcode::OP_GET_CALLEE: {
             Function* callee = currentFrame().function;
             push(callee ? Value::object(callee) : Value::undefined());
@@ -1630,7 +1652,7 @@ void VM::dispatch(Opcode op) {
 
         // Conditional jump (truthy)
         case Opcode::OP_JUMP_IF_TRUE: {
-            uint16_t offset = readShort();
+            uint32_t offset = readJumpOffset();
             if (peek().isTruthy()) {
                 ip_ += offset;
             }
@@ -1727,7 +1749,7 @@ void VM::dispatch(Opcode op) {
         case Opcode::OP_CASE: {
             // Compare TOS-1 (discriminant) with TOS (case value)
             // If equal, pop case value and jump; otherwise pop case value and continue
-            uint16_t offset = readShort();
+            uint32_t offset = readJumpOffset();
             Value caseValue = pop();
             Value discriminant = peek(0);
             if (discriminant.strictEquals(caseValue)) {
@@ -1748,7 +1770,7 @@ void VM::dispatch(Opcode op) {
 
         // Short-circuit logical operators
         case Opcode::OP_AND: {
-            uint16_t offset = readShort();
+            uint32_t offset = readJumpOffset();
             Value lhs = peek(0);
             if (lhs.isFalsy()) {
                 // LHS is falsy — short-circuit, skip RHS
@@ -1761,7 +1783,7 @@ void VM::dispatch(Opcode op) {
         }
 
         case Opcode::OP_OR: {
-            uint16_t offset = readShort();
+            uint32_t offset = readJumpOffset();
             Value lhs = peek(0);
             if (!lhs.isFalsy()) {
                 // LHS is truthy — short-circuit, skip RHS
@@ -1774,7 +1796,7 @@ void VM::dispatch(Opcode op) {
         }
 
         case Opcode::OP_NULLISH: {
-            uint16_t offset = readShort();
+            uint32_t offset = readJumpOffset();
             Value lhs = peek(0);
             if (!lhs.isNull() && !lhs.isUndefined()) {
                 // LHS is not nullish — short-circuit, skip RHS
@@ -1788,7 +1810,7 @@ void VM::dispatch(Opcode op) {
 
         // Debug line tracking
         case Opcode::OP_LINE: {
-            uint16_t line = readShort();
+            uint32_t line = readShort();
             currentLine_ = line;
             break;
         }
@@ -1845,8 +1867,21 @@ uint8_t VM::readByte() {
     return chunk_->code()[ip_++];
 }
 
-uint16_t VM::readShort() {
+uint32_t VM::readJumpOffset() {
     const auto& code = chunk_->code();
+    uint32_t value = (static_cast<uint32_t>(code[ip_]) << 24) | (static_cast<uint32_t>(code[ip_ + 1]) << 16) |
+                     (static_cast<uint32_t>(code[ip_ + 2]) << 8) | code[ip_ + 3];
+    ip_ += 4;
+    return value;
+}
+
+// A u16 operand, or a u32 one right after an OP_WIDE prefix
+uint32_t VM::readShort() {
+    const auto& code = chunk_->code();
+    if (wideOperand_) {
+        wideOperand_ = false;
+        return readJumpOffset();
+    }
     uint8_t high = code[ip_++];
     uint8_t low = code[ip_++];
     return (high << 8) | low;
@@ -1959,6 +1994,13 @@ Value VM::runCompiled(Function* fn, Value thisValue, const std::vector<Value>& c
 }
 
 Value VM::construct(Function* constructor, const std::vector<Value>& args) {
+    return construct(constructor, args, nullptr);
+}
+
+// Reflect.construct(target, args, newTarget): the instance inherits from
+// newTarget.prototype (custom-elements ES5 adapters construct HTMLElement
+// this way, with the subclass as newTarget)
+Value VM::construct(Function* constructor, const std::vector<Value>& args, Object* newTarget) {
     if (!constructor) {
         return Value::undefined();
     }
@@ -1974,7 +2016,12 @@ Value VM::construct(Function* constructor, const std::vector<Value>& args) {
     }
 
     Object* instance = new Object();
-    Object* proto = ensurePrototypeObject(constructor);
+    Object* proto = nullptr;
+    if (newTarget && newTarget != constructor) {
+        Value p = getProperty(Value::object(newTarget), "prototype");
+        if (p.isObject()) proto = p.asObject();
+    }
+    if (!proto) proto = ensurePrototypeObject(constructor);
     instance->setPrototype(proto ? proto : intrinsic(Intrinsic::Object));
 
     if (constructor->isCompiled() && !constructor->isBuiltin() && !constructor->isNative()) {

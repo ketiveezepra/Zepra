@@ -79,10 +79,14 @@ size_t BytecodeChunk::stringConstant(const std::string& text, Runtime::Value exi
     return constants_.size() - 1;
 }
 
+// Jump operands are 32-bit (big-endian), so a function or script of any
+// size can jump over its code (YouTube's main module is 10 MB of bytecode)
 void BytecodeChunk::patchJump(size_t offset) {
-    size_t jump = currentOffset() - offset - 2;
-    code_[offset] = (jump >> 8) & 0xFF;
-    code_[offset + 1] = jump & 0xFF;
+    size_t jump = currentOffset() - offset - 4;
+    code_[offset] = (jump >> 24) & 0xFF;
+    code_[offset + 1] = (jump >> 16) & 0xFF;
+    code_[offset + 2] = (jump >> 8) & 0xFF;
+    code_[offset + 3] = jump & 0xFF;
 }
 
 uint32_t BytecodeChunk::lineAt(size_t offset) const {
@@ -205,10 +209,24 @@ void BytecodeGenerator::setSource(const std::string& name, uint32_t firstLine) {
     lineOffset_ = firstLine > 0 ? firstLine - 1 : 0;
 }
 
+// A directive prologue containing "use strict"
+static bool hasUseStrict(const std::vector<Frontend::StmtPtr>& body) {
+    for (const auto& stmt : body) {
+        if (stmt->type() != Frontend::NodeType::ExpressionStatement) return false;
+        const auto* expr = static_cast<const Frontend::ExprStmt*>(stmt.get())->expression();
+        if (!expr || expr->type() != Frontend::NodeType::Literal) return false;
+        const auto* literal = static_cast<const Frontend::LiteralExpr*>(expr);
+        if (!literal->isString()) return false;
+        if (literal->asString() == "use strict") return true;
+    }
+    return false;
+}
+
 std::unique_ptr<BytecodeChunk> BytecodeGenerator::compile(const Frontend::Program* program) {
     CompilerState mainState;
     mainState.functionName = "<script>";
     mainState.isScript = true;
+    mainState.strict = hasUseStrict(program->body());
     current_ = &mainState;
 
     const auto& body = program->body();
@@ -274,14 +292,13 @@ void BytecodeGenerator::emitShort(uint16_t value) {
 
 size_t BytecodeGenerator::emitJump(Opcode op) {
     emit(op);
-    emit(static_cast<uint8_t>(0xFF));
-    emit(static_cast<uint8_t>(0xFF));
-    return currentChunk()->currentOffset() - 2;
+    for (int i = 0; i < 4; i++) emit(static_cast<uint8_t>(0xFF));
+    return currentChunk()->currentOffset() - 4;
 }
 
 void BytecodeGenerator::patchJump(size_t offset) {
-    if (currentChunk()->currentOffset() - offset - 2 > 0xFFFF) {
-        error("Too much code to jump over (more than 64 KB of bytecode)");
+    if (currentChunk()->currentOffset() - offset - 4 > 0x7FFFFFFF) {
+        error("Too much code to jump over (more than 2 GB of bytecode)");
         return;
     }
     currentChunk()->patchJump(offset);
@@ -289,11 +306,12 @@ void BytecodeGenerator::patchJump(size_t offset) {
 
 void BytecodeGenerator::emitLoop(size_t loopStart) {
     emit(Opcode::OP_LOOP);
-    size_t offset = currentChunk()->currentOffset() - loopStart + 2;
-    if (offset > 0xFFFF) {
-        error("Loop body too large (more than 64 KB of bytecode)");
+    size_t offset = currentChunk()->currentOffset() - loopStart + 4;
+    if (offset > 0x7FFFFFFF) {
+        error("Loop body too large (more than 2 GB of bytecode)");
     }
-    emitShort(static_cast<uint16_t>(offset));
+    emitShort(static_cast<uint16_t>(offset >> 16));
+    emitShort(static_cast<uint16_t>(offset & 0xFFFF));
 }
 
 void BytecodeGenerator::emitArgCount(size_t count) {
@@ -311,23 +329,30 @@ void BytecodeGenerator::emitLocal(Opcode op, int slot) {
 
 size_t BytecodeGenerator::nameConstant(const std::string& name) {
     size_t index = currentChunk()->stringConstant(name, Runtime::Value::undefined());
-    if (index > 0xFFFF) {
-        error("Too many constants in one function (max 65536)");
-        return 0;
-    }
     return index;
 }
 
 void BytecodeGenerator::emitNameOperand(Opcode op, const std::string& name) {
-    size_t index = nameConstant(name);
+    emitIndexed(op, nameConstant(name));
+}
+
+// `op` with a constant-pool index operand: u16, or OP_WIDE op u32 for a
+// function with more than 65536 constants (YouTube's 10 MB module body)
+void BytecodeGenerator::emitIndexed(Opcode op, size_t index) {
+    if (index > 0xFFFF) {
+        emit(Opcode::OP_WIDE);
+        emit(op);
+        emitShort(static_cast<uint16_t>(index >> 16));
+        emitShort(static_cast<uint16_t>(index & 0xFFFF));
+        return;
+    }
     emit(op);
     emitShort(static_cast<uint16_t>(index));
 }
 
 void BytecodeGenerator::emitClosureOperands(Runtime::Function* fn, const std::vector<Upvalue>& upvalues) {
     size_t index = makeConstant(Runtime::Value::object(fn));
-    emit(Opcode::OP_CLOSURE);
-    emitShort(static_cast<uint16_t>(index));
+    emitIndexed(Opcode::OP_CLOSURE, index);
     emitShort(static_cast<uint16_t>(upvalues.size()));
     for (const auto& upvalue : upvalues) {
         emit(upvalue.isLocal ? uint8_t(1) : uint8_t(0));
@@ -337,10 +362,6 @@ void BytecodeGenerator::emitClosureOperands(Runtime::Function* fn, const std::ve
 
 size_t BytecodeGenerator::makeConstant(Runtime::Value value) {
     size_t constant = currentChunk()->addConstant(value);
-    if (constant > 0xFFFF) {
-        error("Too many constants in one function (max 65536)");
-        return 0;
-    }
     return constant;
 }
 
@@ -350,8 +371,7 @@ void BytecodeGenerator::emitConstant(Runtime::Value value) {
         emit(Opcode::OP_CONSTANT);
         emit(static_cast<uint8_t>(index));
     } else {
-        emit(Opcode::OP_CONSTANT_LONG);
-        emitShort(static_cast<uint16_t>(index));
+        emitIndexed(Opcode::OP_CONSTANT_LONG, index);
     }
 }
 
@@ -831,10 +851,27 @@ void BytecodeGenerator::patchContinueJumps() {
 
 // Leaving blocks and try statements early (break/continue): pop the locals
 // they declared and the exception handlers they installed.
-void BytecodeGenerator::emitExitScopes(int targetDepth, size_t targetTryDepth) {
-    for (size_t depth = current_->tryDepth; depth > targetTryDepth; --depth) {
-        emit(Opcode::OP_TRY_END);
+// Leaving try statements early: pop their exception handlers, running each
+// finally block on the way (innermost first), with only the handlers outside
+// its try statement installed, so an exception in it propagates outward
+void BytecodeGenerator::emitFinallyBlocks(size_t targetTryDepth) {
+    size_t depth = current_->tryDepth;
+    const auto saved = current_->finallies;
+    const size_t savedTryDepth = current_->tryDepth;
+    while (!current_->finallies.empty() && current_->finallies.back().outerTryDepth >= targetTryDepth) {
+        const CompilerState::Finally f = current_->finallies.back();
+        current_->finallies.pop_back();
+        for (; depth > f.outerTryDepth; --depth) emit(Opcode::OP_TRY_END);
+        current_->tryDepth = f.outerTryDepth;
+        compileFinalizer(f.block);
     }
+    current_->finallies = saved;
+    current_->tryDepth = savedTryDepth;
+    for (; depth > targetTryDepth; --depth) emit(Opcode::OP_TRY_END);
+}
+
+void BytecodeGenerator::emitExitScopes(int targetDepth, size_t targetTryDepth) {
+    emitFinallyBlocks(targetTryDepth);
     for (int i = static_cast<int>(current_->locals.size()) - 1;
          i >= 0 && current_->locals[i].depth > targetDepth; --i) {
         emit(current_->locals[i].isCaptured ? Opcode::OP_CLOSE_UPVALUE : Opcode::OP_POP);
@@ -1024,7 +1061,21 @@ void BytecodeGenerator::compileReturnStatement(const Frontend::ReturnStmt* stmt)
     } else {
         emitConstant(Runtime::Value::undefined());
     }
+    if (current_->finallies.empty()) {
+        emit(Opcode::OP_RETURN);
+        return;
+    }
+    // Inside try/finally: keep the value in a slot while the finally blocks run
+    beginScope();
+    int slot = addTemporary("return value");
+    emitFinallyBlocks(0);
+    emitLocal(Opcode::OP_GET_LOCAL, slot);
     emit(Opcode::OP_RETURN);
+    // Nothing after the return runs: drop the scope without emitting pops
+    while (!current_->locals.empty() && current_->locals.back().depth >= current_->scopeDepth) {
+        current_->locals.pop_back();
+    }
+    current_->scopeDepth--;
 }
 
 void BytecodeGenerator::compileBreakStatement(const Frontend::BreakStmt* stmt) {
@@ -1071,6 +1122,11 @@ void BytecodeGenerator::compileThrowStatement(const Frontend::ThrowStmt* stmt) {
 }
 
 void BytecodeGenerator::compileTryStatement(const Frontend::TryStmt* stmt) {
+    const Frontend::BlockStmt* finalizer = stmt->finalizer();
+    // While the try block (and catch block) compile, a return/break/continue
+    // that leaves them runs the finally block first (emitFinallyBlocks)
+    if (finalizer) current_->finallies.push_back({finalizer, current_->tryDepth});
+
     // TRY_BEGIN's operand is the handler offset, patched like a jump
     size_t handlerJump = emitJump(Opcode::OP_TRY_BEGIN);
     current_->tryDepth++;
@@ -1092,19 +1148,49 @@ void BytecodeGenerator::compileTryStatement(const Frontend::TryStmt* stmt) {
         }
         // The catch block's completion replaces the try block's
         resetCompletion();
-        compileStatementList(handler->body->body());
+        if (finalizer) {
+            // An exception thrown by the catch block still runs the finally block
+            size_t catchHandler = emitJump(Opcode::OP_TRY_BEGIN);
+            current_->tryDepth++;
+            beginScope();
+            compileStatementList(handler->body->body());
+            endScope();
+            current_->tryDepth--;
+            emit(Opcode::OP_TRY_END);
+            size_t skipRethrow = emitJump(Opcode::OP_JUMP);
+            patchJump(catchHandler);
+            emit(Opcode::OP_CATCH);
+            current_->finallies.pop_back();
+            beginScope();
+            int exceptionSlot = addTemporary("exception");
+            compileFinalizer(finalizer);
+            emitLocal(Opcode::OP_GET_LOCAL, exceptionSlot);
+            emit(Opcode::OP_THROW);
+            // unreachable: drop the scope without pops
+            while (!current_->locals.empty() && current_->locals.back().depth >= current_->scopeDepth) {
+                current_->locals.pop_back();
+            }
+            current_->scopeDepth--;
+            current_->finallies.push_back({finalizer, current_->tryDepth});
+            patchJump(skipRethrow);
+        } else {
+            compileStatementList(handler->body->body());
+        }
     } else {
         // try/finally: run the finally block, then rethrow
+        if (finalizer) current_->finallies.pop_back();
         int exceptionSlot = addTemporary("exception");
-        if (stmt->finalizer()) compileFinalizer(stmt->finalizer());
+        if (finalizer) compileFinalizer(finalizer);
         emitLocal(Opcode::OP_GET_LOCAL, exceptionSlot);
         emit(Opcode::OP_THROW);
+        if (finalizer) current_->finallies.push_back({finalizer, current_->tryDepth});
     }
     endScope();
+    if (finalizer) current_->finallies.pop_back();
 
     patchJump(skipHandler);
-    if (stmt->finalizer()) {
-        compileFinalizer(stmt->finalizer());
+    if (finalizer) {
+        compileFinalizer(finalizer);
     }
 }
 
@@ -1187,6 +1273,8 @@ void BytecodeGenerator::compileSwitchStatement(const Frontend::SwitchStmt* stmt)
 void BytecodeGenerator::compileFunction(const FunctionSource& source, Runtime::Function* fn) {
     CompilerState fnState;
     fnState.enclosing = current_;
+    fnState.strict = (current_ && current_->strict) || classDepth_ > 0 || source.fieldClass ||
+                     (source.body && hasUseStrict(source.body->body()));
     fnState.functionName = source.name.empty() ? "<anonymous>" : source.name;
     fnState.isMethod = source.isMethod;
     current_ = &fnState;
@@ -1499,8 +1587,7 @@ void BytecodeGenerator::emitPatternElements(const Frontend::Expression* pattern,
         if (rest) {
             fetchSource();
             emitConstant(Runtime::Value::number(static_cast<double>(elements.size())));
-            emit(Opcode::OP_CALL_METHOD);
-            emitShort(static_cast<uint16_t>(nameConstant("slice")));
+            emitIndexed(Opcode::OP_CALL_METHOD, nameConstant("slice"));
             emitArgCount(1);
             emitBinding(rest, kind);
         }
@@ -1767,8 +1854,7 @@ void BytecodeGenerator::compileLiteral(const Frontend::LiteralExpr* expr) {
             emit(Opcode::OP_CONSTANT);
             emit(static_cast<uint8_t>(index));
         } else {
-            emit(Opcode::OP_CONSTANT_LONG);
-            emitShort(static_cast<uint16_t>(index));
+            emitIndexed(Opcode::OP_CONSTANT_LONG, index);
         }
     } else if (std::holds_alternative<bool>(value)) {
         emit(std::get<bool>(value) ? Opcode::OP_TRUE : Opcode::OP_FALSE);
@@ -1779,6 +1865,10 @@ void BytecodeGenerator::compileLiteral(const Frontend::LiteralExpr* expr) {
 
 void BytecodeGenerator::compileIdentifier(const Frontend::IdentifierExpr* expr) {
     const std::string& name = expr->name();
+    if (name == "new.target") {  // the parser's form of the meta property
+        emit(Opcode::OP_NEW_TARGET);
+        return;
+    }
 
     int local = resolveLocal(name);
     if (local != -1) {
@@ -1867,7 +1957,7 @@ void BytecodeGenerator::compileUnaryExpression(const Frontend::UnaryExpr* expr) 
     if (expr->op() == Frontend::TokenType::Typeof &&
         expr->argument()->type() == Frontend::NodeType::Identifier) {
         const std::string& name = static_cast<const Frontend::IdentifierExpr*>(expr->argument())->name();
-        if (name != "undefined" && resolveLocal(name) == -1 && resolveUpvalue(name) == -1) {
+        if (name != "undefined" && name != "new.target" && resolveLocal(name) == -1 && resolveUpvalue(name) == -1) {
             emitNameOperand(Opcode::OP_GET_GLOBAL_TYPEOF, name);
             emit(Opcode::OP_TYPEOF);
             return;
@@ -2152,9 +2242,8 @@ void BytecodeGenerator::compileCallExpression(const Frontend::CallExpr* expr) {
         if (!member->isComputed() && !member->isOptional() && !expr->isOptional() && !spread) {
             compileExpression(member->object());
             for (const auto& arg : args) compileExpression(arg.get());
-            emit(Opcode::OP_CALL_METHOD);
-            emitShort(static_cast<uint16_t>(nameConstant(
-                static_cast<const Frontend::IdentifierExpr*>(member->property())->name())));
+            emitIndexed(Opcode::OP_CALL_METHOD, nameConstant(
+                static_cast<const Frontend::IdentifierExpr*>(member->property())->name()));
             emitArgCount(args.size());
             return;
         }
@@ -2346,6 +2435,17 @@ void BytecodeGenerator::compileObjectExpression(const Frontend::ObjectExpr* expr
             emit(Opcode::OP_OBJECT_SPREAD);
             continue;
         }
+        // `__proto__: value` (not computed, not shorthand) sets the prototype,
+        // through Object.prototype's __proto__ setter
+        std::string literalKey;
+        if (!prop.computed && !prop.shorthand && !prop.method && prop.kind == Frontend::ObjectProperty::Kind::Init &&
+            staticPropertyKey(prop.key.get(), literalKey) && literalKey == "__proto__") {
+            emit(Opcode::OP_DUP);
+            compileExpression(prop.value.get());
+            emitNameOperand(Opcode::OP_SET_PROPERTY, "__proto__");
+            emit(Opcode::OP_POP);
+            continue;
+        }
         emitPropertyKey(prop.key.get(), prop.computed);
         if (prop.method && prop.value->type() == Frontend::NodeType::FunctionExpression) {
             // Methods, getters and setters know the object as their home
@@ -2366,14 +2466,20 @@ void BytecodeGenerator::compileObjectExpression(const Frontend::ObjectExpr* expr
 
 void BytecodeGenerator::compileThisExpression(const Frontend::ThisExpr*) {
     int slot = resolveLocal("this");
-    if (slot != -1) {
-        emitLocal(Opcode::OP_GET_LOCAL, slot);
-        return;
-    }
-    // Arrow functions use the `this` of the function they are written in
-    int upvalue = resolveUpvalue("this");
-    if (upvalue != -1) {
-        emitLocal(Opcode::OP_GET_UPVALUE, upvalue);
+    int upvalue = slot == -1 ? resolveUpvalue("this") : -1;
+    if (slot != -1 || upvalue != -1) {
+        // Arrow functions use the `this` of the function they are written in
+        if (slot != -1) emitLocal(Opcode::OP_GET_LOCAL, slot);
+        else emitLocal(Opcode::OP_GET_UPVALUE, upvalue);
+        if (!current_->strict) {
+            // Sloppy mode: a call without a receiver (f()) sees the global object
+            size_t isNil = emitJump(Opcode::OP_JUMP_IF_NIL);
+            size_t done = emitJump(Opcode::OP_JUMP);
+            patchJump(isNil);
+            emit(Opcode::OP_POP);
+            emitNameOperand(Opcode::OP_GET_GLOBAL, "globalThis");
+            patchJump(done);
+        }
         return;
     }
     // Script top level: the global object
@@ -2522,6 +2628,8 @@ void BytecodeGenerator::compileClassExpression(const Frontend::ClassExpr* expr) 
 
 // Builds the class and leaves its constructor on the stack
 void BytecodeGenerator::compileClass(const Frontend::ClassDecl* decl) {
+    ++classDepth_;
+    struct ClassScope { int& d; ~ClassScope() { --d; } } classScope{classDepth_};
     const std::string& className = decl->name();
     bool hasInstanceFields = false;
     for (const auto& field : decl->fields()) hasInstanceFields |= !field.isStatic;
@@ -2612,8 +2720,7 @@ void BytecodeGenerator::emitPropertyKey(const Frontend::Expression* key, bool co
             emit(Opcode::OP_CONSTANT);
             emit(static_cast<uint8_t>(index));
         } else {
-            emit(Opcode::OP_CONSTANT_LONG);
-            emitShort(static_cast<uint16_t>(index));
+            emitIndexed(Opcode::OP_CONSTANT_LONG, index);
         }
     } else {
         error(key, "Invalid property name");

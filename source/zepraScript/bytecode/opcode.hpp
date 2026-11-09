@@ -175,6 +175,9 @@ enum class Opcode : uint8 {
     OP_DECLARE_LEXICAL,   // u16 name: a script's top-level let/const/class, uninitialized until its INIT
     OP_INIT_LEXICAL,      // u16 name: [value] -> []; initializes a top-level let/class binding
     OP_INIT_CONST,        // u16 name: [value] -> []; initializes a top-level const binding
+    OP_NEW_TARGET,        // pushes new.target: the running function when called by new, else undefined
+    OP_WIDE,              // prefix: the next instruction's first u16 operand (a constant
+                          // index) is a u32 instead; only emitted past 65535 constants
 
     // End marker
     OP_END

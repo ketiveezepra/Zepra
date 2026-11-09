@@ -370,6 +370,21 @@ public:
     
     // Direct element access
     const std::vector<Value>& elements() const { return elements_; }
+
+    // Holes (`Array(3)`, `a.length = 5`): read as undefined like any slot,
+    // but the iteration methods (map, forEach, filter, ...) skip them. A slot
+    // stops being a hole once anything but undefined is stored in it.
+    bool isHole(size_t index) const {
+        return index < holes_.size() && holes_[index] && elements_[index].isUndefined();
+    }
+    void markHoles(size_t from, size_t to) {
+        if (to > elements_.size()) to = elements_.size();
+        if (holes_.size() < to) holes_.resize(to, false);
+        for (size_t i = from; i < to; ++i) holes_[i] = true;
+    }
+
+private:
+    std::vector<bool> holes_;
 };
 
 /**

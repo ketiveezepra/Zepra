@@ -1447,6 +1447,17 @@ ExprPtr Parser::parseMemberExpression() {
 }
 
 ExprPtr Parser::parseNewExpression() {
+    // new.target: the function `new` was applied to, inside it
+    if (check(TokenType::Dot)) {
+        SourceLocation loc = previousToken_.start;
+        advance();
+        Token name = advance();
+        if (name.value != "target") {
+            error(name, "Unexpected token after new.");
+            throw ParseError("Expected new.target");
+        }
+        return std::make_unique<IdentifierExpr>("new.target", loc);
+    }
     ExprPtr callee = parseMemberExpression();
     
     std::vector<ExprPtr> args;

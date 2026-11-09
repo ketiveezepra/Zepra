@@ -6,6 +6,10 @@
  */
 
 #include "runtime/objects/proxy.hpp"
+#include <stdexcept>
+#include <memory>
+#include "runtime/objects/object.hpp"
+#include "runtime/execution/vm.hpp"
 #include <algorithm>
 #include "runtime/objects/function.hpp"
 
@@ -15,143 +19,149 @@ namespace Zepra::Runtime {
 // Proxy Implementation
 // =============================================================================
 
-Proxy::Proxy(Object* target, ProxyHandler handler)
-    : Object(ObjectType::Ordinary)
+Proxy::Proxy(Object* target, Object* handler)
+    : Object(ObjectType::Proxy)
     , target_(target)
-    , handler_(std::move(handler)) {}
+    , handler_(handler) {}
+
+Function* Proxy::trap(const char* name) const {
+    if (revoked_ || !handler_) {
+        throw std::runtime_error(std::string("Cannot perform '") + name + "' on a proxy that has been revoked");
+    }
+    VM* vm = VM::current();
+    Value fn = vm ? vm->getMember(Value::object(handler_), name) : handler_->get(name);
+    if (fn.isUndefined() || fn.isNull()) return nullptr;
+    if (!fn.isObject() || !fn.asObject()->isFunction()) {
+        throw std::runtime_error(std::string("proxy trap '") + name + "' is not a function");
+    }
+    return static_cast<Function*>(fn.asObject());
+}
+
+Value Proxy::callTrap(Function* fn, std::vector<Value> args) const {
+    VM* vm = VM::current();
+    if (!vm) return Value::undefined();
+    return vm->executeCallback(fn, Value::object(handler_), args);
+}
+
+static Value keyValue(const std::string& key) {
+    if (key.compare(0, 9, "@@symbol:") == 0) {
+        return Value::symbol(static_cast<uint32_t>(std::stoul(key.substr(9))));
+    }
+    return Value::string(new String(key));
+}
 
 Value Proxy::get(const std::string& key) const {
-    if (revoked_) return Value::undefined();
-    
-    if (handler_.get) {
-        return handler_.get(target_, key, const_cast<Proxy*>(this));
+    if (Function* fn = trap("get")) {
+        return callTrap(fn, {Value::object(target_), keyValue(key), Value::object(const_cast<Proxy*>(this))});
     }
-    return target_ ? target_->get(key) : Value::undefined();
+    VM* vm = VM::current();
+    return vm ? vm->getMember(Value::object(target_), key) : target_->get(key);
 }
 
 bool Proxy::set(const std::string& key, Value value) {
-    if (revoked_) return false;
-    
-    if (handler_.set) {
-        return handler_.set(target_, key, value, this);
-    } else if (target_) {
-        target_->set(key, value);
+    if (Function* fn = trap("set")) {
+        return callTrap(fn, {Value::object(target_), keyValue(key), value, Value::object(this)}).toBoolean();
     }
+    if (VM* vm = VM::current()) vm->setMember(Value::object(target_), key, value);
+    else target_->set(key, value);
     return true;
 }
 
-bool Proxy::hasProperty(const std::string& key) const {
-    if (revoked_) return false;
-    
-    if (handler_.has) {
-        return handler_.has(target_, key);
+bool Proxy::has(const std::string& key) const {
+    if (Function* fn = trap("has")) {
+        return callTrap(fn, {Value::object(target_), keyValue(key)}).toBoolean();
     }
-    // Default: check target
-    return target_ ? target_->get(key).isUndefined() == false : false;
+    for (Object* o = target_; o; o = o->prototype()) {
+        if (o->has(key)) return true;
+    }
+    return false;
 }
 
 bool Proxy::deleteProperty(const std::string& key) {
-    if (revoked_) return false;
-    
-    if (handler_.deleteProperty) {
-        return handler_.deleteProperty(target_, key);
+    if (Function* fn = trap("deleteProperty")) {
+        return callTrap(fn, {Value::object(target_), keyValue(key)}).toBoolean();
     }
-    // Default: no-op
-    return true;
+    return target_->deleteProperty(key);
 }
 
-/**
- * @brief Create a Proxy with handler object traps
- * 
- * Extracts trap functions from the handler object and stores them
- * in the ProxyHandler struct for efficient trap invocation.
- */
-Proxy* Proxy::create(Object* target, Object* handlerObj) {
-    ProxyHandler handler;
-    
-    if (handlerObj) {
-        // Extract 'get' trap
-        Value getVal = handlerObj->get("get");
-        if (getVal.isObject()) {
-            Function* getFn = dynamic_cast<Function*>(getVal.asObject());
-            if (getFn) {
-                handler.get = [getFn](Object* t, const std::string& k, Object* r) {
-                    std::vector<Value> args = {
-                        Value::object(t),
-                        Value::string(new String(k)),
-                        Value::object(r)
-                    };
-                    FunctionCallInfo info(nullptr, Value::undefined(), args);
-                    return getFn->builtinFunction() ? getFn->builtinFunction()(info) 
-                                                     : Value::undefined();
-                };
+std::vector<std::string> Proxy::proxyOwnKeys() const {
+    if (Function* fn = trap("ownKeys")) {
+        std::vector<std::string> names;
+        Value list = callTrap(fn, {Value::object(target_)});
+        if (auto* array = list.isObject() ? dynamic_cast<Array*>(list.asObject()) : nullptr) {
+            for (size_t i = 0; i < array->length(); ++i) {
+                Value k = array->at(i);
+                if (k.isString()) names.push_back(k.toString());
             }
         }
-        
-        // Extract 'set' trap
-        Value setVal = handlerObj->get("set");
-        if (setVal.isObject()) {
-            Function* setFn = dynamic_cast<Function*>(setVal.asObject());
-            if (setFn) {
-                handler.set = [setFn](Object* t, const std::string& k, Value v, Object* r) {
-                    std::vector<Value> args = {
-                        Value::object(t),
-                        Value::string(new String(k)),
-                        v,
-                        Value::object(r)
-                    };
-                    FunctionCallInfo info(nullptr, Value::undefined(), args);
-                    Value result = setFn->builtinFunction() ? setFn->builtinFunction()(info) 
-                                                            : Value::boolean(true);
-                    return result.toBoolean();
-                };
-            }
-        }
-        
-        // Extract 'has' trap
-        Value hasVal = handlerObj->get("has");
-        if (hasVal.isObject()) {
-            Function* hasFn = dynamic_cast<Function*>(hasVal.asObject());
-            if (hasFn) {
-                handler.has = [hasFn](Object* t, const std::string& k) {
-                    std::vector<Value> args = {
-                        Value::object(t),
-                        Value::string(new String(k))
-                    };
-                    FunctionCallInfo info(nullptr, Value::undefined(), args);
-                    Value result = hasFn->builtinFunction() ? hasFn->builtinFunction()(info) 
-                                                            : Value::boolean(false);
-                    return result.toBoolean();
-                };
-            }
-        }
-        
-        // Extract 'deleteProperty' trap
-        Value delVal = handlerObj->get("deleteProperty");
-        if (delVal.isObject()) {
-            Function* delFn = dynamic_cast<Function*>(delVal.asObject());
-            if (delFn) {
-                handler.deleteProperty = [delFn](Object* t, const std::string& k) {
-                    std::vector<Value> args = {
-                        Value::object(t),
-                        Value::string(new String(k))
-                    };
-                    FunctionCallInfo info(nullptr, Value::undefined(), args);
-                    Value result = delFn->builtinFunction() ? delFn->builtinFunction()(info) 
-                                                            : Value::boolean(true);
-                    return result.toBoolean();
-                };
-            }
-        }
+        return names;
     }
-    
-    return new Proxy(target, handler);
+    return target_->getOwnPropertyNames();
 }
 
-std::pair<Proxy*, std::function<void()>> Proxy::createRevocable(Object* target, Object* handlerObj) {
-    Proxy* proxy = create(target, handlerObj);
-    auto revoker = [proxy]() { proxy->revoke(); };
-    return {proxy, revoker};
+std::vector<std::string> Proxy::proxyEnumerableKeys() const {
+    if (!trap("ownKeys")) return target_->keys();
+    std::vector<std::string> names = proxyOwnKeys();
+    Function* describe = trap("getOwnPropertyDescriptor");
+    if (!describe) return names;
+    std::vector<std::string> out;
+    VM* vm = VM::current();
+    for (const auto& name : names) {
+        Value desc = callTrap(describe, {Value::object(target_), keyValue(name)});
+        if (desc.isObject() && vm && vm->getMember(desc, "enumerable").toBoolean()) out.push_back(name);
+    }
+    return out;
+}
+
+Object* Proxy::create(Object* target, Object* handler) {
+    if (!target->isFunction()) return new Proxy(target, handler);
+
+    // A callable target: a function that runs the apply/construct traps.
+    // Property reads fall through to the target (it is the prototype), and
+    // `prototype` is the target's. (get/set traps do not apply to it.)
+    auto* targetFn = static_cast<Function*>(target);
+    struct State { Object* handler; Function* target; Object* self = nullptr; bool revoked = false; };
+    auto state = std::make_shared<State>(State{handler, targetFn});
+    auto* wrapper = new Function(targetFn->name(), [state](const FunctionCallInfo& info) -> Value {
+        if (state->revoked) throw std::runtime_error("Cannot perform 'apply' on a proxy that has been revoked");
+        VM* vm = VM::current();
+        if (!vm) return Value::undefined();
+        std::vector<Value> args = info.arguments();
+        Value self = info.thisValue();
+        // `new proxy(...)`: the VM made a fresh instance of proxy.prototype
+        const bool construct = self.isObject() && state->self &&
+            self.asObject()->prototype() == vm->getMember(Value::object(state->self), "prototype").asObject() &&
+            self.asObject()->getOwnPropertyNames().empty();
+        Value trapFn = vm->getMember(Value::object(state->handler), construct ? "construct" : "apply");
+        auto* argArray = new Array(args);
+        if (construct) {
+            if (trapFn.isObject() && trapFn.asObject()->isFunction()) {
+                Value result = vm->executeCallback(static_cast<Function*>(trapFn.asObject()), Value::object(state->handler),
+                                                   {Value::object(state->target), Value::object(argArray), Value::object(state->self)});
+                if (!result.isObject()) throw std::runtime_error("proxy [[Construct]] must return an object");
+                return result;
+            }
+            return vm->construct(state->target, args);
+        }
+        if (trapFn.isObject() && trapFn.asObject()->isFunction()) {
+            return vm->executeCallback(static_cast<Function*>(trapFn.asObject()), Value::object(state->handler),
+                                       {Value::object(state->target), self, Value::object(argArray)});
+        }
+        return vm->executeCallback(state->target, self, args);
+    }, targetFn->arity());
+    state->self = wrapper;
+    wrapper->setPrototype(target);
+    if (VM* vm = VM::current()) {
+        Value proto = vm->getMember(Value::object(target), "prototype");
+        if (proto.isObject()) wrapper->set("prototype", proto);
+    }
+    return wrapper;
+}
+
+std::pair<Object*, std::function<void()>> Proxy::createRevocable(Object* target, Object* handler) {
+    Object* proxy = create(target, handler);
+    auto* plain = dynamic_cast<Proxy*>(proxy);
+    return {proxy, [plain]() { if (plain) plain->revoke(); }};
 }
 
 // =============================================================================

@@ -252,10 +252,14 @@ void ScriptContext::setupFetchGlobals(Object* windowObj) {
     windowObj->set("Headers", Value::object(headersCtor));
 
     // --- XMLHttpRequest ---
+    // XMLHttpRequest.prototype exists (libraries read and patch it); the
+    // methods themselves are per instance
+    auto* xhrProto = new Object();
+    xhrProto->setPrototype(objectProto);
     auto* xhrCtor = createNativeFunction("XMLHttpRequest",
-        [this, objectProto](Context*, const std::vector<Value>&) -> Value {
+        [this, objectProto, xhrProto](Context*, const std::vector<Value>&) -> Value {
             auto* xhr = new Object();
-            xhr->setPrototype(objectProto);
+            xhr->setPrototype(xhrProto);
             auto state = std::make_shared<XhrState>();
 
             xhr->set("readyState", Value::number(0));
@@ -403,6 +407,8 @@ void ScriptContext::setupFetchGlobals(Object* windowObj) {
 
             return Value::object(xhr);
         }, 0);
+    xhrCtor->set("prototype", Value::object(xhrProto));
+    xhrProto->set("constructor", Value::object(xhrCtor));
     xhrCtor->set("UNSENT", Value::number(0));
     xhrCtor->set("OPENED", Value::number(1));
     xhrCtor->set("HEADERS_RECEIVED", Value::number(2));
