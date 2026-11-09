@@ -244,6 +244,7 @@ private:
     std::unordered_map<DOMElement*, std::unordered_map<std::string, CSSComputedStyle>> pseudoStyleCache_;
     CSSCascade cascade_;
     SelectorMatcher matcher_;
+    CSSLengthContext lengthContext_;               // for math functions, set per applyProperty
 
     void applyDeclarations(CSSComputedStyle& style, const CSSStyleDeclaration* decl,
                            const CSSComputedStyle* parentStyle, Importance importance = Importance::Any);

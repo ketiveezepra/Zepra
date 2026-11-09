@@ -209,6 +209,98 @@ TEST(Cascade, PseudoElementRulesSkipTheElement) {
 }
 
 // ---------------------------------------------------------------------------
+// Math functions and logical properties (Tailwind v4 output)
+// ---------------------------------------------------------------------------
+
+TEST(MathFunctions, CalcKeepsAUniformUnitAndMixesTheRest) {
+    // Tailwind's spacing scale: --spacing times a number
+    StyledDoc d("<!doctype html><div id=a><p id=b>x</p></div>",
+                ":root, :host { --spacing: .25rem; }"
+                "#a { height: calc(var(--spacing) * 6); padding-inline: calc(var(--spacing) * 6);"
+                "     width: calc(100% - 20px); margin-top: calc(1rem + 4px); }"
+                "#b { padding: calc(1px + 1px) 0; line-height: calc(2 / 1.5); }");
+    const CSSComputedStyle* a = d.style("a");
+    EXPECT_EQ(a->height.unit, CSSLength::Unit::Rem);
+    EXPECT_FLOAT_EQ(a->height.value, 1.5f);
+    // Font-relative paddings are resolved against the element's font size
+    EXPECT_EQ(a->paddingLeft.unit, CSSLength::Unit::Px);
+    EXPECT_FLOAT_EQ(a->paddingLeft.value, 24.0f);
+    EXPECT_FLOAT_EQ(a->paddingRight.value, 24.0f);
+    // A percentage with a px part keeps both
+    EXPECT_EQ(a->width.unit, CSSLength::Unit::Percent);
+    EXPECT_FLOAT_EQ(a->width.value, 100.0f);
+    EXPECT_FLOAT_EQ(a->width.pxOffset, -20.0f);
+    EXPECT_FLOAT_EQ(a->width.toPx(16, 16, 1280, 800, 500), 480.0f);
+    EXPECT_FLOAT_EQ(a->marginTop.value, 20.0f);
+    // A function's spaces don't split a shorthand
+    const CSSComputedStyle* b = d.style("b");
+    EXPECT_FLOAT_EQ(b->paddingTop.value, 2.0f);
+    EXPECT_FLOAT_EQ(b->paddingRight.value, 0.0f);
+    EXPECT_NEAR(b->lineHeight, 1.3333f, 0.001f);
+}
+
+TEST(MathFunctions, ClampMinMaxCompareInPx) {
+    // 10vw of the 1280px media environment is 128px, between 4rem and 9.5rem
+    StyledDoc d("<!doctype html><h1 id=a>x</h1><div id=b>y</div>",
+                "#a { font-size: clamp(4rem, 10vw, 9.5rem); }"
+                "#b { width: max(10px, 1rem); min-width: min(5px, 1em); height: min(10%, 20px); }");
+    EXPECT_FLOAT_EQ(d.style("a")->fontSize, 128.0f);
+    EXPECT_FLOAT_EQ(d.style("b")->width.value, 16.0f);
+    EXPECT_EQ(d.style("b")->width.unit, CSSLength::Unit::Px);
+    EXPECT_FLOAT_EQ(d.style("b")->minWidth.value, 5.0f);
+    // A percentage can't be compared with a length before layout: invalid, auto
+    EXPECT_TRUE(d.style("b")->height.isAuto());
+}
+
+TEST(MathFunctions, InvalidExpressionsFallBack) {
+    StyledDoc d("<!doctype html><div id=a>x</div>",
+                "#a { width: calc(1px + 2); height: calc(1px * 2px); margin-top: calc(10px / 0); "
+                "     padding-top: calc(1px +); }");
+    EXPECT_TRUE(d.style("a")->width.isAuto());
+    EXPECT_TRUE(d.style("a")->height.isAuto());
+    EXPECT_TRUE(d.style("a")->marginTop.isAuto());
+    EXPECT_TRUE(d.style("a")->paddingTop.isAuto());
+}
+
+TEST(Lengths, ScientificNotationAndHugeValuesAreClamped) {
+    // Tailwind's rounded-full; 1e99 used to throw out of std::stof
+    StyledDoc d("<!doctype html><div id=a>x</div><div id=b>y</div>",
+                "#a { border-radius: 3.40282e38px; width: 1e2px; }"
+                "#b { height: 1e99px; width: 2.5E1px; }");
+    EXPECT_FLOAT_EQ(d.style("a")->borderTopLeftRadius, 16777216.0f);
+    EXPECT_FLOAT_EQ(d.style("a")->width.value, 100.0f);
+    EXPECT_FLOAT_EQ(d.style("b")->height.value, 16777216.0f);
+    EXPECT_FLOAT_EQ(d.style("b")->width.value, 25.0f);
+}
+
+TEST(LogicalProperties, MapToPhysicalSidesForHorizontalLtr) {
+    StyledDoc d("<!doctype html><nav id=a>x</nav><div id=b>y</div>",
+                "#a { padding-inline: 24px; padding-block: 20px 4px; margin-inline: auto; "
+                "     inset-inline-start: 3px; border-inline: 2px solid #888; inline-size: 50%; }"
+                "#b { margin-block-start: 7px; border-block-end-width: 5px; border-block-end-style: solid;"
+                "     max-block-size: 10px; margin-inline: 1px 2px; }");
+    const CSSComputedStyle* a = d.style("a");
+    EXPECT_FLOAT_EQ(a->paddingLeft.value, 24.0f);
+    EXPECT_FLOAT_EQ(a->paddingRight.value, 24.0f);
+    EXPECT_FLOAT_EQ(a->paddingTop.value, 20.0f);
+    EXPECT_FLOAT_EQ(a->paddingBottom.value, 4.0f);
+    EXPECT_TRUE(a->marginLeft.isAuto());
+    EXPECT_TRUE(a->marginRight.isAuto());
+    EXPECT_FLOAT_EQ(a->left.value, 3.0f);
+    EXPECT_FLOAT_EQ(a->borderLeftWidth, 2.0f);
+    EXPECT_FLOAT_EQ(a->borderRightWidth, 2.0f);
+    EXPECT_EQ(a->borderLeftStyle, BorderStyle::Solid);
+    EXPECT_FLOAT_EQ(a->borderTopWidth, 0.0f);
+    EXPECT_EQ(a->width.unit, CSSLength::Unit::Percent);
+    const CSSComputedStyle* b = d.style("b");
+    EXPECT_FLOAT_EQ(b->marginTop.value, 7.0f);
+    EXPECT_FLOAT_EQ(b->borderBottomWidth, 5.0f);
+    EXPECT_FLOAT_EQ(b->maxHeight.value, 10.0f);
+    EXPECT_FLOAT_EQ(b->marginLeft.value, 1.0f);
+    EXPECT_FLOAT_EQ(b->marginRight.value, 2.0f);
+}
+
+// ---------------------------------------------------------------------------
 // Table layout (CSS 2.1 §17)
 // ---------------------------------------------------------------------------
 

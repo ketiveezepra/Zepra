@@ -15,6 +15,7 @@
 #include "css/css_engine.hpp"
 #include "browser/dom.hpp"
 #include "css/presentational_hints.hpp"
+#include "css/media_query.hpp"
 #include <sstream>
 #include <algorithm>
 #include <iostream>
@@ -38,15 +39,60 @@ static void zeroUnstyledBorders(CSSComputedStyle& style) {
     if (none(style.borderLeftStyle)) style.borderLeftWidth = 0;
 }
 
+// Space-separated values; a function's arguments ("calc(1px + 2px) 0") stay
+// together
 static std::vector<std::string> splitValues(const std::string& value) {
     std::vector<std::string> parts;
-    std::istringstream ss(value);
     std::string token;
-    while (ss >> token) {
-        if (!token.empty()) parts.push_back(token);
+    int depth = 0;
+    for (char c : value) {
+        if (c == '(') depth++;
+        else if (c == ')' && depth > 0) depth--;
+        if (depth == 0 && std::isspace(static_cast<unsigned char>(c))) {
+            if (!token.empty()) parts.push_back(token);
+            token.clear();
+            continue;
+        }
+        token += c;
     }
+    if (!token.empty()) parts.push_back(token);
     return parts;
 }
+
+// Logical properties mapped to the physical ones for horizontal-tb, ltr
+// (CSS Logical 1): block is top/bottom, inline is left/right. Two-value
+// shorthands give start then end.
+static const std::unordered_map<std::string, std::pair<const char*, const char*>> kLogicalShorthands = {
+    {"margin-inline", {"margin-left", "margin-right"}},
+    {"margin-block", {"margin-top", "margin-bottom"}},
+    {"padding-inline", {"padding-left", "padding-right"}},
+    {"padding-block", {"padding-top", "padding-bottom"}},
+    {"border-inline", {"border-left", "border-right"}},
+    {"border-block", {"border-top", "border-bottom"}},
+    {"border-inline-width", {"border-left-width", "border-right-width"}},
+    {"border-block-width", {"border-top-width", "border-bottom-width"}},
+    {"border-inline-style", {"border-left-style", "border-right-style"}},
+    {"border-block-style", {"border-top-style", "border-bottom-style"}},
+    {"border-inline-color", {"border-left-color", "border-right-color"}},
+    {"border-block-color", {"border-top-color", "border-bottom-color"}},
+};
+static const std::unordered_map<std::string, const char*> kLogicalLonghands = {
+    {"margin-inline-start", "margin-left"},   {"margin-inline-end", "margin-right"},
+    {"margin-block-start", "margin-top"},     {"margin-block-end", "margin-bottom"},
+    {"padding-inline-start", "padding-left"}, {"padding-inline-end", "padding-right"},
+    {"padding-block-start", "padding-top"},   {"padding-block-end", "padding-bottom"},
+    {"border-inline-start", "border-left"},   {"border-inline-end", "border-right"},
+    {"border-block-start", "border-top"},     {"border-block-end", "border-bottom"},
+    {"border-inline-start-width", "border-left-width"}, {"border-inline-end-width", "border-right-width"},
+    {"border-block-start-width", "border-top-width"},   {"border-block-end-width", "border-bottom-width"},
+    {"border-inline-start-style", "border-left-style"}, {"border-inline-end-style", "border-right-style"},
+    {"border-block-start-style", "border-top-style"},   {"border-block-end-style", "border-bottom-style"},
+    {"border-inline-start-color", "border-left-color"}, {"border-inline-end-color", "border-right-color"},
+    {"border-block-start-color", "border-top-color"},   {"border-block-end-color", "border-bottom-color"},
+    {"inline-size", "width"},         {"block-size", "height"},
+    {"min-inline-size", "min-width"}, {"min-block-size", "min-height"},
+    {"max-inline-size", "max-width"}, {"max-block-size", "max-height"},
+};
 
 static std::string trimGridText(const std::string& s) {
     size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
@@ -378,6 +424,31 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
                                    const std::string& property,
                                    const std::string& rawValue,
                                    const CSSComputedStyle* parentStyle) {
+    // What a math function's em/vw terms resolve against: the font size so
+    // far (the parent's until font-size itself is applied) and the viewport
+    lengthContext_.fontSize = style.fontSize;
+    lengthContext_.viewportWidth = static_cast<float>(mediaEnvironment().width);
+    lengthContext_.viewportHeight = static_cast<float>(mediaEnvironment().height);
+
+    // Logical properties: applied as their physical counterparts
+    if (auto longhand = kLogicalLonghands.find(property); longhand != kLogicalLonghands.end()) {
+        applyProperty(style, longhand->second, rawValue, parentStyle);
+        return;
+    }
+    if (auto shorthand = kLogicalShorthands.find(property); shorthand != kLogicalShorthands.end()) {
+        // One value for both sides, or start then end; keywords and var()
+        // apply to both as given
+        auto parts = splitValues(rawValue);
+        bool keyword = rawValue == "inherit" || rawValue == "initial" || rawValue == "unset";
+        if (parts.empty() || parts.size() > 2 || keyword || containsVarFunction(rawValue) ||
+            property.rfind("border-", 0) == 0) {
+            parts = {rawValue};
+        }
+        applyProperty(style, shorthand->second.first, parts[0], parentStyle);
+        applyProperty(style, shorthand->second.second, parts.size() > 1 ? parts[1] : parts[0], parentStyle);
+        return;
+    }
+
     // Handle 'inherit' keyword
     if (rawValue == "inherit" && parentStyle) {
         if (property == "color") style.color = parentStyle->color;
@@ -608,6 +679,16 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     else if (property == "table-layout") { style.tableLayoutFixed = (value == "fixed"); }
     else if (property == "line-height") {
         if (value == "normal") { style.lineHeight = 1.2f; }
+        else if (isCSSMathFunction(value)) {
+            // calc(2 / 1.5) is a number; calc(1rem + 2px) a length
+            CSSMathValue math;
+            if (evaluateCSSMath(value, lengthContext_, math)) {
+                if (math.isNumber) style.lineHeight = math.number;
+                else if (math.length.unit == CSSLength::Unit::Percent) style.lineHeight = math.length.value / 100.0f;
+                else style.lineHeight = math.length.toPx(style.fontSize, 16.0f, lengthContext_.viewportWidth,
+                                                         lengthContext_.viewportHeight, 0) / style.fontSize;
+            }
+        }
         else if (value.find_first_of("0123456789.") != std::string::npos) {
             try {
                 float val = std::stof(value);
@@ -1173,31 +1254,10 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
 // ============================================================================
 
 CSSLength StyleResolver::parseLength(const std::string& value) {
-    if (value.empty() || value == "auto") {
-        return CSSLength::auto_();
-    }
-    
-    float numValue = 0;
-    CSSLength::Unit unit = CSSLength::Unit::Px;
-    
-    try {
-        size_t pos = 0;
-        numValue = std::stof(value, &pos);
-        
-        std::string unitStr = value.substr(pos);
-        
-        if (unitStr == "px" || unitStr.empty()) unit = CSSLength::Unit::Px;
-        else if (unitStr == "em") unit = CSSLength::Unit::Em;
-        else if (unitStr == "rem") unit = CSSLength::Unit::Rem;
-        else if (unitStr == "%") unit = CSSLength::Unit::Percent;
-        else if (unitStr == "vw") unit = CSSLength::Unit::Vw;
-        else if (unitStr == "vh") unit = CSSLength::Unit::Vh;
-        else if (unitStr == "pt") unit = CSSLength::Unit::Pt;
-    } catch (...) {
-        return CSSLength::auto_();
-    }
-    
-    return {numValue, unit};
+    // Every unit, scientific notation and the math functions (calc(),
+    // min(), max(), clamp()) live in CSSLength::parse; the context carries
+    // the element's font size and the viewport for their em/vw terms
+    return CSSLength::parse(value, lengthContext_);
 }
 
 CSSColor StyleResolver::parseColor(const std::string& value) {

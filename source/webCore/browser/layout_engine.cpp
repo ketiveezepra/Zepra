@@ -2481,6 +2481,11 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     // smaller side, as corners here are circular)
     if (box.borderRadiusPercent > 0)
         box.borderRadius = std::min(box.width, box.height) * std::min(box.borderRadiusPercent, 50.0f) / 100.0f;
+    // A radius past half the box (Tailwind's rounded-full is 3.40282e38px)
+    // is a pill: the rasterizer places corner centres at +-radius and drew
+    // nothing sensible from such a value
+    if (box.borderRadius > 0 && box.width > 0 && box.height > 0)
+        box.borderRadius = std::min({box.borderRadius, box.width / 2.0f, box.height / 2.0f});
     
     // Skip if off-screen (culling)
     if (screenY + box.height < 0 || screenY > viewportHeight) {

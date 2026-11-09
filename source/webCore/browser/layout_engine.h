@@ -51,6 +51,7 @@ struct LayoutLength {
 
     float value = 0;
     Unit unit = Unit::None;
+    float offset = 0;   // px added to a percentage: calc(100% - 20px)
 
     bool isAuto() const { return unit == Unit::Auto; }
     bool isPercent() const { return unit == Unit::Percent; }
@@ -59,7 +60,7 @@ struct LayoutLength {
     float resolve(float containerSize, float fontSize, float vpW, float vpH) const {
         switch (unit) {
             case Unit::Px:      return value;
-            case Unit::Percent: return value / 100.0f * containerSize;
+            case Unit::Percent: return value / 100.0f * containerSize + offset;
             case Unit::Em:      return value * fontSize;
             case Unit::Rem:     return value * 16.0f;
             case Unit::Vw:      return value / 100.0f * vpW;

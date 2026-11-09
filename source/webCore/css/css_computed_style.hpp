@@ -16,6 +16,15 @@
 
 namespace Zepra::WebCore {
 
+/// What font- and viewport-relative terms of a calc() resolve against at
+/// computed-value time (CSS Values 4 §10.9: mixed units are combined there)
+struct CSSLengthContext {
+    float fontSize = 16.0f;        ///< the element's font size (em, ex, ch)
+    float rootFontSize = 16.0f;    ///< rem
+    float viewportWidth = 1920.0f; ///< vw, vmin, vmax
+    float viewportHeight = 1080.0f;
+};
+
 /**
  * @brief CSS length value with unit
  */
@@ -31,19 +40,48 @@ struct CSSLength {
 
     float value = 0;
     Unit unit = Unit::Px;
+    /// A percentage from calc() can carry a px part ("calc(100% - 20px)" is
+    /// value 100, pxOffset -20), added once the percentage is resolved.
+    /// 0 for every other length.
+    float pxOffset = 0;
 
     bool isAuto() const { return unit == Unit::Auto; }
     bool isPercent() const { return unit == Unit::Percent; }
-    
+
     /// Resolve to pixels
-    float toPx(float fontSize, float rootFontSize, float viewportWidth, 
+    float toPx(float fontSize, float rootFontSize, float viewportWidth,
                float viewportHeight, float containerSize = 0) const;
 
-    static CSSLength parse(const std::string& str);
+    /// A length, percentage or math function (calc(), min(), max(),
+    /// clamp()); auto for anything else, including the intrinsic sizing
+    /// keywords (max-content, ...) and a math function that does not resolve
+    static CSSLength parse(const std::string& str, const CSSLengthContext& ctx = {});
     static CSSLength px(float v) { return {v, Unit::Px}; }
     static CSSLength auto_() { return {0, Unit::Auto}; }
     static CSSLength percent(float v) { return {v, Unit::Percent}; }
 };
+
+/// The value of a math function: a number ("calc(2 / 1.5)") or a length /
+/// percentage ("calc(.25rem * 6)", "clamp(4rem, 10vw, 9.5rem)")
+struct CSSMathValue {
+    bool isNumber = false;
+    float number = 0;
+    CSSLength length;
+};
+
+/// True when the value is a math function call: calc(), min(), max(),
+/// clamp() or -webkit-calc() (case-insensitive)
+bool isCSSMathFunction(const std::string& value);
+
+/**
+ * Evaluates a math function (CSS Values 4 §10): + - * / with parentheses and
+ * nested functions; lengths of one unit stay in it ("calc(.25rem * 6)" is
+ * 1.5rem), mixed units are combined in px through `ctx`, and a percentage
+ * mixed with lengths keeps the percentage with the lengths in pxOffset.
+ * False for a malformed or untyped expression (a number added to a length,
+ * min() of a percentage and a length, division by zero, an unknown function).
+ */
+bool evaluateCSSMath(const std::string& value, const CSSLengthContext& ctx, CSSMathValue& out);
 
 /**
  * @brief RGBA Color

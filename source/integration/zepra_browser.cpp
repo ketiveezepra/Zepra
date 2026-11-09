@@ -1033,13 +1033,13 @@ static ZepraBrowser::LayoutLength cssToLayout(const Zepra::WebCore::CSSLength& c
     switch (css.unit) {
         case CU::Auto:    return LL::autoVal();
         case CU::Px:      return LL::px(css.value);
-        case CU::Percent: return LL::pct(css.value);
+        case CU::Percent: { LL pct = LL::pct(css.value); pct.offset = css.pxOffset; return pct; }
         case CU::Em:      return {css.value, LL::Unit::Em};
         case CU::Rem:     return {css.value, LL::Unit::Rem};
         case CU::Vw:      return {css.value, LL::Unit::Vw};
         case CU::Vh:      return {css.value, LL::Unit::Vh};
-        case CU::Pt:      return LL::px(css.value * 96.0f / 72.0f);
-        default:          return LL::px(css.value);
+        // Absolute units and the others (ch, ex, vmin, vmax) resolve here
+        default:          return LL::px(css.toPx(16.0f, 16.0f, (float)g_width, (float)g_height, 0));
     }
 }
 
