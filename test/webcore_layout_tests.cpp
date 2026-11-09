@@ -1515,3 +1515,210 @@ TEST(StickyPosition, SticksUntilItsParentEnds) {
     EXPECT_FLOAT_EQ(titleY(700), 10);
     EXPECT_FLOAT_EQ(titleY(780), -20);    // pushed out with the section's end (800 - 780 - 40)
 }
+
+// ---------------------------------------------------------------------------
+// CSS Grid
+// ---------------------------------------------------------------------------
+
+namespace {
+
+LayoutBox makeGrid(const std::string& columns, const std::string& rows = "", float gap = 0) {
+    LayoutBox grid;
+    grid.type = LayoutType::Grid;
+    grid.gridTemplateColumns = columns;
+    grid.gridTemplateRows = rows;
+    grid.rowGap = grid.columnGap = grid.gap = gap;
+    return grid;
+}
+
+LayoutBox& addItem(LayoutBox& grid, float height = 0, const std::string& text = "") {
+    LayoutBox& item = addBox(grid, LayoutType::Block);
+    if (height > 0) item.cssHeight = LayoutLength::px(height);
+    if (!text.empty()) addBox(item, LayoutType::Inline).text = text;
+    return item;
+}
+
+} // namespace
+
+TEST(GridLayout, FixedAndFlexibleColumnsShareTheWidthAfterGaps) {
+    LayoutBox grid = makeGrid("100px 1fr 2fr", "", 20);
+    LayoutBox& a = addItem(grid, 10);
+    LayoutBox& b = addItem(grid, 10);
+    LayoutBox& c = addItem(grid, 10);
+    ZepraBrowser::layoutBlock(grid, 700, 0);
+    EXPECT_FLOAT_EQ(a.x, 0);
+    EXPECT_FLOAT_EQ(a.width, 100);
+    EXPECT_FLOAT_EQ(b.x, 120);
+    EXPECT_NEAR(b.width, 560 / 3.0f, 0.01);
+    EXPECT_NEAR(c.x, 140 + 560 / 3.0f, 0.01);
+    EXPECT_NEAR(c.width, 1120 / 3.0f, 0.01);
+}
+
+TEST(GridLayout, AutoPlacementFillsRowsAndRowsTakeTheTallestItem) {
+    LayoutBox grid = makeGrid("1fr 1fr", "", 10);
+    LayoutBox& a = addItem(grid, 40);
+    LayoutBox& b = addItem(grid, 60);
+    LayoutBox& c = addItem(grid, 30);
+    LayoutBox& d = addItem(grid);  // auto height: stretched to its row
+    ZepraBrowser::layoutBlock(grid, 410, 0);
+    EXPECT_FLOAT_EQ(b.x, 210);
+    EXPECT_FLOAT_EQ(a.y, 0);
+    EXPECT_FLOAT_EQ(a.height, 40);  // a fixed height is not stretched
+    EXPECT_FLOAT_EQ(c.y, 70);
+    EXPECT_FLOAT_EQ(d.y, 70);
+    EXPECT_FLOAT_EQ(d.height, 30);
+    EXPECT_FLOAT_EQ(grid.height, 100);
+}
+
+TEST(GridLayout, LinesSpansAndNegativeLinesPlaceItems) {
+    LayoutBox grid = makeGrid("repeat(4, 50px)");
+    LayoutBox& wide = addItem(grid, 20);
+    wide.gridColumnStart = "2";
+    wide.gridColumnEnd = "span 2";
+    LayoutBox& last = addItem(grid, 20);
+    last.gridColumnStart = "-2";
+    last.gridColumnEnd = "-1";
+    last.gridRowStart = "1";
+    LayoutBox& next = addItem(grid, 20);  // auto: the first free cell after the cursor
+    ZepraBrowser::layoutBlock(grid, 400, 0);
+    EXPECT_FLOAT_EQ(wide.x, 50);
+    EXPECT_FLOAT_EQ(wide.width, 100);
+    EXPECT_FLOAT_EQ(last.x, 150);
+    EXPECT_FLOAT_EQ(last.y, 0);
+    EXPECT_FLOAT_EQ(next.x, 0);
+    EXPECT_FLOAT_EQ(next.y, 20);
+}
+
+TEST(GridLayout, TemplateAreasPlaceNamedItems) {
+    LayoutBox grid = makeGrid("120px 1fr", "50px auto");
+    grid.gridTemplateAreas = "\"head head\" \"side main\"";
+    LayoutBox& main = addItem(grid, 0, "main");
+    main.gridRowStart = main.gridRowEnd = main.gridColumnStart = main.gridColumnEnd = "main";
+    LayoutBox& head = addItem(grid);
+    head.gridRowStart = head.gridRowEnd = head.gridColumnStart = head.gridColumnEnd = "head";
+    LayoutBox& side = addItem(grid, 80);
+    side.gridRowStart = side.gridRowEnd = side.gridColumnStart = side.gridColumnEnd = "side";
+    ZepraBrowser::layoutBlock(grid, 620, 0);
+    EXPECT_FLOAT_EQ(head.y, 0);
+    EXPECT_FLOAT_EQ(head.width, 620);
+    EXPECT_FLOAT_EQ(head.height, 50);
+    EXPECT_FLOAT_EQ(side.y, 50);
+    EXPECT_FLOAT_EQ(main.x, 120);
+    EXPECT_FLOAT_EQ(main.y, 50);
+    EXPECT_FLOAT_EQ(main.width, 500);
+    EXPECT_FLOAT_EQ(main.height, 80);  // stretched to the row the 80px side sets
+}
+
+TEST(GridLayout, AutoFillRepeatsAsManyTracksAsFit) {
+    LayoutBox grid = makeGrid("repeat(auto-fill, minmax(200px, 1fr))", "", 10);
+    for (int i = 0; i < 4; ++i) addItem(grid, 20);
+    ZepraBrowser::layoutBlock(grid, 700, 0);
+    // floor((700 + 10) / 210) = 3 columns of (700 - 20) / 3
+    auto it = grid.children.begin();
+    EXPECT_NEAR(it->width, 680 / 3.0f, 0.01);
+    std::advance(it, 3);
+    EXPECT_FLOAT_EQ(it->x, 0);
+    EXPECT_FLOAT_EQ(it->y, 30);
+}
+
+TEST(GridLayout, AutoFitCollapsesEmptyRepeatedTracks) {
+    LayoutBox grid = makeGrid("repeat(auto-fit, minmax(100px, 1fr))");
+    LayoutBox& a = addItem(grid, 20);
+    LayoutBox& b = addItem(grid, 20);
+    ZepraBrowser::layoutBlock(grid, 500, 0);
+    EXPECT_FLOAT_EQ(a.width, 250);
+    EXPECT_FLOAT_EQ(b.x, 250);
+    EXPECT_FLOAT_EQ(b.width, 250);
+}
+
+TEST(GridLayout, AutoTracksFitContentThenStretchUnlessJustifyStart) {
+    LayoutBox grid = makeGrid("auto auto");
+    LayoutBox& a = addItem(grid, 0, "abc");       // 24px
+    LayoutBox& b = addItem(grid, 0, "abcdefgh");  // 64px
+    ZepraBrowser::layoutBlock(grid, 488, 0);
+    EXPECT_FLOAT_EQ(a.width, 24 + 200);
+    EXPECT_FLOAT_EQ(b.x, 224);
+    EXPECT_FLOAT_EQ(b.width, 64 + 200);
+
+    LayoutBox start = makeGrid("auto auto");
+    start.justifyContent = 6;  // start
+    LayoutBox& c = addItem(start, 0, "abc");
+    LayoutBox& d = addItem(start, 0, "abcdefgh");
+    ZepraBrowser::layoutBlock(start, 488, 0);
+    EXPECT_FLOAT_EQ(c.width, 24);
+    EXPECT_FLOAT_EQ(d.x, 24);
+    EXPECT_FLOAT_EQ(d.width, 64);
+}
+
+TEST(GridLayout, ItemsAlignInTheirAreas) {
+    LayoutBox grid = makeGrid("200px", "100px");
+    grid.justifyItems = 3;  // center
+    grid.alignItems = 2;    // end
+    LayoutBox& a = addItem(grid, 0, "abcde");  // 40px wide
+    ZepraBrowser::layoutBlock(grid, 500, 0);
+    EXPECT_FLOAT_EQ(a.width, 40);
+    EXPECT_FLOAT_EQ(a.x, 80);
+    EXPECT_FLOAT_EQ(a.y, 100 - a.height);
+
+    LayoutBox self = makeGrid("200px", "100px");
+    LayoutBox& b = addItem(self, 0, "abcde");
+    b.justifySelf = 2;  // end
+    b.alignSelf = 3;    // center
+    ZepraBrowser::layoutBlock(self, 500, 0);
+    EXPECT_FLOAT_EQ(b.x, 160);
+    EXPECT_FLOAT_EQ(b.y, (100 - b.height) / 2);
+}
+
+TEST(GridLayout, ColumnFlowFillsColumnsFirst) {
+    LayoutBox grid = makeGrid("100px 100px", "30px 30px");
+    grid.gridAutoFlowColumn = true;
+    LayoutBox& a = addItem(grid);
+    LayoutBox& b = addItem(grid);
+    LayoutBox& c = addItem(grid);
+    ZepraBrowser::layoutBlock(grid, 400, 0);
+    EXPECT_FLOAT_EQ(a.x, 0);
+    EXPECT_FLOAT_EQ(b.x, 0);
+    EXPECT_FLOAT_EQ(b.y, 30);
+    EXPECT_FLOAT_EQ(c.x, 100);
+    EXPECT_FLOAT_EQ(c.y, 0);
+}
+
+TEST(GridLayout, IntrinsicWidthSumsTheTracks) {
+    LayoutBox grid = makeGrid("100px auto", "", 10);
+    addItem(grid);
+    addItem(grid, 0, "abcdefghij");  // 80px
+    float minW, maxW;
+    ZepraBrowser::intrinsicWidths(grid, minW, maxW);
+    EXPECT_FLOAT_EQ(maxW, 190);
+    EXPECT_FLOAT_EQ(minW, 190);  // one unbreakable word
+}
+
+TEST(Cascade, GridPlacementShorthands) {
+    StyledDoc d("<!doctype html><div id=g><p id=a></p><p id=b></p><p id=c></p></div>",
+                "#g { display: grid; gap: 4px 12px; grid-template: \"x y\" 40px / 1fr 2fr; place-items: center start }"
+                " #a { grid-area: y } #b { grid-column: 1 / span 2; grid-row: 2 } #c { grid-area: 1 / 2 / 3 / 4;"
+                " place-self: end }");
+    const CSSComputedStyle* g = d.style("g");
+    EXPECT_EQ(g->rowGap.value, 4);
+    EXPECT_EQ(g->columnGap.value, 12);
+    EXPECT_EQ(g->gridTemplateAreas, "\"x y\"");
+    EXPECT_EQ(g->gridTemplateRows, "40px");
+    EXPECT_EQ(g->gridTemplateColumns, "1fr 2fr");
+    EXPECT_EQ(g->alignItems, JustifyAlign::Center);
+    EXPECT_EQ(g->justifyItems, JustifyAlign::Start);
+    const CSSComputedStyle* a = d.style("a");
+    EXPECT_EQ(a->gridRowStart, "y");
+    EXPECT_EQ(a->gridColumnEnd, "y");
+    const CSSComputedStyle* b = d.style("b");
+    EXPECT_EQ(b->gridColumnStart, "1");
+    EXPECT_EQ(b->gridColumnEnd, "span 2");
+    EXPECT_EQ(b->gridRowStart, "2");
+    EXPECT_EQ(b->gridRowEnd, "auto");
+    const CSSComputedStyle* c = d.style("c");
+    EXPECT_EQ(c->gridRowStart, "1");
+    EXPECT_EQ(c->gridColumnStart, "2");
+    EXPECT_EQ(c->gridRowEnd, "3");
+    EXPECT_EQ(c->gridColumnEnd, "4");
+    EXPECT_EQ(c->alignSelf, JustifyAlign::End);
+    EXPECT_EQ(c->justifySelf, JustifyAlign::End);
+}
