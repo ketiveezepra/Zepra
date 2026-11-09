@@ -991,34 +991,42 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         style.appearance = value;
     }
     else if (property == "outline") {
-        // Shorthand: "2px solid #000" or "none"
-        if (value == "none" || value == "0") {
-            style.outlineWidth = 0;
-            style.outlineStyle = "none";
-        } else {
-            style.outlineStyle = "solid";
-            std::istringstream ss(value);
-            std::string token;
-            while (ss >> token) {
-                if (token == "solid" || token == "dashed" || token == "dotted") {
-                    style.outlineStyle = token;
-                } else if (token == "none") {
-                    style.outlineWidth = 0;
-                } else if (token[0] == '#' || token.substr(0,3) == "rgb") {
-                    style.outlineColor = parseColor(token);
-                } else {
-                    CSSLength len = parseLength(token);
-                    if (!len.isAuto()) style.outlineWidth = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
-                }
+        // Width, style and colour in any order; omitted parts take their
+        // initial values: medium, none, currentColor (CSS UI 4 §5.1)
+        float width = 3;
+        std::string outlineStyle = "none";
+        CSSColor color = style.color;
+        std::istringstream ss(value);
+        std::string token;
+        while (ss >> token) {
+            BorderStyle b;
+            std::string t = token;
+            std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+            if (t == "auto" || parseBorderStyle(t, b)) { outlineStyle = t; continue; }
+            if (t == "thin") { width = 1; continue; }
+            if (t == "medium") { width = 3; continue; }
+            if (t == "thick") { width = 5; continue; }
+            if (std::isdigit((unsigned char)t[0]) || t[0] == '.') {
+                CSSLength len = parseLength(t);
+                if (!len.isAuto()) width = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+                continue;
             }
+            color = parseColor(token);
         }
+        style.outlineWidth = width;
+        style.outlineStyle = outlineStyle;
+        style.outlineColor = color;
     }
     else if (property == "outline-width") {
         CSSLength len = parseLength(value);
         if (!len.isAuto()) style.outlineWidth = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
     }
     else if (property == "outline-color") { style.outlineColor = parseColor(value); }
-    else if (property == "outline-style") { style.outlineStyle = value; }
+    else if (property == "outline-style") {
+        std::string t = value;
+        std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+        style.outlineStyle = t;
+    }
     else if (property == "outline-offset") {
         CSSLength len = parseLength(value);
         if (!len.isAuto()) style.outlineOffset = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
