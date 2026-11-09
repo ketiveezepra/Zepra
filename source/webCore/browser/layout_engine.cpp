@@ -520,6 +520,8 @@ static void layoutAtWidth(LayoutBox& item, float width) {
     item.width = width;
 }
 
+void layoutBoxAtWidth(LayoutBox& box, float width) { layoutAtWidth(box, width); }
+
 void imageSize(const LayoutBox& img, float containingWidth, float& width, float& height) {
     float vpW = layoutViewportWidth(), vpH = layoutViewportHeight();
     float edgesW = img.paddingLeft + img.paddingRight + img.borderLeft + img.borderRight;
@@ -615,6 +617,7 @@ bool isBlockLevel(LayoutType type) {
     switch (type) {
         case LayoutType::Block:
         case LayoutType::Flex:
+        case LayoutType::Grid:
         case LayoutType::Table:
         case LayoutType::TableRowGroup:
         case LayoutType::TableRow:
@@ -715,7 +718,9 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         if (box.height < minH) box.height = minH;
     }
     
-    if (box.type == LayoutType::Flex) {
+    if (box.type == LayoutType::Grid) {
+        childY = layoutGrid(box, contentWidth, childX, childY);
+    } else if (box.type == LayoutType::Flex) {
         float flexGap = box.gap;
         bool isColumn = (box.flexDirection == 1 || box.flexDirection == 3);
         bool isReverse = (box.flexDirection == 2 || box.flexDirection == 3);
@@ -1954,7 +1959,8 @@ void collectFixed(const LayoutBox& box, std::vector<const LayoutBox*>& out) {
 // Painted by its stacking context, not in tree order: positioned boxes, and
 // flex items with a z-index (CSS Flexbox §4.3)
 bool isLayered(const LayoutBox& child, const LayoutBox& parent) {
-    return child.positionType != 0 || (parent.type == LayoutType::Flex && !child.zIndexAuto);
+    bool item = parent.type == LayoutType::Flex || parent.type == LayoutType::Grid;
+    return child.positionType != 0 || (item && !child.zIndexAuto);
 }
 
 // Starts a stacking context: its layered descendants paint inside it
@@ -2021,7 +2027,7 @@ struct LayerWalk {
             if (child.positionType == 3) continue;  // fixed: the frame's root paints them
             float dx = 0, dy = 0;
             if (child.positionType == 4) stickyShift(child, box, x, y, ports, dx, dy);
-            bool flexItem = box.type == LayoutType::Flex;
+            bool flexItem = box.type == LayoutType::Flex || box.type == LayoutType::Grid;
             bool layered = isLayered(child, box);
             bool context = startsContext(child, flexItem);
             if (layered) {

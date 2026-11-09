@@ -29,6 +29,7 @@ enum class LayoutType {
     InlineBlock, // Inline-block element
     Flex,        // Flexbox container
     FlexItem,    // Child of flexbox container
+    Grid,        // CSS Grid container (display: grid / inline-grid)
     None,        // display: none
     Text,        // Text node
     // CSS 2.1 §17 table boxes; LayoutBox children follow the table model
@@ -206,6 +207,18 @@ struct LayoutBox {
     LayoutLength flexBasis;  // auto = use content size, otherwise resolved value
     int alignSelf = -1;      // -1=auto (inherit alignItems), 0=stretch, 1=start, 2=end, 3=center
     int order = 0;
+
+    // Grid container properties (CSS Grid 1), kept as CSS text and parsed
+    // by layoutGrid; justify-items uses the alignItems numbering
+    std::string gridTemplateColumns, gridTemplateRows, gridTemplateAreas;
+    std::string gridAutoColumns, gridAutoRows;
+    bool gridAutoFlowColumn = false;  // grid-auto-flow: column
+    bool gridAutoFlowDense = false;   // dense (placed like sparse for now)
+    int justifyItems = 0;             // 0=stretch (normal), 1=start, 2=end, 3=center
+
+    // Grid item properties: grid-row/column-start/end as CSS text
+    std::string gridColumnStart, gridColumnEnd, gridRowStart, gridRowEnd;
+    int justifySelf = -1;             // -1=auto, then as justifyItems
     
     // Text decoration
     std::string textDecoration;
@@ -444,6 +457,20 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY = 0);
  * then row heights and cell vertical alignment. Called by layoutBlock.
  */
 void layoutTable(LayoutBox& table, float containingWidth, float startY);
+
+/**
+ * @brief Lay out a Grid container's items (CSS Grid 1) in its content box,
+ * which starts at (contentX, contentY) and is contentWidth wide. Returns
+ * the y of the content's bottom edge. Called by layoutBlock.
+ */
+float layoutGrid(LayoutBox& box, float contentWidth, float contentX, float contentY);
+
+/// Min-/max-content widths of a Grid container's content (no edges)
+void gridIntrinsicWidths(const LayoutBox& box, float& minWidth, float& maxWidth);
+
+/// Lays a box out again as a block exactly `width` wide (border box),
+/// ignoring its own width and min/max-width
+void layoutBoxAtWidth(LayoutBox& box, float width);
 
 /**
  * @brief Min-content and max-content border-box widths of a box (the

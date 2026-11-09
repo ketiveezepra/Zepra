@@ -328,6 +328,16 @@ public:
 
     std::string gridTemplateColumns;
     std::string gridTemplateRows;
+    std::string gridTemplateAreas;
+    std::string gridAutoColumns;
+    std::string gridAutoRows;
+    bool gridAutoFlowColumn = false;  // grid-auto-flow: column
+    bool gridAutoFlowDense = false;
+    // grid-row/column-start/end as CSS text ("auto", "2", "-1", "span 2", "main")
+    std::string gridColumnStart, gridColumnEnd, gridRowStart, gridRowEnd;
+    JustifyAlign justifyItems = JustifyAlign::Stretch;  // normal
+    JustifyAlign justifySelf = JustifyAlign::Auto;
+    bool justifyContentNormal = true;  // justify-content: normal (grid tracks stretch)
     CSSLength gap;
     CSSLength rowGap;
     CSSLength columnGap;

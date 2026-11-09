@@ -2749,8 +2749,53 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                             case JustifyAlign::SpaceAround: blockBox->alignContent = 5; break;
                             default: blockBox->alignContent = 0; break; // stretch
                         }
-                    } else if (childStyle->display == DisplayValue::InlineBlock ||
+                    } else if (childStyle->display == DisplayValue::Grid ||
                                childStyle->display == DisplayValue::InlineGrid) {
+                        // inline-grid lays out as a block-level grid for now
+                        blockBox->type = LayoutType::Grid;
+                        using namespace Zepra::WebCore;
+                        float gapPx = childStyle->gap.toPx(style->fontSize, 16.0f, (float)g_width, (float)g_height, 0);
+                        blockBox->gap = gapPx;
+                        blockBox->rowGap = childStyle->rowGap.value > 0 ?
+                            childStyle->rowGap.toPx(style->fontSize, 16.0f, (float)g_width, (float)g_height, 0) : gapPx;
+                        blockBox->columnGap = childStyle->columnGap.value > 0 ?
+                            childStyle->columnGap.toPx(style->fontSize, 16.0f, (float)g_width, (float)g_height, 0) : gapPx;
+                        blockBox->gridTemplateColumns = childStyle->gridTemplateColumns;
+                        blockBox->gridTemplateRows = childStyle->gridTemplateRows;
+                        blockBox->gridTemplateAreas = childStyle->gridTemplateAreas;
+                        blockBox->gridAutoColumns = childStyle->gridAutoColumns;
+                        blockBox->gridAutoRows = childStyle->gridAutoRows;
+                        blockBox->gridAutoFlowColumn = childStyle->gridAutoFlowColumn;
+                        blockBox->gridAutoFlowDense = childStyle->gridAutoFlowDense;
+                        // justify-content: 0 normal (auto tracks stretch), then as flex; 6 = start
+                        switch (childStyle->justifyContent) {
+                            case JustifyAlign::FlexEnd: case JustifyAlign::End: blockBox->justifyContent = 1; break;
+                            case JustifyAlign::Center: blockBox->justifyContent = 2; break;
+                            case JustifyAlign::SpaceBetween: blockBox->justifyContent = 3; break;
+                            case JustifyAlign::SpaceAround: blockBox->justifyContent = 4; break;
+                            case JustifyAlign::SpaceEvenly: blockBox->justifyContent = 5; break;
+                            default: blockBox->justifyContent = childStyle->justifyContentNormal ? 0 : 6; break;
+                        }
+                        auto selfAlign = [](JustifyAlign a) {
+                            switch (a) {
+                                case JustifyAlign::FlexStart: case JustifyAlign::Start: case JustifyAlign::Baseline: return 1;
+                                case JustifyAlign::FlexEnd: case JustifyAlign::End: return 2;
+                                case JustifyAlign::Center: return 3;
+                                default: return 0;
+                            }
+                        };
+                        blockBox->alignItems = selfAlign(childStyle->alignItems);
+                        blockBox->justifyItems = selfAlign(childStyle->justifyItems);
+                        switch (childStyle->alignContent) {
+                            case JustifyAlign::FlexStart: case JustifyAlign::Start: blockBox->alignContent = 1; break;
+                            case JustifyAlign::FlexEnd: case JustifyAlign::End: blockBox->alignContent = 2; break;
+                            case JustifyAlign::Center: blockBox->alignContent = 3; break;
+                            case JustifyAlign::SpaceBetween: blockBox->alignContent = 4; break;
+                            case JustifyAlign::SpaceAround: blockBox->alignContent = 5; break;
+                            case JustifyAlign::SpaceEvenly: blockBox->alignContent = 6; break;
+                            default: blockBox->alignContent = 0; break;
+                        }
+                    } else if (childStyle->display == DisplayValue::InlineBlock) {
                         blockBox->type = LayoutType::InlineBlock;
                     } else {
                         applyTableDisplay(blockBox, childElement, childTag, childStyle);
@@ -2773,6 +2818,18 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         case JustifyAlign::FlexEnd: case JustifyAlign::End: blockBox->alignSelf = 2; break;
                         case JustifyAlign::Center: blockBox->alignSelf = 3; break;
                         default: blockBox->alignSelf = -1; break; // auto = inherit from parent
+                    }
+                    // Grid item placement, consumed when the parent is LayoutType::Grid
+                    blockBox->gridColumnStart = childStyle->gridColumnStart;
+                    blockBox->gridColumnEnd = childStyle->gridColumnEnd;
+                    blockBox->gridRowStart = childStyle->gridRowStart;
+                    blockBox->gridRowEnd = childStyle->gridRowEnd;
+                    switch (childStyle->justifySelf) {
+                        case JustifyAlign::Stretch: blockBox->justifySelf = 0; break;
+                        case JustifyAlign::FlexStart: case JustifyAlign::Start: case JustifyAlign::Baseline: blockBox->justifySelf = 1; break;
+                        case JustifyAlign::FlexEnd: case JustifyAlign::End: blockBox->justifySelf = 2; break;
+                        case JustifyAlign::Center: blockBox->justifySelf = 3; break;
+                        default: blockBox->justifySelf = -1; break;
                     }
                 } else {
                     // Fallback margins for common block tags (no CSS engine available)
