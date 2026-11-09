@@ -58,7 +58,7 @@ static const std::unordered_set<std::string> INHERITED_PROPERTIES = {
     "color", "font", "font-family", "font-size", "font-style", 
     "font-weight", "font-variant", "line-height", "letter-spacing",
     "word-spacing", "text-align", "text-indent", "text-transform",
-    "white-space", "direction",
+    "white-space", "direction", "-webkit-text-fill-color",
     // Lists
     "list-style", "list-style-image", "list-style-position", "list-style-type",
     // Other
@@ -864,6 +864,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         style.backgroundRepeat = "repeat";
         style.backgroundPosition.clear();
         style.backgroundSize.clear();
+        style.backgroundClipText = false;
         std::vector<std::string> tokens;
         std::string token;
         int depth = 0;
@@ -909,6 +910,17 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         try { style.opacity = std::stof(value); } catch (...) {}
     }
     else if (property == "box-shadow") { style.boxShadow = value; }
+    else if (property == "background-clip" || property == "-webkit-background-clip") {
+        std::string v = value;
+        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+        style.backgroundClipText = v == "text";
+    }
+    else if (property == "-webkit-text-fill-color") {
+        std::string v = value;
+        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+        style.hasTextFillColor = v != "currentcolor";
+        if (style.hasTextFillColor) style.textFillColor = CSSColor::parse(v);
+    }
     else if (property == "transform") { style.transform = value; }
     else if (property == "transition") { style.transition = value; }
     else if (property == "animation") { style.animation = value; }
@@ -982,6 +994,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         }
     }
     else if (property == "isolation") { style.isolation = value; }
+    else if (property == "mix-blend-mode") { style.mixBlendMode = value; }
     else if (property == "will-change") { style.willChange = value; }
     else if (property == "content") { style.content = value; }
     else if (property == "user-select" || property == "-webkit-user-select") {

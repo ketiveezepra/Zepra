@@ -15,6 +15,7 @@
 #include "../css/css_computed_style.hpp"
 #include "../dom/form_controls.hpp"
 #include "gradient_raster.h"
+#include "box_shadow.h"
 
 // Viewport dimensions (defined in zepra_browser.cpp)
 extern int g_width;
@@ -448,6 +449,34 @@ void setLayoutCallbacks2(
     s_gfx_gradient = gfx_gradient;
     s_gfx_svg = gfx_svg;
     s_gfx_hgradient = gfx_hgradient;
+}
+
+static void (*s_gfx_blend_fill)(float, float, float, float, float, uint32_t, uint8_t, uint8_t) = nullptr;
+
+void setBlendFillCallback(void (*gfx_blend_fill)(float, float, float, float, float, uint32_t, uint8_t, uint8_t)) {
+    s_gfx_blend_fill = gfx_blend_fill;
+static void (*s_gfx_shadow)(float, float, const ShadowBox&, const BoxShadow&) = nullptr;
+
+void setShadowPaintCallback(void (*gfx_shadow)(float, float, const ShadowBox&, const BoxShadow&)) {
+    s_gfx_shadow = gfx_shadow;
+}
+
+// The box's outer (inset = false) or inset shadows, bottom one first
+static void paintShadows(const LayoutBox& box, float x, float y, bool inset) {
+    if (!s_gfx_shadow || box.boxShadow.empty() || box.boxShadow == "none") return;
+    std::vector<BoxShadow> shadows = parseBoxShadow(box.boxShadow, box.color);
+    if (shadows.empty()) return;
+    ShadowBox sb;
+    sb.width = box.width;
+    sb.height = box.height;
+    sb.borderTop = box.borderTop;
+    sb.borderRight = box.borderRight;
+    sb.borderBottom = box.borderBottom;
+    sb.borderLeft = box.borderLeft;
+    sb.radius = box.borderRadius;
+    for (size_t i = shadows.size(); i-- > 0;) {
+        if (shadows[i].inset == inset) s_gfx_shadow(x, y, sb, shadows[i]);
+    }
 }
 
 void setGradientPaintCallback(void (*gfx_gradient_bg)(float, float, const GradientBackground&)) {
@@ -2138,6 +2167,106 @@ std::vector<const LayoutBox*> fixedBoxesInPaintOrder(const LayoutBox& root) {
 
 static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY, float viewportHeight, float scrollY);
 
+// ---------------------------------------------------------------------------
+// background-clip: text (CSS Backgrounds 4 §2.1): the background of the
+// nearest such box, sampled under each character of its text
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct ClipTextBackground {
+    const LayoutBox* box = nullptr;
+    float x = 0, y = 0;            // its border box on screen
+    bool sampled = false;
+    int pw = 0, ph = 0;
+    std::vector<uint8_t> pixels;   // its gradient, coarsely (straight RGBA)
+};
+thread_local ClipTextBackground* s_clipText = nullptr;
+
+// While a background-clip: text box paints (itself and its children)
+struct ClipTextScope {
+    ClipTextBackground background;
+    ClipTextBackground* previous = nullptr;
+    bool active = false;
+    ClipTextScope(const LayoutBox& box, float x, float y) {
+        if (!box.bgClipText) return;
+        background.box = &box;
+        background.x = x;
+        background.y = y;
+        previous = s_clipText;
+        s_clipText = &background;
+        active = true;
+    }
+    ~ClipTextScope() {
+        if (active) s_clipText = previous;
+    }
+};
+
+// The clip-text background's colour at a screen point; false where it has none
+bool clipTextColor(ClipTextBackground& bg, float x, float y, uint32_t& color) {
+    const LayoutBox& box = *bg.box;
+    if (isGradientBackground(box.backgroundImage)) {
+        if (!bg.sampled) {
+            bg.sampled = true;
+            GradientBackground g;
+            g.image = box.backgroundImage;
+            g.size = box.bgSize;
+            g.position = box.bgPosition;
+            g.repeat = box.bgRepeat;
+            g.width = box.width;
+            g.height = box.height;
+            g.borderTop = box.borderTop;
+            g.borderRight = box.borderRight;
+            g.borderBottom = box.borderBottom;
+            g.borderLeft = box.borderLeft;
+            bg.pw = std::clamp((int)std::lround(box.width / 2), 1, 512);
+            bg.ph = std::clamp((int)std::lround(box.height / 2), 1, 64);
+            if (!rasterizeGradientBackground(g, bg.pw, bg.ph, bg.pixels)) bg.pixels.clear();
+        }
+        if (!bg.pixels.empty()) {
+            int i = std::clamp((int)((x - bg.x) / box.width * bg.pw), 0, bg.pw - 1);
+            int j = std::clamp((int)((y - bg.y) / box.height * bg.ph), 0, bg.ph - 1);
+            const uint8_t* p = &bg.pixels[((size_t)j * bg.pw + i) * 4];
+            if (p[3] >= 128) {
+                color = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+                return true;
+            }
+        }
+    }
+    if (box.hasBgColor) {
+        color = box.bgColor;
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+// One run of text. With a transparent -webkit-text-fill-color the glyphs
+// show the enclosing background-clip: text box's background instead (one
+// colour per character, sampled at its middle), or nothing.
+static void drawTextRun(const std::string& text, float x, float y, uint32_t color, const LayoutBox& box) {
+    if (!box.textFillTransparent) {
+        s_text_render(text, x, y, color, box.fontSize, &box);
+        return;
+    }
+    if (!s_clipText || !s_text_width) return;
+    size_t i = 0;
+    while (i < text.size()) {
+        // One code point (UTF-8)
+        unsigned char lead = (unsigned char)text[i];
+        size_t n = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+        n = std::min(n, text.size() - i);
+        std::string ch = text.substr(i, n);
+        float before = s_text_width(text.substr(0, i), box.fontSize, &box);
+        float width = s_text_width(ch, box.fontSize, &box);
+        uint32_t c;
+        if (ch != " " && clipTextColor(*s_clipText, x + before + width / 2, y - box.fontSize * 0.35f, c))
+            s_text_render(ch, x + before, y, c, box.fontSize, &box);
+        i += n;
+    }
+}
+
 void paintBox(const LayoutBox& box, float offsetX, float offsetY,
               float viewportHeight, float scrollY) {
     if (t_frame.active) {
@@ -2200,9 +2329,15 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     // The background colour's own alpha (rgba(), #rrggbbaa) times opacity
     uint8_t alpha = (uint8_t)std::lround(box.bgAlpha * std::clamp(box.opacity, 0.0f, 1.0f));
     
+    // Outer shadows under everything the box paints (CSS Backgrounds 3 §7.1)
+    paintShadows(box, screenX, screenY, false);
+
     // Row and row-group backgrounds show through their cells only, not the
     // border-spacing between them (CSS 2.1 §17.5.1)
-    if (box.hasBgColor && (box.type == LayoutType::TableRow || box.type == LayoutType::TableRowGroup)) {
+    if (box.bgClipText) {
+        // background-clip: text: the background is painted through the
+        // glyphs of the box's text (drawTextRun), not here
+    } else if (box.hasBgColor && (box.type == LayoutType::TableRow || box.type == LayoutType::TableRowGroup)) {
         auto paintCells = [&](const LayoutBox& row, float rowX, float rowY) {
             for (const auto& cell : row.children) {
                 if (cell.type == LayoutType::TableCell && s_gfx_rect)
@@ -2223,6 +2358,9 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     } else {
         if (!box.hasBgColor) {
             // no colour of its own
+        } else if (box.blendMode != 0 && s_gfx_blend_fill) {
+            // mix-blend-mode: mixed with what is already drawn under it
+            s_gfx_blend_fill(screenX, screenY, box.width, box.height, box.borderRadius, box.bgColor, alpha, box.blendMode);
         } else if ((box.borderRadius > 0 || alpha < 255) && s_gfx_rrect) {
             // Translucent fills go through the rounded-rect path, the one that
             // takes an alpha (a radius of 0 is a plain rectangle)
@@ -2247,7 +2385,12 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
             s_gfx_gradient_bg(screenX, screenY, bg);
         }
     }
+    if (!box.bgClipText && (box.bgTextureId > 0 || !box.bgSvgData.empty())) paintBackgroundImage(box, screenX, screenY);
+    // Text inside a background-clip: text box shows its background
+    ClipTextScope clipText(box, screenX, screenY);
     if (box.bgTextureId > 0 || !box.bgSvgData.empty()) paintBackgroundImage(box, screenX, screenY);
+    // Inset shadows over the background, under the border and content
+    paintShadows(box, screenX, screenY, true);
     
     // Draw border, inside the border box (CSS Backgrounds 3, 4): each side is
     // a rectangle of its own width along that edge. Strokes are centered on
@@ -2342,7 +2485,7 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
             else if (box.textAlign == 2) textX = screenX + box.width - box.paddingRight - textW;
         }
         
-        if (s_text_render && !drawText.empty()) s_text_render(drawText, textX, textY, drawColor, box.fontSize, &box);
+        if (s_text_render && !drawText.empty()) drawTextRun(drawText, textX, textY, drawColor, box);
         
         // Text decoration
         if (!drawText.empty()) {
