@@ -152,6 +152,9 @@ struct LayoutBox {
     // Opacity (0.0 = transparent, 1.0 = opaque)
     float opacity = 1.0f;
     
+    // mix-blend-mode of the box's background colour (blend_modes.h; 0 normal)
+    uint8_t blendMode = 0;
+
     // Background image / gradient (CSS string)
     std::string backgroundImage;
     bool hasBgGradient = false;  // backgroundImage is all gradients: drawn by setGradientPaintCallback
@@ -398,6 +401,11 @@ struct GradientBackground;
 /// Set the callback that paints a gradient background (gradient_raster.h)
 /// over a box's border box at (x, y)
 void setGradientPaintCallback(void (*gfx_gradient_bg)(float x, float y, const GradientBackground& bg));
+
+/// Set the callback that fills a box's background colour with a
+/// mix-blend-mode (blend_modes.h) against what is already drawn under it
+void setBlendFillCallback(void (*gfx_blend_fill)(float x, float y, float w, float h, float radius, uint32_t color,
+                                                 uint8_t alpha, uint8_t mode));
 
 /// Set the callback that paints a <canvas> bitmap into its content box
 void setCanvasPaintCallback(

@@ -976,6 +976,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         }
     }
     else if (property == "isolation") { style.isolation = value; }
+    else if (property == "mix-blend-mode") { style.mixBlendMode = value; }
     else if (property == "will-change") { style.willChange = value; }
     else if (property == "content") { style.content = value; }
     else if (property == "user-select" || property == "-webkit-user-select") {

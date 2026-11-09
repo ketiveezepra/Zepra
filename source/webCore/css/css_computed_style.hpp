@@ -394,6 +394,7 @@ public:
     std::string placeItems;         // center, stretch, etc.
     std::string placeContent;       // center, space-between, etc.
     std::string isolation;          // auto, isolate
+    std::string mixBlendMode;       // normal, multiply, ... ("" = normal)
     std::string willChange;         // auto, transform, opacity
     std::string content;            // for ::before/::after
     std::string userSelect;         // none, auto, text
