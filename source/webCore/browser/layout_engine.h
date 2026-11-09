@@ -257,7 +257,16 @@ struct LayoutBox {
     int colSpan = 1;             // TableCell
     int rowSpan = 1;             // TableCell: 0 = to the end of the row group
     int verticalAlign = 0;       // TableCell: 0=baseline, 1=top, 2=middle, 3=bottom
-    bool noWrap = false;         // TableCell: white-space nowrap/pre
+    bool noWrap = false;         // white-space nowrap/pre (table cells and text runs)
+
+    /// A text run broken over several lines: each line's byte range in
+    /// `text` and its position relative to the box (the box spans from the
+    /// line box's start edge, and its first line may start further in)
+    struct TextLine {
+        size_t start = 0, length = 0;
+        float x = 0, y = 0, width = 0;
+    };
+    std::vector<TextLine> textLines;  // empty: one line, drawn at the box's origin
 
     // Min-/max-content border-box widths, cached per viewport width
     mutable float intrinsicMin = 0;

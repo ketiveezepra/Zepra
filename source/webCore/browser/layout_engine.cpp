@@ -565,6 +565,50 @@ static void layoutAtWidth(LayoutBox& item, float width) {
     item.width = width;
 }
 
+// Greedy line breaking at spaces (CSS Text 3 §5): the first line has
+// `firstWidth`, the rest `width`. A word wider than a line gets a line of
+// its own. Line ranges leave out the spaces they break at. The first line
+// is empty when not even the first word fits in `firstWidth`.
+static std::vector<LayoutBox::TextLine> breakTextLines(const LayoutBox& box, float firstWidth, float width) {
+    std::vector<LayoutBox::TextLine> lines;
+    const std::string& text = box.text;
+    float space = measureTextWidth(" ", box.fontSize, &box);
+    LayoutBox::TextLine line;
+    float avail = firstWidth;
+    size_t i = 0;
+    bool first = true;
+    while (i < text.size()) {
+        size_t end = text.find(' ', i);
+        if (end == std::string::npos) end = text.size();
+        float w = measureTextWidth(text.substr(i, end - i), box.fontSize, &box);
+        if (line.length == 0) {
+            if (w > avail && first && avail < width) {
+                // Nothing fits on the first (partial) line
+                line.start = i;
+                lines.push_back(line);
+                avail = width;
+                first = false;
+                continue;
+            }
+            line.start = i;
+            line.length = end - i;
+            line.width = w;
+        } else if (line.width + space + w <= avail) {
+            line.length = end - line.start;
+            line.width += space + w;
+        } else {
+            lines.push_back(line);
+            line = LayoutBox::TextLine{};
+            avail = width;
+            first = false;
+            continue;  // this word starts the next line
+        }
+        i = end + 1;
+    }
+    if (line.length > 0) lines.push_back(line);
+    return lines;
+}
+
 void layoutBoxAtWidth(LayoutBox& box, float width) { layoutAtWidth(box, width); }
 
 void imageSize(const LayoutBox& img, float containingWidth, float& width, float& height) {
@@ -1277,6 +1321,39 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 float textW = measureTextWidth(child.text, child.fontSize, &child);
                 child.width = textW;
                 child.height = child.fontSize + 4;
+                child.textLines.clear();
+                if (lineWidth + textW > contentWidth && !child.noWrap && contentWidth > 0 &&
+                    child.text.find(' ') != std::string::npos) {
+                    // Too long for the rest of the line: break it at spaces
+                    auto lines = breakTextLines(child, contentWidth - lineWidth, contentWidth);
+                    if (lineWidth > 0 && !lines.empty() && lines[0].length == 0) {
+                        // Not even its first word fits here: start on a new line
+                        childY += lineHeight;
+                        lineWidth = 0;
+                        lineHeight = 0;
+                        lines = breakTextLines(child, contentWidth, contentWidth);
+                    }
+                    if (lines.size() > 1) {
+                        float lh = child.fontSize + 4;
+                        float firstHeight = std::max(lineHeight, lh);
+                        child.x = childX;
+                        child.y = childY;
+                        float right = 0;
+                        for (size_t i = 0; i < lines.size(); ++i) {
+                            lines[i].x = i == 0 ? lineWidth : 0;
+                            lines[i].y = i == 0 ? 0 : firstHeight + lh * static_cast<float>(i - 1);
+                            right = std::max(right, lines[i].x + lines[i].width);
+                        }
+                        child.width = right;
+                        child.height = lines.back().y + lh;
+                        // The line box goes on after the last line
+                        childY += lines.back().y;
+                        lineWidth = lines.back().width + 4;
+                        lineHeight = lh;
+                        child.textLines = std::move(lines);
+                        continue;
+                    }
+                }
             }
             
             // Check for line wrap
@@ -1320,10 +1397,13 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     // container: its items are placed by justify-content, and its text
     // runs are anonymous flex items (CSS Flexbox 1 §4), not lines
     if (box.textAlign > 0 && contentWidth > 0 && box.type != LayoutType::Flex) {
-        // Group children into lines by Y position and shift their X
+        // Group children into lines by Y position and shift their X. A
+        // wrapped text run is on several lines: each of its lines moves on
+        // its own (frag >= 0), with whatever shares that line.
+        struct Piece { LayoutBox* box; int frag; };
         float currentLineY = -1;
         float lineMaxRight = 0;
-        std::vector<LayoutBox*> lineChildren;
+        std::vector<Piece> lineChildren;
         
         auto flushLine = [&]() {
             if (lineChildren.empty()) return;
@@ -1334,12 +1414,22 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
             else if (box.textAlign == 2) // right
                 shift = contentWidth - lineContentWidth;
             if (shift > 0) {
-                for (auto* lc : lineChildren) {
-                    if (!isBlockLevel(lc->type))
-                        lc->x += shift;
+                for (auto& pc : lineChildren) {
+                    // Whole pixels, so the glyphs aren't drawn blurred
+                    if (pc.frag >= 0) pc.box->textLines[pc.frag].x += std::floor(shift);
+                    else if (!isBlockLevel(pc.box->type)) pc.box->x += shift;
                 }
             }
             lineChildren.clear();
+        };
+        auto addPiece = [&](LayoutBox* lc, int frag, float y, float right) {
+            if (y != currentLineY) {
+                flushLine();
+                currentLineY = y;
+                lineMaxRight = 0;
+            }
+            lineChildren.push_back({lc, frag});
+            lineMaxRight = std::max(lineMaxRight, right);
         };
         
         for (auto& child : box.children) {
@@ -1349,13 +1439,14 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 currentLineY = -1;
                 continue;
             }
-            if (child.y != currentLineY) {
-                flushLine();
-                currentLineY = child.y;
-                lineMaxRight = 0;
+            if (!child.textLines.empty()) {
+                for (size_t f = 0; f < child.textLines.size(); ++f) {
+                    const auto& tl = child.textLines[f];
+                    addPiece(&child, static_cast<int>(f), child.y + tl.y, child.x + tl.x + tl.width);
+                }
+                continue;
             }
-            lineChildren.push_back(&child);
-            lineMaxRight = std::max(lineMaxRight, child.x + child.width);
+            addPiece(&child, -1, child.y, child.x + child.width);
         }
         flushLine();
     }
@@ -2510,37 +2601,50 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
             drawColor = 0x999999;
         }
         
-        if (box.textAlign > 0 && s_text_width && !drawText.empty()) {
+        if (box.textAlign > 0 && s_text_width && !drawText.empty() && box.textLines.empty()) {
             float textW = s_text_width(drawText, box.fontSize, &box);
             if (box.textAlign == 1) textX = screenX + (box.width - textW) / 2.0f;
             else if (box.textAlign == 2) textX = screenX + box.width - box.paddingRight - textW;
         }
         
-        if (s_text_render && !drawText.empty()) drawTextRun(drawText, textX, textY, drawColor, box);
-        
-        // Text decoration
-        if (!drawText.empty()) {
-            float textW = s_text_width ? s_text_width(drawText, box.fontSize, &box) : (drawText.length() * box.fontSize * 0.5f);
-            
-            // Links underline unless their text-decoration says otherwise
-            bool underline = box.textDecoration.find("underline") != std::string::npos ||
-                             (box.isLink && box.textDecoration.empty());
-            bool lineThrough = (box.textDecoration.find("line-through") != std::string::npos);
-            
+        // Links underline unless their text-decoration says otherwise
+        bool underline = box.textDecoration.find("underline") != std::string::npos ||
+                         (box.isLink && box.textDecoration.empty());
+        bool lineThrough = (box.textDecoration.find("line-through") != std::string::npos);
+        // One line of text with its decorations at (x, baseline)
+        auto drawLine = [&](const std::string& text, float x, float baseline, float knownWidth) {
+            if (text.empty()) return;
+            if (s_text_render) drawTextRun(text, x, baseline, drawColor, box);
+            if (!underline && !lineThrough) return;
+            float textW = knownWidth >= 0 ? knownWidth
+                        : s_text_width ? s_text_width(text, box.fontSize, &box) : (text.length() * box.fontSize * 0.5f);
             if (underline) {
-                float lineY = textY + 2;
-                if (s_gfx_line) s_gfx_line(textX, lineY, textX + textW, lineY, drawColor, 1.0f);
-                else if (s_gfx_rect) s_gfx_rect(textX, lineY, textW, 1.0f, drawColor);
+                float lineY = baseline + 2;
+                if (s_gfx_line) s_gfx_line(x, lineY, x + textW, lineY, drawColor, 1.0f);
+                else if (s_gfx_rect) s_gfx_rect(x, lineY, textW, 1.0f, drawColor);
             }
             if (lineThrough) {
-                float lineY = textY - box.fontSize * 0.35f;
-                if (s_gfx_line) s_gfx_line(textX, lineY, textX + textW, lineY, drawColor, 1.0f);
-                else if (s_gfx_rect) s_gfx_rect(textX, lineY, textW, 1.0f, drawColor);
+                float lineY = baseline - box.fontSize * 0.35f;
+                if (s_gfx_line) s_gfx_line(x, lineY, x + textW, lineY, drawColor, 1.0f);
+                else if (s_gfx_rect) s_gfx_rect(x, lineY, textW, 1.0f, drawColor);
             }
+        };
+        bool wrapped = !box.textLines.empty() && !box.isInput && drawText == box.text;
+        if (wrapped) {
+            for (const auto& tl : box.textLines) {
+                drawLine(drawText.substr(tl.start, tl.length), screenX + tl.x, screenY + tl.y + box.fontSize, tl.width);
+                // Each line is its own link area
+                if (box.isLink && !box.href.empty() && s_register_link) {
+                    float lx = screenX + tl.x, ly = screenY + tl.y, lw = tl.width, lh = box.fontSize + 4;
+                    if (insideClip(lx, ly, lw, lh)) s_register_link(lx, ly, lw, lh, box.href, box.target);
+                }
+            }
+        } else {
+            drawLine(drawText, textX, textY, -1);
         }
         
         // Register link hit box
-        if (box.isLink && !box.href.empty() && s_register_link) {
+        if (!wrapped && box.isLink && !box.href.empty() && s_register_link) {
             float lx = screenX, ly = screenY, lw = box.width, lh = box.height;
             if (insideClip(lx, ly, lw, lh)) s_register_link(lx, ly, lw, lh, box.href, box.target);
         }

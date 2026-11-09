@@ -1789,3 +1789,133 @@ TEST(Cascade, GridPlacementShorthands) {
     EXPECT_EQ(c->alignSelf, JustifyAlign::End);
     EXPECT_EQ(c->justifySelf, JustifyAlign::End);
 }
+
+// ---------------------------------------------------------------------------
+// Line breaking inside text runs (8px per character, spaces included)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+LayoutBox& addRun(LayoutBox& parent, const std::string& text) {
+    LayoutBox& run = addBox(parent, LayoutType::Inline);
+    run.text = text;
+    return run;
+}
+
+std::vector<std::string> lineTexts(const LayoutBox& run) {
+    std::vector<std::string> out;
+    for (const auto& line : run.textLines) out.push_back(run.text.substr(line.start, line.length));
+    return out;
+}
+
+} // namespace
+
+TEST(TextWrap, LongRunBreaksAtSpacesToFitTheWidth) {
+    LayoutBox block;
+    LayoutBox& run = addRun(block, "aaaa bbbb cccc dddd");
+    ZepraBrowser::layoutBlock(block, 100, 0);
+    EXPECT_EQ(lineTexts(run), (std::vector<std::string>{"aaaa bbbb", "cccc dddd"}));
+    EXPECT_FLOAT_EQ(run.textLines[1].y, 20);
+    EXPECT_FLOAT_EQ(run.height, 40);
+    EXPECT_FLOAT_EQ(block.height, 40);
+}
+
+TEST(TextWrap, RunStartsOnTheLineItJoins) {
+    LayoutBox block;
+    addRun(block, "xxxxxxxx");  // 64px, then 4px between runs
+    LayoutBox& run = addRun(block, "aaaa bbbb cccc");
+    LayoutBox& after = addRun(block, "zz");
+    ZepraBrowser::layoutBlock(block, 100, 0);
+    EXPECT_EQ(lineTexts(run), (std::vector<std::string>{"aaaa", "bbbb cccc"}));
+    EXPECT_FLOAT_EQ(run.x, 0);
+    EXPECT_FLOAT_EQ(run.textLines[0].x, 68);
+    EXPECT_FLOAT_EQ(run.textLines[1].x, 0);
+    // The next run follows the last line
+    EXPECT_FLOAT_EQ(after.x, 72 + 4);
+    EXPECT_FLOAT_EQ(after.y, 20);
+}
+
+TEST(TextWrap, RunMovesToANewLineWhenItsFirstWordDoesNotFit) {
+    LayoutBox block;
+    addRun(block, "xxxxxxxxxx");  // 80px
+    LayoutBox& run = addRun(block, "aaaa bbbb cccc dddd eeee");
+    ZepraBrowser::layoutBlock(block, 100, 0);
+    EXPECT_EQ(lineTexts(run), (std::vector<std::string>{"aaaa bbbb", "cccc dddd", "eeee"}));
+    EXPECT_FLOAT_EQ(run.y, 20);
+    EXPECT_FLOAT_EQ(run.textLines[0].x, 0);
+    EXPECT_FLOAT_EQ(block.height, 80);
+}
+
+TEST(TextWrap, WordWiderThanTheLineGetsALineOfItsOwn) {
+    LayoutBox block;
+    LayoutBox& run = addRun(block, "a bbbbbbbbbbbbbbb c");
+    ZepraBrowser::layoutBlock(block, 100, 0);
+    EXPECT_EQ(lineTexts(run), (std::vector<std::string>{"a", "bbbbbbbbbbbbbbb", "c"}));
+}
+
+TEST(TextWrap, TextAlignCentresEachLine) {
+    LayoutBox block;
+    block.textAlign = 1;
+    LayoutBox& run = addRun(block, "aaaa bbbb cccc");
+    ZepraBrowser::layoutBlock(block, 100, 0);
+    ASSERT_EQ(run.textLines.size(), 2u);
+    EXPECT_FLOAT_EQ(run.textLines[0].x, (100 - 72) / 2.0f);
+    EXPECT_FLOAT_EQ(run.textLines[1].x, (100 - 32) / 2.0f);
+}
+
+TEST(TextWrap, NoWrapKeepsOneLine) {
+    LayoutBox block;
+    LayoutBox& run = addRun(block, "aaaa bbbb cccc dddd");
+    run.noWrap = true;
+    ZepraBrowser::layoutBlock(block, 100, 0);
+    EXPECT_TRUE(run.textLines.empty());
+    EXPECT_FLOAT_EQ(run.width, 152);
+}
+
+TEST(TextWrap, MinContentIsTheWidestWord) {
+    LayoutBox block;
+    addRun(block, "aa bbbbbb c");
+    float minW, maxW;
+    ZepraBrowser::intrinsicWidths(block, minW, maxW);
+    EXPECT_FLOAT_EQ(minW, 48);
+    EXPECT_FLOAT_EQ(maxW, 88);
+}
+
+TEST(TextWrap, GridColumnWrapsItsText) {
+    LayoutBox grid;
+    grid.type = LayoutType::Grid;
+    grid.gridTemplateColumns = "100px 1fr";
+    LayoutBox& item = addBox(grid, LayoutType::Block);
+    addRun(item, "aaaa bbbb cccc dddd");
+    addBox(grid, LayoutType::Block);
+    ZepraBrowser::layoutBlock(grid, 600, 0);
+    EXPECT_FLOAT_EQ(item.width, 100);
+    EXPECT_FLOAT_EQ(item.height, 40);
+}
+
+namespace {
+struct DrawnText {
+    std::string text;
+    float x, y;
+};
+std::vector<DrawnText> g_drawn;
+}
+
+TEST(TextWrap, EachLineIsPaintedAtItsPosition) {
+    g_drawn.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t) {}, [](float, float, float, float, uint32_t, float) {},
+        [](const std::string& t, float x, float y, uint32_t, float, const LayoutBox*) { g_drawn.push_back({t, x, y}); },
+        [](const std::string& t, float size, const LayoutBox*) { return t.size() * size * 0.5f; }, nullptr, nullptr);
+    LayoutBox block;
+    LayoutBox& run = addRun(block, "aaaa bbbb cccc dddd");
+    ZepraBrowser::layoutBlock(block, 100, 0);
+    ZepraBrowser::paintBox(block, 10, 50, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ASSERT_EQ(run.textLines.size(), 2u);
+    ASSERT_EQ(g_drawn.size(), 2u);
+    EXPECT_EQ(g_drawn[0].text, "aaaa bbbb");
+    EXPECT_EQ(g_drawn[1].text, "cccc dddd");
+    EXPECT_FLOAT_EQ(g_drawn[0].x, 10);
+    EXPECT_FLOAT_EQ(g_drawn[1].y - g_drawn[0].y, 20);
+}
