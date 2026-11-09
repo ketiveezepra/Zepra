@@ -575,12 +575,20 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     }
     else if (property == "text-transform") { style.textTransform = value; }
     else if (property == "letter-spacing") {
-        CSSLength len = parseLength(value);
-        if (!len.isAuto()) style.letterSpacing = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        // normal is 0 (CSS Text 3 §8)
+        if (value == "normal") style.letterSpacing = 0;
+        else {
+            CSSLength len = parseLength(value);
+            if (!len.isAuto()) style.letterSpacing = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        }
     }
     else if (property == "word-spacing") {
-        CSSLength len = parseLength(value);
-        if (!len.isAuto()) style.wordSpacing = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        // normal is 0 (CSS Text 3 §8)
+        if (value == "normal") style.wordSpacing = 0;
+        else {
+            CSSLength len = parseLength(value);
+            if (!len.isAuto()) style.wordSpacing = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        }
     }
     else if (property == "white-space") { style.whiteSpace = value; }
 
