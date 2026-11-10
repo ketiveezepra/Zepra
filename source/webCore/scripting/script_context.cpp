@@ -14,11 +14,14 @@
 #include "scripting/web_storage.hpp"
 #include <iostream>
 #include <algorithm>
+#include <cstdlib>
 #include <chrono>
 #include <memory>
 #include <unordered_map>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
+#include <random>
 
 // ZepraScript internal headers
 #include "runtime/execution/vm.hpp"
@@ -139,6 +142,8 @@ Zepra::Runtime::Object* makeWebStorage(Zepra::Runtime::VM* vm, std::function<Sto
 }
 } // namespace
 
+extern const char* const kPlatformShims;
+
 ScriptContext::ScriptContext() : vm_(nullptr), vmReady_(false) {
     timeOriginMs_ = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -252,7 +257,13 @@ void ScriptContext::reportThrown(const std::string& text, const Zepra::Runtime::
     uint32_t line = 0;
     if (thrown.isObject()) {
         Zepra::Runtime::Value stack = thrown.asObject()->get("stack");
-        if (stack.isString()) firstStackFrame(stack.toString(), file, line);
+        if (stack.isString()) {
+            firstStackFrame(stack.toString(), file, line);
+            // ZEPRA_JS_STACKS=1: uncaught errors' stacks on stderr (the
+            // console panel only keeps the first frame)
+            static const bool printStacks = std::getenv("ZEPRA_JS_STACKS") != nullptr;
+            if (printStacks) std::cerr << "[JS stack] " << stack.toString() << std::endl;
+        }
     }
     reportError(text, file, line);
 }
@@ -312,9 +323,11 @@ ScriptResult ScriptContext::run(const std::string& code, const std::string& file
         return result;
     }
     
-    // Skip oversized scripts — extremely large bundles (>512KB) are still
-    // beyond what ZepraScript's single-pass compile can handle safely.
-    static constexpr size_t MAX_SCRIPT_SIZE = 524288; // 512KB
+    // Skip only absurdly large scripts. Real app bundles are 1–4 MB
+    // (YouTube's base module is 1.2 MB, its ytBootstrapConfig inline
+    // script 760 KB); the parser handles ~40 MB/s, so they fit the 500 ms
+    // parse budget below with room to spare.
+    static constexpr size_t MAX_SCRIPT_SIZE = size_t(16) * 1024 * 1024; // 16MB
     if (code.size() > MAX_SCRIPT_SIZE) {
         result.success = true;
         result.value = "undefined";
@@ -435,6 +448,11 @@ void ScriptContext::emitConsole(const std::string& level, const std::string& tex
 }
 
 void ScriptContext::emitConsole(ConsoleMessage message) {
+    // ZEPRA_JS_STACKS=1 also copies console errors and warnings to stderr
+    static const bool echoErrors = std::getenv("ZEPRA_JS_STACKS") != nullptr;
+    if (echoErrors && (message.level == "error" || message.level == "warn")) {
+        std::cerr << "[console." << message.level << "] " << message.text.substr(0, 2000) << std::endl;
+    }
     if (consoleMessageHandler_) {
         consoleMessageHandler_(message);
         return;
@@ -478,6 +496,8 @@ void ScriptContext::clearInterval(int id) {
 
 void ScriptContext::processTimers() {
     processNetworkResponses();
+    // Scripts whose source arrived run before the timers that came due
+    runReadyScripts();
     double now = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     
@@ -499,9 +519,12 @@ void ScriptContext::processTimers() {
         }
         if (callback) callback();
     }
+    runMessageTasks();
 }
 
 void ScriptContext::runAnimationFrames() {
+    // Intersection/resize observations are taken once per frame
+    deliverObservations();
     if (animationFrameQueue_.empty()) return;
     const double timestampMs = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now().time_since_epoch()).count() - timeOriginMs_;
@@ -585,6 +608,16 @@ void ScriptContext::fireDOMContentLoaded() {
 }
 
 void ScriptContext::fireLoadEvent() {
+    // The load event waits for the scripts still loading (async ones and
+    // those other scripts inserted): runReadyScripts() fires it after the last
+    if (pendingScriptCount() > 0) {
+        loadEventDelayed_ = true;
+        return;
+    }
+    fireLoadEventNow();
+}
+
+void ScriptContext::fireLoadEventNow() {
     if (vm_ && domBindings_) {
         domBindings_->setReadyState("complete");
         runTask([this] { domBindings_->fireEvent(nullptr, "load", false, false); }, "load listener");
@@ -662,6 +695,11 @@ void ScriptContext::setupGlobals() {
     }
     setupWindowGlobals();
     setupDocumentGlobals();
+    // Needs both window and document (kPlatformShims)
+    ScriptResult shims = evaluate(kPlatformShims, "<zepra-platform-shims>");
+    if (!shims.success) {
+        std::cerr << "[ScriptContext] platform shims failed to install: " << shims.error << std::endl;
+    }
 }
 
 void ScriptContext::setupWindowGlobals() {
@@ -798,8 +836,95 @@ void ScriptContext::setupWindowGlobals() {
             return Value::number(now - timeOriginMs_);
         }, 0);
     performanceObj->set("now", Value::object(perfNowFn));
+    // performance.timeOrigin and the legacy performance.timing /
+    // performance.navigation (YouTube's ytcsi reads timing.responseStart on
+    // load and threw "Cannot read properties of undefined")
+    {
+        const double epochOriginMs = std::chrono::duration<double, std::milli>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        performanceObj->set("timeOrigin", Value::number(epochOriginMs));
+        auto* timing = new Object();
+        const double t = std::floor(epochOriginMs);
+        for (const char* key : {"navigationStart", "fetchStart", "domainLookupStart", "domainLookupEnd",
+                                "connectStart", "connectEnd", "requestStart", "responseStart",
+                                "responseEnd", "domLoading", "domInteractive",
+                                "domContentLoadedEventStart", "domContentLoadedEventEnd",
+                                "domComplete", "loadEventStart", "loadEventEnd"}) {
+            timing->set(key, Value::number(t));
+        }
+        for (const char* key : {"unloadEventStart", "unloadEventEnd", "redirectStart", "redirectEnd",
+                                "secureConnectionStart"}) {
+            timing->set(key, Value::number(0));
+        }
+        performanceObj->set("timing", Value::object(timing));
+        auto* navigation = new Object();
+        navigation->set("type", Value::number(0));
+        navigation->set("redirectCount", Value::number(0));
+        performanceObj->set("navigation", Value::object(navigation));
+        // User Timing / Performance Timeline: accepted, nothing recorded
+        auto emptyList = [](Context*, const std::vector<Value>&) -> Value {
+            return Value::object(new Array());
+        };
+        auto noop = [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); };
+        performanceObj->set("mark", Value::object(createNativeFunction("mark", noop, 1)));
+        performanceObj->set("measure", Value::object(createNativeFunction("measure", noop, 1)));
+        performanceObj->set("clearMarks", Value::object(createNativeFunction("clearMarks", noop, 0)));
+        performanceObj->set("clearMeasures", Value::object(createNativeFunction("clearMeasures", noop, 0)));
+        performanceObj->set("clearResourceTimings", Value::object(createNativeFunction("clearResourceTimings", noop, 0)));
+        performanceObj->set("setResourceTimingBufferSize", Value::object(createNativeFunction("setResourceTimingBufferSize", noop, 1)));
+        performanceObj->set("getEntries", Value::object(createNativeFunction("getEntries", emptyList, 0)));
+        performanceObj->set("getEntriesByType", Value::object(createNativeFunction("getEntriesByType", emptyList, 1)));
+        performanceObj->set("getEntriesByName", Value::object(createNativeFunction("getEntriesByName", emptyList, 1)));
+    }
     windowObj->set("performance", Value::object(performanceObj));
     vm_->setGlobal("performance", Value::object(performanceObj));
+
+    // window.crypto: getRandomValues(typedArray) and randomUUID()
+    // (Cloudflare's beacon.min.js threw "crypto is not defined")
+    {
+        auto* cryptoObj = new Object();
+        auto* getRandomValues = createNativeFunction("getRandomValues",
+            [](Context*, const std::vector<Value>& args) -> Value {
+                if (args.empty() || !args[0].isObject()) {
+                    throw JSError("TypeError", "Failed to execute 'getRandomValues' on 'Crypto': parameter 1 is not of type 'ArrayBufferView'.");
+                }
+                Object* view = args[0].asObject();
+                const double length = view->get("length").toNumber();
+                if (!(length >= 0) || length > 65536) {
+                    throw JSError("QuotaExceededError", "Failed to execute 'getRandomValues' on 'Crypto': The ArrayBufferView's byte length exceeds the number of bytes of entropy available via this API (65536).");
+                }
+                const double bytesPerElement = view->get("BYTES_PER_ELEMENT").toNumber();
+                const double maxValue = bytesPerElement >= 4 ? 4294967296.0 : bytesPerElement == 2 ? 65536.0 : 256.0;
+                std::random_device rd;
+                for (size_t i = 0; i < static_cast<size_t>(length); ++i) {
+                    const double r = std::fmod(static_cast<double>(rd()), maxValue);
+                    view->set(std::to_string(i), Value::number(r));
+                }
+                return args[0];
+            }, 1);
+        cryptoObj->set("getRandomValues", Value::object(getRandomValues));
+        auto* randomUUID = createNativeFunction("randomUUID",
+            [](Context*, const std::vector<Value>&) -> Value {
+                std::random_device rd;
+                unsigned char bytes[16];
+                for (int i = 0; i < 16; ++i) bytes[i] = static_cast<unsigned char>(rd() & 0xFF);
+                bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0F) | 0x40);  // version 4
+                bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3F) | 0x80);  // variant 10
+                char text[37];
+                std::snprintf(text, sizeof(text),
+                              "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                              bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                              bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
+                return Value::string(new String(text));
+            }, 0);
+        cryptoObj->set("randomUUID", Value::object(randomUUID));
+        windowObj->set("crypto", Value::object(cryptoObj));
+        vm_->setGlobal("crypto", Value::object(cryptoObj));
+    }
+
+    // window.devicePixelRatio: the page is rendered 1:1
+    windowObj->set("devicePixelRatio", Value::number(1));
+    vm_->setGlobal("devicePixelRatio", Value::number(1));
     vm_->setGlobal("requestAnimationFrame", Value::object(rafFn));
     
     // window.cancelAnimationFrame (no-op)
@@ -859,36 +984,8 @@ void ScriptContext::setupWindowGlobals() {
     
     // MutationObserver is live (scripting/mutation_observer.cpp, set up by DOMBindings)
 
-    // IntersectionObserver — lazy loading, viewport detection
-    auto* intObsCtor = createNativeFunction("IntersectionObserver",
-        [](Context*, const std::vector<Value>&) -> Value {
-            auto* obs = new Object();
-            obs->set("observe", Value::object(createNativeFunction("observe",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            obs->set("unobserve", Value::object(createNativeFunction("unobserve",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            obs->set("disconnect", Value::object(createNativeFunction("disconnect",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 0)));
-            return Value::object(obs);
-        }, 1);
-    vm_->setGlobal("IntersectionObserver", Value::object(intObsCtor));
-    windowObj->set("IntersectionObserver", Value::object(intObsCtor));
-    
-    // ResizeObserver — responsive components
-    auto* resObsCtor = createNativeFunction("ResizeObserver",
-        [](Context*, const std::vector<Value>&) -> Value {
-            auto* obs = new Object();
-            obs->set("observe", Value::object(createNativeFunction("observe",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            obs->set("unobserve", Value::object(createNativeFunction("unobserve",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 1)));
-            obs->set("disconnect", Value::object(createNativeFunction("disconnect",
-                [](Context*, const std::vector<Value>&) -> Value { return Value::undefined(); }, 0)));
-            return Value::object(obs);
-        }, 1);
-    vm_->setGlobal("ResizeObserver", Value::object(resObsCtor));
-    windowObj->set("ResizeObserver", Value::object(resObsCtor));
-    
+    // IntersectionObserver, ResizeObserver, MessageChannel: installWebTaskApis()
+
     // fetch(), XMLHttpRequest and Headers (fetch_bindings.cpp)
     setupFetchGlobals(windowObj);
     
@@ -960,7 +1057,769 @@ void ScriptContext::setupWindowGlobals() {
     // DataTransfer (drag and drop events carry one)
     setupDragAndDrop(windowObj);
 
+    installWebTaskApis(windowObj);
+
     std::cout << "[ScriptContext] Window globals registered (alert, console, setTimeout, navigator, location, JSON, localStorage, history)" << std::endl;
+}
+
+namespace {
+
+// MessageChannel/MessagePort, window.postMessage, IntersectionObserver and
+// ResizeObserver, written in script on two native hooks:
+//  - __zepraPostTask(fn) queues fn as a task (drained by processTimers()
+//    within a time budget, so a scheduler that posts itself a message per
+//    slice, like React's, gets several slices per frame, unclamped)
+//  - __zepraDeliverObservations() is called by runAnimationFrames() every
+//    frame: observers measure their targets with getBoundingClientRect()
+//    against the viewport (or their root) and call back on changes. A newly
+//    observed target is always reported on the next frame (IO: whether it
+//    intersects; RO: its size), as the specs' initial observation requires.
+const char* const kWebTaskApis = R"JS(
+var MessagePort, MessageChannel, IntersectionObserver, IntersectionObserverEntry, ResizeObserver, ResizeObserverEntry;
+(function () {
+  var post = __zepraPostTask;
+  var clone = function (d) { try { return structuredClone(d); } catch (e) { return d; } };
+
+  MessagePort = function MessagePort() {
+    this.__other = null; this.__listeners = []; this.__started = false;
+    this.__queue = []; this.__onmessage = null; this.__closed = false;
+  };
+  Object.defineProperty(MessagePort.prototype, 'onmessage', {
+    get: function () { return this.__onmessage; },
+    set: function (f) { this.__onmessage = f; this.start(); },
+    configurable: true
+  });
+  MessagePort.prototype.postMessage = function (data) {
+    var target = this.__other;
+    if (!target || this.__closed) return;
+    var payload = clone(data);
+    post(function () { target.__deliver(payload); });
+  };
+  MessagePort.prototype.__deliver = function (data) {
+    if (this.__closed) return;
+    if (!this.__started) { this.__queue.push(data); return; }
+    var ev;
+    try { ev = new MessageEvent('message'); } catch (e) { ev = { type: 'message' }; }
+    try { Object.defineProperty(ev, 'data', { value: data, configurable: true }); } catch (e) { ev.data = data; }
+    ev.ports = []; ev.origin = ''; ev.lastEventId = ''; ev.source = null;
+    if (typeof this.__onmessage === 'function') this.__onmessage.call(this, ev);
+    var listeners = this.__listeners.slice();
+    for (var i = 0; i < listeners.length; i++) {
+      var l = listeners[i];
+      if (typeof l === 'function') l.call(this, ev);
+      else if (l && typeof l.handleEvent === 'function') l.handleEvent(ev);
+    }
+  };
+  MessagePort.prototype.start = function () {
+    if (this.__started) return;
+    this.__started = true;
+    var queued = this.__queue, self = this;
+    this.__queue = [];
+    queued.forEach(function (d) { post(function () { self.__deliver(d); }); });
+  };
+  MessagePort.prototype.close = function () { this.__closed = true; };
+  MessagePort.prototype.addEventListener = function (type, l) {
+    if (type === 'message' && l && this.__listeners.indexOf(l) < 0) this.__listeners.push(l);
+  };
+  MessagePort.prototype.removeEventListener = function (type, l) {
+    var i = this.__listeners.indexOf(l);
+    if (i >= 0) this.__listeners.splice(i, 1);
+  };
+  MessagePort.prototype.dispatchEvent = function () { return true; };
+
+  MessageChannel = function MessageChannel() {
+    var a = new MessagePort(), b = new MessagePort();
+    a.__other = b; b.__other = a;
+    this.port1 = a; this.port2 = b;
+  };
+
+  if (typeof window.postMessage !== 'function') {
+    window.postMessage = function (message) {
+      var data = clone(message);
+      post(function () {
+        var ev;
+        try { ev = new MessageEvent('message'); } catch (e) { return; }
+        try { Object.defineProperty(ev, 'data', { value: data, configurable: true }); } catch (e) { ev.data = data; }
+        ev.origin = (typeof location !== 'undefined' && location.origin) || '';
+        ev.source = window;
+        window.dispatchEvent(ev);
+      });
+    };
+  }
+
+  // ---- observers ----
+  var observers = [];
+  var now = function () { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); };
+  var report = function (e) { setTimeout(function () { throw e; }, 0); };
+  var register = function (o) { if (observers.indexOf(o) < 0) observers.push(o); };
+  var unregister = function (o) { var i = observers.indexOf(o); if (i >= 0) observers.splice(i, 1); };
+  var rect = function (x, y, w, h) {
+    return { x: x, y: y, width: w, height: h, top: y, left: x, right: x + w, bottom: y + h,
+             toJSON: function () { return { x: x, y: y, width: w, height: h, top: y, left: x, right: x + w, bottom: y + h }; } };
+  };
+  var measure = function (el) {
+    var r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    if (!r) return null;
+    var x = r.left !== undefined ? r.left : r.x, y = r.top !== undefined ? r.top : r.y;
+    return rect(x, y, r.width || 0, r.height || 0);
+  };
+  var connected = function (el) { return el.isConnected !== false; };
+  var parseMargin = function (text) {
+    var parts = String(text || '0px').trim().split(/\s+/), out = [];
+    for (var i = 0; i < parts.length && i < 4; i++) {
+      var v = parseFloat(parts[i]) || 0;
+      out.push(parts[i].indexOf('%') >= 0 ? { pct: v } : { px: v });
+    }
+    if (out.length === 0) out.push({ px: 0 });
+    if (out.length === 1) out.push(out[0]);
+    if (out.length === 2) out.push(out[0]);
+    if (out.length === 3) out.push(out[1]);
+    return out;  // top, right, bottom, left
+  };
+  var marginPx = function (m, size) { return m.pct !== undefined ? m.pct * size / 100 : m.px; };
+
+  IntersectionObserverEntry = function IntersectionObserverEntry(init) {
+    for (var k in init) this[k] = init[k];
+  };
+  IntersectionObserver = function IntersectionObserver(callback, options) {
+    if (typeof callback !== 'function') throw new TypeError("Failed to construct 'IntersectionObserver': The callback provided as parameter 1 is not a function.");
+    options = options || {};
+    var t = options.threshold === undefined ? [0] : [].concat(options.threshold);
+    for (var i = 0; i < t.length; i++) {
+      t[i] = Number(t[i]);
+      if (!(t[i] >= 0 && t[i] <= 1)) throw new RangeError("Failed to construct 'IntersectionObserver': Threshold values must be numbers between 0 and 1");
+    }
+    t.sort(function (a, b) { return a - b; });
+    this.root = options.root || null;
+    this.rootMargin = options.rootMargin || '0px 0px 0px 0px';
+    this.thresholds = t;
+    this.__callback = callback; this.__margin = parseMargin(this.rootMargin);
+    this.__targets = []; this.__records = []; this.__checkedAt = -1e9;
+  };
+  IntersectionObserver.prototype.observe = function (target) {
+    if (!target || typeof target !== 'object') throw new TypeError("Failed to execute 'observe' on 'IntersectionObserver': parameter 1 is not of type 'Element'.");
+    for (var i = 0; i < this.__targets.length; i++) if (this.__targets[i].el === target) return;
+    this.__targets.push({ el: target, state: null });
+    register(this);
+  };
+  IntersectionObserver.prototype.unobserve = function (target) {
+    this.__targets = this.__targets.filter(function (t) { return t.el !== target; });
+    if (!this.__targets.length) unregister(this);
+  };
+  IntersectionObserver.prototype.disconnect = function () { this.__targets = []; unregister(this); };
+  IntersectionObserver.prototype.takeRecords = function () { var r = this.__records; this.__records = []; return r; };
+  IntersectionObserver.prototype.__check = function (time, full) {
+    var rootRect;
+    if (this.root) { rootRect = measure(this.root); if (!rootRect) return; }
+    else rootRect = rect(0, 0, window.innerWidth || 0, window.innerHeight || 0);
+    var m = this.__margin;
+    var top = rootRect.top - marginPx(m[0], rootRect.height), right = rootRect.right + marginPx(m[1], rootRect.width);
+    var bottom = rootRect.bottom + marginPx(m[2], rootRect.height), left = rootRect.left - marginPx(m[3], rootRect.width);
+    var rootBounds = rect(left, top, right - left, bottom - top);
+    for (var i = 0; i < this.__targets.length; i++) {
+      var t = this.__targets[i];
+      if (t.state && !full) continue;
+      var box = connected(t.el) ? measure(t.el) : null;
+      var hasBox = box && !(box.width === 0 && box.height === 0 && box.left === 0 && box.top === 0);
+      var b = box || rect(0, 0, 0, 0);
+      var il = Math.max(b.left, left), it = Math.max(b.top, top);
+      var ir = Math.min(b.right, right), ib = Math.min(b.bottom, bottom);
+      var intersecting = !!hasBox && ir >= il && ib >= it;
+      var area = b.width * b.height;
+      var ratio = intersecting ? (area > 0 ? Math.min(1, (ir - il) * (ib - it) / area) : 1) : 0;
+      var index = -1;
+      if (intersecting) { index = 0; while (index < this.thresholds.length && this.thresholds[index] <= ratio) index++; }
+      if (t.state && t.state.index === index && t.state.intersecting === intersecting) continue;
+      t.state = { index: index, intersecting: intersecting };
+      this.__records.push(new IntersectionObserverEntry({
+        time: time, target: t.el, rootBounds: this.root ? rootBounds : rootBounds,
+        boundingClientRect: b,
+        intersectionRect: intersecting ? rect(il, it, ir - il, ib - it) : rect(0, 0, 0, 0),
+        isIntersecting: intersecting, intersectionRatio: ratio, isVisible: false
+      }));
+    }
+  };
+
+  ResizeObserverEntry = function ResizeObserverEntry(init) { for (var k in init) this[k] = init[k]; };
+  ResizeObserver = function ResizeObserver(callback) {
+    if (typeof callback !== 'function') throw new TypeError("Failed to construct 'ResizeObserver': The callback provided as parameter 1 is not a function.");
+    this.__callback = callback; this.__targets = []; this.__records = []; this.__checkedAt = -1e9;
+  };
+  ResizeObserver.prototype.observe = function (target, options) {
+    if (!target || typeof target !== 'object') throw new TypeError("Failed to execute 'observe' on 'ResizeObserver': parameter 1 is not of type 'Element'.");
+    for (var i = 0; i < this.__targets.length; i++) if (this.__targets[i].el === target) return;
+    this.__targets.push({ el: target, w: 0, h: 0, fresh: true, box: (options && options.box) || 'content-box' });
+    register(this);
+  };
+  ResizeObserver.prototype.unobserve = IntersectionObserver.prototype.unobserve;
+  ResizeObserver.prototype.disconnect = IntersectionObserver.prototype.disconnect;
+  ResizeObserver.prototype.__check = function (time, full) {
+    for (var i = 0; i < this.__targets.length; i++) {
+      var t = this.__targets[i];
+      if (!t.fresh && !full) continue;
+      var b = connected(t.el) ? measure(t.el) : null;
+      var pl = 0, pt = 0, pr = 0, pb = 0, bl = 0, bt = 0, br = 0, bb = 0;
+      if (b && typeof getComputedStyle === 'function') {
+        try {
+          var cs = getComputedStyle(t.el);
+          pl = parseFloat(cs.paddingLeft) || 0; pr = parseFloat(cs.paddingRight) || 0;
+          pt = parseFloat(cs.paddingTop) || 0; pb = parseFloat(cs.paddingBottom) || 0;
+          bl = parseFloat(cs.borderLeftWidth) || 0; br = parseFloat(cs.borderRightWidth) || 0;
+          bt = parseFloat(cs.borderTopWidth) || 0; bb = parseFloat(cs.borderBottomWidth) || 0;
+        } catch (e) {}
+      }
+      var bw = b ? b.width : 0, bh = b ? b.height : 0;
+      var cw = Math.max(0, bw - pl - pr - bl - br), ch = Math.max(0, bh - pt - pb - bt - bb);
+      var w = t.box === 'border-box' ? bw : cw, h = t.box === 'border-box' ? bh : ch;
+      var fresh = t.fresh;
+      t.fresh = false;
+      if (w === t.w && h === t.h && !(fresh && (w || h))) continue;
+      t.w = w; t.h = h;
+      this.__records.push(new ResizeObserverEntry({
+        target: t.el, contentRect: rect(pl, pt, cw, ch),
+        contentBoxSize: [{ inlineSize: cw, blockSize: ch }],
+        borderBoxSize: [{ inlineSize: bw, blockSize: bh }],
+        devicePixelContentBoxSize: [{ inlineSize: cw * (window.devicePixelRatio || 1), blockSize: ch * (window.devicePixelRatio || 1) }]
+      }));
+    }
+  };
+
+  // Called once per frame; existing targets are re-measured at most every
+  // 100 ms, new ones at once
+  __zepraDeliverObservations = function () {
+    if (!observers.length) return;
+    var time = now();
+    var list = observers.slice();
+    for (var i = 0; i < list.length; i++) {
+      var o = list[i];
+      var full = time - o.__checkedAt >= 100;
+      if (full) o.__checkedAt = time;
+      try { o.__check(time, full); } catch (e) { report(e); }
+    }
+    for (var j = 0; j < list.length; j++) {
+      var ob = list[j];
+      if (!ob.__records.length) continue;
+      var records = ob.__records;
+      ob.__records = [];
+      try { ob.__callback.call(ob, records, ob); } catch (e) { report(e); }
+    }
+  };
+
+  window.MessagePort = MessagePort; window.MessageChannel = MessageChannel;
+  window.IntersectionObserver = IntersectionObserver; window.IntersectionObserverEntry = IntersectionObserverEntry;
+  window.ResizeObserver = ResizeObserver; window.ResizeObserverEntry = ResizeObserverEntry;
+})();
+)JS";
+
+} // namespace
+
+
+// Web platform pieces pages touch at startup that the DOM bindings do not
+// provide yet, defined only when missing: Range/Selection, TextEncoder and
+// TextDecoder, AbortController, DOMException, Blob/File/FormData,
+// requestIdleCallback, reportError, escape/unescape, window.top/parent/...,
+// and Element extras (animate, compareDocumentPosition, reflected
+// attributes). Small and spec-shaped; enough for libraries to boot.
+const char* const kPlatformShims = R"JS(
+(function () {
+  var def = __zepraDefineGlobal;
+  var has = function (name) { return typeof window[name] !== 'undefined'; };
+  var proto = function (C, methods) { for (var k in methods) Object.defineProperty(C.prototype, k, { value: methods[k], writable: true, configurable: true }); };
+  var accessor = function (target, name, get, set) {
+    if (!target || Object.getOwnPropertyDescriptor(target, name)) return;
+    Object.defineProperty(target, name, { get: get, set: set, configurable: true, enumerable: true });
+  };
+
+  // ---- DOMException ----
+  if (!has('DOMException')) {
+    var codes = { IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4, InvalidCharacterError: 5,
+                  NotFoundError: 8, NotSupportedError: 9, InvalidStateError: 11, SyntaxError: 12,
+                  InvalidModificationError: 13, NamespaceError: 14, InvalidAccessError: 15, SecurityError: 18,
+                  NetworkError: 19, AbortError: 20, QuotaExceededError: 22, TimeoutError: 23, DataCloneError: 25 };
+    var DOMException = function DOMException(message, name) {
+      this.message = message === undefined ? '' : String(message);
+      this.name = name === undefined ? 'Error' : String(name);
+      this.code = codes[this.name] || 0;
+      try { this.stack = new Error(this.message).stack; } catch (e) {}
+    };
+    DOMException.prototype = Object.create(Error.prototype);
+    DOMException.prototype.constructor = DOMException;
+    for (var c in codes) DOMException[c.replace(/([a-z])([A-Z])/g, '$1_$2').toUpperCase().replace(/_ERROR$/, '_ERR')] = codes[c];
+    def('DOMException', DOMException);
+  }
+
+  // ---- AbortController / AbortSignal ----
+  if (!has('AbortController')) {
+    var AbortSignal = function AbortSignal() { throw new TypeError('Illegal constructor'); };
+    var makeSignal = function () {
+      var s = Object.create(AbortSignal.prototype);
+      s.aborted = false; s.reason = undefined; s.onabort = null; s.__listeners = [];
+      return s;
+    };
+    proto(AbortSignal, {
+      addEventListener: function (type, fn) { if (type === 'abort' && fn) this.__listeners.push(fn); },
+      removeEventListener: function (type, fn) { var i = this.__listeners.indexOf(fn); if (i >= 0) this.__listeners.splice(i, 1); },
+      dispatchEvent: function (ev) {
+        if (typeof this.onabort === 'function') this.onabort.call(this, ev);
+        var ls = this.__listeners.slice();
+        for (var i = 0; i < ls.length; i++) { if (typeof ls[i] === 'function') ls[i].call(this, ev); else if (ls[i] && ls[i].handleEvent) ls[i].handleEvent(ev); }
+        return true;
+      },
+      throwIfAborted: function () { if (this.aborted) throw this.reason; }
+    });
+    var abortSignal = function (s, reason) {
+      if (s.aborted) return;
+      s.aborted = true;
+      s.reason = reason === undefined ? new DOMException('signal is aborted without reason', 'AbortError') : reason;
+      s.dispatchEvent({ type: 'abort', target: s, currentTarget: s });
+    };
+    AbortSignal.abort = function (reason) { var s = makeSignal(); abortSignal(s, reason); return s; };
+    AbortSignal.timeout = function (ms) {
+      var s = makeSignal();
+      setTimeout(function () { abortSignal(s, new DOMException('signal timed out', 'TimeoutError')); }, ms);
+      return s;
+    };
+    AbortSignal.any = function (signals) {
+      var s = makeSignal();
+      signals.forEach(function (o) {
+        if (o.aborted) abortSignal(s, o.reason);
+        else o.addEventListener('abort', function () { abortSignal(s, o.reason); });
+      });
+      return s;
+    };
+    var AbortController = function AbortController() { this.signal = makeSignal(); };
+    proto(AbortController, { abort: function (reason) { abortSignal(this.signal, reason); } });
+    def('AbortSignal', AbortSignal);
+    def('AbortController', AbortController);
+  }
+
+  // ---- TextEncoder / TextDecoder (UTF-8) ----
+  if (!has('TextEncoder')) {
+    var TextEncoder = function TextEncoder() {};
+    proto(TextEncoder, {
+      encode: function (input) {
+        var s = input === undefined ? '' : String(input), out = [];
+        for (var i = 0; i < s.length; i++) {
+          var c = s.charCodeAt(i);
+          if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) {
+            var d = s.charCodeAt(i + 1);
+            if (d >= 0xDC00 && d <= 0xDFFF) { c = 0x10000 + ((c - 0xD800) << 10) + (d - 0xDC00); i++; }
+            else c = 0xFFFD;
+          } else if (c >= 0xD800 && c <= 0xDFFF) c = 0xFFFD;
+          if (c < 0x80) out.push(c);
+          else if (c < 0x800) out.push(0xC0 | (c >> 6), 0x80 | (c & 63));
+          else if (c < 0x10000) out.push(0xE0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+          else out.push(0xF0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+        }
+        return new Uint8Array(out);
+      },
+      encodeInto: function (s, dest) {
+        var bytes = this.encode(s), n = Math.min(bytes.length, dest.length);
+        for (var i = 0; i < n; i++) dest[i] = bytes[i];
+        return { read: s.length, written: n };
+      }
+    });
+    TextEncoder.prototype.encoding = 'utf-8';
+    def('TextEncoder', TextEncoder);
+  }
+  if (!has('TextDecoder')) {
+    var TextDecoder = function TextDecoder(label, options) {
+      var l = String(label === undefined ? 'utf-8' : label).toLowerCase();
+      if (l === 'utf8' || l === 'unicode-1-1-utf-8') l = 'utf-8';
+      if (l !== 'utf-8' && l !== 'utf-16le' && l !== 'latin1' && l !== 'iso-8859-1' && l !== 'ascii' && l !== 'windows-1252') throw new RangeError("The encoding label provided ('" + label + "') is invalid.");
+      this.encoding = l === 'latin1' || l === 'iso-8859-1' || l === 'ascii' ? 'windows-1252' : l;
+      this.fatal = !!(options && options.fatal);
+      this.ignoreBOM = !!(options && options.ignoreBOM);
+    };
+    proto(TextDecoder, {
+      decode: function (input) {
+        if (input === undefined) return '';
+        var b = input instanceof ArrayBuffer ? new Uint8Array(input)
+              : (input && input.buffer instanceof ArrayBuffer) ? new Uint8Array(input.buffer, input.byteOffset || 0, input.byteLength) : input;
+        var out = '', parts = [], i = 0, n = b.length;
+        if (this.encoding === 'windows-1252') { for (; i < n; i++) out += String.fromCharCode(b[i]); return out; }
+        if (this.encoding === 'utf-16le') { for (; i + 1 < n; i += 2) out += String.fromCharCode(b[i] | (b[i + 1] << 8)); return out; }
+        if (!this.ignoreBOM && n >= 3 && b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF) i = 3;
+        var units = [];
+        var bad = function (self) { if (self.fatal) throw new TypeError('The encoded data was not valid for encoding utf-8'); units.push(0xFFFD); };
+        while (i < n) {
+          var c = b[i];
+          if (c < 0x80) { units.push(c); i++; }
+          else {
+            var need = c >= 0xF0 && c <= 0xF4 ? 3 : c >= 0xE0 ? 2 : c >= 0xC2 && c < 0xE0 ? 1 : -1;
+            if (need < 0 || i + need >= n + 0 && i + need > n - 1 + 1) { if (need < 0 || i + need >= n) { bad(this); i++; continue; } }
+            var cp = c & (need === 1 ? 0x1F : need === 2 ? 0x0F : 0x07), ok = true;
+            for (var k = 1; k <= need; k++) { var x = b[i + k]; if ((x & 0xC0) !== 0x80) { ok = false; break; } cp = (cp << 6) | (x & 63); }
+            if (!ok) { bad(this); i++; continue; }
+            i += need + 1;
+            if (cp >= 0x10000) { cp -= 0x10000; units.push(0xD800 + (cp >> 10), 0xDC00 + (cp & 1023)); }
+            else units.push(cp);
+          }
+          if (units.length >= 8192) { parts.push(String.fromCharCode.apply(null, units)); units = []; }
+        }
+        parts.push(String.fromCharCode.apply(null, units));
+        return parts.join('');
+      }
+    });
+    def('TextDecoder', TextDecoder);
+  }
+
+  // ---- Blob / File / FormData ----
+  if (!has('Blob')) {
+    var Blob = function Blob(parts, options) {
+      var text = '';
+      (parts || []).forEach(function (p) {
+        if (typeof p === 'string') text += p;
+        else if (p instanceof Blob) text += p.__text;
+        else if (p instanceof ArrayBuffer || (p && p.buffer instanceof ArrayBuffer)) text += new TextDecoder('latin1').decode(p);
+        else text += String(p);
+      });
+      this.__text = text;
+      this.size = new TextEncoder().encode(text).length;
+      this.type = options && options.type ? String(options.type).toLowerCase() : '';
+    };
+    proto(Blob, {
+      text: function () { return Promise.resolve(this.__text); },
+      arrayBuffer: function () { return Promise.resolve(new TextEncoder().encode(this.__text).buffer); },
+      slice: function (a, b, type) { return new Blob([this.__text.slice(a, b)], { type: type || this.type }); },
+      stream: function () { throw new TypeError('Blob.stream is not supported'); }
+    });
+    var File = function File(parts, name, options) {
+      Blob.call(this, parts, options);
+      this.name = String(name);
+      this.lastModified = options && options.lastModified !== undefined ? Number(options.lastModified) : Date.now();
+    };
+    File.prototype = Object.create(Blob.prototype);
+    File.prototype.constructor = File;
+    def('Blob', Blob);
+    def('File', File);
+  }
+  if (!has('FormData')) {
+    var FormData = function FormData(form) {
+      this.__entries = [];
+      if (form && form.elements) {
+        for (var i = 0; i < form.elements.length; i++) {
+          var el = form.elements[i];
+          if (el.name && !el.disabled && ((el.type !== 'checkbox' && el.type !== 'radio') || el.checked)) this.__entries.push([el.name, String(el.value)]);
+        }
+      }
+    };
+    proto(FormData, {
+      append: function (k, v) { this.__entries.push([String(k), v instanceof Blob ? v : String(v)]); },
+      set: function (k, v) { this.delete(k); this.append(k, v); },
+      get: function (k) { for (var i = 0; i < this.__entries.length; i++) if (this.__entries[i][0] === String(k)) return this.__entries[i][1]; return null; },
+      getAll: function (k) { return this.__entries.filter(function (e) { return e[0] === String(k); }).map(function (e) { return e[1]; }); },
+      has: function (k) { return this.get(k) !== null; },
+      delete: function (k) { this.__entries = this.__entries.filter(function (e) { return e[0] !== String(k); }); },
+      forEach: function (fn, self) { var t = this; this.__entries.forEach(function (e) { fn.call(self, e[1], e[0], t); }); },
+      entries: function () { return this.__entries.map(function (e) { return [e[0], e[1]]; })[Symbol.iterator](); },
+      keys: function () { return this.__entries.map(function (e) { return e[0]; })[Symbol.iterator](); },
+      values: function () { return this.__entries.map(function (e) { return e[1]; })[Symbol.iterator](); }
+    });
+    FormData.prototype[Symbol.iterator] = FormData.prototype.entries;
+    def('FormData', FormData);
+  }
+
+  // ---- Range / Selection ----
+  if (!has('Range')) {
+    var Range = function Range() {
+      this.startContainer = document; this.startOffset = 0;
+      this.endContainer = document; this.endOffset = 0;
+      this.collapsed = true; this.commonAncestorContainer = document;
+    };
+    var update = function (r) {
+      r.collapsed = r.startContainer === r.endContainer && r.startOffset === r.endOffset;
+      var a = r.startContainer;
+      while (a && a.contains && !a.contains(r.endContainer)) a = a.parentNode;
+      r.commonAncestorContainer = a || document;
+    };
+    var indexOf = function (node) { var p = node.parentNode; return p ? Array.prototype.indexOf.call(p.childNodes, node) : 0; };
+    proto(Range, {
+      setStart: function (n, o) { this.startContainer = n; this.startOffset = o; update(this); },
+      setEnd: function (n, o) { this.endContainer = n; this.endOffset = o; update(this); },
+      setStartBefore: function (n) { this.setStart(n.parentNode, indexOf(n)); },
+      setStartAfter: function (n) { this.setStart(n.parentNode, indexOf(n) + 1); },
+      setEndBefore: function (n) { this.setEnd(n.parentNode, indexOf(n)); },
+      setEndAfter: function (n) { this.setEnd(n.parentNode, indexOf(n) + 1); },
+      selectNode: function (n) { this.setStartBefore(n); this.setEndAfter(n); },
+      selectNodeContents: function (n) { this.setStart(n, 0); this.setEnd(n, n.nodeType === 3 ? (n.data || '').length : n.childNodes.length); },
+      collapse: function (toStart) { if (toStart) this.setEnd(this.startContainer, this.startOffset); else this.setStart(this.endContainer, this.endOffset); },
+      cloneRange: function () { var r = new Range(); r.setStart(this.startContainer, this.startOffset); r.setEnd(this.endContainer, this.endOffset); return r; },
+      detach: function () {},
+      toString: function () { var n = this.commonAncestorContainer; return n && n.textContent !== undefined && !this.collapsed ? String(n.textContent) : ''; },
+      createContextualFragment: function (html) { var t = document.createElement('template'); t.innerHTML = html; return t.content; },
+      getBoundingClientRect: function () {
+        var n = this.startContainer && this.startContainer.nodeType === 1 ? this.startContainer : this.startContainer && this.startContainer.parentNode;
+        return n && n.getBoundingClientRect ? n.getBoundingClientRect() : new DOMRect(0, 0, 0, 0);
+      },
+      getClientRects: function () { return [this.getBoundingClientRect()]; },
+      deleteContents: function () {
+        if (this.startContainer === this.endContainer && this.startContainer.nodeType === 1) {
+          var kids = Array.prototype.slice.call(this.startContainer.childNodes, this.startOffset, this.endOffset);
+          kids.forEach(function (k) { k.parentNode.removeChild(k); });
+          this.collapse(true);
+        }
+      },
+      insertNode: function (node) {
+        var c = this.startContainer;
+        if (c.nodeType === 1 || c.nodeType === 9 || c.nodeType === 11) c.insertBefore(node, c.childNodes[this.startOffset] || null);
+        else if (c.parentNode) c.parentNode.insertBefore(node, c.nextSibling);
+      },
+      compareBoundaryPoints: function () { return 0; },
+      comparePoint: function () { return 0; },
+      isPointInRange: function () { return false; },
+      intersectsNode: function (n) { var a = this.commonAncestorContainer; return !!(a && a.contains && a.contains(n)); }
+    });
+    Range.START_TO_START = 0; Range.START_TO_END = 1; Range.END_TO_END = 2; Range.END_TO_START = 3;
+    def('Range', Range);
+    if (!document.createRange) document.createRange = function () { return new Range(); };
+  }
+  if (!has('Selection')) {
+    var Selection = function Selection() { throw new TypeError('Illegal constructor'); };
+    var selection = Object.create(Selection.prototype);
+    selection.__ranges = [];
+    proto(Selection, {
+      getRangeAt: function (i) { if (i >= this.__ranges.length) throw new DOMException('The index is not in the allowed range.', 'IndexSizeError'); return this.__ranges[i]; },
+      addRange: function (r) { this.__ranges = [r]; },
+      removeAllRanges: function () { this.__ranges = []; },
+      removeRange: function () { this.__ranges = []; },
+      empty: function () { this.__ranges = []; },
+      collapse: function (n, o) { var r = new Range(); if (n) { r.setStart(n, o || 0); r.collapse(true); } this.__ranges = n ? [r] : []; },
+      collapseToStart: function () {}, collapseToEnd: function () {},
+      selectAllChildren: function (n) { var r = new Range(); r.selectNodeContents(n); this.__ranges = [r]; },
+      extend: function () {}, setBaseAndExtent: function (a, ao, b, bo) { var r = new Range(); r.setStart(a, ao); r.setEnd(b, bo); this.__ranges = [r]; },
+      containsNode: function () { return false; }, deleteFromDocument: function () {}, modify: function () {},
+      toString: function () { return this.__ranges.length ? this.__ranges[0].toString() : ''; }
+    });
+    Object.defineProperty(Selection.prototype, 'rangeCount', { get: function () { return this.__ranges.length; }, configurable: true });
+    Object.defineProperty(Selection.prototype, 'isCollapsed', { get: function () { return !this.__ranges.length || this.__ranges[0].collapsed; }, configurable: true });
+    ['anchorNode', 'focusNode'].forEach(function (k) { Object.defineProperty(Selection.prototype, k, { get: function () { return this.__ranges.length ? this.__ranges[0].startContainer : null; }, configurable: true }); });
+    ['anchorOffset', 'focusOffset'].forEach(function (k) { Object.defineProperty(Selection.prototype, k, { get: function () { return this.__ranges.length ? this.__ranges[0].startOffset : 0; }, configurable: true }); });
+    Object.defineProperty(Selection.prototype, 'type', { get: function () { return !this.__ranges.length ? 'None' : this.isCollapsed ? 'Caret' : 'Range'; }, configurable: true });
+    def('Selection', Selection);
+    var getSelection = function () { return selection; };
+    def('getSelection', getSelection);
+    if (!document.getSelection) document.getSelection = getSelection;
+  }
+
+  // ---- scheduling, errors, misc globals ----
+  if (!has('requestIdleCallback')) {
+    var idleId = 0, idle = {};
+    def('requestIdleCallback', function (cb, opts) {
+      var id = ++idleId;
+      idle[id] = setTimeout(function () {
+        delete idle[id];
+        var start = Date.now();
+        cb({ didTimeout: false, timeRemaining: function () { return Math.max(0, 50 - (Date.now() - start)); } });
+      }, 1);
+      return id;
+    });
+    def('cancelIdleCallback', function (id) { if (idle[id]) { clearTimeout(idle[id]); delete idle[id]; } });
+  }
+  if (!has('reportError')) {
+    def('reportError', function (e) { setTimeout(function () { throw e; }, 0); });
+  }
+  if (!has('PerformanceObserver')) {
+    var PerformanceObserver = function PerformanceObserver(cb) { this.__cb = cb; };
+    proto(PerformanceObserver, { observe: function () {}, disconnect: function () {}, takeRecords: function () { return []; } });
+    PerformanceObserver.supportedEntryTypes = [];
+    def('PerformanceObserver', PerformanceObserver);
+  }
+  if (!has('BroadcastChannel')) {
+    var BroadcastChannel = function BroadcastChannel(name) { this.name = String(name); this.onmessage = null; };
+    proto(BroadcastChannel, { postMessage: function () {}, close: function () {}, addEventListener: function () {}, removeEventListener: function () {} });
+    def('BroadcastChannel', BroadcastChannel);
+  }
+  if (typeof escape === 'undefined') {
+    def('escape', function (s) {
+      s = String(s);
+      var out = '', keep = /[A-Za-z0-9@*_+\-./]/;
+      for (var i = 0; i < s.length; i++) {
+        var c = s.charCodeAt(i);
+        if (keep.test(s[i])) out += s[i];
+        else if (c < 256) out += '%' + (c < 16 ? '0' : '') + c.toString(16).toUpperCase();
+        else out += '%u' + ('000' + c.toString(16).toUpperCase()).slice(-4);
+      }
+      return out;
+    });
+    def('unescape', function (s) {
+      return String(s).replace(/%u([0-9A-Fa-f]{4})|%([0-9A-Fa-f]{2})/g, function (m, u, h) { return String.fromCharCode(parseInt(u || h, 16)); });
+    });
+  }
+  var selfProps = ['top', 'parent', 'frames', 'self'];
+  for (var i = 0; i < selfProps.length; i++) if (typeof window[selfProps[i]] === 'undefined') window[selfProps[i]] = window;
+  if (typeof window.opener === 'undefined') window.opener = null;
+  if (typeof window.closed === 'undefined') window.closed = false;
+  if (typeof window.name === 'undefined') window.name = '';
+  if (typeof window.length === 'undefined') window.length = 0;
+  if (typeof window.isSecureContext === 'undefined') window.isSecureContext = typeof location !== 'undefined' && (location.protocol === 'https:' || location.hostname === 'localhost');
+  if (typeof window.origin === 'undefined' && typeof location !== 'undefined') window.origin = location.origin;
+  ['screenX', 'screenY', 'screenLeft', 'screenTop'].forEach(function (k) { if (typeof window[k] === 'undefined') window[k] = 0; });
+  if (typeof window.outerWidth === 'undefined') window.outerWidth = window.innerWidth;
+  if (typeof window.outerHeight === 'undefined') window.outerHeight = window.innerHeight;
+  if (!has('DOMRectReadOnly') && has('DOMRect')) def('DOMRectReadOnly', DOMRect);
+
+  // ---- document extras ----
+  var d = document;
+  var docProps = {
+    referrer: function () { return ''; },
+    domain: function () { return typeof location !== 'undefined' ? location.hostname : ''; },
+    baseURI: function () { var b = d.querySelector('base[href]'); return b ? b.href : (typeof location !== 'undefined' ? location.href : ''); },
+    forms: function () { return d.getElementsByTagName('form'); },
+    images: function () { return d.getElementsByTagName('img'); },
+    links: function () { return d.querySelectorAll('a[href],area[href]'); },
+    fullscreenElement: function () { return null; },
+    pointerLockElement: function () { return null; },
+    prerendering: function () { return false; }
+  };
+  for (var k in docProps) if (!(k in d)) accessor(d, k, docProps[k]);
+  if (!('fullscreenEnabled' in d)) d.fullscreenEnabled = false;
+  if (!d.exitFullscreen) d.exitFullscreen = function () { return Promise.resolve(); };
+  if (!d.execCommand) d.execCommand = function () { return false; };
+  if (!d.queryCommandSupported) d.queryCommandSupported = function () { return false; };
+  if (!d.getAnimations) d.getAnimations = function () { return []; };
+  if (!d.elementFromPoint) d.elementFromPoint = function () { return null; };
+  if (!d.elementsFromPoint) d.elementsFromPoint = function () { return []; };
+  if (!d.createNodeIterator && d.createTreeWalker) {
+    d.createNodeIterator = function (root, what, filter) {
+      var w = d.createTreeWalker(root, what, filter), first = true;
+      return { root: root, referenceNode: root, nextNode: function () { if (first) { first = false; if (!what || what & 1) return root; } return w.nextNode(); }, previousNode: function () { return w.previousNode(); }, detach: function () {} };
+    };
+  }
+
+  // ---- Element extras ----
+  var E = typeof Element !== 'undefined' ? Element.prototype : null;
+  var H = typeof HTMLElement !== 'undefined' ? HTMLElement.prototype : null;
+  if (E) {
+    var animation = function (el, keyframes, options) {
+      var duration = typeof options === 'number' ? options : (options && options.duration) || 0;
+      var a = { playState: 'running', currentTime: 0, effect: null, id: (options && options.id) || '', onfinish: null, oncancel: null,
+                pending: false, playbackRate: 1, startTime: null, timeline: null, replaceState: 'active' };
+      var resolve;
+      a.finished = new Promise(function (r) { resolve = r; });
+      a.ready = Promise.resolve(a);
+      var frames = Array.isArray(keyframes) ? keyframes : keyframes ? [keyframes] : [];
+      var last = frames.length ? frames[frames.length - 1] : null;
+      var fill = options && (options.fill === 'forwards' || options.fill === 'both');
+      var done = function () {
+        if (a.playState === 'finished' || a.playState === 'idle') return;
+        a.playState = 'finished';
+        if (fill && last && el.style) for (var p in last) if (p !== 'offset' && p !== 'easing' && p !== 'composite') { try { el.style[p] = last[p]; } catch (e) {} }
+        var ev = { type: 'finish', target: a, currentTime: duration, timelineTime: null };
+        if (typeof a.onfinish === 'function') a.onfinish(ev);
+        resolve(a);
+      };
+      var timer = setTimeout(done, duration);
+      a.finish = function () { clearTimeout(timer); done(); };
+      a.cancel = function () { clearTimeout(timer); a.playState = 'idle'; if (typeof a.oncancel === 'function') a.oncancel({ type: 'cancel' }); };
+      a.play = function () {}; a.pause = function () { a.playState = 'paused'; }; a.reverse = function () {};
+      a.updatePlaybackRate = function () {}; a.persist = function () {}; a.commitStyles = function () {};
+      a.addEventListener = function (t, fn) { if (t === 'finish') a.finished.then(function () { fn({ type: 'finish' }); }); };
+      a.removeEventListener = function () {};
+      return a;
+    };
+    if (!E.animate) E.animate = function (k, o) { return animation(this, k, o); };
+    if (!E.getAnimations) E.getAnimations = function () { return []; };
+    if (!E.requestFullscreen) E.requestFullscreen = function () { return Promise.reject(new TypeError('Fullscreen is not supported')); };
+    if (!E.setPointerCapture) { E.setPointerCapture = function () {}; E.releasePointerCapture = function () {}; E.hasPointerCapture = function () { return false; }; }
+    if (!E.scrollIntoViewIfNeeded) E.scrollIntoViewIfNeeded = function () { if (this.scrollIntoView) this.scrollIntoView(); };
+    if (!E.checkVisibility) E.checkVisibility = function () { var r = this.getBoundingClientRect(); return !!(r.width || r.height); };
+    if (!E.computedStyleMap) E.computedStyleMap = function () { var cs = getComputedStyle(this); return { get: function (p) { return { toString: function () { return cs.getPropertyValue(p); } }; } }; };
+  }
+  var N = typeof Node !== 'undefined' ? Node.prototype : null;
+  if (N) {
+    if (!N.compareDocumentPosition) {
+      N.compareDocumentPosition = function (other) {
+        if (other === this) return 0;
+        var root = function (n) { while (n.parentNode) n = n.parentNode; return n; };
+        if (root(this) !== root(other)) return 1 | 32 | 2;
+        if (this.contains(other)) return 16 | 4;
+        if (other.contains(this)) return 8 | 2;
+        var chain = function (n) { var c = []; while (n) { c.unshift(n); n = n.parentNode; } return c; };
+        var a = chain(this), b = chain(other), i = 0;
+        while (a[i] === b[i]) i++;
+        var p = a[i - 1].childNodes;
+        return Array.prototype.indexOf.call(p, b[i]) > Array.prototype.indexOf.call(p, a[i]) ? 4 : 2;
+      };
+      ['DOCUMENT_POSITION_DISCONNECTED', 'DOCUMENT_POSITION_PRECEDING', 'DOCUMENT_POSITION_FOLLOWING', 'DOCUMENT_POSITION_CONTAINS',
+       'DOCUMENT_POSITION_CONTAINED_BY', 'DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC'].forEach(function (k, i) { N[k] = 1 << i; if (typeof Node === 'function') Node[k] = 1 << i; });
+    }
+    if (!N.isEqualNode) N.isEqualNode = function (o) { return !!o && this.nodeType === o.nodeType && (this.outerHTML !== undefined ? this.outerHTML === o.outerHTML : this.textContent === o.textContent); };
+    if (!N.normalize) N.normalize = function () {};
+    if (!N.lookupNamespaceURI) N.lookupNamespaceURI = function () { return null; };
+  }
+  if (H) {
+    var reflectAttr = function (prop, attr, bool) {
+      accessor(H, prop, function () { return bool ? this.hasAttribute(attr) : (this.getAttribute(attr) || ''); },
+        function (v) { if (bool) { if (v) this.setAttribute(attr, ''); else this.removeAttribute(attr); } else this.setAttribute(attr, String(v)); });
+    };
+    reflectAttr('nonce', 'nonce'); reflectAttr('inputMode', 'inputmode'); reflectAttr('enterKeyHint', 'enterkeyhint');
+    reflectAttr('popover', 'popover');
+    accessor(H, 'draggable', function () { var v = this.getAttribute('draggable'); return v === 'true' || (v !== 'false' && (this.tagName === 'IMG' || (this.tagName === 'A' && this.hasAttribute('href')))); },
+      function (v) { this.setAttribute('draggable', v ? 'true' : 'false'); });
+    accessor(H, 'spellcheck', function () { return this.getAttribute('spellcheck') !== 'false'; }, function (v) { this.setAttribute('spellcheck', v ? 'true' : 'false'); });
+    accessor(H, 'translate', function () { return this.getAttribute('translate') !== 'no'; }, function (v) { this.setAttribute('translate', v ? 'yes' : 'no'); });
+    accessor(H, 'contentEditable', function () { var v = this.getAttribute('contenteditable'); return v === null ? 'inherit' : v === '' ? 'true' : v; },
+      function (v) { if (v === 'inherit') this.removeAttribute('contenteditable'); else this.setAttribute('contenteditable', String(v)); });
+    accessor(H, 'isContentEditable', function () { for (var n = this; n && n.getAttribute; n = n.parentNode) { var v = n.getAttribute('contenteditable'); if (v !== null) return v !== 'false'; } return false; });
+    accessor(H, 'outerText', function () { return this.innerText; });
+    accessor(H, 'role', function () { return this.getAttribute('role'); }, function (v) { this.setAttribute('role', String(v)); });
+    accessor(H, 'ariaLabel', function () { return this.getAttribute('aria-label'); }, function (v) { this.setAttribute('aria-label', String(v)); });
+    if (!H.showPopover) { H.showPopover = function () {}; H.hidePopover = function () {}; H.togglePopover = function () { return false; }; }
+  }
+})();
+)JS";
+
+void ScriptContext::installWebTaskApis(Zepra::Runtime::Object* windowObj) {
+    using namespace Zepra::Runtime;
+    auto* postTask = createNativeFunction("__zepraPostTask",
+        [this](Context*, const std::vector<Value>& args) -> Value {
+            if (args.empty() || !args[0].isObject() || !args[0].asObject()->isFunction()) return Value::undefined();
+            const int id = nextMessageTaskId_++;
+            callbackStore_->set("m" + std::to_string(id), args[0]);
+            messageTasks_.push_back(id);
+            return Value::undefined();
+        }, 1);
+    vm_->setGlobal("__zepraPostTask", Value::object(postTask));
+    vm_->setGlobal("__zepraDeliverObservations", Value::undefined());
+    // __zepraDefineGlobal(name, value): a global binding and window property
+    auto* defineGlobal = createNativeFunction("__zepraDefineGlobal",
+        [this, windowObj](Context*, const std::vector<Value>& args) -> Value {
+            if (args.size() < 2) return Value::undefined();
+            const std::string name = args[0].toString();
+            vm_->setGlobal(name, args[1]);
+            if (windowObj) windowObj->set(name, args[1]);
+            return Value::undefined();
+        }, 2);
+    vm_->setGlobal("__zepraDefineGlobal", Value::object(defineGlobal));
+    ScriptResult result = evaluate(kWebTaskApis, "<zepra-web-apis>");
+    if (!result.success) {
+        std::cerr << "[ScriptContext] web task APIs failed to install: " << result.error << std::endl;
+    }
+}
+
+// Runs posted message tasks (MessagePort/window.postMessage) for up to
+// ~8 ms; tasks posted meanwhile run too, the rest wait for the next frame
+void ScriptContext::runMessageTasks() {
+    if (messageTasks_.empty() || !vm_) return;
+    const auto start = std::chrono::steady_clock::now();
+    while (!messageTasks_.empty()) {
+        const int id = messageTasks_.front();
+        messageTasks_.pop_front();
+        const std::string key = "m" + std::to_string(id);
+        callStoredCallback(key, false, 0);
+        removeStoredCallback(key);
+        if (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(8)) break;
+    }
+}
+
+void ScriptContext::deliverObservations() {
+    using namespace Zepra::Runtime;
+    if (!vm_) return;
+    Value deliver = vm_->getGlobal("__zepraDeliverObservations");
+    if (!deliver.isObject() || !deliver.asObject()->isFunction()) return;
+    auto* fn = static_cast<Function*>(deliver.asObject());
+    runTask([&] { vm_->call(fn, Value::undefined(), {}); }, "observer callback");
 }
 
 void ScriptContext::setupDocumentGlobals() {
@@ -977,6 +1836,8 @@ void ScriptContext::setupDocumentGlobals() {
     });
     domBindings_->installDocument(document_);
     if (document_) vm_->setGlobal("__document_ref__", vm_->getGlobal("document"));
+    // <script> elements scripts insert run (script_elements.cpp)
+    setupScriptElements();
 }
 
 // ============================================================================

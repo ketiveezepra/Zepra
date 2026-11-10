@@ -26,9 +26,6 @@ namespace ZepraBrowser {
 
 namespace {
 
-// layoutBlock leaves this gap between neighbouring inline boxes on a line
-constexpr float kInlineGap = 4;
-
 int s_intrinsicEpoch = 0;
 
 float horizontalEdges(const LayoutBox& b) {
@@ -366,7 +363,8 @@ void intrinsicWidths(const LayoutBox& box, float& minW, float& maxW) {
         float w = fixedBorderBoxWidth(box, box.cssWidth);
         minW = maxW = w < 0 ? box.width : w;
     } else if (box.children.empty()) {
-        float textW = box.text.empty() ? 0 : measureTextWidth(box.text, box.fontSize, &box);
+        float forced = widestForcedLine(box);
+        float textW = box.text.empty() ? 0 : forced > 0 ? forced : measureTextWidth(box.text, box.fontSize, &box);
         // Inline-level leaves are exactly as wide as their text in layoutBlock;
         // a run that can wrap is at least as wide as its widest word
         float wordW = textW;
@@ -374,7 +372,7 @@ void intrinsicWidths(const LayoutBox& box, float& minW, float& maxW) {
             wordW = 0;
             size_t i = 0;
             while (i <= box.text.size()) {
-                size_t end = std::min(box.text.find(' ', i), box.text.size());
+                size_t end = std::min(box.text.find_first_of(" \n", i), box.text.size());
                 if (end > i) wordW = std::max(wordW, measureTextWidth(box.text.substr(i, end - i), box.fontSize, &box));
                 i = end + 1;
             }
@@ -401,7 +399,7 @@ void intrinsicWidths(const LayoutBox& box, float& minW, float& maxW) {
         maxW += edges;
     } else {
         float line = 0;
-        int lineCount = 0;
+        const LayoutBox* prev = nullptr;  // the inline before, on this line
         for (const auto& child : box.children) {
             if (child.type == LayoutType::None || child.positionType == 2 || child.positionType == 3) continue;
             float cmin, cmax;
@@ -410,15 +408,19 @@ void intrinsicWidths(const LayoutBox& box, float& minW, float& maxW) {
             minW = std::max(minW, cmin + m);
             if (isBlockLevel(child.type) && child.floatType == 0) {
                 maxW = std::max(maxW, line);
+                if (box.noWrap) minW = std::max(minW, line);
                 line = 0;
-                lineCount = 0;
+                prev = nullptr;
                 maxW = std::max(maxW, cmax + m);
             } else {
-                line += (lineCount > 0 ? kInlineGap : 0) + cmax + m;
-                lineCount++;
+                // The same spacing layoutBlock puts between inline boxes
+                line += (prev ? inlineSpacing(*prev, child) : 0) + cmax + m;
+                prev = &child;
             }
         }
         maxW = std::max(maxW, line);
+        // white-space: nowrap never breaks the line, so it is its own minimum
+        if (box.noWrap) minW = std::max(minW, line);
         minW += edges;
         maxW += edges;
     }

@@ -82,6 +82,11 @@ Lexer::Lexer(const SourceCode* source)
         offset_ = 3;
         location_.offset = 3;
     }
+    // Hashbang comment: `#!` at the very start runs to the end of the line
+    if (offset_ + 1 < srcLen_ && src_[offset_] == '#' && src_[offset_ + 1] == '!') {
+        while (offset_ < srcLen_ && src_[offset_] != '\n') offset_++;
+        location_.offset = static_cast<uint32_t>(offset_);
+    }
 }
 
 char Lexer::current() const {
@@ -125,8 +130,24 @@ void Lexer::skipWhitespace() {
                 advance();
                 break;
             case '\n':
+            case '\v':
+            case '\f':
                 advance();
                 break;
+            case '<':
+                // Annex B HTML-like comment: `<!--` starts a single-line comment
+                if (peek(1) == '!' && peek(2) == '-' && peek(3) == '-') {
+                    skipLineComment();
+                    break;
+                }
+                return;
+            case '-':
+                // Annex B: `-->` first on a line (after whitespace) is a comment
+                if (peek(1) == '-' && peek(2) == '>' && atLineStart()) {
+                    skipLineComment();
+                    break;
+                }
+                return;
             case '/':
                 if (peek(1) == '/') {
                     skipLineComment();
@@ -137,9 +158,39 @@ void Lexer::skipWhitespace() {
                 }
                 break;
             default:
+                if (static_cast<unsigned char>(c) >= 0x80) {
+                    size_t n = unicodeSpaceLength(offset_);
+                    if (n) {
+                        for (size_t i = 0; i < n; i++) advance();
+                        break;
+                    }
+                }
                 return;
         }
     }
+}
+
+// Byte length of a non-ASCII WhiteSpace or LineTerminator code point at `at`
+// (NBSP, ZWNBSP, the Zs block, LS, PS); 0 when there is none
+size_t Lexer::unicodeSpaceLength(size_t at) const {
+    auto byte = [this](size_t i) -> unsigned char {
+        return i < srcLen_ ? static_cast<unsigned char>(src_[i]) : 0;
+    };
+    unsigned char b0 = byte(at), b1 = byte(at + 1), b2 = byte(at + 2);
+    if (b0 == 0xC2 && b1 == 0xA0) return 2;                       // U+00A0
+    if (b0 == 0xEF && b1 == 0xBB && b2 == 0xBF) return 3;         // U+FEFF
+    if (b0 == 0xE1 && b1 == 0x9A && b2 == 0x80) return 3;         // U+1680
+    if (b0 == 0xE2 && b1 == 0x80 && ((b2 >= 0x80 && b2 <= 0x8A) || b2 == 0xA8 ||
+                                     b2 == 0xA9 || b2 == 0xAF)) return 3;  // U+2000-200A, 2028, 2029, 202F
+    if (b0 == 0xE2 && b1 == 0x81 && b2 == 0x9F) return 3;         // U+205F
+    if (b0 == 0xE3 && b1 == 0x80 && b2 == 0x80) return 3;         // U+3000
+    return 0;
+}
+
+// True when only spaces, tabs and block comments precede offset_ on its line
+bool Lexer::atLineStart() const {
+    if (lastTokenLine_ == 0) return true;
+    return location_.line > lastTokenLine_;
 }
 
 void Lexer::skipLineComment() {
@@ -187,8 +238,21 @@ Token Lexer::nextToken() {
     char c = advance();
     
     // Identifiers and keywords
-    if (isIdentifierStart(c)) {
+    if (isIdentifierStart(c) || (c == '\\' && current() == 'u')) {
         Token tok = scanIdentifierOrKeyword();
+        lastTokenLine_ = tok.end.line;
+        updateDivisionContext(tok.type);
+        return tok;
+    }
+
+    // Class private names: #name
+    if (c == '#' && (isIdentifierStart(current()) || (current() == '\\' && peek(1) == 'u'))) {
+        advance();
+        Token tok = scanIdentifierOrKeyword();
+        tok.type = TokenType::PrivateName;
+        tok.value = "#" + tok.value;
+        tok.start = tokenStart_;
+        lastTokenLine_ = tok.end.line;
         updateDivisionContext(tok.type);
         return tok;
     }
@@ -196,6 +260,7 @@ Token Lexer::nextToken() {
     // Numbers
     if (isDigit(c) || (c == '.' && isDigit(peek(0)))) {
         Token tok = scanNumber();
+        lastTokenLine_ = tok.end.line;
         updateDivisionContext(tok.type);
         return tok;
     }
@@ -203,6 +268,7 @@ Token Lexer::nextToken() {
     // Strings
     if (c == '"' || c == '\'') {
         Token tok = scanString(c);
+        lastTokenLine_ = tok.end.line;
         updateDivisionContext(tok.type);
         return tok;
     }
@@ -210,12 +276,14 @@ Token Lexer::nextToken() {
     // Template literals
     if (c == '`') {
         Token tok = scanTemplate();
+        lastTokenLine_ = tok.end.line;
         updateDivisionContext(tok.type);
         return tok;
     }
     
     // Operators and punctuation
     Token tok = scanOperator();
+    lastTokenLine_ = tok.end.line;
     updateDivisionContext(tok.type);
     return tok;
 }
@@ -262,57 +330,113 @@ const Token& Lexer::peek() {
     return peekedToken_;
 }
 
+namespace {
+// Digits of a numeric literal with its separators removed (`1_000` -> `1000`)
+std::string stripNumericSeparators(const char* begin, size_t length) {
+    std::string out;
+    out.reserve(length);
+    for (size_t i = 0; i < length; i++) {
+        if (begin[i] != '_') out += begin[i];
+    }
+    return out;
+}
+
+// Value of an integer written in a power-of-two radix; exact up to 2^53 and
+// correctly rounded-ish beyond (no 64-bit overflow like strtol)
+double radixValue(const std::string& digits, int radix) {
+    double v = 0;
+    for (char c : digits) {
+        int d = (c >= '0' && c <= '9') ? c - '0'
+              : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+              : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : 0;
+        v = v * radix + d;
+    }
+    return v;
+}
+}  // namespace
+
+// Consumes digits accepted by `isDigitFn`, allowing single `_` separators
+// between two digits (ES2021 NumericLiteralSeparator)
+template <typename DigitFn>
+void Lexer::scanDigits(DigitFn isDigitFn) {
+    while (true) {
+        if (isDigitFn(current())) {
+            advance();
+        } else if (current() == '_' && offset_ > 0 && isDigitFn(src_[offset_ - 1]) &&
+                   isDigitFn(peek(1))) {
+            advance();
+        } else {
+            break;
+        }
+    }
+}
+
 Token Lexer::scanNumber() {
     size_t start = offset_ - 1;
-    
-    // Handle hex, octal, binary
+    auto dec = [](char c) { return c >= '0' && c <= '9'; };
+
+    // Hex, octal, binary
     if (src_[start] == '0' && offset_ < srcLen_) {
         char next = current();
-        if (next == 'x' || next == 'X') {
+        int radix = 0;
+        if (next == 'x' || next == 'X') radix = 16;
+        else if (next == 'b' || next == 'B') radix = 2;
+        else if (next == 'o' || next == 'O') radix = 8;
+        if (radix) {
             advance();
-            while (isHexDigit(current())) advance();
-            std::string value(src_ + start, offset_ - start);
-            Token token = makeToken(TokenType::Number, value);
-            token.numericValue = std::strtol(value.c_str() + 2, nullptr, 16);
+            size_t digitsStart = offset_;
+            if (radix == 16) scanDigits([](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); });
+            else if (radix == 8) scanDigits([](char c) { return c >= '0' && c <= '7'; });
+            else scanDigits([](char c) { return c == '0' || c == '1'; });
+            std::string digits = stripNumericSeparators(src_ + digitsStart, offset_ - digitsStart);
+            if (digits.empty()) return errorToken("Invalid number literal");
+            if (current() == 'n') return errorToken("BigInt literals are not supported");
+            if (isIdentifierStart(current()) || dec(current())) return errorToken("Invalid number literal");
+            Token token = makeToken(TokenType::Number, std::string(src_ + start, offset_ - start));
+            token.numericValue = radixValue(digits, radix);
             return token;
         }
-        if (next == 'b' || next == 'B') {
-            advance();
-            while (current() == '0' || current() == '1') advance();
-            std::string value(src_ + start, offset_ - start);
-            Token token = makeToken(TokenType::Number, value);
-            token.numericValue = std::strtol(value.c_str() + 2, nullptr, 2);
-            return token;
-        }
-        if (next == 'o' || next == 'O') {
-            advance();
-            while (current() >= '0' && current() <= '7') advance();
-            std::string value(src_ + start, offset_ - start);
-            Token token = makeToken(TokenType::Number, value);
-            token.numericValue = std::strtol(value.c_str() + 2, nullptr, 8);
-            return token;
+        // Legacy octal (Annex B, sloppy mode): 010 === 8; 08/09 stay decimal
+        if (dec(next)) {
+            size_t p = offset_;
+            bool octal = true;
+            while (p < srcLen_ && dec(src_[p])) { if (src_[p] > '7') octal = false; p++; }
+            if (octal && !(p < srcLen_ && (src_[p] == '.' || src_[p] == 'e' || src_[p] == 'E' || src_[p] == '_'))) {
+                while (offset_ < p) advance();
+                std::string digits(src_ + start + 1, offset_ - start - 1);
+                Token token = makeToken(TokenType::Number, std::string(src_ + start, offset_ - start));
+                token.numericValue = radixValue(digits, 8);
+                return token;
+            }
         }
     }
-    
-    // Integer part
-    while (isDigit(current())) advance();
-    
-    // Decimal part
-    if (current() == '.' && isDigit(peek(1))) {
+
+    // Integer part (the first digit, or '.', was consumed by the caller)
+    if (dec(src_[start])) scanDigits(dec);
+
+    // Decimal part: `1.5`, `1.` and `.5`
+    if (src_[start] == '.') {
+        scanDigits(dec);
+    } else if (current() == '.') {
         advance();
-        while (isDigit(current())) advance();
+        scanDigits(dec);
     }
-    
+
     // Exponent
-    if (current() == 'e' || current() == 'E') {
+    if ((current() == 'e' || current() == 'E') &&
+        (dec(peek(1)) || ((peek(1) == '+' || peek(1) == '-') && dec(peek(2))))) {
         advance();
         if (current() == '+' || current() == '-') advance();
-        while (isDigit(current())) advance();
+        scanDigits(dec);
     }
-    
+
+    if (current() == 'n') return errorToken("BigInt literals are not supported");
+    if (isIdentifierStart(current())) return errorToken("Invalid or unexpected token after number");
+
     std::string value(src_ + start, offset_ - start);
     Token token = makeToken(TokenType::Number, value);
-    token.numericValue = std::strtod(value.c_str(), nullptr);
+    std::string digits = stripNumericSeparators(value.data(), value.size());
+    token.numericValue = std::strtod(digits.c_str(), nullptr);
     return token;
 }
 
@@ -470,9 +594,53 @@ Token Lexer::scanString(char quote) {
 
 Token Lexer::scanIdentifierOrKeyword() {
     size_t start = offset_ - 1;
+    bool escaped = src_[start] == '\\';
+    auto skipUnicodeEscapeBody = [this]() {  // after `\u`
+        if (current() == '{') {
+            while (current() != '\0' && current() != '}') advance();
+            if (current() == '}') advance();
+        } else {
+            for (int i = 0; i < 4 && isHexDigit(current()); i++) advance();
+        }
+    };
+    if (escaped) {
+        advance();  // u
+        skipUnicodeEscapeBody();
+    }
     
-    while (isIdentifierPart(current())) {
-        advance();
+    while (true) {
+        char c = current();
+        if (isIdentifierPart(c)) {
+            if (static_cast<unsigned char>(c) >= 0x80 && unicodeSpaceLength(offset_)) break;
+            advance();
+        } else if (c == '\\' && peek(1) == 'u') {
+            escaped = true;
+            advance();
+            advance();
+            skipUnicodeEscapeBody();
+        } else {
+            break;
+        }
+    }
+    
+    if (escaped) {
+        // \uXXXX / \u{X} escapes: the name is the decoded text, and an
+        // escaped word is never a keyword
+        std::string name;
+        size_t end = offset_;
+        SourceLocation endLocation = location_;
+        offset_ = start;
+        while (offset_ < end) {
+            if (src_[offset_] == '\\') {
+                offset_++;  // backslash; scanEscape reads the 'u' sequence
+                scanEscape(name);
+            } else {
+                name += src_[offset_++];
+            }
+        }
+        offset_ = end;
+        location_ = endLocation;
+        return makeToken(TokenType::Identifier, std::move(name));
     }
     
     size_t len = offset_ - start;
@@ -604,9 +772,40 @@ Token Lexer::scanTemplate() {
 
 bool Lexer::skipTemplateSubstitution() {
     int depth = 0;
+    // The last non-space character seen: a '/' after one of these starts a
+    // regex literal rather than a division or a comment, so
+    // `${e.replace(/\//g, ".")}` is not cut at its "//"
+    char lastSignificant = '(';
+    auto regexCanFollow = [](char p) {
+        return p == '(' || p == ',' || p == '=' || p == ':' || p == '[' || p == '!' ||
+               p == '&' || p == '|' || p == '?' || p == '{' || p == '}' || p == ';' ||
+               p == '+' || p == '-' || p == '*' || p == '%' || p == '<' || p == '>' ||
+               p == '~' || p == '^';
+    };
     while (current() != '\0') {
         char c = current();
         if (c == '}' && depth == 0) return true;
+        if (c == '/' && peek(1) != '/' && peek(1) != '*' && regexCanFollow(lastSignificant)) {
+            // Regex literal: skip to its closing '/', honouring escapes and classes
+            advance();
+            bool inClass = false;
+            while (current() != '\0' && current() != '\n') {
+                char r = current();
+                if (r == '\\') { advance(); if (current() != '\0') advance(); continue; }
+                if (r == '[') inClass = true;
+                else if (r == ']') inClass = false;
+                else if (r == '/' && !inClass) break;
+                advance();
+            }
+            if (current() == '/') advance();
+            while (std::isalpha(static_cast<unsigned char>(current()))) advance();  // flags
+            lastSignificant = ')';
+            continue;
+        }
+        if (c == '/' && regexCanFollow(lastSignificant) && (peek(1) == '/' || peek(1) == '*')) {
+            // "//" or "/*" where a regex could start is still a comment: fall through
+        }
+        if (!std::isspace(static_cast<unsigned char>(c)) && c != '/') lastSignificant = c;
         if (c == '{') {
             depth++;
             advance();
@@ -620,9 +819,11 @@ bool Lexer::skipTemplateSubstitution() {
                 advance();
             }
             if (current() == c) advance();
+            lastSignificant = ')';
         } else if (c == '`') {
             advance();
             skipNestedTemplate();
+            lastSignificant = ')';
         } else if (c == '/' && peek(1) == '/') {
             while (current() != '\0' && current() != '\n') advance();
         } else if (c == '/' && peek(1) == '*') {
@@ -634,6 +835,7 @@ bool Lexer::skipTemplateSubstitution() {
                 advance();
             }
         } else {
+            if (c == '/') lastSignificant = ')';  // division operator
             advance();
         }
     }
@@ -771,7 +973,12 @@ Token Lexer::scanOperator() {
                 if (match('=')) return makeToken(TokenType::QuestionQuestionAssign);
                 return makeToken(TokenType::QuestionQuestion);
             }
-            if (match('.')) return makeToken(TokenType::QuestionDot);
+            // `?.` followed by a digit is a conditional and a number:
+            // `k===void 0?.01:k` (YouTube's base module)
+            if (current() == '.' && !(peek(1) >= '0' && peek(1) <= '9')) {
+                advance();
+                return makeToken(TokenType::QuestionDot);
+            }
             return makeToken(TokenType::Question);
     }
     
@@ -857,7 +1064,9 @@ bool Lexer::isAlphaNumeric(char c) const {
 }
 
 bool Lexer::isIdentifierStart(char c) const {
-    return isAlpha(c) || c == '_' || c == '$';
+    // Any non-ASCII byte: UTF-8 encoded identifier characters (whitespace
+    // code points are taken out by skipWhitespace / unicodeSpaceLength first)
+    return isAlpha(c) || c == '_' || c == '$' || static_cast<unsigned char>(c) >= 0x80;
 }
 
 bool Lexer::isIdentifierPart(char c) const {

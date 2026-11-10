@@ -95,9 +95,12 @@ private:
     void skipWhitespace();
     void skipLineComment();
     void skipBlockComment();
+    size_t unicodeSpaceLength(size_t at) const;
+    bool atLineStart() const;
     
     // Token scanning
     Token scanNumber();
+    template <typename DigitFn> void scanDigits(DigitFn isDigitFn);
     Token scanString(char quote);
     Token scanIdentifierOrKeyword();
     Token scanRegExp();
@@ -138,6 +141,7 @@ private:
     
     // Context for regex vs division disambiguation
     bool canFollowDivision_ = false;
+    uint32_t lastTokenLine_ = 0;  // line the previous token ended on (0: none yet)
 };
 
 } // namespace Zepra::Frontend

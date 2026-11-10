@@ -15,6 +15,7 @@
 #include "css/css_engine.hpp"
 #include "browser/dom.hpp"
 #include "css/presentational_hints.hpp"
+#include "css/media_query.hpp"
 #include <sstream>
 #include <algorithm>
 #include <iostream>
@@ -38,15 +39,60 @@ static void zeroUnstyledBorders(CSSComputedStyle& style) {
     if (none(style.borderLeftStyle)) style.borderLeftWidth = 0;
 }
 
+// Space-separated values; a function's arguments ("calc(1px + 2px) 0") stay
+// together
 static std::vector<std::string> splitValues(const std::string& value) {
     std::vector<std::string> parts;
-    std::istringstream ss(value);
     std::string token;
-    while (ss >> token) {
-        if (!token.empty()) parts.push_back(token);
+    int depth = 0;
+    for (char c : value) {
+        if (c == '(') depth++;
+        else if (c == ')' && depth > 0) depth--;
+        if (depth == 0 && std::isspace(static_cast<unsigned char>(c))) {
+            if (!token.empty()) parts.push_back(token);
+            token.clear();
+            continue;
+        }
+        token += c;
     }
+    if (!token.empty()) parts.push_back(token);
     return parts;
 }
+
+// Logical properties mapped to the physical ones for horizontal-tb, ltr
+// (CSS Logical 1): block is top/bottom, inline is left/right. Two-value
+// shorthands give start then end.
+static const std::unordered_map<std::string, std::pair<const char*, const char*>> kLogicalShorthands = {
+    {"margin-inline", {"margin-left", "margin-right"}},
+    {"margin-block", {"margin-top", "margin-bottom"}},
+    {"padding-inline", {"padding-left", "padding-right"}},
+    {"padding-block", {"padding-top", "padding-bottom"}},
+    {"border-inline", {"border-left", "border-right"}},
+    {"border-block", {"border-top", "border-bottom"}},
+    {"border-inline-width", {"border-left-width", "border-right-width"}},
+    {"border-block-width", {"border-top-width", "border-bottom-width"}},
+    {"border-inline-style", {"border-left-style", "border-right-style"}},
+    {"border-block-style", {"border-top-style", "border-bottom-style"}},
+    {"border-inline-color", {"border-left-color", "border-right-color"}},
+    {"border-block-color", {"border-top-color", "border-bottom-color"}},
+};
+static const std::unordered_map<std::string, const char*> kLogicalLonghands = {
+    {"margin-inline-start", "margin-left"},   {"margin-inline-end", "margin-right"},
+    {"margin-block-start", "margin-top"},     {"margin-block-end", "margin-bottom"},
+    {"padding-inline-start", "padding-left"}, {"padding-inline-end", "padding-right"},
+    {"padding-block-start", "padding-top"},   {"padding-block-end", "padding-bottom"},
+    {"border-inline-start", "border-left"},   {"border-inline-end", "border-right"},
+    {"border-block-start", "border-top"},     {"border-block-end", "border-bottom"},
+    {"border-inline-start-width", "border-left-width"}, {"border-inline-end-width", "border-right-width"},
+    {"border-block-start-width", "border-top-width"},   {"border-block-end-width", "border-bottom-width"},
+    {"border-inline-start-style", "border-left-style"}, {"border-inline-end-style", "border-right-style"},
+    {"border-block-start-style", "border-top-style"},   {"border-block-end-style", "border-bottom-style"},
+    {"border-inline-start-color", "border-left-color"}, {"border-inline-end-color", "border-right-color"},
+    {"border-block-start-color", "border-top-color"},   {"border-block-end-color", "border-bottom-color"},
+    {"inline-size", "width"},         {"block-size", "height"},
+    {"min-inline-size", "min-width"}, {"min-block-size", "min-height"},
+    {"max-inline-size", "max-width"}, {"max-block-size", "max-height"},
+};
 
 static std::string trimGridText(const std::string& s) {
     size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
@@ -119,6 +165,16 @@ void StyleResolver::addStyleSheet(std::shared_ptr<CSSStyleSheet> sheet, StyleOri
     cascade_.invalidateIndex();
 }
 
+void StyleResolver::setStyleSheets(std::vector<StyleSheetEntry> sheets) {
+    registered_.clear();
+    for (const auto& entry : sheets) {
+        if (!entry.sheet) continue;
+        for (const auto& [name, reg] : entry.sheet->propertyRegistrations()) registered_[name] = reg;
+    }
+    stylesheets_ = std::move(sheets);
+    cascade_.invalidateIndex();
+}
+
 CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSComputedStyle* parentStyle) {
     CSSComputedStyle computed;
     
@@ -130,12 +186,7 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
     }
     
     // Step 2: Collect all matching rules WITH correct per-sheet origins
-    std::vector<std::pair<CSSStyleSheet*, StyleOrigin>> sheetPairs;
-    for (const auto& entry : stylesheets_) {
-        sheetPairs.push_back({entry.sheet.get(), entry.origin});
-    }
-    
-    auto matchedRules = cascade_.collectMatchingRulesWithOrigins(element, sheetPairs);
+    auto matchedRules = collectRules(element, "");
     
     // Step 3: Sort by cascade order
     cascade_.sortByCascade(matchedRules);
@@ -180,11 +231,8 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
         // Step 6: !important declarations, in reverse origin order: author rules,
         // the inline style, user rules, user-agent rules (CSS Cascade 4, 6.4)
         auto applyImportant = [&](StyleOrigin origin) {
-            for (const auto& match : matchedRules) {
-                if (match.origin == origin && match.rule && match.rule->style() && match.rule->style()->hasImportant()) {
-                    applyDeclarations(computed, match.rule->style(), parentStyle, Importance::Important);
-                }
-            }
+            for (const MatchedRule* match : CSSCascade::importantOrder(matchedRules, origin))
+                applyDeclarations(computed, match->rule->style(), parentStyle, Importance::Important);
         };
         applyImportant(StyleOrigin::Author);
         if (inlineDecl && inlineDecl->hasImportant()) {
@@ -245,7 +293,9 @@ const CSSComputedStyle* StyleResolver::getComputedStyle(DOMElement* element) {
     
     // Compute parent style first (for inheritance)
     const CSSComputedStyle* parentStyle = nullptr;
-    if (auto* parent = dynamic_cast<DOMElement*>(element->parentNode())) {
+    // The flat tree parent: a slotted child inherits from its slot, a
+    // shadow root's children from the host
+    if (DOMElement* parent = flatTreeParentElement(element)) {
         parentStyle = getComputedStyle(parent);
     }
     
@@ -272,11 +322,7 @@ const CSSComputedStyle* StyleResolver::getPseudoElementStyle(DOMElement* element
     CSSComputedStyle computed = elementStyle ? CSSComputedStyle::inherit(*elementStyle) : CSSComputedStyle();
     computed.display = DisplayValue::Inline;
 
-    std::vector<std::pair<CSSStyleSheet*, StyleOrigin>> sheetPairs;
-    for (const auto& entry : stylesheets_) sheetPairs.push_back({entry.sheet.get(), entry.origin});
-    cascade_.setMatchPseudoElement(pseudo);
-    auto matched = cascade_.collectMatchingRulesWithOrigins(element, sheetPairs);
-    cascade_.setMatchPseudoElement("");
+    auto matched = collectRules(element, pseudo);
     cascade_.sortByCascade(matched);
 
     // Normal declarations, then !important ones in reverse origin order (no
@@ -287,11 +333,8 @@ const CSSComputedStyle* StyleResolver::getPseudoElementStyle(DOMElement* element
         }
     }
     for (StyleOrigin origin : {StyleOrigin::Author, StyleOrigin::User, StyleOrigin::UserAgent}) {
-        for (const auto& match : matched) {
-            if (match.origin == origin && match.rule && match.rule->style() && match.rule->style()->hasImportant()) {
-                applyDeclarations(computed, match.rule->style(), elementStyle, Importance::Important);
-            }
-        }
+        for (const MatchedRule* match : CSSCascade::importantOrder(matched, origin))
+            applyDeclarations(computed, match->rule->style(), elementStyle, Importance::Important);
     }
 
     for (CSSLength* len : {&computed.marginTop, &computed.marginRight, &computed.marginBottom,
@@ -316,13 +359,75 @@ const CSSComputedStyle* StyleResolver::getPseudoElementStyle(DOMElement* element
 }
 
 std::vector<MatchedRule> StyleResolver::matchedRules(DOMElement* element) {
+    auto rules = collectRules(element, "");
+    cascade_.sortByCascade(rules);
+    return rules;
+}
+
+std::vector<MatchedRule> StyleResolver::collectRules(DOMElement* element, const std::string& pseudo) {
     std::vector<std::pair<CSSStyleSheet*, StyleOrigin>> sheetPairs;
     for (const auto& entry : stylesheets_) {
         sheetPairs.push_back({entry.sheet.get(), entry.origin});
     }
-    auto rules = cascade_.collectMatchingRulesWithOrigins(element, sheetPairs);
-    cascade_.sortByCascade(rules);
-    return rules;
+    cascade_.setMatchPseudoElement(pseudo);
+    auto matched = cascade_.collectMatchingRulesWithOrigins(element, sheetPairs);
+    cascade_.setMatchPseudoElement("");
+
+    // Shadow trees (CSS Scoping §3): the document's author rules stop at a
+    // shadow tree, whose own sheets apply inside it and to its host (:host)
+    DOMShadowRoot* tree = asShadowRoot(treeRoot(element));
+    if (tree) {
+        matched.erase(std::remove_if(matched.begin(), matched.end(),
+                                     [](const MatchedRule& m) { return m.origin == StyleOrigin::Author; }),
+                      matched.end());
+    }
+    if (shadowScopes_.empty()) return matched;
+    auto collectScoped = [&](const DOMShadowRoot* scope, bool forHost) {
+        auto found = shadowScopes_.find(scope);
+        if (found == shadowScopes_.end()) return;
+        ScopedCascade& scoped = *found->second;
+        scoped.cascade.setShadowScope(scope);
+        scoped.cascade.setMatchPseudoElement(pseudo);
+        auto rules = scoped.cascade.collectMatchingRulesWithOrigins(element, scoped.pairs);
+        scoped.cascade.setMatchPseudoElement("");
+        scoped.cascade.setShadowScope(nullptr);
+        for (auto& rule : rules) {
+            // :host rules lose to the document's rules for the host
+            // (outer tree context first), whatever their specificity
+            // (the lowest layer rank too: layers are compared first)
+            if (forHost) {
+                rule.specificity.a -= 1000;
+                rule.layer = 0;
+            }
+            matched.push_back(rule);
+        }
+    };
+    if (tree) collectScoped(tree, false);
+    if (DOMShadowRoot* hosted = element->shadowRoot()) collectScoped(hosted, true);
+    return matched;
+}
+
+void StyleResolver::setShadowStyleSheets(
+        std::vector<std::pair<const DOMShadowRoot*, std::vector<std::shared_ptr<CSSStyleSheet>>>> scopes) {
+    // Trees with the same sheets share one cascade (and its selector index)
+    std::unordered_map<const DOMShadowRoot*, std::shared_ptr<ScopedCascade>> next;
+    std::vector<std::shared_ptr<ScopedCascade>> pool;
+    for (const auto& [root, existing] : shadowScopes_) pool.push_back(existing);
+    for (auto& [root, sheets] : scopes) {
+        if (sheets.empty()) continue;
+        std::shared_ptr<ScopedCascade> match;
+        auto same = [&](const std::shared_ptr<ScopedCascade>& c) { return c && c->sheets == sheets; };
+        for (const auto& [r, c] : next) if (same(c)) { match = c; break; }
+        if (!match) for (const auto& c : pool) if (same(c)) { match = c; break; }
+        if (!match) {
+            match = std::make_shared<ScopedCascade>();
+            match->sheets = sheets;
+            for (const auto& sheet : sheets) match->pairs.push_back({sheet.get(), StyleOrigin::Author});
+        }
+        next[root] = match;
+    }
+    shadowScopes_ = std::move(next);
+    invalidateAll();
 }
 
 bool isInheritedProperty(const std::string& property) {
@@ -378,6 +483,31 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
                                    const std::string& property,
                                    const std::string& rawValue,
                                    const CSSComputedStyle* parentStyle) {
+    // What a math function's em/vw terms resolve against: the font size so
+    // far (the parent's until font-size itself is applied) and the viewport
+    lengthContext_.fontSize = style.fontSize;
+    lengthContext_.viewportWidth = static_cast<float>(mediaEnvironment().width);
+    lengthContext_.viewportHeight = static_cast<float>(mediaEnvironment().height);
+
+    // Logical properties: applied as their physical counterparts
+    if (auto longhand = kLogicalLonghands.find(property); longhand != kLogicalLonghands.end()) {
+        applyProperty(style, longhand->second, rawValue, parentStyle);
+        return;
+    }
+    if (auto shorthand = kLogicalShorthands.find(property); shorthand != kLogicalShorthands.end()) {
+        // One value for both sides, or start then end; keywords and var()
+        // apply to both as given
+        auto parts = splitValues(rawValue);
+        bool keyword = rawValue == "inherit" || rawValue == "initial" || rawValue == "unset";
+        if (parts.empty() || parts.size() > 2 || keyword || containsVarFunction(rawValue) ||
+            property.rfind("border-", 0) == 0) {
+            parts = {rawValue};
+        }
+        applyProperty(style, shorthand->second.first, parts[0], parentStyle);
+        applyProperty(style, shorthand->second.second, parts.size() > 1 ? parts[1] : parts[0], parentStyle);
+        return;
+    }
+
     // Handle 'inherit' keyword
     if (rawValue == "inherit" && parentStyle) {
         if (property == "color") style.color = parentStyle->color;
@@ -385,7 +515,11 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         else if (property == "font-size") style.fontSize = parentStyle->fontSize;
         else if (property == "font-weight") style.fontWeight = parentStyle->fontWeight;
         else if (property == "font-style") style.fontStyle = parentStyle->fontStyle;
-        else if (property == "line-height") style.lineHeight = parentStyle->lineHeight;
+        else if (property == "line-height") {
+            style.lineHeight = parentStyle->lineHeight;
+            style.lineHeightNormal = parentStyle->lineHeightNormal;
+            style.lineHeightPx = parentStyle->lineHeightPx;
+        }
         else if (property == "text-align") {
             style.textAlign = parentStyle->textAlign;
             style.legacyAlign = parentStyle->legacyAlign;
@@ -401,6 +535,12 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         else if (property == "border-collapse") style.borderCollapse = parentStyle->borderCollapse;
         else if (property == "visibility") style.visibility = parentStyle->visibility;
         else if (property == "cursor") style.cursor = parentStyle->cursor;
+        // Not inherited by default, but 'inherit' still takes the parent's
+        // value: preflight's a{text-decoration:inherit} removes the UA underline
+        else if (property == "text-decoration" || property == "text-decoration-line")
+            style.textDecoration = parentStyle->textDecoration.empty() ? "none" : parentStyle->textDecoration;
+        else if (property == "text-transform") style.textTransform = parentStyle->textTransform;
+        else if (property == "background-color") style.backgroundColor = parentStyle->backgroundColor;
         return;
     }
     
@@ -413,7 +553,11 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         else if (property == "position") style.position = PositionValue::Static;
         else if (property == "opacity") style.opacity = 1.0f;
         else if (property == "font-style") style.fontStyle = FontStyle::Normal;
-        else if (property == "line-height") style.lineHeight = 1.2f;
+        else if (property == "line-height") {
+            style.lineHeight = 1.2f;
+            style.lineHeightNormal = true;
+            style.lineHeightPx = 0;
+        }
         else if (property == "white-space") style.whiteSpace = "normal";
         else if (property == "vertical-align") style.verticalAlign = "baseline";
         else if (property == "text-align") {
@@ -607,14 +751,46 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     else if (property == "border-collapse") { style.borderCollapse = (value == "collapse"); }
     else if (property == "table-layout") { style.tableLayoutFixed = (value == "fixed"); }
     else if (property == "line-height") {
-        if (value == "normal") { style.lineHeight = 1.2f; }
-        else if (value.find_first_of("0123456789.") != std::string::npos) {
-            try {
-                float val = std::stof(value);
-                if (value.back() == '%') style.lineHeight = val / 100.0f;
-                else if (value.find("px") != std::string::npos) style.lineHeight = val / style.fontSize;
-                else style.lineHeight = val;
-            } catch (...) {}
+        // A number inherits as a number (scaling with each element's font
+        // size); a length or percentage computes to px here and inherits as
+        // that px value (CSS Inline 3 §4.3)
+        auto setNumber = [&](float n) {
+            if (!(n >= 0)) return;
+            style.lineHeight = n;
+            style.lineHeightNormal = false;
+            style.lineHeightPx = 0;
+        };
+        auto setPx = [&](float px) {
+            if (!(px >= 0)) return;
+            style.lineHeightPx = std::max(px, 0.001f);
+            style.lineHeight = style.fontSize > 0 ? px / style.fontSize : 1.2f;
+            style.lineHeightNormal = false;
+        };
+        if (value == "normal") {
+            style.lineHeight = 1.2f;
+            style.lineHeightNormal = true;
+            style.lineHeightPx = 0;
+        } else if (isCSSMathFunction(value)) {
+            // calc(2 / 1.5) is a number; calc(1rem + 2px) a length
+            CSSMathValue math;
+            if (evaluateCSSMath(value, lengthContext_, math)) {
+                if (math.isNumber) setNumber(math.number);
+                else if (math.length.unit == CSSLength::Unit::Percent) setPx(math.length.value / 100.0f * style.fontSize);
+                else setPx(math.length.toPx(style.fontSize, 16.0f, lengthContext_.viewportWidth,
+                                            lengthContext_.viewportHeight, 0));
+            }
+        } else if (value.find_first_of("0123456789.") != std::string::npos) {
+            char* end = nullptr;
+            float val = std::strtof(value.c_str(), &end);
+            std::string unit = end ? std::string(end) : "";
+            if (end == value.c_str()) return;
+            if (unit.empty()) setNumber(val);
+            else if (unit == "%") setPx(val / 100.0f * style.fontSize);
+            else {
+                CSSLength len = parseLength(value);
+                if (!len.isAuto()) setPx(len.toPx(style.fontSize, 16.0f, lengthContext_.viewportWidth,
+                                                  lengthContext_.viewportHeight, 0));
+            }
         }
     }
 
@@ -1173,31 +1349,10 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
 // ============================================================================
 
 CSSLength StyleResolver::parseLength(const std::string& value) {
-    if (value.empty() || value == "auto") {
-        return CSSLength::auto_();
-    }
-    
-    float numValue = 0;
-    CSSLength::Unit unit = CSSLength::Unit::Px;
-    
-    try {
-        size_t pos = 0;
-        numValue = std::stof(value, &pos);
-        
-        std::string unitStr = value.substr(pos);
-        
-        if (unitStr == "px" || unitStr.empty()) unit = CSSLength::Unit::Px;
-        else if (unitStr == "em") unit = CSSLength::Unit::Em;
-        else if (unitStr == "rem") unit = CSSLength::Unit::Rem;
-        else if (unitStr == "%") unit = CSSLength::Unit::Percent;
-        else if (unitStr == "vw") unit = CSSLength::Unit::Vw;
-        else if (unitStr == "vh") unit = CSSLength::Unit::Vh;
-        else if (unitStr == "pt") unit = CSSLength::Unit::Pt;
-    } catch (...) {
-        return CSSLength::auto_();
-    }
-    
-    return {numValue, unit};
+    // Every unit, scientific notation and the math functions (calc(),
+    // min(), max(), clamp()) live in CSSLength::parse; the context carries
+    // the element's font size and the viewport for their em/vw terms
+    return CSSLength::parse(value, lengthContext_);
 }
 
 CSSColor StyleResolver::parseColor(const std::string& value) {

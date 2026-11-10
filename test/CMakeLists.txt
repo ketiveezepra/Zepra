@@ -386,3 +386,16 @@ endif()
 # ZepraScript Tests
 # =============================================================================
 add_subdirectory(zeprascript)
+
+# The browser's page loader: fetch pool, incremental <style>/<link> sheets
+if(TARGET webcore)
+    add_executable(integration_loader_tests integration_loader_tests.cpp
+                   ${PROJECT_SOURCE_DIR}/source/integration/fetch_pool.cpp
+                   ${PROJECT_SOURCE_DIR}/source/integration/page_styles.cpp)
+    target_include_directories(integration_loader_tests PRIVATE ${PROJECT_SOURCE_DIR}/source/integration)
+    target_link_libraries(integration_loader_tests webcore GTest::gtest GTest::gtest_main)
+    if(NOT WIN32)
+        target_link_libraries(integration_loader_tests pthread)
+    endif()
+    add_test(NAME IntegrationLoaderTests COMMAND integration_loader_tests)
+endif()

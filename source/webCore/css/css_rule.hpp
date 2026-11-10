@@ -93,8 +93,14 @@ public:
     void setMedia(std::vector<std::shared_ptr<const MediaQueryList>> media) { media_ = std::move(media); }
     bool mediaMatches() const { return allMediaMatch(media_); }
 
+    /// The cascade layer the rule sits in, as a dotted path ("base",
+    /// "framework.utilities"); empty when it is not in a layer
+    const std::string& layer() const { return layer_; }
+    void setLayer(std::string layer) { layer_ = std::move(layer); }
+
 private:
     std::string selectorText_;
+    std::string layer_;
     std::unique_ptr<CSSStyleDeclaration> style_;
     std::vector<std::shared_ptr<const MediaQueryList>> media_;
 };

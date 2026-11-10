@@ -101,6 +101,12 @@ void DOMNode::adopt(DOMNode* child) {
     if (child->document_ == document_) return;
     child->document_ = document_;
     for (const auto& grandchild : child->children_) child->adopt(grandchild.get());
+    // A host's shadow tree and a template's contents move with it
+    if (child->nodeType_ == NodeType::Element) {
+        auto* element = static_cast<DOMElement*>(child);
+        if (DOMShadowRoot* shadow = element->shadowRoot()) child->adopt(shadow);
+        if (DOMDocumentFragment* content = element->existingTemplateContent()) child->adopt(content);
+    }
 }
 
 DOMNode* DOMNode::previousSibling() const {
@@ -299,7 +305,32 @@ std::unique_ptr<DOMNode> DOMDocumentFragment::cloneNode(bool deep) const {
 // ============================================================================
 
 DOMElement::DOMElement(const std::string& tagName)
-    : DOMNode(NodeType::Element), tagName_(tagName) {}
+    : DOMNode(NodeType::Element), tagName_(tagName),
+      ceState_(isValidCustomElementName(tagName) ? CustomElementState::Undefined
+                                                 : CustomElementState::Uncustomized) {}
+
+DOMElement::~DOMElement() = default;
+
+static bool s_shadowRootsExist = false;
+bool shadowRootsExist() { return s_shadowRootsExist; }
+
+DOMShadowRoot* DOMElement::attachShadow(bool open) {
+    s_shadowRootsExist = true;
+    shadowRoot_ = std::make_unique<DOMShadowRoot>(this, open);
+    shadowRoot_->setOwnerDocument(document_);
+    noteDomMutation();
+    return shadowRoot_.get();
+}
+
+DOMDocumentFragment* DOMElement::templateContent() {
+    if (tagName_ != "template") return nullptr;
+    if (!templateContent_) {
+        templateContent_ = std::make_unique<DOMDocumentFragment>();
+        templateContent_->setOwnerDocument(document_);
+        templateContent_->setTemplateHost(this);
+    }
+    return templateContent_.get();
+}
 
 std::string DOMElement::getAttribute(const std::string& name) const {
     auto it = attributes_.find(name);
@@ -392,10 +423,19 @@ void serializeElement(const DOMElement& element, std::string& out) {
     out += '>';
 }
 
+void serializeNodes(const DOMNode& parent, bool raw, std::string& out);
+
 void serializeChildren(const DOMElement& element, std::string& out) {
     // Script and style text is raw text: written as it is
     bool raw = element.tagName() == "script" || element.tagName() == "style";
-    for (const auto& child : element.childNodes()) {
+    // A <template> serializes its contents (HTML §13.3, step 3)
+    const DOMNode* parent = &element;
+    if (const DOMDocumentFragment* content = element.existingTemplateContent()) parent = content;
+    serializeNodes(*parent, raw, out);
+}
+
+void serializeNodes(const DOMNode& parent, bool raw, std::string& out) {
+    for (const auto& child : parent.childNodes()) {
         switch (child->nodeType()) {
             case NodeType::Element:
                 serializeElement(static_cast<const DOMElement&>(*child), out);
@@ -414,6 +454,14 @@ void serializeChildren(const DOMElement& element, std::string& out) {
 
 }  // namespace
 
+std::string serializeChildNodes(const DOMNode* node) {
+    std::string out;
+    if (!node) return out;
+    if (node->nodeType() == NodeType::Element) serializeChildren(*static_cast<const DOMElement*>(node), out);
+    else serializeNodes(*node, false, out);
+    return out;
+}
+
 std::string DOMElement::innerHTML() const {
     std::string out;
     serializeChildren(*this, out);
@@ -421,10 +469,11 @@ std::string DOMElement::innerHTML() const {
 }
 
 void DOMElement::setInnerHTML(const std::string& html) {
-    children_.clear();
+    DOMNode* target = tagName_ == "template" ? static_cast<DOMNode*>(templateContent()) : this;
+    while (DOMNode* last = target->lastChild()) target->removeChild(last);
     noteDomMutation();
     HTMLParser parser;
-    for (auto& node : parser.parseFragmentNodes(html, tagName_)) appendChild(std::move(node));
+    for (auto& node : parser.parseFragmentNodes(html, tagName_)) target->appendChild(std::move(node));
 }
 
 std::string DOMElement::textContent() const {
@@ -512,13 +561,167 @@ std::unique_ptr<DOMNode> DOMElement::cloneNode(bool deep) const {
     clone->valueDirty_ = valueDirty_;
     clone->checkedDirty_ = checkedDirty_;
     clone->checked_ = checked_;
+    // A cloned script that already ran does not run again
+    clone->scriptAlreadyStarted_ = scriptAlreadyStarted_;
+    clone->svgNamespace_ = svgNamespace_;
 
     if (deep) {
         for (const auto& child : children_) {
             clone->appendChild(child->cloneNode(true));
         }
+        // A template's cloning steps copy its contents (HTML §4.12.3)
+        if (templateContent_) {
+            DOMDocumentFragment* content = clone->templateContent();
+            for (const auto& child : templateContent_->childNodes()) content->appendChild(child->cloneNode(true));
+        }
     }
     return clone;
+}
+
+// ============================================================================
+// Custom element names, shadow trees and the flat tree
+// ============================================================================
+
+bool isValidCustomElementName(const std::string& name) {
+    if (name.size() < 2 || name[0] < 'a' || name[0] > 'z') return false;
+    bool hyphen = false;
+    for (char c : name) {
+        if (c >= 'A' && c <= 'Z') return false;
+        if (c == '-') hyphen = true;
+        // PCENChar: ASCII lowercase, digits, - . _ and non-ASCII
+        unsigned char u = static_cast<unsigned char>(c);
+        if (u < 0x80 && !(std::islower(u) || std::isdigit(u) || c == '-' || c == '.' || c == '_')) return false;
+    }
+    if (!hyphen) return false;
+    static const char* const kReserved[] = {"annotation-xml", "color-profile", "font-face", "font-face-src",
+                                            "font-face-uri", "font-face-format", "font-face-name",
+                                            "missing-glyph"};
+    for (const char* r : kReserved) if (name == r) return false;
+    return true;
+}
+
+DOMShadowRoot* asShadowRoot(const DOMNode* node) {
+    if (!node || node->nodeType() != NodeType::DocumentFragment) return nullptr;
+    auto* fragment = static_cast<const DOMDocumentFragment*>(node);
+    return fragment->isShadowRoot() ? static_cast<DOMShadowRoot*>(const_cast<DOMDocumentFragment*>(fragment))
+                                    : nullptr;
+}
+
+DOMNode* treeRoot(const DOMNode* node) {
+    if (!node) return nullptr;
+    while (node->parentNode()) node = node->parentNode();
+    return const_cast<DOMNode*>(node);
+}
+
+DOMNode* shadowIncludingRoot(const DOMNode* node) {
+    DOMNode* root = treeRoot(node);
+    while (DOMShadowRoot* shadow = asShadowRoot(root)) root = treeRoot(shadow->host());
+    return root;
+}
+
+namespace {
+bool isSlot(const DOMNode* node) {
+    return node && node->nodeType() == NodeType::Element &&
+           static_cast<const DOMElement*>(node)->tagName() == "slot";
+}
+
+// The first slot in tree order below `node` named `name`
+const DOMElement* firstSlotNamed(const DOMNode* node, const std::string& name) {
+    for (const auto& child : node->childNodes()) {
+        if (child->nodeType() != NodeType::Element) continue;
+        auto* el = static_cast<const DOMElement*>(child.get());
+        if (el->tagName() == "slot" && el->getAttribute("name") == name) return el;
+        if (const DOMElement* found = firstSlotNamed(el, name)) return found;
+    }
+    return nullptr;
+}
+
+void appendFlattened(const DOMNode* node, std::vector<DOMNode*>& out);
+}  // namespace
+
+std::string slotNameOf(const DOMNode* node) {
+    if (node && node->nodeType() == NodeType::Element) return static_cast<const DOMElement*>(node)->getAttribute("slot");
+    return "";
+}
+
+std::vector<DOMNode*> assignedNodes(const DOMElement* slot, bool flatten) {
+    std::vector<DOMNode*> out;
+    DOMShadowRoot* shadow = asShadowRoot(treeRoot(slot));
+    if (shadow && shadow->host()) {
+        const std::string name = slot->getAttribute("name");
+        // Only the first slot of a name gets the host's children of that name
+        if (firstSlotNamed(shadow, name) == slot) {
+            for (const auto& child : shadow->host()->childNodes()) {
+                NodeType type = child->nodeType();
+                if (type != NodeType::Element && type != NodeType::Text) continue;
+                if (slotNameOf(child.get()) != name) continue;
+                if (flatten && isSlot(child.get())) appendFlattened(child.get(), out);
+                else out.push_back(child.get());
+            }
+        }
+    }
+    if (flatten && out.empty()) {
+        // Fallback content
+        for (const auto& child : slot->childNodes()) {
+            if (isSlot(child.get())) appendFlattened(child.get(), out);
+            else out.push_back(child.get());
+        }
+    }
+    return out;
+}
+
+namespace {
+void appendFlattened(const DOMNode* slot, std::vector<DOMNode*>& out) {
+    // A slot outside a shadow tree is an ordinary element
+    if (!asShadowRoot(treeRoot(slot))) {
+        out.push_back(const_cast<DOMNode*>(slot));
+        return;
+    }
+    for (DOMNode* n : assignedNodes(static_cast<const DOMElement*>(slot), true)) out.push_back(n);
+}
+}  // namespace
+
+DOMElement* assignedSlot(const DOMNode* node) {
+    DOMNode* parent = node ? node->parentNode() : nullptr;
+    if (!parent || parent->nodeType() != NodeType::Element) return nullptr;
+    DOMShadowRoot* shadow = static_cast<DOMElement*>(parent)->shadowRoot();
+    if (!shadow) return nullptr;
+    NodeType type = node->nodeType();
+    if (type != NodeType::Element && type != NodeType::Text) return nullptr;
+    return const_cast<DOMElement*>(firstSlotNamed(shadow, slotNameOf(node)));
+}
+
+std::vector<DOMNode*> flatTreeChildren(const DOMNode* node) {
+    std::vector<DOMNode*> out;
+    const DOMNode* source = node;
+    if (node->nodeType() == NodeType::Element) {
+        if (DOMShadowRoot* shadow = static_cast<const DOMElement*>(node)->shadowRoot()) source = shadow;
+    }
+    out.reserve(source->childNodes().size());
+    int inShadowTree = -1;  // looked up at the first slot
+    for (const auto& child : source->childNodes()) {
+        if (isSlot(child.get())) {
+            if (inShadowTree < 0) inShadowTree = asShadowRoot(treeRoot(source)) != nullptr;
+            if (inShadowTree) {
+                appendFlattened(child.get(), out);
+                continue;
+            }
+        }
+        out.push_back(child.get());
+    }
+    return out;
+}
+
+DOMElement* flatTreeParentElement(const DOMNode* node) {
+    if (!node) return nullptr;
+    DOMNode* parent = node->parentNode();
+    if (!parent) return nullptr;
+    if (parent->nodeType() == NodeType::Element) {
+        if (static_cast<DOMElement*>(parent)->shadowRoot()) return assignedSlot(node);
+        return static_cast<DOMElement*>(parent);
+    }
+    if (DOMShadowRoot* shadow = asShadowRoot(parent)) return shadow->host();
+    return nullptr;
 }
 
 // ============================================================================

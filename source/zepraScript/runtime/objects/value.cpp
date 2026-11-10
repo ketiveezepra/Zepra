@@ -6,6 +6,7 @@
  */
 
 #include "runtime/objects/value.hpp"
+#include "runtime/objects/string_utf16.hpp"
 #include "runtime/objects/object.hpp"
 #include "runtime/objects/function.hpp"
 #include "runtime/objects/number_conversion.hpp"
@@ -240,7 +241,13 @@ bool Value::strictEquals(const Value& other) const {
 Value Value::add(const Value& left, const Value& right) {
     // String concatenation
     if (left.isString() || right.isString()) {
-        return Value::string(new String(left.toString() + right.toString()));
+        std::string text = left.toString();
+        std::string tail = right.toString();
+        if (Utf16::needsSurrogateJoin(text, tail)) {
+            return Value::string(new String(Utf16::joinSurrogates(text, tail)));
+        }
+        text += tail;
+        return Value::string(new String(std::move(text)));
     }
     
     // Numeric addition

@@ -43,31 +43,47 @@ struct ProxyHandler {
 };
 
 /**
- * @brief JavaScript Proxy object
+ * @brief JavaScript Proxy object (a non-callable target)
+ *
+ * Every operation looks its trap up on the handler when it runs (handlers
+ * may change) and calls it through the running VM with the handler as
+ * `this`; without a trap the operation goes to the target. A function
+ * target gets a callable wrapper instead (see createCallable).
  */
 class Proxy : public Object {
 public:
-    Proxy(Object* target, ProxyHandler handler);
-    
+    Proxy(Object* target, Object* handler);
+
     Object* target() const { return target_; }
-    const ProxyHandler& handler() const { return handler_; }
-    
+    Object* handlerObject() const { return handler_; }
+
     bool isRevoked() const { return revoked_; }
-    void revoke() { revoked_ = true; }
-    
-    // Overridden Object methods that trigger traps
+    void revoke() { revoked_ = true; target_ = nullptr; handler_ = nullptr; }
+
     Value get(const std::string& key) const override;
+    Value get(uint32_t index) const override { return get(std::to_string(index)); }
     bool set(const std::string& key, Value value) override;
-    bool hasProperty(const std::string& key) const;
-    bool deleteProperty(const std::string& key);
-    
-    // Static factory
-    static Proxy* create(Object* target, Object* handler);
-    static std::pair<Proxy*, std::function<void()>> createRevocable(Object* target, Object* handler);
-    
+    bool set(uint32_t index, Value value) override { return set(std::to_string(index), value); }
+    bool has(const std::string& key) const override;
+    bool has(uint32_t index) const override { return has(std::to_string(index)); }
+    bool hasProperty(const std::string& key) const { return has(key); }
+    bool deleteProperty(const std::string& key) override;
+    bool deleteProperty(uint32_t index) override { return deleteProperty(std::to_string(index)); }
+    // Object::getOwnPropertyNames/keys of a proxy: the ownKeys trap
+    std::vector<std::string> proxyOwnKeys() const;
+    std::vector<std::string> proxyEnumerableKeys() const;
+
+    // A Proxy, or for a callable target a function honoring apply/construct
+    static Object* create(Object* target, Object* handler);
+    static std::pair<Object*, std::function<void()>> createRevocable(Object* target, Object* handler);
+
 private:
+    // The handler's trap `name`, or null; TypeError once revoked
+    Function* trap(const char* name) const;
+    Value callTrap(Function* fn, std::vector<Value> args) const;
+
     Object* target_;
-    ProxyHandler handler_;
+    Object* handler_;
     bool revoked_ = false;
 };
 

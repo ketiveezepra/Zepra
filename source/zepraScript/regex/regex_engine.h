@@ -10,6 +10,7 @@
 #include "regex_bytecode.h"
 #include <stdexcept>
 #include <string>
+#include <cstdint>
 #include <vector>
 #include <optional>
 
@@ -72,11 +73,13 @@ private:
     };
 
     char32_t charAt(const std::string& input, int32_t pos) const;
+    int32_t charLength(const std::string& input, int32_t pos) const;
+    bool run(const std::string& input, Thread initial, size_t stopPc, int32_t requiredEnd, Thread& out);
+    size_t assertionEnd(size_t pc) const;
     bool isWordChar(char32_t c) const;
 
     const RegexProgram& program_;
     RegexFlags flags_;
-    std::vector<Thread> stack_;
     MatchResult result_;
     uint64_t steps_ = 0;  // instructions run by the current exec(), bounded by kStepBudget
 };

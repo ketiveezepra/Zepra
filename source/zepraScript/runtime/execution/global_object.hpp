@@ -69,6 +69,9 @@ public:
     Value NaN() const { return Value::number(std::nan("")); }
     Value infinity() const { return Value::number(std::numeric_limits<double>::infinity()); }
     
+    // Compiles and runs source text in the global scope (Function, eval)
+    static Value evaluateSourceText(const std::string& source, const char* what, const std::string& name);
+
 private:
     void initializeObjectConstructor();
     void initializeArrayConstructor();

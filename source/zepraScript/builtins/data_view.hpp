@@ -83,6 +83,8 @@ public:
     static Value getFloat64(Runtime::Context* ctx, const std::vector<Value>& args);
     
     static Object* createDataViewPrototype();
+    // The script-facing DataView constructor (prototype inherits objectPrototype)
+    static Object* createConstructor(Object* objectPrototype);
 };
 
 } // namespace Zepra::Builtins

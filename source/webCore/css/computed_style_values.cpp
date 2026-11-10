@@ -255,7 +255,8 @@ std::vector<std::pair<std::string, std::string>> resolve(const CSSComputedStyle&
     add("font-weight", std::to_string((int)s.fontWeight));
     add("font-style", s.fontStyle == FontStyle::Normal ? "normal" :
                       s.fontStyle == FontStyle::Italic ? "italic" : "oblique");
-    add("line-height", s.lineHeight > 4 ? formatComputedNumber(s.lineHeight) + "px" : formatComputedNumber(s.lineHeight));
+    // The resolved value: normal, else px (CSSOM resolves numbers too)
+    add("line-height", s.lineHeightNormal ? std::string("normal") : formatComputedNumber(s.usedLineHeight()) + "px");
     add("text-align", textAlignStr(s.textAlign));
     if (everything || !s.textDecoration.empty()) add("text-decoration", s.textDecoration);
     if (everything || !s.textTransform.empty()) add("text-transform", s.textTransform);

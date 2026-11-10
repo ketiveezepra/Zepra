@@ -87,6 +87,9 @@ bool MatchedRule::operator<(const MatchedRule& other) const {
     if (origin != other.origin) {
         return static_cast<int>(origin) < static_cast<int>(other.origin);
     }
+
+    // 2. Cascade layer (CSS Cascade 5 §6.4): later layers win, unlayered last
+    if (layer != other.layer) return layer < other.layer;
     
     // 2. Specificity (higher specificity wins)
     // Compare (a, b, c) tuple: IDs, Classes, Elements
@@ -136,7 +139,7 @@ std::vector<MatchedRule> CSSCascade::collectMatchingRules(
                 MatchedRule match;
                 match.rule = styleRule;
                 match.origin = origin;
-                match.specificity = calculateSpecificity(styleRule->selectorText());
+                match.specificity = matchingSpecificity(element, styleRule->selectorText());
                 match.order = ruleOrder++;
                 
                 matched.push_back(match);
@@ -170,8 +173,9 @@ std::vector<MatchedRule> CSSCascade::collectMatchingRulesWithOrigins(
             MatchedRule match;
             match.rule = ir.rule;
             match.origin = ir.origin;
-            match.specificity = calculateSpecificity(ir.rule->selectorText());
+            match.specificity = matchingSpecificity(element, ir.rule->selectorText());
             match.order = ir.order;
+            match.layer = ir.layer;
             matched.push_back(match);
         }
     };
@@ -224,6 +228,7 @@ void CSSCascade::buildIndex(
     indexedRules_.clear();
     
     size_t ruleOrder = 0;
+    auto ranks = layerRanks(sheets);
     
     for (const auto& [sheet, origin] : sheets) {
         if (!sheet || !sheet->cssRules()) continue;
@@ -237,7 +242,12 @@ void CSSCascade::buildIndex(
             if (!styleRule) continue;
             
             size_t ruleIdx = indexedRules_.size();
-            indexedRules_.push_back({styleRule, origin, ruleOrder++});
+            unsigned layer = MatchedRule::kUnlayered;
+            if (!styleRule->layer().empty()) {
+                auto rank = ranks.find(styleRule->layer());
+                if (rank != ranks.end()) layer = rank->second;
+            }
+            indexedRules_.push_back({styleRule, origin, ruleOrder++, layer});
             // Index every selector of a list ("td, th"), not just the last
             const std::string& text = styleRule->selectorText();
             size_t partStart = 0;
@@ -356,6 +366,93 @@ void CSSCascade::indexSelector(const std::string& selector, size_t ruleIdx) {
     if (!indexed) {
         index_.universal.push_back(ruleIdx);
     }
+}
+
+std::unordered_map<std::string, unsigned> CSSCascade::layerRanks(
+    const std::vector<std::pair<CSSStyleSheet*, StyleOrigin>>& sheets) {
+    // The layer tree in first-declaration order: a path's parents are
+    // declared with it ("a.b" declares "a" first)
+    struct Node {
+        std::string path;
+        std::vector<size_t> children;
+    };
+    std::vector<Node> nodes(1);  // nodes[0]: the root (unlayered)
+    std::unordered_map<std::string, size_t> byPath;
+    for (const auto& [sheet, origin] : sheets) {
+        if (!sheet) continue;
+        for (const std::string& name : sheet->layerNames()) {
+            size_t parent = 0;
+            size_t pos = 0;
+            while (pos <= name.size()) {
+                size_t dot = name.find('.', pos);
+                if (dot == std::string::npos) dot = name.size();
+                std::string path = name.substr(0, dot);
+                auto it = byPath.find(path);
+                if (it == byPath.end()) {
+                    nodes.push_back({path, {}});
+                    it = byPath.emplace(path, nodes.size() - 1).first;
+                    nodes[parent].children.push_back(it->second);
+                }
+                parent = it->second;
+                pos = dot + 1;
+            }
+        }
+    }
+    // Post-order: sublayers rank before the layer's own rules
+    std::unordered_map<std::string, unsigned> ranks;
+    unsigned next = 0;
+    std::vector<std::pair<size_t, size_t>> stack = {{0, 0}};  // node, next child
+    while (!stack.empty()) {
+        auto& [node, child] = stack.back();
+        if (child < nodes[node].children.size()) {
+            size_t c = nodes[node].children[child++];
+            stack.push_back({c, 0});
+            continue;
+        }
+        if (node != 0) ranks[nodes[node].path] = next++;
+        stack.pop_back();
+    }
+    return ranks;
+}
+
+std::vector<const MatchedRule*> CSSCascade::importantOrder(const std::vector<MatchedRule>& sorted,
+                                                           StyleOrigin origin) {
+    std::vector<const MatchedRule*> out;
+    for (const auto& match : sorted) {
+        if (match.origin == origin && match.rule && match.rule->style() && match.rule->style()->hasImportant())
+            out.push_back(&match);
+    }
+    // Stable: within a layer the normal order (specificity, then source) stays
+    std::stable_sort(out.begin(), out.end(), [](const MatchedRule* a, const MatchedRule* b) {
+        return a->layer > b->layer;
+    });
+    return out;
+}
+
+Selector::Specificity CSSCascade::matchingSpecificity(DOMElement* element, const std::string& selectorList) {
+    // Groups at top-level commas
+    std::vector<std::string> groups;
+    int depth = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= selectorList.size(); i++) {
+        char c = i < selectorList.size() ? selectorList[i] : ',';
+        if (c == '(' || c == '[') depth++;
+        else if ((c == ')' || c == ']') && depth > 0) depth--;
+        else if (c == ',' && depth == 0) {
+            groups.push_back(selectorList.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    if (groups.size() <= 1) return calculateSpecificity(selectorList);
+    Selector::Specificity best = {0, 0, 0};
+    bool any = false;
+    for (const auto& group : groups) {
+        if (element && !selectorMatches(element, group)) continue;
+        Selector::Specificity spec = calculateSpecificity(group);
+        if (!any || best < spec) best = spec;
+        any = true;
+    }
+    return best;
 }
 
 void CSSCascade::sortByCascade(std::vector<MatchedRule>& rules) {
@@ -543,6 +640,8 @@ bool CSSCascade::selectorGroupMatches(DOMElement* element, const std::string& se
             // Child combinator — parent must match
             DOMNode* parentNode = current->parentNode();
             current = parentNode ? dynamic_cast<DOMElement*>(parentNode) : nullptr;
+            // From the top of a shadow tree its rules reach the host (:host > x)
+            if (!current && shadowScope_ && parentNode == shadowScope_) current = shadowScope_->host();
             if (!current || !compoundSelectorMatches(current, parts[p])) return false;
         } else if (comb == '+') {
             // Adjacent sibling combinator — previous element sibling must match
@@ -568,6 +667,7 @@ bool CSSCascade::selectorGroupMatches(DOMElement* element, const std::string& se
             // Descendant combinator — any ancestor must match
             DOMNode* parentNode = current->parentNode();
             DOMElement* ancestor = parentNode ? dynamic_cast<DOMElement*>(parentNode) : nullptr;
+            if (!ancestor && shadowScope_ && parentNode == shadowScope_) ancestor = shadowScope_->host();
             bool found = false;
             while (ancestor) {
                 if (compoundSelectorMatches(ancestor, parts[p])) {
@@ -575,8 +675,11 @@ bool CSSCascade::selectorGroupMatches(DOMElement* element, const std::string& se
                     found = true;
                     break;
                 }
+                // The host is the last ancestor a shadow tree's rules see
+                if (shadowScope_ && ancestor == shadowScope_->host()) break;
                 parentNode = ancestor->parentNode();
                 ancestor = parentNode ? dynamic_cast<DOMElement*>(parentNode) : nullptr;
+                if (!ancestor && shadowScope_ && parentNode == shadowScope_) ancestor = shadowScope_->host();
             }
             if (!found) return false;
         }
@@ -585,8 +688,36 @@ bool CSSCascade::selectorGroupMatches(DOMElement* element, const std::string& se
     return true;
 }
 
-// Match a compound selector ("div.class#id[attr]") against a single element
+// Standard pseudo-classes this matcher does not evaluate: they keep matching
+// (as before) rather than dropping the rule. Anything else, including every
+// vendor-prefixed name, is an unknown pseudo-class and matches nothing.
+static bool knownPseudoClass(const std::string& name) {
+    static const char* const known[] = {
+        "first-of-type", "last-of-type", "only-of-type", "nth-of-type", "nth-last-of-type", "nth-last-child",
+        "lang", "dir", "scope", "host", "host-context", "has", "defined", "valid", "invalid", "user-valid",
+        "user-invalid", "required", "optional", "in-range", "out-of-range", "autofill", "fullscreen",
+        "modal", "popover-open", "picture-in-picture", "playing", "paused", "open", "closed", "blank",
+        "current", "past", "future", "local-link", "target-within", "focus-visible", "nth-child", "not",
+        "is", "where", "matches", "any", "root", "empty", "first-child", "last-child", "only-child",
+    };
+    for (const char* k : known) {
+        if (name == k) return true;
+    }
+    return false;
+}
+
+// Seen from its shadow tree, the host is featureless: only :host,
+// :host() and :host-context() match it (CSS Scoping §3.1)
 bool CSSCascade::compoundSelectorMatches(DOMElement* element, const std::string& compound) {
+    if (shadowScope_ && !inHostArgument_ && element && element == shadowScope_->host() &&
+        compound.find(":host") == std::string::npos) {
+        return false;
+    }
+    return compoundMatches(element, compound);
+}
+
+// Match a compound selector ("div.class#id[attr]") against a single element
+bool CSSCascade::compoundMatches(DOMElement* element, const std::string& compound) {
     if (!element || compound.empty()) return false;
     
     // Universal selector
@@ -814,6 +945,24 @@ bool CSSCascade::compoundSelectorMatches(DOMElement* element, const std::string&
                 std::string tag = element->tagName();
                 std::transform(tag.begin(), tag.end(), tag.begin(), ::tolower);
                 if (tag != "html") return false;
+            } else if (pseudoName == "host" || pseudoName == "host-context") {
+                // The shadow host, only for rules of its own shadow tree
+                if (!shadowScope_ || element != shadowScope_->host()) return false;
+                if (!pseudoArg.empty()) {
+                    bool saved = inHostArgument_;
+                    inHostArgument_ = true;
+                    bool ok = false;
+                    if (pseudoName == "host") {
+                        ok = selectorMatches(element, pseudoArg);
+                    } else {
+                        for (DOMElement* a = element; a && !ok; a = flatTreeParentElement(a)) ok = selectorMatches(a, pseudoArg);
+                    }
+                    inHostArgument_ = saved;
+                    if (!ok) return false;
+                }
+            } else if (pseudoName == "defined") {
+                // Built-in elements and upgraded custom elements
+                if (!element->isDefined()) return false;
             } else if (pseudoName == "empty") {
                 if (element->firstChild()) return false;
             } else if (pseudoName == "not" && !pseudoArg.empty()) {
@@ -823,6 +972,12 @@ bool CSSCascade::compoundSelectorMatches(DOMElement* element, const std::string&
             } else if (pseudoName == "where") {
                 // :where(sel) — same as :is() but zero specificity
                 if (!pseudoArg.empty() && !selectorMatches(element, pseudoArg)) return false;
+            } else if (!knownPseudoClass(pseudoName)) {
+                // A pseudo-class this engine does not know (vendor ones like
+                // :-moz-focusring above all) makes the selector invalid, so it
+                // matches nothing (Selectors 4 §3.9); Tailwind's preflight
+                // ":-moz-focusring{outline:auto}" otherwise outlines every box
+                return false;
             }
         }
         else if (std::isalnum(compound[i]) || compound[i] == '-' || compound[i] == '_') {
@@ -893,14 +1048,18 @@ Selector::Specificity CSSCascade::calculateSpecificity(const std::string& select
                 if (i < selector.length()) i++;
             }
             
-            if (isPseudoElement) {
+            std::string lowerName = pseudoName;
+            for (char& ch : lowerName) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            bool legacyElement = lowerName == "before" || lowerName == "after" ||
+                                 lowerName == "first-line" || lowerName == "first-letter";
+            if (isPseudoElement || legacyElement) {
                 spec.c++;
             } else if (pseudoName == "where") {
                 // :where() contributes zero specificity (CSS Selectors L4)
-            } else if (pseudoName == "not" || pseudoName == "is" || pseudoName == "matches") {
-                // Specificity = max specificity of arguments
+            } else if (pseudoName == "not" || pseudoName == "is" || pseudoName == "matches" || pseudoName == "has") {
+                // The most specific selector of the argument list
                 if (!pseudoArg.empty()) {
-                    auto argSpec = calculateSpecificity(pseudoArg);
+                    auto argSpec = matchingSpecificity(nullptr, pseudoArg);
                     spec.a += argSpec.a;
                     spec.b += argSpec.b;
                     spec.c += argSpec.c;

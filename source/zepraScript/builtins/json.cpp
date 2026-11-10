@@ -6,6 +6,12 @@
  */
 
 #include "builtins/json.hpp"
+#include <cmath>
+#include "builtins/boolean.hpp"
+#include "builtins/number.hpp"
+#include "runtime/objects/number_conversion.hpp"
+#include "runtime/execution/js_error.hpp"
+#include "runtime/execution/vm.hpp"
 #include <algorithm>
 #include "runtime/objects/object.hpp"
 #include "runtime/objects/function.hpp"
@@ -310,203 +316,250 @@ private:
 // JSON.stringify implementation
 // ============================================================================
 
+// JSON.stringify per ECMA-262 SerializeJSONProperty: toJSON, the replacer
+// (function or property list), the gap, getters (read through the VM),
+// boxed primitives, shortest round-trip numbers, cycle detection, and
+// lone surrogates written as \uXXXX escapes.
 class JsonStringifier {
 public:
-    explicit JsonStringifier(int indent = 0) : indent_(indent), depth_(0) {}
-    
-    std::string stringify(Runtime::Value value) {
-        return stringifyValue(value);
+    JsonStringifier(std::string gap, Runtime::Value replacerFn, std::vector<std::string> propertyList, bool hasList)
+        : gap_(std::move(gap)), replacer_(replacerFn), propertyList_(std::move(propertyList)), hasList_(hasList) {}
+
+    // false: the result is undefined
+    bool stringify(Runtime::Value value, std::string& out) {
+        auto* wrapper = new Runtime::Object();
+        wrapper->set("", value);
+        return serializeProperty(Runtime::Value::object(wrapper), "", value, out);
     }
-    
+
 private:
-    std::string stringifyValue(Runtime::Value value) {
-        if (value.isUndefined()) {
-            return "null"; // undefined becomes null in JSON
+    Runtime::Value get(const Runtime::Value& holder, const std::string& key) {
+        if (Runtime::VM* vm = Runtime::VM::current()) return vm->getMember(holder, key);
+        return holder.asObject()->get(key);
+    }
+
+    Runtime::Value call(const Runtime::Value& fn, const Runtime::Value& self, std::vector<Runtime::Value> args) {
+        Runtime::VM* vm = Runtime::VM::current();
+        if (!vm) return Runtime::Value::undefined();
+        return vm->executeCallback(static_cast<Runtime::Function*>(fn.asObject()), self, args);
+    }
+
+    static bool isCallable(const Runtime::Value& v) { return v.isObject() && v.asObject()->isFunction(); }
+
+    bool serializeProperty(const Runtime::Value& holder, const std::string& key, Runtime::Value value, std::string& out) {
+        if (value.isObject()) {
+            Runtime::Value toJSON = get(value, "toJSON");
+            if (isCallable(toJSON)) value = call(toJSON, value, {Runtime::Value::string(new Runtime::String(key))});
         }
-        
-        if (value.isNull()) {
-            return "null";
+        if (isCallable(replacer_)) {
+            value = call(replacer_, holder, {Runtime::Value::string(new Runtime::String(key)), value});
         }
-        
-        if (value.isBoolean()) {
-            return value.asBoolean() ? "true" : "false";
-        }
-        
-        if (value.isNumber()) {
-            double num = value.asNumber();
-            if (std::isnan(num) || std::isinf(num)) {
-                return "null"; // NaN/Infinity become null
-            }
-            std::ostringstream ss;
-            ss << std::setprecision(17) << num;
-            return ss.str();
-        }
-        
-        if (value.isString()) {
-            return stringifyString(value.toString());
-        }
-        
         if (value.isObject()) {
             Runtime::Object* obj = value.asObject();
-            
-            if (auto* arr = dynamic_cast<Runtime::Array*>(obj)) {
-                return stringifyArray(arr);
-            }
-            
-            if (obj->isFunction()) {
-                return ""; // Functions become empty in JSON
-            }
-            
-            return stringifyObject(obj);
+            if (auto* n = dynamic_cast<NumberObject*>(obj)) value = Runtime::Value::number(n->valueOf());
+            else if (auto* b = dynamic_cast<BooleanObject*>(obj)) value = Runtime::Value::boolean(b->valueOf());
+            else if (auto* str = dynamic_cast<Runtime::String*>(obj)) value = Runtime::Value::string(new Runtime::String(str->value()));
         }
-        
-        return "null";
+        if (value.isNull()) { out += "null"; return true; }
+        if (value.isBoolean()) { out += value.asBoolean() ? "true" : "false"; return true; }
+        if (value.isString()) { quote(value.asString()->value(), out); return true; }
+        if (value.isNumber()) {
+            const double d = value.asNumber();
+            out += std::isfinite(d) ? Runtime::NumberConversion::toString(d) : "null";
+            return true;
+        }
+        if (value.isObject() && !value.asObject()->isFunction()) {
+            Runtime::Object* obj = value.asObject();
+            if (std::find(stack_.begin(), stack_.end(), obj) != stack_.end()) {
+                throw Runtime::JSError("TypeError", "Converting circular structure to JSON");
+            }
+            if (stack_.size() > 5000) throw Runtime::JSError("RangeError", "Maximum call stack size exceeded");
+            stack_.push_back(obj);
+            if (obj->isArray()) serializeArray(value, out);
+            else serializeObject(value, out);
+            stack_.pop_back();
+            return true;
+        }
+        return false;  // undefined, functions, symbols
     }
-    
-    std::string stringifyString(const std::string& str) {
-        std::ostringstream ss;
-        ss << '"';
-        
-        for (char c : str) {
+
+    void newline(std::string& out) {
+        if (gap_.empty()) return;
+        out += '\n';
+        for (size_t i = 0; i < stack_.size(); ++i) out += gap_;
+    }
+
+    void serializeObject(const Runtime::Value& value, std::string& out) {
+        std::vector<std::string> keys = hasList_ ? propertyList_ : value.asObject()->keys();
+        out += '{';
+        bool any = false;
+        for (const auto& key : keys) {
+            std::string member;
+            if (!serializeProperty(value, key, get(value, key), member)) continue;
+            if (any) out += ',';
+            newline(out);
+            quote(key, out);
+            out += gap_.empty() ? ":" : ": ";
+            out += member;
+            any = true;
+        }
+        if (any) {
+            stack_.pop_back();
+            newline(out);
+            stack_.push_back(value.asObject());
+        }
+        out += '}';
+    }
+
+    void serializeArray(const Runtime::Value& value, std::string& out) {
+        const size_t length = static_cast<size_t>(get(value, "length").toNumber());
+        out += '[';
+        for (size_t i = 0; i < length; ++i) {
+            if (i) out += ',';
+            newline(out);
+            const std::string key = std::to_string(i);
+            if (!serializeProperty(value, key, value.asObject()->get(static_cast<uint32_t>(i)), out)) out += "null";
+        }
+        if (length) {
+            stack_.pop_back();
+            newline(out);
+            stack_.push_back(value.asObject());
+        }
+        out += ']';
+    }
+
+    static void quote(const std::string& text, std::string& out) {
+        static const char* hex = "0123456789abcdef";
+        out += '"';
+        for (size_t i = 0; i < text.size(); ++i) {
+            const unsigned char c = static_cast<unsigned char>(text[i]);
             switch (c) {
-                case '"': ss << "\\\""; break;
-                case '\\': ss << "\\\\"; break;
-                case '\b': ss << "\\b"; break;
-                case '\f': ss << "\\f"; break;
-                case '\n': ss << "\\n"; break;
-                case '\r': ss << "\\r"; break;
-                case '\t': ss << "\\t"; break;
+                case '"': out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\b': out += "\\b"; break;
+                case '\f': out += "\\f"; break;
+                case '\n': out += "\\n"; break;
+                case '\r': out += "\\r"; break;
+                case '\t': out += "\\t"; break;
                 default:
-                    if (static_cast<unsigned char>(c) < 32) {
-                        ss << "\\u" << std::hex << std::setw(4) 
-                           << std::setfill('0') << static_cast<int>(c);
+                    if (c < 0x20) {
+                        out += "\\u00";
+                        out += hex[c >> 4];
+                        out += hex[c & 15];
+                    } else if (c == 0xED && i + 2 < text.size() &&
+                               (static_cast<unsigned char>(text[i + 1]) & 0xE0) == 0xA0) {
+                        // A lone surrogate (WTF-8): well-formed JSON.stringify escapes it
+                        const unsigned unit = 0xD000 | ((static_cast<unsigned char>(text[i + 1]) & 0x3F) << 6) |
+                                              (static_cast<unsigned char>(text[i + 2]) & 0x3F);
+                        out += "\\u";
+                        out += hex[(unit >> 12) & 15];
+                        out += hex[(unit >> 8) & 15];
+                        out += hex[(unit >> 4) & 15];
+                        out += hex[unit & 15];
+                        i += 2;
                     } else {
-                        ss << c;
+                        out += static_cast<char>(c);
                     }
             }
         }
-        
-        ss << '"';
-        return ss.str();
+        out += '"';
     }
-    
-    std::string stringifyArray(Runtime::Array* arr) {
-        if (arr->length() == 0) {
-            return "[]";
-        }
-        
-        depth_++;
-        std::ostringstream ss;
-        ss << '[';
-        
-        for (size_t i = 0; i < arr->length(); i++) {
-            if (i > 0) ss << ',';
-            if (indent_ > 0) {
-                ss << '\n' << std::string(depth_ * indent_, ' ');
-            }
-            
-            std::string val = stringifyValue(arr->at(i));
-            ss << (val.empty() ? "null" : val);
-        }
-        
-        depth_--;
-        if (indent_ > 0) {
-            ss << '\n' << std::string(depth_ * indent_, ' ');
-        }
-        ss << ']';
-        
-        return ss.str();
-    }
-    
-    std::string stringifyObject(Runtime::Object* obj) {
-        auto keys = obj->keys();
-        if (keys.empty()) {
-            return "{}";
-        }
-        
-        depth_++;
-        std::ostringstream ss;
-        ss << '{';
-        
-        bool first = true;
-        for (const auto& key : keys) {
-            Runtime::Value val = obj->get(key);
-            std::string valStr = stringifyValue(val);
-            
-            if (valStr.empty()) continue; // Skip undefined/function properties
-            
-            if (!first) ss << ',';
-            first = false;
-            
-            if (indent_ > 0) {
-                ss << '\n' << std::string(depth_ * indent_, ' ');
-            }
-            
-            ss << stringifyString(key) << ':';
-            if (indent_ > 0) ss << ' ';
-            ss << valStr;
-        }
-        
-        depth_--;
-        if (indent_ > 0 && !keys.empty()) {
-            ss << '\n' << std::string(depth_ * indent_, ' ');
-        }
-        ss << '}';
-        
-        return ss.str();
-    }
-    
-    int indent_;
-    int depth_;
+
+    std::string gap_;
+    Runtime::Value replacer_;
+    std::vector<std::string> propertyList_;
+    bool hasList_;
+    std::vector<Runtime::Object*> stack_;
 };
 
 // ============================================================================
 // JSON builtin methods
 // ============================================================================
 
-Runtime::Value JSONBuiltin::parse(const Runtime::FunctionCallInfo& info) {
-    if (info.argumentCount() < 1) {
-        throw std::runtime_error("JSON.parse requires a string argument");
+namespace {
+// JSON.parse's reviver walk (InternalizeJSONProperty), children first
+Runtime::Value internalize(Runtime::VM* vm, Runtime::Function* reviver, const Runtime::Value& holder,
+                           const std::string& key, int depth) {
+    Runtime::Value value = vm->getMember(holder, key);
+    if (value.isObject() && depth < 5000) {
+        Runtime::Object* obj = value.asObject();
+        std::vector<std::string> keys;
+        if (obj->isArray()) {
+            for (size_t i = 0; i < obj->length(); ++i) keys.push_back(std::to_string(i));
+        } else {
+            keys = obj->keys();
+        }
+        for (const auto& k : keys) {
+            Runtime::Value element = internalize(vm, reviver, value, k, depth + 1);
+            if (element.isUndefined()) {
+                obj->deleteProperty(k);
+            } else if (obj->isArray()) {
+                obj->set(static_cast<uint32_t>(std::stoul(k)), element);
+            } else {
+                obj->set(k, element);
+            }
+        }
     }
-    
+    return vm->executeCallback(reviver, holder, {Runtime::Value::string(new Runtime::String(key)), value});
+}
+} // namespace
+
+Runtime::Value JSONBuiltin::parse(const Runtime::FunctionCallInfo& info) {
     std::string jsonStr = info.argument(0).toString();
-    
+    Runtime::Value result;
     try {
         JsonParser parser(jsonStr);
-        return parser.parse();
+        result = parser.parse();
+    } catch (const Runtime::JSError&) {
+        throw;
     } catch (const std::exception& e) {
-        throw std::runtime_error(std::string("SyntaxError: ") + e.what());
+        throw Runtime::JSError("SyntaxError", std::string(e.what()));
     }
+    const Runtime::Value reviver = info.argument(1);
+    Runtime::VM* vm = Runtime::VM::current();
+    if (vm && reviver.isObject() && reviver.asObject()->isFunction()) {
+        auto* root = new Runtime::Object();
+        root->set("", result);
+        return internalize(vm, static_cast<Runtime::Function*>(reviver.asObject()), Runtime::Value::object(root), "", 0);
+    }
+    return result;
 }
 
 Runtime::Value JSONBuiltin::stringify(const Runtime::FunctionCallInfo& info) {
-    if (info.argumentCount() < 1) {
-        return Runtime::Value::undefined();
-    }
-    
-    Runtime::Value value = info.argument(0);
-    
-    // Get indent (third argument)
-    int indent = 0;
-    if (info.argumentCount() >= 3) {
-        if (info.argument(2).isNumber()) {
-            indent = std::min(10, static_cast<int>(info.argument(2).asNumber()));
-            indent = std::max(0, indent);
+    const Runtime::Value replacer = info.argument(1);
+    Runtime::Value replacerFn = Runtime::Value::undefined();
+    std::vector<std::string> list;
+    bool hasList = false;
+    if (replacer.isObject()) {
+        if (replacer.asObject()->isFunction()) {
+            replacerFn = replacer;
+        } else if (auto* array = dynamic_cast<Runtime::Array*>(replacer.asObject())) {
+            hasList = true;
+            for (size_t i = 0; i < array->length(); ++i) {
+                Runtime::Value item = array->at(i);
+                if (!(item.isString() || item.isNumber() || item.isObject())) continue;
+                std::string name = item.toString();
+                if (std::find(list.begin(), list.end(), name) == list.end()) list.push_back(name);
+            }
         }
     }
-    
-    try {
-        JsonStringifier stringifier(indent);
-        std::string result = stringifier.stringify(value);
-        
-        if (result.empty()) {
-            return Runtime::Value::undefined();
-        }
-        
-        return Runtime::Value::string(new Runtime::String(result));
-    } catch (const std::exception&) {
-        return Runtime::Value::undefined();
+    Runtime::Value space = info.argument(2);
+    if (space.isObject()) {
+        if (auto* n = dynamic_cast<NumberObject*>(space.asObject())) space = Runtime::Value::number(n->valueOf());
+        else if (auto* str = dynamic_cast<Runtime::String*>(space.asObject())) space = Runtime::Value::string(new Runtime::String(str->value()));
     }
+    std::string gap;
+    if (space.isNumber()) {
+        const double n = std::min(10.0, std::floor(space.asNumber()));
+        if (n >= 1) gap.assign(static_cast<size_t>(n), ' ');
+    } else if (space.isString()) {
+        gap = space.asString()->value().substr(0, 10);
+    }
+
+    JsonStringifier stringifier(gap, replacerFn, list, hasList);
+    std::string result;
+    if (!stringifier.stringify(info.argument(0), result)) return Runtime::Value::undefined();
+    return Runtime::Value::string(new Runtime::String(result));
 }
 
 Runtime::Object* JSONBuiltin::createJSONObject(Runtime::Context*) {

@@ -9,6 +9,10 @@
  */
 
 #include "runtime/execution/global_object.hpp"
+#include "bytecode/bytecode_generator.hpp"
+#include "frontend/syntax_checker.hpp"
+#include "frontend/parser.hpp"
+#include "frontend/source_code.hpp"
 #include <algorithm>
 #include "builtins/promise_builtin.hpp"
 #include "builtins/console.hpp"
@@ -28,9 +32,11 @@
 #include "builtins/map.hpp"
 #include "builtins/set.hpp"
 #include "builtins/date.hpp"
+#include "builtins/intl_bindings.hpp"
 #include "builtins/weakmap.hpp"
 #include "builtins/regexp.hpp"
 #include "builtins/typed_array.hpp"
+#include "builtins/data_view.hpp"
 #include "builtins/reflect.hpp"
 #include "runtime/objects/proxy.hpp"
 #include "builtins/generator.hpp"
@@ -139,6 +145,46 @@ void GlobalObject::initializeObjectConstructor() {
     Builtins::defineHidden(objectConstructor_, "prototype", Value::object(objectPrototype_));
     Builtins::defineHidden(objectPrototype_, "constructor", Value::object(objectConstructor_));
     set("Object", Value::object(objectConstructor_));
+
+    // Object.getOwnPropertyDescriptors(obj): { key: descriptor } for every own key
+    Function* describe = new Function("getOwnPropertyDescriptors", [](const FunctionCallInfo& info) -> Value {
+        VM* vm = VM::current();
+        Value target = info.argument(0);
+        if (!target.isObject()) throw JSError("TypeError", "Cannot convert undefined or null to object");
+        Value getDescriptor = vm->getMember(vm->getGlobal("Object"), "getOwnPropertyDescriptor");
+        auto* result = new Object();
+        for (const std::string& key : target.asObject()->getOwnPropertyNames()) {
+            Value desc = vm->executeCallback(static_cast<Function*>(getDescriptor.asObject()), Value::undefined(),
+                                             {target, Value::string(new String(key))});
+            if (!desc.isUndefined()) result->set(key, desc);
+        }
+        return Value::object(result);
+    }, 1);
+    Builtins::defineHidden(objectConstructor_, "getOwnPropertyDescriptors", Value::object(describe));
+
+    // Object.prototype.__proto__ (Annex B): the [[Prototype]] as an accessor
+    PropertyDescriptor protoAccessor;
+    protoAccessor.getter = Value::object(new Function("get __proto__", [](const FunctionCallInfo& info) -> Value {
+        Value self = info.thisValue();
+        VM* vm = VM::current();
+        if (self.isNull() || self.isUndefined()) throw JSError("TypeError", "Cannot convert undefined or null to object");
+        Object* object = self.isObject() ? self.asObject() : nullptr;
+        Object* proto = object ? vm->prototypeOf(object) : vm->primitivePrototypeOf(self);
+        return proto ? Value::object(proto) : Value::null();
+    }, 0));
+    protoAccessor.setter = Value::object(new Function("set __proto__", [](const FunctionCallInfo& info) -> Value {
+        Value self = info.thisValue();
+        Value proto = info.argument(0);
+        if (!self.isObject() || !(proto.isObject() || proto.isNull())) return Value::undefined();
+        Object* p = proto.isNull() ? nullptr : proto.asObject();
+        for (Object* o = p; o; o = o->prototype()) {
+            if (o == self.asObject()) throw JSError("TypeError", "Cyclic __proto__ value");
+        }
+        self.asObject()->setPrototype(p);
+        return Value::undefined();
+    }, 1));
+    protoAccessor.attributes = PropertyAttribute::Configurable;
+    objectPrototype_->defineProperty("__proto__", protoAccessor);
 }
 
 void GlobalObject::initializeArrayConstructor() {
@@ -155,7 +201,9 @@ void GlobalObject::initializeArrayConstructor() {
             if (length > static_cast<double>(1u << 22)) {
                 throw JSError("RangeError", "Array length too large");
             }
-            return Value::object(new Array(std::vector<Value>(static_cast<size_t>(length), Value::undefined())));
+            auto* array = new Array(std::vector<Value>(static_cast<size_t>(length), Value::undefined()));
+            array->markHoles(0, array->length());
+            return Value::object(array);
         }
         return Value::object(new Array(std::vector<Value>(args.begin(), args.end())));
     }, 1);
@@ -217,16 +265,64 @@ void GlobalObject::initializeBooleanConstructor() {
     set("Boolean", Value::object(booleanConstructor_));
 }
 
+// Compiles and runs `source` as a global script; its completion value is
+// the result. Errors become catchable SyntaxError / thrown values.
+Value GlobalObject::evaluateSourceText(const std::string& source, const char* what, const std::string& name) {
+    VM* vm = VM::current();
+    if (!vm) throw JSError("EvalError", std::string(what) + " called outside a running script");
+    if (!vm->codeGenerationFromStringsAllowed()) {
+        throw JSError("EvalError", std::string("Code generation from strings disallowed for this context (") + what + ")");
+    }
+    auto sourceCode = Frontend::SourceCode::fromString(source, name);
+    Frontend::Parser parser(sourceCode.get());
+    auto program = parser.parseProgram();
+    if (parser.hasErrors()) throw JSError("SyntaxError", parser.errors().front());
+    Frontend::SyntaxChecker checker;
+    if (!checker.check(program.get())) throw JSError("SyntaxError", checker.errors().front());
+    Bytecode::BytecodeGenerator generator;
+    generator.setSource(name, 1);  // stacks show <eval> / <anonymous>, not <script>
+    auto chunk = generator.compile(program.get());
+    if (generator.hasErrors() || !chunk) {
+        throw JSError("SyntaxError", generator.hasErrors() ? generator.errors().front() : "Invalid source");
+    }
+    ExecutionResult result = vm->execute(chunk.get());
+    // Functions created by the code reference its chunk's constants
+    vm->retainChunk(std::move(chunk));
+    if (result.status == ExecutionResult::Status::Exception) throw ThrownException(result.value);
+    if (result.status == ExecutionResult::Status::Error) throw std::runtime_error(result.error);
+    return result.value;
+}
+
 void GlobalObject::initializeFunctionConstructor() {
     VM& vm = vmOf(context_);
     functionPrototype_ = vm.intrinsic(VM::Intrinsic::Function);
-    // new Function("...") compiles source text at run time, which the engine refuses
-    functionConstructor_ = new Function("Function", [](const FunctionCallInfo&) -> Value {
-        throw JSError("EvalError", "Code generation from strings is disallowed (Function constructor)");
+    // new Function(p1, ..., body) compiles `(function anonymous(p1,...\n) {\nbody\n})`
+    // in the global scope. Page scripts can already run any code they like
+    // (inline <script>, script injection), so compiling strings adds no
+    // capability; an embedder that wants CSP-style 'unsafe-eval' blocking
+    // can turn it off with VM::setCodeGenerationFromStringsAllowed(false).
+    functionConstructor_ = new Function("Function", [](const FunctionCallInfo& info) -> Value {
+        std::string params;
+        const size_t count = info.argumentCount();
+        for (size_t i = 0; i + 1 < count; ++i) {
+            if (i) params += ",";
+            params += info.argument(i).toString();
+        }
+        const std::string body = count ? info.argument(count - 1).toString() : std::string();
+        return evaluateSourceText("(function anonymous(" + params + "\n) {\n" + body + "\n})",
+                                  "Function", "<anonymous>");
     }, 1);
     Builtins::defineHidden(functionConstructor_, "prototype", Value::object(functionPrototype_));
     Builtins::defineHidden(functionPrototype_, "constructor", Value::object(functionConstructor_));
     set("Function", Value::object(functionConstructor_));
+
+    // Global eval. Calls run as indirect eval (global scope): a direct
+    // eval's access to the caller's local variables is not supported.
+    Builtins::defineHidden(this, "eval", Value::object(new Function("eval", [](const FunctionCallInfo& info) -> Value {
+        const Value code = info.argument(0);
+        if (!code.isString()) return code;
+        return evaluateSourceText(code.toString(), "eval", "<eval>");
+    }, 1)));
 }
 
 void GlobalObject::initializeErrorConstructors() {
@@ -369,9 +465,22 @@ void GlobalObject::initializeGlobalFunctions() {
             [](Context* ctx, const std::vector<Value>& args) -> Value {
                 return Builtins::DateBuiltin::now(ctx, args);
             }, 0)));
+    dateCtor->set("parse", Value::object(
+        createNativeFunction("parse",
+            [](Context* ctx, const std::vector<Value>& args) -> Value {
+                return Builtins::DateBuiltin::parse(ctx, args);
+            }, 1)));
+    dateCtor->set("UTC", Value::object(
+        createNativeFunction("UTC",
+            [](Context* ctx, const std::vector<Value>& args) -> Value {
+                return Builtins::DateBuiltin::UTC(ctx, args);
+            }, 7)));
     Builtins::defineHidden(dateCtor, "prototype", Value::object(dateProto));
     Builtins::defineHidden(dateProto, "constructor", Value::object(dateCtor));
     set("Date", Value::object(dateCtor));
+
+    // Intl (ECMA-402): number/date formatting, collation, plural rules, ...
+    Builtins::defineHidden(this, "Intl", Value::object(Builtins::createIntlObject(objectPrototype_)));
 
     // WeakMap constructor + prototype
     Object* weakMapProto = Builtins::WeakMapBuiltin::createWeakMapPrototype();
@@ -456,6 +565,7 @@ void GlobalObject::initializeGlobalFunctions() {
     Object* arrayBufferProto = Builtins::TypedArrayBuiltin::createArrayBufferPrototype();
     arrayBufferProto->setPrototype(objectPrototype_);
     set("ArrayBuffer", Value::object(Builtins::TypedArrayBuiltin::createArrayBufferConstructor(arrayBufferProto)));
+    Builtins::defineHidden(this, "DataView", Value::object(Builtins::DataViewBuiltin::createConstructor(objectPrototype_)));
 
     Object* typedArrayProto = Builtins::TypedArrayBuiltin::createTypedArrayPrototype();
     typedArrayProto->setPrototype(objectPrototype_);

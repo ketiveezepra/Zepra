@@ -5,9 +5,14 @@
  * @brief Live DOM wrappers and DOM events for page scripts (see dom_bindings.hpp)
  */
 
+#include <typeinfo>
+#include <cstdlib>
+#include <iostream>
 #include "scripting/dom_bindings.hpp"
 #include "scripting/canvas_bindings.hpp"
+#include "scripting/custom_elements.hpp"
 #include "scripting/mutation_observer.hpp"
+#include "scripting/page_url.hpp"
 #include "css/computed_style_values.hpp"
 #include "css/css_engine.hpp"
 #include "css/css_style_declaration.hpp"
@@ -91,6 +96,9 @@ public:
     Value target = Value::null();
     Value currentTarget = Value::null();
     std::vector<Object*> path;
+    /// event.target as each path entry sees it: a node in a shadow tree is
+    /// retargeted to its host for listeners outside that tree
+    std::vector<Value> pathTargets;
     double timeStamp = 0;
 };
 
@@ -119,14 +127,56 @@ void defineHidden(Object* obj, const std::string& name, Value value) {
     obj->defineProperty(name, desc);
 }
 
+/// [CEReactions]: custom element reactions the call queues run before it
+/// returns (custom_elements.hpp)
+BuiltinFn withReactions(BuiltinFn fn) {
+    return [fn = std::move(fn)](const FunctionCallInfo& info) -> Value {
+        CEReactionsScope scope;
+        Value result;
+        try {
+            result = fn(info);
+        } catch (...) {
+            scope.leave();
+            throw;
+        }
+        scope.leave();
+        return result;
+    };
+}
+
+// DOM methods and attribute setters run custom element reactions on return
 void method(Object* obj, const std::string& name, size_t arity, BuiltinFn fn) {
-    defineHidden(obj, name, Value::object(new Function(name, std::move(fn), arity)));
+    defineHidden(obj, name, Value::object(new Function(name, withReactions(std::move(fn)), arity)));
+}
+
+// An assignment that reaches a DOM accessor through a plain object's
+// prototype chain (`Sub.prototype.async = fn`, where Sub's prototype inherits
+// from HTMLElement.prototype) creates an own data property on that object.
+// Some reflected attributes live higher in our prototype chain than in other
+// browsers (async, open, value, ... on HTMLElement), and libraries such as
+// Polymer assign methods with those names to their class prototypes.
+BuiltinFn shadowingSetter(std::string name, BuiltinFn setter) {
+    return [name, setter = std::move(setter)](const FunctionCallInfo& info) -> Value {
+        Value self = info.thisValue();
+        if (self.isObject() && typeid(*self.asObject()) == typeid(Object)) {
+            PropertyDescriptor own;
+            own.value = info.argument(0);
+            own.attributes = PropertyAttribute::Writable | PropertyAttribute::Enumerable |
+                             PropertyAttribute::Configurable;
+            self.asObject()->defineProperty(name, own);
+            return Value::undefined();
+        }
+        return setter(info);
+    };
 }
 
 void accessor(Object* obj, const std::string& name, BuiltinFn getter, BuiltinFn setter = nullptr) {
     PropertyDescriptor desc;
     desc.getter = Value::object(new Function("get " + name, std::move(getter), 0));
-    if (setter) desc.setter = Value::object(new Function("set " + name, std::move(setter), 1));
+    if (setter) {
+        desc.setter = Value::object(new Function("set " + name,
+            shadowingSetter(name, withReactions(std::move(setter))), 1));
+    }
     desc.attributes = PropertyAttribute::Configurable | PropertyAttribute::Enumerable;
     obj->defineProperty(name, desc);
 }
@@ -192,10 +242,9 @@ EventObject* thisEvent(const FunctionCallInfo& info, const char* name) {
     return e;
 }
 
+// Connected: in the document, or in a shadow tree whose host is
 bool isConnectedTo(const DOMNode* node, const DOMDocument* document) {
-    const DOMNode* root = node;
-    while (root->parentNode()) root = root->parentNode();
-    return document && root == document;
+    return document && shadowIncludingRoot(node) == document;
 }
 
 DOMElement* asElement(DOMNode* node) {
@@ -227,6 +276,17 @@ void collectByTag(const DOMNode& node, const std::string& tag, std::vector<DOMEl
             collectByTag(*e, tag, out);
         }
     }
+}
+
+bool isScriptElement(const DOMNode* node) {
+    return node && node->nodeType() == NodeType::Element &&
+           lower(static_cast<const DOMElement*>(node)->tagName()) == "script";
+}
+
+// The <script> elements of a subtree (`node` included), in tree order
+void collectScripts(DOMNode* node, std::vector<DOMElement*>& out) {
+    if (isScriptElement(node)) out.push_back(static_cast<DOMElement*>(node));
+    for (const auto& c : node->childNodes()) collectScripts(c.get(), out);
 }
 
 std::string textOf(const DOMNode& node) {
@@ -651,6 +711,11 @@ DOMBindings::DOMBindings(VM* vm, ErrorReporter reportError) : vm_(vm), reportErr
     installComputedStyle();
     installMediaQueries();
     installForms();
+    customElements_ = std::make_unique<CustomElements>(*this, vm_);
+    customElements_->install(global_, htmlElementProto_);
+    installShadowDOM();
+    installSVG();
+    installTraversal();
 
     // Bare addEventListener(...) and friends act on the window
     // (the engine's global object is not the window yet)
@@ -664,7 +729,9 @@ DOMBindings::DOMBindings(VM* vm, ErrorReporter reportError) : vm_(vm), reportErr
 }
 
 DOMBindings::~DOMBindings() {
-    // No more records once the page's scripts are gone
+    // No more records or reactions once the page's scripts are gone (the
+    // custom elements sink passes records on to the observers: it goes first)
+    customElements_.reset();
     mutationObservers_.reset();
     // Nodes that outlive the page's script objects must not point at them
     for (NodeWrapper* w : wrappers_) {
@@ -843,8 +910,9 @@ void DOMBindings::installNode() {
     accessor(p, "ownerDocument", on<DOMNode>("ownerDocument", [this](DOMNode& n, const Info&) {
         return n.nodeType() == NodeType::Document ? Value::null() : wrap(n.ownerDocument() ? n.ownerDocument() : document_);
     }));
-    accessor(p, "isConnected", on<DOMNode>("isConnected", [this](DOMNode& n, const Info&) {
-        return Value::boolean(isConnectedTo(&n, document_));
+    accessor(p, "isConnected", on<DOMNode>("isConnected", [](DOMNode& n, const Info&) {
+        // In a document: this page's or one script made
+        return Value::boolean(shadowIncludingRoot(&n)->nodeType() == NodeType::Document);
     }));
 
     method(p, "hasChildNodes", 0, on<DOMNode>("hasChildNodes", [](DOMNode& n, const Info&) {
@@ -858,10 +926,11 @@ void DOMBindings::installNode() {
     method(p, "isSameNode", 1, on<DOMNode>("isSameNode", [this](DOMNode& n, const Info& info) {
         return Value::boolean(nodeArg(info, 0, "isSameNode", true) == &n);
     }));
-    method(p, "getRootNode", 0, on<DOMNode>("getRootNode", [this](DOMNode& n, const Info&) {
-        DOMNode* root = &n;
-        while (root->parentNode()) root = root->parentNode();
-        return wrap(root);
+    method(p, "getRootNode", 0, on<DOMNode>("getRootNode", [this](DOMNode& n, const Info& info) {
+        // A shadow root for nodes in a shadow tree, unless { composed: true }
+        Value options = info.argument(0);
+        bool composed = options.isObject() && vm_->getMember(options, "composed").toBoolean();
+        return wrap(composed ? shadowIncludingRoot(&n) : treeRoot(&n));
     }));
     method(p, "appendChild", 1, on<DOMNode>("appendChild", [this](DOMNode& n, const Info& info) {
         DOMNode* child = nodeArg(info, 0, "appendChild", false);
@@ -898,11 +967,19 @@ void DOMBindings::installNode() {
         if (n.nodeType() == NodeType::Document) {
             throwDOMException("NotSupportedError", "Failed to execute 'cloneNode' on 'Node': Cloning a document is not supported.");
         }
+        if (asShadowRoot(&n)) {
+            throwDOMException("NotSupportedError", "Failed to execute 'cloneNode' on 'Node': ShadowRoot nodes are not clonable.");
+        }
         std::unique_ptr<DOMNode> clone = n.cloneNode(info.argument(0).toBoolean());
         DOMNode* raw = clone.get();
-        NodeWrapper* w = wrapperOf(raw);
-        w->owned = std::move(clone);
-        return Value::object(w);
+        Value result = own(std::move(clone));
+        // Clones of defined custom elements are upgraded (not those cloned
+        // from template contents: those live in an inert document)
+        auto* root = treeRoot(&n);
+        bool inert = root->nodeType() == NodeType::DocumentFragment &&
+                     static_cast<DOMDocumentFragment*>(root)->templateHost();
+        if (!inert) customElements_->enqueueUpgrades(raw);
+        return result;
     }));
     method(p, "toString", 0, on<DOMNode>("toString", [this](DOMNode& n, const Info&) {
         return str("[object " + interfaceName(&n) + "]");
@@ -1009,8 +1086,8 @@ void DOMBindings::installElement() {
 
     accessor(p, "tagName", on<DOMElement>("tagName", [](DOMElement& e, const Info&) { return str(upper(e.tagName())); }));
     accessor(p, "localName", on<DOMElement>("localName", [](DOMElement& e, const Info&) { return str(lower(e.tagName())); }));
-    accessor(p, "namespaceURI", on<DOMElement>("namespaceURI", [](DOMElement&, const Info&) {
-        return str("http://www.w3.org/1999/xhtml");
+    accessor(p, "namespaceURI", on<DOMElement>("namespaceURI", [this](DOMElement& e, const Info&) {
+        return str(svgInterfaceOf(&e) ? "http://www.w3.org/2000/svg" : "http://www.w3.org/1999/xhtml");
     }));
     // Reflected string attributes: element.id = "x" sets id="x"
     auto reflect = [](Object* proto, const char* property, const char* attribute) {
@@ -1068,6 +1145,7 @@ void DOMBindings::installElement() {
         }
         e.setAttribute(name, argString(info, 1));
         if (canvases_) canvases_->attributeChanged(&e, name);
+        scriptAttributeChanged(&e, name);
         return Value::undefined();
     }));
     method(p, "setAttributeNS", 3, on<DOMElement>("setAttributeNS", [this](DOMElement& e, const Info& info) {
@@ -1107,8 +1185,12 @@ void DOMBindings::installElement() {
         on<DOMElement>("innerHTML", [](DOMElement& e, const Info&) { return str(e.innerHTML()); }),
         on<DOMElement>("innerHTML", [this](DOMElement& e, const Info& info) {
             Value v = info.argument(0);
-            removeAllChildren(&e);
-            for (auto& node : parseFragment(v.isNull() ? "" : v.toString(), &e)) e.appendChild(std::move(node));
+            // A template's markup goes to its contents
+            DOMNode* target = &e;
+            if (DOMDocumentFragment* content = e.templateContent()) target = content;
+            removeAllChildren(target);
+            for (auto& node : parseFragment(v.isNull() ? "" : v.toString(), &e)) target->appendChild(std::move(node));
+            scriptChildrenChanged(&e);
             return Value::undefined();
         }));
     accessor(p, "outerHTML",
@@ -1898,30 +1980,77 @@ void DOMBindings::installDocumentInterface() {
     defineHidden(p, "hidden", Value::boolean(false));
     defineHidden(p, "visibilityState", str("visible"));
     defineHidden(p, "doctype", Value::null());
-    defineHidden(p, "currentScript", Value::null());
+    // The <script> whose classic script is running (null in callbacks,
+    // events and module scripts)
+    accessor(p, "currentScript", on<DOMDocument>("currentScript", [this](DOMDocument&, const Info&) {
+        return currentScript_ ? wrap(currentScript_) : Value::null();
+    }));
+    // document.scripts: the <script> elements, in tree order
+    accessor(p, "scripts", on<DOMDocument>("scripts", [this](DOMDocument& d, const Info&) {
+        std::vector<DOMElement*> found;
+        collectByTag(d, "script", found);
+        return elementList(found);
+    }));
 
     method(p, "hasFocus", 0, [](const FunctionCallInfo&) -> Value { return Value::boolean(true); });
     // document.write is not supported (the page is parsed before scripts run)
     for (const char* name : {"write", "writeln", "open", "close"}) {
         method(p, name, 0, [](const FunctionCallInfo&) -> Value { return Value::undefined(); });
     }
-    auto createElement = [this](DOMDocument& d, const std::string& tag) -> Value {
+    auto createElement = [this](DOMDocument& d, const std::string& tag, bool svg) -> Value {
         if (tag.empty()) {
             throwDOMException("InvalidCharacterError", "Failed to execute 'createElement' on 'Document': The tag name provided ('') is not a valid name.");
         }
-        std::unique_ptr<DOMNode> el = d.createElement(lower(tag));
-        DOMNode* raw = el.get();
-        NodeWrapper* w = wrapperOf(raw);
-        w->owned = std::move(el);
-        return Value::object(w);
+        std::string localName = lower(tag);
+        // A defined custom element is made by its class
+        if (!svg) {
+            Value custom = customElements_->create(localName);
+            if (!custom.isUndefined()) return custom;
+        }
+        std::unique_ptr<DOMElement> el = d.createElement(localName);
+        el->setSvgNamespace(svg);
+        // A script a script made is async unless it sets async = false
+        if (isScriptElement(el.get())) el->setScriptForceAsync(true);
+        return own(std::move(el));
     };
     method(p, "createElement", 1, on<DOMDocument>("createElement", [createElement](DOMDocument& d, const Info& info) {
-        return createElement(d, argString(info, 0));
+        return createElement(d, argString(info, 0), false);
     }));
     method(p, "createElementNS", 2, on<DOMDocument>("createElementNS", [createElement](DOMDocument& d, const Info& info) {
         std::string name = argString(info, 1);
         size_t colon = name.find(':');
-        return createElement(d, colon == std::string::npos ? name : name.substr(colon + 1));
+        bool svg = !info.argument(0).isNullOrUndefined() && argString(info, 0) == "http://www.w3.org/2000/svg";
+        return createElement(d, colon == std::string::npos ? name : name.substr(colon + 1), svg);
+    }));
+    // importNode: a copy for this document (its custom elements upgraded);
+    // adoptNode: the node itself, taken out of where it is
+    method(p, "importNode", 1, on<DOMDocument>("importNode", [this](DOMDocument& d, const Info& info) {
+        DOMNode* node = nodeArg(info, 0, "importNode", false);
+        if (node->nodeType() == NodeType::Document || asShadowRoot(node)) {
+            throwDOMException("NotSupportedError", "Failed to execute 'importNode' on 'Document': The node provided is a document or shadow root, which may not be imported.");
+        }
+        std::unique_ptr<DOMNode> clone = node->cloneNode(info.argument(1).toBoolean());
+        std::function<void(DOMNode*)> adoptAll = [&](DOMNode* n) {
+            n->setOwnerDocument(&d);
+            if (DOMElement* el = asElement(n); el && el->existingTemplateContent()) adoptAll(el->existingTemplateContent());
+            for (const auto& c : n->childNodes()) adoptAll(c.get());
+        };
+        adoptAll(clone.get());
+        DOMNode* raw = clone.get();
+        Value result = own(std::move(clone));
+        customElements_->enqueueUpgrades(raw);
+        return result;
+    }));
+    method(p, "adoptNode", 1, on<DOMDocument>("adoptNode", [this](DOMDocument&, const Info& info) {
+        DOMNode* node = nodeArg(info, 0, "adoptNode", false);
+        if (node->nodeType() == NodeType::Document) {
+            throwDOMException("NotSupportedError", "Failed to execute 'adoptNode' on 'Document': The node provided is a document, which may not be adopted.");
+        }
+        if (asShadowRoot(node)) {
+            throwDOMException("HierarchyRequestError", "Failed to execute 'adoptNode' on 'Document': The node provided is a shadow root, which may not be adopted.");
+        }
+        if (DOMNode* parent = node->parentNode()) wrapperOf(node)->owned = parent->removeChild(node);
+        return info.argument(0);
     }));
     auto own = [this](std::unique_ptr<DOMNode> node) -> Value {
         DOMNode* raw = node.get();
@@ -1941,6 +2070,16 @@ void DOMBindings::installDocumentInterface() {
     method(p, "createEvent", 1, on<DOMDocument>("createEvent", [this](DOMDocument&, const Info& info) {
         std::string kind = lower(argString(info, 0));
         Object* proto = kind.rfind("mouse", 0) == 0 ? mouseEventProto_ : eventProto_;
+        // The legacy interface names (createEvent('CustomEvent').initCustomEvent(...))
+        static const std::pair<const char*, const char*> kInterfaces[] = {
+            {"customevent", "CustomEvent"}, {"uievent", "UIEvent"}, {"uievents", "UIEvent"},
+            {"keyboardevent", "KeyboardEvent"}, {"focusevent", "FocusEvent"}, {"inputevent", "InputEvent"}};
+        for (const auto& [legacy, name] : kInterfaces) {
+            if (kind != legacy) continue;
+            Value ctor = vm_->getGlobal(name);
+            Value p = ctor.isObject() ? vm_->getMember(ctor, "prototype") : Value::undefined();
+            if (p.isObject()) proto = p.asObject();
+        }
         EventObject* e = newEvent(proto, "", Value::undefined());
         return Value::object(e);
     }));
@@ -1968,7 +2107,7 @@ void DOMBindings::installDocumentInterface() {
 void DOMBindings::installDocument(DOMDocument* document) {
     document_ = document;
     if (!document_) return;
-    document_->setMutationSink(mutationObservers_.get());
+    document_->setMutationSink(customElements_->sink(mutationObservers_.get()));
     Value doc = wrap(document_);
     // A plain property (cookies are not stored yet)
     doc.asObject()->set("cookie", str(""));
@@ -2150,6 +2289,69 @@ void DOMBindings::installForms() {
         ctor->set("prototype", Value::object(option));
         vm_->setGlobal("Option", Value::object(ctor));
         if (global_) defineHidden(global_, "Option", Value::object(ctor));
+    }
+    // HTMLScriptElement: src reads as an absolute URL; async is true for a
+    // script a script made until it says otherwise ("force async"); text is
+    // the script's source. Setting src or text on a connected script that has
+    // not run yet prepares it.
+    {
+        Object* script = tagInterfaces_["script"].second;
+        accessor(script, "src",
+            on<DOMElement>("src", [this](DOMElement& e, const Info&) {
+                if (!e.hasAttribute("src")) return str("");
+                std::string src = e.getAttribute("src");
+                PageUrl url = PageUrl::resolve(documentUrl(), src);
+                return str(url.valid ? url.href() : src);
+            }),
+            on<DOMElement>("src", [this](DOMElement& e, const Info& info) {
+                e.setAttribute("src", info.argument(0).toString());
+                scriptAttributeChanged(&e, "src");
+                return Value::undefined();
+            }));
+        accessor(script, "async",
+            on<DOMElement>("async", [](DOMElement& e, const Info&) {
+                return Value::boolean(e.scriptForceAsync() || e.hasAttribute("async"));
+            }),
+            on<DOMElement>("async", [](DOMElement& e, const Info& info) {
+                e.setScriptForceAsync(false);
+                if (info.argument(0).toBoolean()) e.setAttribute("async", "");
+                else e.removeAttribute("async");
+                return Value::undefined();
+            }));
+        accessor(script, "text",
+            on<DOMElement>("text", [](DOMElement& e, const Info&) {
+                std::string text;
+                for (const auto& c : e.childNodes()) {
+                    if (c->nodeType() == NodeType::Text) text += c->nodeValue();
+                }
+                return str(text);
+            }),
+            on<DOMElement>("text", [this](DOMElement& e, const Info& info) {
+                setText(&e, info.argument(0).toString());
+                return Value::undefined();
+            }));
+    }
+    // new Image(width, height): an <img> element (YouTube's ytcsi beacon
+    // code threw "Image is not defined")
+    {
+        Object* image = tagInterfaces_["img"].second;
+        auto* ctor = new Function("Image", [this](const FunctionCallInfo& info) -> Value {
+            if (!document_) throw JSError("TypeError", "Illegal constructor: Image");
+            std::unique_ptr<DOMNode> el = document_->createElement("img");
+            auto* e = static_cast<DOMElement*>(el.get());
+            if (info.argumentCount() > 0 && !info.argument(0).isUndefined()) {
+                e->setAttribute("width", std::to_string(unsignedLong(info.argument(0))));
+            }
+            if (info.argumentCount() > 1 && !info.argument(1).isUndefined()) {
+                e->setAttribute("height", std::to_string(unsignedLong(info.argument(1))));
+            }
+            NodeWrapper* w = wrapperOf(e);
+            w->owned = std::move(el);
+            return Value::object(w);
+        }, 0);
+        ctor->set("prototype", Value::object(image));
+        vm_->setGlobal("Image", Value::object(ctor));
+        if (global_) defineHidden(global_, "Image", Value::object(ctor));
     }
 
     // The text selection: selectionStart/End/Direction, select(),
@@ -2596,19 +2798,415 @@ std::vector<std::pair<std::string, std::string>> DOMBindings::computedValues(DOM
 }
 
 // ============================================================================
+// Shadow DOM, <template> contents and <slot>
+// ============================================================================
+
+void DOMBindings::installShadowDOM() {
+    shadowRootProto_ = makeInterface("ShadowRoot", fragmentProto_);
+    Object* p = shadowRootProto_;
+    accessor(p, "host", on<DOMShadowRoot>("host", [this](DOMShadowRoot& r, const Info&) { return wrap(r.host()); }));
+    accessor(p, "mode", on<DOMShadowRoot>("mode", [](DOMShadowRoot& r, const Info&) {
+        return str(r.isOpen() ? "open" : "closed");
+    }));
+    defineHidden(p, "delegatesFocus", Value::boolean(false));
+    defineHidden(p, "slotAssignment", str("named"));
+    defineHidden(p, "clonable", Value::boolean(false));
+    defineHidden(p, "serializable", Value::boolean(false));
+    accessor(p, "innerHTML",
+        on<DOMShadowRoot>("innerHTML", [](DOMShadowRoot& r, const Info&) { return str(serializeChildNodes(&r)); }),
+        on<DOMShadowRoot>("innerHTML", [this](DOMShadowRoot& r, const Info& info) {
+            Value v = info.argument(0);
+            removeAllChildren(&r);
+            for (auto& node : parseFragment(v.isNull() ? "" : v.toString(), r.host())) r.appendChild(std::move(node));
+            return Value::undefined();
+        }));
+    accessor(p, "activeElement", on<DOMShadowRoot>("activeElement", [this](DOMShadowRoot& r, const Info&) {
+        // The focused element retargeted to this tree: itself or a host in it
+        for (DOMNode* n = focusedElement(); n;) {
+            DOMNode* root = treeRoot(n);
+            if (root == &r) return wrap(n);
+            DOMShadowRoot* shadow = asShadowRoot(root);
+            if (!shadow) break;
+            n = shadow->host();
+        }
+        return Value::null();
+    }));
+
+    // Element: attachShadow(), shadowRoot, assignedSlot
+    Object* e = elementProto_;
+    method(e, "attachShadow", 1, on<DOMElement>("attachShadow", [this](DOMElement& el, const Info& info) {
+        static const std::unordered_set<std::string> kHosts = {
+            "article", "aside", "blockquote", "body", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6",
+            "header", "main", "nav", "p", "section", "span"};
+        Value init = info.argument(0);
+        std::string mode = init.isObject() ? vm_->getMember(init, "mode").toString() : "";
+        if (mode != "open" && mode != "closed") {
+            throw JSError("TypeError", "Failed to execute 'attachShadow' on 'Element': The provided value '" + mode +
+                          "' is not a valid enum value of type ShadowRootMode.");
+        }
+        std::string name = lower(el.tagName());
+        if (svgInterfaceOf(&el) || (!kHosts.count(name) && !isValidCustomElementName(name))) {
+            throwDOMException("NotSupportedError", "Failed to execute 'attachShadow' on 'Element': This element does not support attachShadow");
+        }
+        if (el.shadowRoot()) {
+            throwDOMException("NotSupportedError", "Failed to execute 'attachShadow' on 'Element': Shadow root cannot be created on a host which already hosts a shadow tree.");
+        }
+        return wrap(el.attachShadow(mode == "open"));
+    }));
+    accessor(e, "shadowRoot", on<DOMElement>("shadowRoot", [this](DOMElement& el, const Info&) {
+        DOMShadowRoot* shadow = el.shadowRoot();
+        return shadow && shadow->isOpen() ? wrap(shadow) : Value::null();
+    }));
+    auto assignedSlotOf = [this](DOMNode& n, const Info&) {
+        // Only slots of open shadow trees are revealed
+        DOMElement* slot = assignedSlot(&n);
+        DOMShadowRoot* shadow = slot ? asShadowRoot(treeRoot(slot)) : nullptr;
+        return shadow && shadow->isOpen() ? wrap(slot) : Value::null();
+    };
+    accessor(e, "assignedSlot", on<DOMNode>("assignedSlot", assignedSlotOf));
+    accessor(textProto_, "assignedSlot", on<DOMNode>("assignedSlot", assignedSlotOf));
+
+    // HTMLSlotElement
+    Object* slot = tagInterfaces_["slot"].second;
+    auto assigned = [this](DOMElement& s, const Info& info, bool elementsOnly) {
+        Value options = info.argument(0);
+        bool flatten = options.isObject() && vm_->getMember(options, "flatten").toBoolean();
+        std::vector<DOMNode*> nodes = assignedNodes(&s, flatten);
+        if (!flatten && !asShadowRoot(treeRoot(&s))) nodes.clear();
+        if (elementsOnly) {
+            nodes.erase(std::remove_if(nodes.begin(), nodes.end(), [](DOMNode* n) { return !asElement(n); }), nodes.end());
+        }
+        return nodeList(nodes);
+    };
+    method(slot, "assignedNodes", 0, on<DOMElement>("assignedNodes", [assigned](DOMElement& s, const Info& info) {
+        return assigned(s, info, false);
+    }));
+    method(slot, "assignedElements", 0, on<DOMElement>("assignedElements", [assigned](DOMElement& s, const Info& info) {
+        return assigned(s, info, true);
+    }));
+
+    // HTMLTemplateElement.content: the template's own fragment
+    Object* tmpl = tagInterfaces_["template"].second;
+    accessor(tmpl, "content", on<DOMElement>("content", [this](DOMElement& t, const Info&) {
+        return wrap(t.templateContent());
+    }));
+    defineHidden(tmpl, "shadowRootMode", str(""));
+}
+
+// ============================================================================
+// TreeWalker, NodeFilter (DOM §6) and document.implementation
+// ============================================================================
+
+namespace {
+/// A TreeWalker: root and current node held by their wrappers (which
+/// outlive their nodes and know when a node is gone)
+class TreeWalkerObject final : public Object {
+public:
+    Object* root = nullptr;
+    Object* current = nullptr;
+    uint32_t whatToShow = 0xFFFFFFFF;
+    Value filter = Value::null();
+    bool active = false;
+};
+}  // namespace
+
+void DOMBindings::installTraversal() {
+    // Node interfaces no node here ever has, which polyfills patch
+    // (ShadyDOM walks Text, Comment, CDATASection, ProcessingInstruction)
+    makeInterface("CDATASection", textProto_);
+    makeInterface("ProcessingInstruction", characterDataProto_);
+    makeInterface("DocumentType", nodeProto_);
+    makeInterface("Attr", nodeProto_);
+
+    // NodeFilter: constants, and the callback interface's name
+    auto* nodeFilter = new Object();
+    nodeFilter->setPrototype(vm_->intrinsic(VM::Intrinsic::Object));
+    const std::pair<const char*, double> kFilter[] = {
+        {"FILTER_ACCEPT", 1}, {"FILTER_REJECT", 2}, {"FILTER_SKIP", 3}, {"SHOW_ALL", 4294967295.0},
+        {"SHOW_ELEMENT", 0x1}, {"SHOW_ATTRIBUTE", 0x2}, {"SHOW_TEXT", 0x4}, {"SHOW_CDATA_SECTION", 0x8},
+        {"SHOW_PROCESSING_INSTRUCTION", 0x40}, {"SHOW_COMMENT", 0x80}, {"SHOW_DOCUMENT", 0x100},
+        {"SHOW_DOCUMENT_TYPE", 0x200}, {"SHOW_DOCUMENT_FRAGMENT", 0x400}};
+    for (const auto& [name, value] : kFilter) constant(nodeFilter, name, value);
+    vm_->setGlobal("NodeFilter", Value::object(nodeFilter));
+    defineHidden(global_, "NodeFilter", Value::object(nodeFilter));
+
+    Object* proto = makeInterface("TreeWalker", nullptr);
+    auto self = [](const Info& info) {
+        Value t = info.thisValue();
+        auto* w = t.isObject() ? dynamic_cast<TreeWalkerObject*>(t.asObject()) : nullptr;
+        if (!w) illegalInvocation("TreeWalker");
+        return w;
+    };
+    auto nodeOfObj = [](Object* o) { return o ? DOMBindings::nodeOf(o) : nullptr; };
+    // 1 accept, 2 reject, 3 skip
+    auto accept = [this](TreeWalkerObject* w, DOMNode* node) -> int {
+        int type = static_cast<int>(node->nodeType());
+        if (!(w->whatToShow & (1u << (type - 1)))) return 3;
+        if (w->filter.isNullOrUndefined()) return 1;
+        if (w->active) throwDOMException("InvalidStateError", "The TreeWalker's filter is already running.");
+        w->active = true;
+        Value result;
+        try {
+            Value fn = w->filter;
+            Value thisArg = Value::undefined();
+            if (!isFunction(fn)) {
+                thisArg = w->filter;
+                fn = vm_->getMember(w->filter, "acceptNode");
+            }
+            if (!isFunction(fn)) throw JSError("TypeError", "NodeFilter has no acceptNode function");
+            result = vm_->call(static_cast<Function*>(fn.asObject()), thisArg, {wrap(node)});
+        } catch (...) {
+            w->active = false;
+            throw;
+        }
+        w->active = false;
+        return static_cast<int>(result.toNumber());
+    };
+    auto setCurrent = [this](TreeWalkerObject* w, DOMNode* n) {
+        w->current = wrap(n).asObject();
+        return Value::object(w->current);
+    };
+
+    accessor(proto, "root", [self](const Info& info) -> Value {
+        Object* r = self(info)->root;
+        return r ? Value::object(r) : Value::null();
+    });
+    accessor(proto, "whatToShow", [self](const Info& info) -> Value { return Value::number(self(info)->whatToShow); });
+    accessor(proto, "filter", [self](const Info& info) -> Value { return self(info)->filter; });
+    accessor(proto, "currentNode", [self](const Info& info) -> Value {
+        Object* c = self(info)->current;
+        return c ? Value::object(c) : Value::null();
+    }, [this, self](const Info& info) -> Value {
+        TreeWalkerObject* w = self(info);
+        DOMNode* n = nodeArg(info, 0, "currentNode", false);
+        w->current = wrap(n).asObject();
+        return Value::undefined();
+    });
+    method(proto, "parentNode", 0, [self, nodeOfObj, accept, setCurrent](const Info& info) -> Value {
+        TreeWalkerObject* w = self(info);
+        DOMNode* root = nodeOfObj(w->root);
+        DOMNode* node = nodeOfObj(w->current);
+        while (node && node != root) {
+            node = node->parentNode();
+            if (node && accept(w, node) == 1) return setCurrent(w, node);
+        }
+        return Value::null();
+    });
+    auto traverseChildren = [self, nodeOfObj, accept, setCurrent](const Info& info, bool first) -> Value {
+        TreeWalkerObject* w = self(info);
+        DOMNode* root = nodeOfObj(w->root);
+        DOMNode* current = nodeOfObj(w->current);
+        if (!current) return Value::null();
+        DOMNode* node = first ? current->firstChild() : current->lastChild();
+        while (node) {
+            int result = accept(w, node);
+            if (result == 1) return setCurrent(w, node);
+            if (result == 3) {
+                DOMNode* child = first ? node->firstChild() : node->lastChild();
+                if (child) { node = child; continue; }
+            }
+            while (node) {
+                DOMNode* sibling = first ? node->nextSibling() : node->previousSibling();
+                if (sibling) { node = sibling; break; }
+                DOMNode* parent = node->parentNode();
+                if (!parent || parent == root || parent == current) return Value::null();
+                node = parent;
+            }
+        }
+        return Value::null();
+    };
+    method(proto, "firstChild", 0, [traverseChildren](const Info& info) { return traverseChildren(info, true); });
+    method(proto, "lastChild", 0, [traverseChildren](const Info& info) { return traverseChildren(info, false); });
+    auto traverseSiblings = [self, nodeOfObj, accept, setCurrent](const Info& info, bool next) -> Value {
+        TreeWalkerObject* w = self(info);
+        DOMNode* root = nodeOfObj(w->root);
+        DOMNode* node = nodeOfObj(w->current);
+        if (!node || node == root) return Value::null();
+        for (;;) {
+            DOMNode* sibling = next ? node->nextSibling() : node->previousSibling();
+            while (sibling) {
+                node = sibling;
+                int result = accept(w, node);
+                if (result == 1) return setCurrent(w, node);
+                sibling = next ? node->firstChild() : node->lastChild();
+                if (result == 2 || !sibling) sibling = next ? node->nextSibling() : node->previousSibling();
+            }
+            node = node->parentNode();
+            if (!node || node == root) return Value::null();
+            if (accept(w, node) == 1) return Value::null();
+        }
+    };
+    method(proto, "nextSibling", 0, [traverseSiblings](const Info& info) { return traverseSiblings(info, true); });
+    method(proto, "previousSibling", 0, [traverseSiblings](const Info& info) { return traverseSiblings(info, false); });
+    method(proto, "nextNode", 0, [self, nodeOfObj, accept, setCurrent](const Info& info) -> Value {
+        TreeWalkerObject* w = self(info);
+        DOMNode* root = nodeOfObj(w->root);
+        DOMNode* node = nodeOfObj(w->current);
+        if (!node) return Value::null();
+        int result = 1;
+        for (;;) {
+            while (result != 2 && node->firstChild()) {
+                node = node->firstChild();
+                result = accept(w, node);
+                if (result == 1) return setCurrent(w, node);
+            }
+            DOMNode* sibling = nullptr;
+            for (DOMNode* temp = node; temp; temp = temp->parentNode()) {
+                if (temp == root) return Value::null();
+                sibling = temp->nextSibling();
+                if (sibling) break;
+            }
+            if (!sibling) return Value::null();
+            node = sibling;
+            result = accept(w, node);
+            if (result == 1) return setCurrent(w, node);
+        }
+    });
+    method(proto, "previousNode", 0, [self, nodeOfObj, accept, setCurrent](const Info& info) -> Value {
+        TreeWalkerObject* w = self(info);
+        DOMNode* root = nodeOfObj(w->root);
+        DOMNode* node = nodeOfObj(w->current);
+        while (node && node != root) {
+            DOMNode* sibling = node->previousSibling();
+            while (sibling) {
+                node = sibling;
+                int result = accept(w, node);
+                while (result != 2 && node->lastChild()) {
+                    node = node->lastChild();
+                    result = accept(w, node);
+                }
+                if (result == 1) return setCurrent(w, node);
+                sibling = node->previousSibling();
+            }
+            if (node == root || !node->parentNode()) return Value::null();
+            node = node->parentNode();
+            if (accept(w, node) == 1) return setCurrent(w, node);
+        }
+        return Value::null();
+    });
+
+    method(documentProto_, "createTreeWalker", 1, on<DOMDocument>("createTreeWalker", [this, proto](DOMDocument&, const Info& info) {
+        DOMNode* root = nodeArg(info, 0, "createTreeWalker", false);
+        auto* w = new TreeWalkerObject();
+        w->setPrototype(proto);
+        w->root = w->current = wrap(root).asObject();
+        if (!info.argument(1).isUndefined()) w->whatToShow = static_cast<uint32_t>(unsignedLong(info.argument(1)));
+        if (info.argumentCount() > 2) w->filter = info.argument(2);
+        return Value::object(w);
+    }));
+
+    // document.implementation: createHTMLDocument() makes an inert document
+    // (no scripts, no rendering, no custom element upgrades)
+    Object* implProto = makeInterface("DOMImplementation", nullptr);
+    auto* implementation = new Object();
+    implementation->setPrototype(implProto);
+    method(implProto, "createHTMLDocument", 0, [this](const Info& info) -> Value {
+        auto doc = std::make_unique<DOMDocument>();
+        auto html = doc->createElement("html");
+        DOMElement* htmlEl = html.get();
+        doc->appendChild(std::move(html));
+        doc->setDocumentElement(htmlEl);
+        DOMElement* head = static_cast<DOMElement*>(htmlEl->appendChild(doc->createElement("head")));
+        if (!info.argument(0).isUndefined()) {
+            DOMNode* title = head->appendChild(doc->createElement("title"));
+            title->appendChild(doc->createTextNode(argString(info, 0)));
+        }
+        htmlEl->appendChild(doc->createElement("body"));
+        DOMDocument* raw = doc.get();
+        extraDocuments_.push_back(std::move(doc));
+        return wrap(raw);
+    });
+    method(implProto, "hasFeature", 0, [](const Info&) -> Value { return Value::boolean(true); });
+    accessor(documentProto_, "implementation", [implementation](const Info&) -> Value {
+        return Value::object(implementation);
+    });
+}
+
+// ============================================================================
+// SVG element interfaces (so instanceof SVGElement and feature tests work)
+// ============================================================================
+
+void DOMBindings::installSVG() {
+    svgElementProto_ = makeInterface("SVGElement", elementProto_);
+    // HTMLOrSVGElement and ElementCSSInlineStyle members are shared with HTML elements
+    for (const char* name : {"style", "dataset", "tabIndex", "focus", "blur"}) {
+        if (auto desc = htmlElementProto_->getOwnPropertyDescriptor(name)) svgElementProto_->defineProperty(name, *desc);
+    }
+    Object* graphics = makeInterface("SVGGraphicsElement", svgElementProto_);
+    method(graphics, "getBBox", 0, on<DOMElement>("getBBox", [this](DOMElement& el, const Info&) {
+        GeometryRect r = geometryOf(&el).bounds();
+        auto* box = new Object();
+        box->setPrototype(vm_->intrinsic(VM::Intrinsic::Object));
+        box->set("x", Value::number(0));
+        box->set("y", Value::number(0));
+        box->set("width", Value::number(r.width));
+        box->set("height", Value::number(r.height));
+        return Value::object(box);
+    }));
+    Object* geometry = makeInterface("SVGGeometryElement", graphics);
+    method(geometry, "getTotalLength", 0, [](const FunctionCallInfo&) -> Value { return Value::number(0); });
+    Object* gradient = makeInterface("SVGGradientElement", svgElementProto_);
+    Object* textContent = makeInterface("SVGTextContentElement", graphics);
+
+    struct SvgInterface { const char* tag; const char* name; Object* parent; };
+    const SvgInterface kSvg[] = {
+        {"svg", "SVGSVGElement", graphics}, {"g", "SVGGElement", graphics},
+        {"path", "SVGPathElement", geometry}, {"circle", "SVGCircleElement", geometry},
+        {"rect", "SVGRectElement", geometry}, {"ellipse", "SVGEllipseElement", geometry},
+        {"line", "SVGLineElement", geometry}, {"polyline", "SVGPolylineElement", geometry},
+        {"polygon", "SVGPolygonElement", geometry}, {"text", "SVGTextElement", textContent},
+        {"tspan", "SVGTSpanElement", textContent}, {"use", "SVGUseElement", graphics},
+        {"image", "SVGImageElement", graphics}, {"defs", "SVGDefsElement", graphics},
+        {"foreignobject", "SVGForeignObjectElement", graphics}, {"a", "SVGAElement", graphics},
+        {"switch", "SVGSwitchElement", graphics}, {"symbol", "SVGSymbolElement", svgElementProto_},
+        {"lineargradient", "SVGLinearGradientElement", gradient},
+        {"radialgradient", "SVGRadialGradientElement", gradient},
+        {"stop", "SVGStopElement", svgElementProto_}, {"clippath", "SVGClipPathElement", svgElementProto_},
+        {"mask", "SVGMaskElement", svgElementProto_}, {"pattern", "SVGPatternElement", svgElementProto_},
+        {"marker", "SVGMarkerElement", svgElementProto_}, {"filter", "SVGFilterElement", svgElementProto_},
+        {"title", "SVGTitleElement", svgElementProto_}, {"desc", "SVGDescElement", svgElementProto_},
+        {"metadata", "SVGMetadataElement", svgElementProto_}, {"style", "SVGStyleElement", svgElementProto_},
+        {"script", "SVGScriptElement", svgElementProto_},
+    };
+    for (const auto& i : kSvg) svgInterfaces_[i.tag] = {i.name, makeInterface(i.name, i.parent)};
+    svgInterfaces_["*"] = {"SVGElement", svgElementProto_};
+}
+
+const std::pair<std::string, Object*>* DOMBindings::svgInterfaceOf(const DOMElement* element) const {
+    if (svgInterfaces_.empty()) return nullptr;
+    std::string tag = lower(element->tagName());
+    auto found = svgInterfaces_.find(tag);
+    bool svg = element->svgNamespace() || tag == "svg";
+    if (!svg && found != svgInterfaces_.end()) {
+        // Parsed SVG content: an element under <svg> (not inside foreignObject)
+        for (DOMNode* p = element->parentNode(); p && p->nodeType() == NodeType::Element; p = p->parentNode()) {
+            std::string ptag = lower(static_cast<DOMElement*>(p)->tagName());
+            if (ptag == "foreignobject") break;
+            if (ptag == "svg") { svg = true; break; }
+        }
+    }
+    if (!svg) return nullptr;
+    if (found != svgInterfaces_.end()) return &found->second;
+    auto generic = svgInterfaces_.find("*");  // any other SVG element
+    return generic != svgInterfaces_.end() ? &generic->second : nullptr;
+}
+
+// ============================================================================
 // Wrappers and node ownership
 // ============================================================================
 
 Object* DOMBindings::prototypeFor(const DOMNode* node) const {
     switch (node->nodeType()) {
         case NodeType::Element: {
-            auto found = tagInterfaces_.find(lower(static_cast<const DOMElement*>(node)->tagName()));
+            auto* element = static_cast<const DOMElement*>(node);
+            if (const auto* svg = svgInterfaceOf(element)) return svg->second;
+            auto found = tagInterfaces_.find(lower(element->tagName()));
             return found != tagInterfaces_.end() ? found->second.second : htmlElementProto_;
         }
         case NodeType::Text: return textProto_;
         case NodeType::Comment: return commentProto_;
         case NodeType::Document: return htmlDocumentProto_;
-        case NodeType::DocumentFragment: return fragmentProto_;
+        case NodeType::DocumentFragment: return asShadowRoot(node) ? shadowRootProto_ : fragmentProto_;
     }
     return nodeProto_;
 }
@@ -2616,15 +3214,24 @@ Object* DOMBindings::prototypeFor(const DOMNode* node) const {
 std::string DOMBindings::interfaceName(const DOMNode* node) const {
     switch (node->nodeType()) {
         case NodeType::Element: {
-            auto found = tagInterfaces_.find(lower(static_cast<const DOMElement*>(node)->tagName()));
+            auto* element = static_cast<const DOMElement*>(node);
+            if (const auto* svg = svgInterfaceOf(element)) return svg->first;
+            auto found = tagInterfaces_.find(lower(element->tagName()));
             return found != tagInterfaces_.end() ? found->second.first : "HTMLElement";
         }
         case NodeType::Text: return "Text";
         case NodeType::Comment: return "Comment";
         case NodeType::Document: return "HTMLDocument";
-        case NodeType::DocumentFragment: return "DocumentFragment";
+        case NodeType::DocumentFragment: return asShadowRoot(node) ? "ShadowRoot" : "DocumentFragment";
     }
     return "Node";
+}
+
+Value DOMBindings::own(std::unique_ptr<DOMNode> node) {
+    DOMNode* raw = node.get();
+    NodeWrapper* w = wrapperOf(raw);
+    w->owned = std::move(node);
+    return Value::object(w);
 }
 
 Value DOMBindings::wrap(DOMNode* node) {
@@ -2724,13 +3331,53 @@ void DOMBindings::insert(DOMNode* parent, DOMNode* child, DOMNode* before, const
     if (!error.first.empty()) throwDOMException(error.first, error.second);
 
     if (child->nodeType() == NodeType::DocumentFragment) {
-        while (DOMNode* first = child->firstChild()) parent->insertBefore(child->removeChild(first), before);
+        std::vector<DOMNode*> moved;
+        while (DOMNode* first = child->firstChild()) {
+            moved.push_back(first);
+            parent->insertBefore(child->removeChild(first), before);
+        }
+        nodesInserted(parent, moved);
         return;
     }
     if (before == child) before = child->nextSibling();
     std::unique_ptr<DOMNode> owned = take(child);
     if (!owned) throwDOMException("HierarchyRequestError", std::string("Failed to execute '") + method + "' on 'Node': The node cannot be inserted here.");
     parent->insertBefore(std::move(owned), before);
+    nodesInserted(parent, {child});
+}
+
+// After an insertion (the HTML "children changed" and "post-connection"
+// steps): a <script> whose text just arrived, and every <script> the inserted
+// nodes brought into the document, get prepared. This runs once the whole
+// insertion is done, so a script that runs here sees the final tree.
+void DOMBindings::nodesInserted(DOMNode* parent, const std::vector<DOMNode*>& nodes) {
+    if (!scriptHook_) return;
+    if (isScriptElement(parent)) scriptChildrenChanged(parent);
+    if (!isConnectedTo(parent, document_)) return;
+    std::vector<DOMElement*> scripts;
+    for (DOMNode* n : nodes) collectScripts(n, scripts);
+    for (DOMElement* script : scripts) {
+        // An earlier script may have moved a later one out of the document
+        if (isConnectedTo(script, document_)) scriptHook_(script);
+    }
+}
+
+void DOMBindings::scriptChildrenChanged(DOMNode* node) {
+    if (scriptHook_ && isScriptElement(node) && isConnectedTo(node, document_)) {
+        scriptHook_(static_cast<DOMElement*>(node));
+    }
+}
+
+// A src (or async) attribute set on a <script>: one that is connected and has
+// not run yet gets prepared, as setting src on an empty connected script does
+void DOMBindings::scriptAttributeChanged(DOMElement* element, const std::string& name) {
+    if (!isScriptElement(element)) return;
+    if (name == "async") element->setScriptForceAsync(false);
+    if (name == "src") scriptChildrenChanged(element);
+}
+
+std::string DOMBindings::documentUrl() const {
+    return documentUrlSource_ ? documentUrlSource_() : std::string();
 }
 
 // append(), prepend(), before(), after(), replaceWith(): nodes, and strings as text
@@ -2744,6 +3391,7 @@ void DOMBindings::insertNodes(DOMNode* parent, const Info& info, DOMNode* before
         } else {
             if (parent->nodeType() == NodeType::Text || parent->nodeType() == NodeType::Comment) continue;
             parent->insertBefore(std::make_unique<DOMText>(v.toString()), before);
+            scriptChildrenChanged(parent);
         }
     }
 }
@@ -2751,7 +3399,21 @@ void DOMBindings::insertNodes(DOMNode* parent, const Info& info, DOMNode* before
 std::vector<std::unique_ptr<DOMNode>> DOMBindings::parseFragment(const std::string& html, DOMNode* context) {
     DOMElement* el = asElement(context);
     HTMLParser parser;
-    return parser.parseFragmentNodes(html, el ? el->tagName() : "div");
+    std::vector<std::unique_ptr<DOMNode>> nodes = parser.parseFragmentNodes(html, el ? el->tagName() : "div");
+    // Scripts from innerHTML, outerHTML and insertAdjacentHTML never run
+    std::vector<DOMElement*> scripts;
+    for (const auto& n : nodes) collectScripts(n.get(), scripts);
+    for (DOMElement* script : scripts) script->setScriptAlreadyStarted(true);
+    // Parsed custom elements with a definition are upgraded when the DOM
+    // call returns, connected or not; not inside template contents (inert)
+    DOMNode* root = context ? treeRoot(context) : nullptr;
+    bool inert = (el && el->tagName() == "template") ||
+                 (root && root->nodeType() == NodeType::DocumentFragment &&
+                  static_cast<DOMDocumentFragment*>(root)->templateHost());
+    if (customElements_ && !inert) {
+        for (auto& node : nodes) customElements_->enqueueUpgrades(node.get());
+    }
+    return nodes;
 }
 
 void DOMBindings::setText(DOMNode* node, const std::string& text) {
@@ -2769,10 +3431,12 @@ void DOMBindings::setText(DOMNode* node, const std::string& text) {
     const auto& kids = node->childNodes();
     if (kids.size() == 1 && kids[0]->nodeType() == NodeType::Text && !kids[0]->binding() && !text.empty()) {
         if (kids[0]->nodeValue() != text) kids[0]->setNodeValue(text);
+        scriptChildrenChanged(node);
         return;
     }
     removeAllChildren(node);
     if (!text.empty()) node->appendChild(std::make_unique<DOMText>(text));
+    scriptChildrenChanged(node);
 }
 
 Value DOMBindings::nodeList(const std::vector<DOMNode*>& nodes) {
@@ -3059,24 +3723,68 @@ bool DOMBindings::dispatch(Object* target, EventObject* e) {
     e->target = Value::object(target);
 
     // The path: the target, its ancestors that can have listeners (wrapped,
-    // or with an on<type> attribute), and the window above a connected node
+    // or with an on<type> attribute), and the window above a connected node.
+    // A slotted node's parent is its slot; a composed event goes on from a
+    // shadow root to its host (UI events the browser fires are composed).
+    static const std::unordered_set<std::string> kNotComposed = {
+        "load", "error", "abort", "change", "submit", "reset", "scroll", "select", "toggle", "slotchange",
+        "readystatechange", "DOMContentLoaded", "invalid", "cancel", "close"};
+    const bool composed = e->composed || (e->trusted && !kNotComposed.count(e->type));
+    auto eventParent = [composed](DOMNode* n) -> DOMNode* {
+        if (DOMShadowRoot* shadow = asShadowRoot(n)) return composed ? shadow->host() : nullptr;
+        if (DOMElement* slot = assignedSlot(n)) return slot;
+        return n->parentNode();
+    };
     std::vector<Object*> path{target};
+    std::vector<DOMNode*> pathNodes{nullptr};
+    DOMNode* targetNode = nullptr;
     if (auto* w = dynamic_cast<NodeWrapper*>(target); w && w->node) {
+        targetNode = w->node;
+        pathNodes[0] = w->node;
         const std::string attr = "on" + e->type;
         DOMNode* root = w->node;
-        for (DOMNode* p = w->node->parentNode(); p; p = p->parentNode()) {
+        for (DOMNode* p = eventParent(w->node); p; p = eventParent(p)) {
             root = p;
             DOMElement* el = asElement(p);
-            if (p->binding() || (el && el->hasAttribute(attr))) path.push_back(wrap(p).asObject());
+            if (p->binding() || (el && el->hasAttribute(attr))) {
+                path.push_back(wrap(p).asObject());
+                pathNodes.push_back(p);
+            }
         }
-        if (document_ && root == document_ && e->type != "load") path.push_back(global_);
+        if (document_ && root == document_ && e->type != "load") {
+            path.push_back(global_);
+            pathNodes.push_back(document_);
+        }
     }
     e->path = path;
+    // Retargeting (DOM §4.8): only when the target is in a shadow tree
+    e->pathTargets.assign(path.size(), e->target);
+    if (targetNode && asShadowRoot(treeRoot(targetNode))) {
+        auto inclusiveAncestor = [](const DOMNode* ancestor, const DOMNode* node) {
+            for (const DOMNode* n = node; n;) {
+                if (n == ancestor) return true;
+                const DOMShadowRoot* shadow = asShadowRoot(n);
+                n = shadow ? shadow->host() : n->parentNode();
+            }
+            return false;
+        };
+        for (size_t i = 1; i < path.size(); i++) {
+            DOMNode* t = targetNode;
+            while (DOMShadowRoot* shadow = asShadowRoot(treeRoot(t))) {
+                if (inclusiveAncestor(shadow, pathNodes[i])) break;
+                t = shadow->host();
+            }
+            if (t != targetNode) e->pathTargets[i] = wrap(t);
+        }
+    }
 
+    const Value originalTarget = e->target;
     for (size_t i = path.size(); i-- > 1 && !e->stopped;) {
         e->phase = 1;
+        e->target = e->pathTargets[i];
         invokeListeners(path[i], e, true);
     }
+    e->target = originalTarget;
     if (!e->stopped) {
         e->phase = 2;
         invokeListeners(path[0], e, true);
@@ -3085,9 +3793,14 @@ bool DOMBindings::dispatch(Object* target, EventObject* e) {
     if (e->bubbles) {
         for (size_t i = 1; i < path.size() && !e->stopped; i++) {
             e->phase = 3;
+            e->target = e->pathTargets[i];
             invokeListeners(path[i], e, false);
         }
     }
+    // After dispatch the event shows its original target (a node in a
+    // shadow tree is hidden once more only by retargeting above)
+    e->target = originalTarget;
+    e->pathTargets.clear();
 
     e->phase = 0;
     e->currentTarget = Value::null();
@@ -3175,6 +3888,14 @@ void DOMBindings::callHandler(Object* target, EventObject* e, bool) {
 }
 
 void DOMBindings::reportException(const std::exception& ex) {
+    // ZEPRA_JS_STACKS=1: the thrown value's stack on stderr
+    static const bool printStacks = std::getenv("ZEPRA_JS_STACKS") != nullptr;
+    if (printStacks) {
+        if (const auto* thrown = dynamic_cast<const ThrownException*>(&ex); thrown && thrown->value().isObject()) {
+            Value stack = thrown->value().asObject()->get("stack");
+            if (stack.isString()) std::cerr << "[JS stack] " << stack.toString() << std::endl;
+        }
+    }
     if (reportError_) reportError_(std::string("Uncaught ") + ex.what());
 }
 

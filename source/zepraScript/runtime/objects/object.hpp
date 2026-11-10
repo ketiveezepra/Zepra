@@ -7,6 +7,7 @@
 
 #include "config.hpp"
 #include <string>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 #include <optional>
@@ -283,10 +284,28 @@ class String : public Object {
 public:
     String(std::string value);
     
+    // The text in WTF-8 (UTF-8 plus 3-byte lone surrogates; see string_utf16.hpp)
     const std::string& value() const { return value_; }
-    size_t length() const override { return value_.size(); }
+    // Length in UTF-16 code units, as JavaScript sees it
+    size_t length() const override {
+        return isAscii() ? value_.size() : utf16().size();
+    }
     
-    // Character access
+    // ASCII strings index bytes directly; computed once
+    bool isAscii() const {
+        if (ascii_ < 0) ascii_ = asciiText(value_) ? 1 : 0;
+        return ascii_ == 1;
+    }
+    // UTF-16 code units, built on first use and cached (for non-ASCII text)
+    const std::u16string& utf16() const;
+    // Code unit at `index` (< length())
+    char16_t codeUnitAt(size_t index) const {
+        return isAscii() ? static_cast<unsigned char>(value_[index]) : utf16()[index];
+    }
+    // Code units [from, to) as WTF-8 text
+    std::string substringUnits(size_t from, size_t to) const;
+    
+    // Character access (UTF-16 code units)
     Value charAt(size_t index) const;
     int charCodeAt(size_t index) const;
     
@@ -304,7 +323,10 @@ public:
     bool endsWith(const std::string& suffix) const;
     
 private:
+    static bool asciiText(const std::string& text);
     std::string value_;
+    mutable int8_t ascii_ = -1;                       // -1: not computed yet
+    mutable std::unique_ptr<std::u16string> utf16_;   // non-ASCII only
 };
 
 /**
@@ -348,6 +370,21 @@ public:
     
     // Direct element access
     const std::vector<Value>& elements() const { return elements_; }
+
+    // Holes (`Array(3)`, `a.length = 5`): read as undefined like any slot,
+    // but the iteration methods (map, forEach, filter, ...) skip them. A slot
+    // stops being a hole once anything but undefined is stored in it.
+    bool isHole(size_t index) const {
+        return index < holes_.size() && holes_[index] && elements_[index].isUndefined();
+    }
+    void markHoles(size_t from, size_t to) {
+        if (to > elements_.size()) to = elements_.size();
+        if (holes_.size() < to) holes_.resize(to, false);
+        for (size_t i = from; i < to; ++i) holes_[i] = true;
+    }
+
+private:
+    std::vector<bool> holes_;
 };
 
 /**

@@ -197,6 +197,7 @@ public:
      * @brief Construct an object
      */
     Value construct(Function* fn, const std::vector<Value>& args);
+    Value construct(Function* fn, const std::vector<Value>& args, Object* newTarget);
     
     /**
      * @brief Get the current context
@@ -316,6 +317,7 @@ public:
      * link. Null at the end of a chain.
      */
     Object* prototypeOf(Object* object);
+    Object* primitivePrototypeOf(const Value& value) { return primitivePrototype(value); }
 
     /**
      * @brief obj.name as script code reads it: accessors run with `target` as
@@ -324,9 +326,17 @@ public:
      * user-defined properties (an Error subclass's `name`, a custom `length`).
      */
     Value getMember(const Value& target, const std::string& name) { return getProperty(target, name); }
+    void setMember(const Value& target, const std::string& name, const Value& value) { setProperty(target, name, value); }
 
     /** ToPrimitive: objects run valueOf()/toString() (toString first when `preferString`). */
     Value toPrimitiveValue(const Value& value, bool preferString) { return toPrimitive(value, preferString); }
+
+    // new Function(...) / eval: allowed unless the embedder turns them off
+    // (the equivalent of a CSP without 'unsafe-eval')
+    bool codeGenerationFromStringsAllowed() const { return codeGenerationFromStrings_; }
+    void setCodeGenerationFromStringsAllowed(bool allowed) { codeGenerationFromStrings_ = allowed; }
+    // Keeps a chunk compiled at run time alive for the functions it created
+    void retainChunk(std::unique_ptr<Bytecode::BytecodeChunk> chunk);
 
     /**
      * @brief Calls `each` with every value `iterable` yields (arrays, strings,
@@ -444,7 +454,8 @@ private:
     
     // Read helpers
     uint8_t readByte();
-    uint16_t readShort();
+    uint32_t readShort();
+    uint32_t readJumpOffset();
     Value readConstant();
     
     // Local variable access
@@ -492,6 +503,7 @@ private:
 
     // Conversions that may run script (valueOf/toString)
     Value toPrimitive(const Value& value, bool preferString);
+    Value toPrimitiveWithHint(const Value& value, const char* hint);
     void toPrimitiveOperands(Value& a, Value& b);
 
     // Exceptions
@@ -579,6 +591,9 @@ private:
     // Exception handling
     std::vector<ExceptionHandler> exceptionHandlers_;
     Value exceptionValue_;
+    bool codeGenerationFromStrings_ = true;
+    bool wideOperand_ = false;  // set by OP_WIDE for the next instruction's index
+    std::vector<std::unique_ptr<Bytecode::BytecodeChunk>> retainedChunks_;
     bool hasException_ = false;
     size_t runDepth_ = 0;  // Nesting of run(): callbacks and generators run inside builtins
     

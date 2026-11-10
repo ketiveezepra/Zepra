@@ -9,6 +9,8 @@
  */
 
 #include "builtins/reflect.hpp"
+#include "runtime/execution/js_error.hpp"
+#include "runtime/execution/vm.hpp"
 #include <algorithm>
 #include "runtime/objects/object.hpp"
 #include "runtime/objects/function.hpp"
@@ -65,6 +67,15 @@ Runtime::Value ReflectBuiltin::construct(const Runtime::FunctionCallInfo& info) 
         }
     }
 
+    Runtime::Object* newTarget = nullptr;
+    if (info.argumentCount() >= 3) {
+        const Runtime::Value nt = info.argument(2);
+        if (!nt.isObject() || !nt.asObject()->isFunction()) {
+            throw Runtime::JSError("TypeError", "Reflect.construct: newTarget is not a constructor");
+        }
+        newTarget = nt.asObject();
+    }
+    if (Runtime::VM* vm = Runtime::VM::current()) return vm->construct(fn, args, newTarget);
     return fn->construct(info.context(), args);
 }
 

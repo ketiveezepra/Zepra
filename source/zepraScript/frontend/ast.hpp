@@ -162,6 +162,7 @@ public:
     double asNumber() const { return std::get<double>(value_); }
     const std::string& asString() const { return std::get<std::string>(value_); }
     bool asBoolean() const { return std::get<bool>(value_); }
+        void setValue(LiteralValue value) { value_ = std::move(value); }
     
 private:
     LiteralValue value_;
@@ -176,6 +177,8 @@ public:
         : Expression(NodeType::Identifier, loc), name_(std::move(name)) {}
     
     const std::string& name() const { return name_; }
+    // Class private names are resolved once the enclosing class body is parsed
+    void setName(std::string name) { name_ = std::move(name); }
     
 private:
     std::string name_;
@@ -1037,6 +1040,9 @@ public:
         bool computed = false;
         ExprPtr value;
         bool isStatic = false;
+        // `static { ... }`: value is a call of an arrow holding the block, run
+        // in order with the static fields; nothing is defined
+        bool isStaticBlock = false;
     };
 
     ClassDecl(std::string name, ExprPtr superClass,
