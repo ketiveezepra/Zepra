@@ -980,8 +980,10 @@ std::string urlEncode(const std::string& str) {
 std::string normalizeUrl(const std::string& input) {
     std::string url = input;
     
-    // For directories, try index.html first
-    if (!url.empty() && url.back() == '/') {
+    // A file:// directory: its index.html. An http(s) URL ending in '/' is
+    // the server's to answer; requesting "/index.html" instead changed the
+    // document's URL (Next.js then routed /index.html: a 404 page)
+    if (!url.empty() && url.back() == '/' && url.rfind("file://", 0) == 0) {
         // Try with index.html
         std::string indexUrl = url + "index.html";
         auto resp = httpGet(indexUrl);
@@ -2098,6 +2100,7 @@ static LayoutBox* wrapInAnonymousBox(LayoutBox* parent, std::list<LayoutBox>::it
     box.fontSize = parent->fontSize;
     box.lineHeight = parent->lineHeight;
     box.color = parent->color;
+    box.colorAlpha = parent->colorAlpha;
     box.bold = parent->bold;
     box.italic = parent->italic;
     box.fontFamily = parent->fontFamily;
@@ -2256,10 +2259,18 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 box->fontSize = style->fontSize;
                 box->lineHeight = style->usedLineHeight();
                 box->color = cssColorToRGB(style->color);
+                box->colorAlpha = style->color.a;
                 if (style->hasTextFillColor) {
                     // -webkit-text-fill-color paints the glyphs instead of color
                     if (style->textFillColor.a == 0) box->textFillTransparent = true;
                     else box->color = cssColorToRGB(style->textFillColor);
+                    box->colorAlpha = style->textFillColor.a;
+                }
+                if (style->textStrokeWidth > 0) {
+                    const auto& stroke = style->hasTextStrokeColor ? style->textStrokeColor : style->color;
+                    box->textStrokeWidth = style->textStrokeWidth;
+                    box->textStrokeColor = cssColorToRGB(stroke);
+                    box->textStrokeAlpha = stroke.a;
                 }
                 box->fontWeight = static_cast<int>(style->fontWeight);
                 box->fontFamily = style->fontFamily;
@@ -2274,8 +2285,9 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 // belong to (and are painted by) the element's own box
                 // (CSS 2.1 §9.2.2.1).
                 
-                // Opacity
-                box->opacity = style->opacity;
+                // A text run has no opacity of its own: its element's (and
+                // their ancestors') applies when it is painted
+                box->opacity = 1.0f;
                 
                 // Overflow
                 box->overflowHidden = (style->overflowX == OverflowValue::Hidden || 
@@ -2948,6 +2960,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     blockBox->fontSize = childStyle->fontSize;
                     blockBox->lineHeight = childStyle->usedLineHeight();
                     blockBox->color = cssColorToRGB(childStyle->color);
+                    blockBox->colorAlpha = childStyle->color.a;
                     blockBox->fontWeight = static_cast<int>(childStyle->fontWeight);
                     blockBox->fontFamily = childStyle->fontFamily;
                     blockBox->bold = (blockBox->fontWeight >= 600);
@@ -3208,6 +3221,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     inlineBox->fontSize = childStyle->fontSize;
                     inlineBox->lineHeight = childStyle->usedLineHeight();
                     inlineBox->color = cssColorToRGB(childStyle->color);
+                    inlineBox->colorAlpha = childStyle->color.a;
                     inlineBox->fontWeight = static_cast<int>(childStyle->fontWeight);
                     inlineBox->fontFamily = childStyle->fontFamily;
                     inlineBox->bold = (inlineBox->fontWeight >= 600);
@@ -3592,9 +3606,25 @@ static nxfont::Font* fontFor(float size, const LayoutBox* style) {
     return fonts.getFontFor(style->fontFamily, weight, style->italic, (int)size);
 }
 
+// Text in colour `c`. With a page box (`style`), the fill takes the colour's
+// own alpha (rgba(), transparent) times the opacity of the box and its
+// ancestors, and a -webkit-text-stroke outline is drawn over it.
 void text(const std::string& str, float x, float y, uint32_t c, float size = 14.0f, const LayoutBox* style = nullptr) {
     auto* font = fontFor(size, style);
-    if (font) font->drawText(str, x, y, R(c), G(c), B(c), style ? style->letterSpacing : 0, style ? style->wordSpacing : 0);
+    if (!font) return;
+    const float letter = style ? style->letterSpacing : 0, word = style ? style->wordSpacing : 0;
+    if (!style) {
+        font->drawText(str, x, y, R(c), G(c), B(c), letter, word);
+        return;
+    }
+    const float opacity = std::clamp(style->paintOpacity, 0.0f, 1.0f);
+    const uint8_t fillAlpha = (uint8_t)std::lround(style->colorAlpha * opacity);
+    if (fillAlpha > 0) font->drawText(str, x, y, R(c), G(c), B(c), letter, word, fillAlpha);
+    if (style->textStrokeWidth > 0) {
+        const uint32_t sc = style->textStrokeColor;
+        const uint8_t strokeAlpha = (uint8_t)std::lround(style->textStrokeAlpha * opacity);
+        font->drawTextStroke(str, x, y, R(sc), G(sc), B(sc), strokeAlpha, style->textStrokeWidth, letter, word);
+    }
 }
 
 float textWidth(const std::string& str, float size = 14.0f, const LayoutBox* style = nullptr) {

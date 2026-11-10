@@ -2277,6 +2277,9 @@ struct PaintFrame {
     std::vector<ClipRect> scrollports;        // innermost last; empty: the viewport
     int count = 0;
     int depth = 0;
+    // The product of the opacity of the boxes being painted (no layer
+    // compositing yet: each box's own paint is scaled by it)
+    float opacity = 1.0f;
 };
 thread_local PaintFrame t_frame;
 
@@ -2581,6 +2584,7 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
     t_frame.scrollports.clear();
     t_frame.count = 0;
     t_frame.depth = 0;
+    t_frame.opacity = 1.0f;
     paintBoxImpl(box, offsetX, offsetY, viewportHeight, scrollY);
     t_frame.active = false;
     t_frame.root = nullptr;
@@ -2595,6 +2599,15 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     
     if (box.type == LayoutType::None) return;
     if (box.opacity <= 0.001f) return;
+    // Opacity applies to the box and everything inside it (CSS Color 4 §3.2):
+    // its own paint and its descendants' are scaled by the running product
+    box.paintOpacity = t_frame.opacity * std::clamp(box.opacity, 0.0f, 1.0f);
+    if (box.paintOpacity <= 0.001f) return;
+    struct OpacityGuard {
+        float saved;
+        ~OpacityGuard() { t_frame.opacity = saved; }
+    } og{t_frame.opacity};
+    t_frame.opacity = box.paintOpacity;
     if (box.visibilityHidden) {
         // visibility:hidden — skip painting this box but still paint children
         // (children inherit visibility but can override to visible)
@@ -2635,7 +2648,7 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     }
     
     // The background colour's own alpha (rgba(), #rrggbbaa) times opacity
-    uint8_t alpha = (uint8_t)std::lround(box.bgAlpha * std::clamp(box.opacity, 0.0f, 1.0f));
+    uint8_t alpha = (uint8_t)std::lround(box.bgAlpha * box.paintOpacity);
     
     // Outer shadows under everything the box paints (CSS Backgrounds 3 §7.1)
     paintShadows(box, screenX, screenY, false);

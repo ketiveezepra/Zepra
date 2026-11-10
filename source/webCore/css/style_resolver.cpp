@@ -138,7 +138,8 @@ static const std::unordered_set<std::string> INHERITED_PROPERTIES = {
     "color", "font", "font-family", "font-size", "font-style", 
     "font-weight", "font-variant", "line-height", "letter-spacing",
     "word-spacing", "text-align", "text-indent", "text-transform",
-    "white-space", "direction", "-webkit-text-fill-color",
+    "white-space", "direction", "-webkit-text-fill-color", "-webkit-text-stroke",
+    "-webkit-text-stroke-width", "-webkit-text-stroke-color",
     // Lists
     "list-style", "list-style-image", "list-style-position", "list-style-type",
     // Other
@@ -1223,6 +1224,39 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         std::transform(v.begin(), v.end(), v.begin(), ::tolower);
         style.hasTextFillColor = v != "currentcolor";
         if (style.hasTextFillColor) style.textFillColor = CSSColor::parse(v);
+    }
+    else if (property == "-webkit-text-stroke-width" || property == "-webkit-text-stroke-color" ||
+             property == "-webkit-text-stroke") {
+        // <line-width> || <color> (Compatibility §7.2); thin/medium/thick
+        // are 1/3/5px
+        auto applyWidth = [&](const std::string& token) {
+            std::string t = token;
+            std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+            if (t == "thin") { style.textStrokeWidth = 1; return true; }
+            if (t == "medium") { style.textStrokeWidth = 3; return true; }
+            if (t == "thick") { style.textStrokeWidth = 5; return true; }
+            if (t.empty() || !(std::isdigit((unsigned char)t[0]) || t[0] == '.')) return false;
+            CSSLength len = parseLength(t);
+            if (len.isAuto()) return false;
+            style.textStrokeWidth = std::max(0.0f, len.toPx(style.fontSize, 16.0f, lengthContext_.viewportWidth,
+                                                            lengthContext_.viewportHeight, 0));
+            return true;
+        };
+        auto applyColor = [&](const std::string& token) {
+            std::string t = token;
+            std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+            style.hasTextStrokeColor = t != "currentcolor";
+            if (style.hasTextStrokeColor) style.textStrokeColor = CSSColor::parse(t);
+        };
+        if (property == "-webkit-text-stroke-width") applyWidth(value);
+        else if (property == "-webkit-text-stroke-color") applyColor(value);
+        else {
+            style.textStrokeWidth = 0;
+            style.hasTextStrokeColor = false;
+            for (const auto& part : splitValues(value)) {
+                if (!applyWidth(part)) applyColor(part);
+            }
+        }
     }
     else if (property == "transform") { style.transform = value; }
     else if (property == "transition") { style.transition = value; }

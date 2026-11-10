@@ -21,6 +21,8 @@
 #include FT_TRUETYPE_TABLES_H
 #include FT_TRUETYPE_TAGS_H
 #include FT_OUTLINE_H
+#include FT_GLYPH_H
+#include FT_STROKER_H
 
 #include "rendering/font_manager.hpp"
 
@@ -114,6 +116,10 @@ public:
             }
         }
         glyphs_.clear();
+        for (auto& pair : strokeGlyphs_) {
+            if (pair.second.textureId) glDeleteTextures(1, &pair.second.textureId);
+        }
+        strokeGlyphs_.clear();
         
         for (FT_Face face : fallbacks_) FT_Done_Face(face);
         fallbacks_.clear();
@@ -129,8 +135,9 @@ public:
     // Returns width of rendered text
     /// `letterSpacing` is added after every character, `wordSpacing` after
     /// every space (CSS Text 3 §8)
+    /// `alpha` scales the glyphs' coverage (a colour's alpha times opacity)
     float drawText(const std::string& text, float x, float y, uint8_t red, uint8_t green, uint8_t blue,
-                   float letterSpacing = 0, float wordSpacing = 0) {
+                   float letterSpacing = 0, float wordSpacing = 0, uint8_t alpha = 255) {
         if (!face_) return 0;
         
         // Save OpenGL state
@@ -158,8 +165,8 @@ public:
                 float h = (float)glyph.height * glyph.scale;
                 
                 glBindTexture(GL_TEXTURE_2D, glyph.textureId);
-                if (glyph.color) glColor4ub(255, 255, 255, 255);
-                else glColor4ub(red, green, blue, 255);
+                if (glyph.color) glColor4ub(255, 255, 255, alpha);
+                else glColor4ub(red, green, blue, alpha);
                 
                 // Render textured quad
                 glBegin(GL_QUADS);
@@ -189,6 +196,42 @@ public:
         return x - startX;
     }
     
+    /// The outline of `text`'s glyphs, `strokeWidth` px wide and centred on
+    /// the glyph edges (-webkit-text-stroke), drawn with FreeType's stroker.
+    /// Advances are the plain glyphs', so it lines up with drawText.
+    void drawTextStroke(const std::string& text, float x, float y, uint8_t red, uint8_t green, uint8_t blue,
+                        uint8_t alpha, float strokeWidth, float letterSpacing = 0, float wordSpacing = 0) {
+        if (!face_ || strokeWidth <= 0 || alpha == 0) return;
+        GLboolean texEnabled, blendEnabled;
+        glGetBooleanv(GL_TEXTURE_2D, &texEnabled);
+        glGetBooleanv(GL_BLEND, &blendEnabled);
+        glEnable(GL_TEXTURE_2D);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        for (size_t i = 0; i < text.size();) {
+            uint32_t c = nextCodepoint(text, i);
+            if (c == ' ') { x += spaceAdvance() + letterSpacing + wordSpacing; continue; }
+            const Glyph* plain = glyphFor(c);
+            if (!plain) continue;
+            const Glyph* outline = strokeGlyphFor(c, strokeWidth);
+            if (outline && outline->textureId) {
+                float xpos = x + outline->bearingX, ypos = y - outline->bearingY;
+                glBindTexture(GL_TEXTURE_2D, outline->textureId);
+                glColor4ub(red, green, blue, alpha);
+                glBegin(GL_QUADS);
+                glTexCoord2f(0, 0); glVertex2f(xpos, ypos);
+                glTexCoord2f(1, 0); glVertex2f(xpos + outline->width, ypos);
+                glTexCoord2f(1, 1); glVertex2f(xpos + outline->width, ypos + outline->height);
+                glTexCoord2f(0, 1); glVertex2f(xpos, ypos + outline->height);
+                glEnd();
+            }
+            x += plain->advance + letterSpacing;
+        }
+        glBindTexture(GL_TEXTURE_2D, 0);
+        if (!texEnabled) glDisable(GL_TEXTURE_2D);
+        if (!blendEnabled) glDisable(GL_BLEND);
+    }
+
     /// Calls `f(glyph)` for each glyph of `text` in order (nullptr for a space),
     /// emoji sequences shaped into their ligatures
     template <typename F>
@@ -692,6 +735,53 @@ private:
     int size_;
     std::string path_;
     std::unordered_map<uint32_t, Glyph> glyphs_;
+    std::unordered_map<uint64_t, Glyph> strokeGlyphs_;  // (codepoint, width in 1/4 px)
+
+    /// The stroked outline of one glyph as a coverage texture
+    const Glyph* strokeGlyphFor(uint32_t c, float strokeWidth) {
+        const uint32_t quarterPx = static_cast<uint32_t>(std::lround(std::min(strokeWidth, 64.0f) * 4));
+        const uint64_t key = (static_cast<uint64_t>(c) << 16) | quarterPx;
+        auto it = strokeGlyphs_.find(key);
+        if (it != strokeGlyphs_.end()) return &it->second;
+        Glyph& glyph = strokeGlyphs_[key];
+        FT_Face face = faceWith(c);
+        if (!face || FT_Load_Char(face, c, FT_LOAD_DEFAULT | FT_LOAD_NO_BITMAP)) return &glyph;
+        if (face->glyph->format != FT_GLYPH_FORMAT_OUTLINE) return &glyph;
+        FT_Glyph ftGlyph = nullptr;
+        if (FT_Get_Glyph(face->glyph, &ftGlyph)) return &glyph;
+        FT_Stroker stroker = nullptr;
+        if (FT_Stroker_New(ft_, &stroker) == 0) {
+            FT_Stroker_Set(stroker, static_cast<FT_Fixed>(quarterPx * 8),  // radius: half the width, 26.6
+                           FT_STROKER_LINECAP_ROUND, FT_STROKER_LINEJOIN_ROUND, 0);
+            if (FT_Glyph_Stroke(&ftGlyph, stroker, 1) == 0 &&
+                FT_Glyph_To_Bitmap(&ftGlyph, FT_RENDER_MODE_NORMAL, nullptr, 1) == 0) {
+                auto* bitmapGlyph = reinterpret_cast<FT_BitmapGlyph>(ftGlyph);
+                const FT_Bitmap& bitmap = bitmapGlyph->bitmap;
+                glyph.width = bitmap.width;
+                glyph.height = bitmap.rows;
+                glyph.bearingX = bitmapGlyph->left;
+                glyph.bearingY = bitmapGlyph->top;
+                if (glyph.width > 0 && glyph.height > 0 && bitmap.buffer) {
+                    std::vector<uint8_t> rgba(static_cast<size_t>(glyph.width) * glyph.height * 4, 255);
+                    for (int row = 0; row < glyph.height; row++)
+                        for (int col = 0; col < glyph.width; col++)
+                            rgba[(static_cast<size_t>(row) * glyph.width + col) * 4 + 3] = bitmap.buffer[row * bitmap.pitch + col];
+                    glGenTextures(1, &glyph.textureId);
+                    glBindTexture(GL_TEXTURE_2D, glyph.textureId);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, glyph.width, glyph.height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                                 rgba.data());
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                }
+            }
+            FT_Stroker_Done(stroker);
+        }
+        FT_Done_Glyph(ftGlyph);
+        return &glyph;
+    }
     std::vector<FT_Face> fallbacks_;
     bool fallbacksLoaded_ = false;
     FT_Face emojiFace_ = nullptr;

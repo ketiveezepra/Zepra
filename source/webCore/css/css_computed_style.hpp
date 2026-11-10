@@ -407,6 +407,11 @@ public:
     // -webkit-text-fill-color (inherited); without one, text fills with color
     bool hasTextFillColor = false;
     CSSColor textFillColor;
+    // -webkit-text-stroke (inherited): width in px (0 = none) and colour
+    // (currentcolor when hasTextStrokeColor is false)
+    float textStrokeWidth = 0;
+    bool hasTextStrokeColor = false;
+    CSSColor textStrokeColor;
     float letterSpacing = 0;
     float wordSpacing = 0;
     std::string whiteSpace = "normal";

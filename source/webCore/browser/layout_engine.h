@@ -189,6 +189,13 @@ struct LayoutBox {
     // Text (runs): -webkit-text-fill-color is transparent, so the glyphs show
     // the background of an enclosing background-clip: text box
     bool textFillTransparent = false;
+    uint8_t colorAlpha = 255;        // the text colour's own alpha (rgba(), transparent)
+    float textStrokeWidth = 0;       // -webkit-text-stroke (0: none)
+    uint32_t textStrokeColor = 0;
+    uint8_t textStrokeAlpha = 255;
+    // Set while painting: the product of this box's and its ancestors'
+    // opacity, which its text is drawn with (no layer compositing yet)
+    mutable float paintOpacity = 1.0f;
     // box-shadow (CSS text; drawn by setShadowPaintCallback)
     std::string boxShadow;
 
