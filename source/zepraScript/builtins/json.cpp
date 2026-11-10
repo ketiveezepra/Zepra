@@ -233,7 +233,9 @@ private:
     Runtime::Value parseObject() {
         advance(); // Skip {
         
+        // An ordinary object (ES2024 §25.5.1: OrdinaryObjectCreate(%Object.prototype%))
         Runtime::Object* obj = new Runtime::Object();
+        if (Runtime::VM* vm = Runtime::VM::current()) obj->setPrototype(vm->intrinsic(Runtime::VM::Intrinsic::Object));
         
         if (current_.type == JsonTokenType::RightBrace) {
             advance();

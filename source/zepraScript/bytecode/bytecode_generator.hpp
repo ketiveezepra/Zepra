@@ -202,6 +202,7 @@ private:
     void compileAssignmentExpression(const Frontend::AssignmentExpr* expr);
     void compileMemberExpression(const Frontend::MemberExpr* expr);
     void compileCallExpression(const Frontend::CallExpr* expr);
+    void compileChainExpression(const Frontend::Expression* expr, bool continuation);
     void compileNewExpression(const Frontend::NewExpr* expr);
     void compileFunctionExpression(const Frontend::FunctionExpr* expr);
     void compileArrowFunction(const Frontend::ArrowFunctionExpr* expr);
@@ -326,6 +327,10 @@ private:
     CompilerState* current_ = nullptr;
     std::vector<std::string> errors_;
     uint32_t currentLine_ = 0;
+    // The optional chain being compiled: its ?. links' nil jumps and how
+    // many values each leaves on the stack (null outside a chain)
+    std::vector<std::pair<size_t, int>>* chainNilJumps_ = nullptr;
+    bool chainContinuation_ = false;
     uint32_t lineOffset_ = 0;                        // firstLine - 1
     std::shared_ptr<const std::string> sourceName_;
 

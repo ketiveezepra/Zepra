@@ -11,6 +11,7 @@
 #include "scripting/script_context.hpp"
 #include "scripting/canvas_bindings.hpp"
 #include "scripting/dom_bindings.hpp"
+#include "scripting/web_api_scripts.hpp"
 #include "scripting/web_storage.hpp"
 #include <iostream>
 #include <algorithm>
@@ -945,22 +946,9 @@ void ScriptContext::setupWindowGlobals() {
     windowObj->set("self", Value::object(windowObj));
     windowObj->set("globalThis", Value::object(windowObj));
     
-    // Next.js hydration: framework scripts push data chunks via self.__next_f.push(...)
-    // Initialize as empty array so the push calls succeed.
-    auto* nextFArray = new Object();
-    nextFArray->set("length", Value::number(0));
-    auto* pushFn = createNativeFunction("push",
-        [nextFArray](Context*, const std::vector<Value>& args) -> Value {
-            double len = nextFArray->get("length").toNumber();
-            for (size_t i = 0; i < args.size(); i++) {
-                nextFArray->set(static_cast<size_t>(len + i), args[i]);
-            }
-            len += args.size();
-            nextFArray->set("length", Value::number(len));
-            return Value::number(len);
-        }, 1);
-    nextFArray->set("push", Value::object(pushFn));
-    windowObj->set("__next_f", Value::object(nextFArray));
+    // No self.__next_f here: Next.js's inline scripts create it themselves
+    // ("(self.__next_f=self.__next_f||[]).push(...)"), and its Flight client
+    // needs a real Array (it calls forEach and replaces push)
     
     vm_->setGlobal("window", Value::object(windowObj));
     vm_->setGlobal("self", Value::object(windowObj));
@@ -1795,6 +1783,11 @@ void ScriptContext::installWebTaskApis(Zepra::Runtime::Object* windowObj) {
     ScriptResult result = evaluate(kWebTaskApis, "<zepra-web-apis>");
     if (!result.success) {
         std::cerr << "[ScriptContext] web task APIs failed to install: " << result.error << std::endl;
+    }
+    // URL, URLSearchParams and ReadableStream (Next.js hydrates through them)
+    ScriptResult streams = evaluate(webApiScripts(), "<zepra-web-api-scripts>");
+    if (!streams.success) {
+        std::cerr << "[ScriptContext] URL/stream APIs failed to install: " << streams.error << std::endl;
     }
 }
 

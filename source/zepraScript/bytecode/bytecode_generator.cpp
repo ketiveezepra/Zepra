@@ -608,6 +608,10 @@ void BytecodeGenerator::compileStatementList(const std::vector<Frontend::StmtPtr
                 for (const auto& declarator : decl->declarators()) {
                     collectPatternNames(declarator.id.get(), lexicalNames);
                 }
+            } else if (s->type() == Frontend::NodeType::ClassDeclaration) {
+                // Classes too: Turbopack's export getters (`get: () => i`)
+                // come before `class i extends Error {}`
+                lexicalNames.push_back(static_cast<const Frontend::ClassDecl*>(s.get())->name());
             }
         }
         for (const auto& name : lexicalNames) reserveLexicalSlot(name);
@@ -1740,6 +1744,10 @@ void BytecodeGenerator::compileExpression(const Frontend::Expression* expr) {
     }
 
     currentLine_ = expr->location().line;
+    // Set by a member or call compiling its object/callee: this expression
+    // continues that optional chain (only the very next expression does)
+    const bool chainContinuation = chainContinuation_;
+    chainContinuation_ = false;
 
     switch (expr->type()) {
         case Frontend::NodeType::Literal:
@@ -1761,10 +1769,8 @@ void BytecodeGenerator::compileExpression(const Frontend::Expression* expr) {
             compileAssignmentExpression(static_cast<const Frontend::AssignmentExpr*>(expr));
             break;
         case Frontend::NodeType::CallExpression:
-            compileCallExpression(static_cast<const Frontend::CallExpr*>(expr));
-            break;
         case Frontend::NodeType::MemberExpression:
-            compileMemberExpression(static_cast<const Frontend::MemberExpr*>(expr));
+            compileChainExpression(expr, chainContinuation);
             break;
         case Frontend::NodeType::ArrayExpression:
             compileArrayExpression(static_cast<const Frontend::ArrayExpr*>(expr));
@@ -2209,6 +2215,64 @@ void BytecodeGenerator::emitArgumentArray(const std::vector<Frontend::ExprPtr>& 
     }
 }
 
+// Whether a member/call chain has a ?. link anywhere along its objects and callees
+static bool chainHasOptionalLink(const Frontend::Expression* expr) {
+    while (expr) {
+        if (expr->type() == Frontend::NodeType::MemberExpression) {
+            const auto* member = static_cast<const Frontend::MemberExpr*>(expr);
+            if (member->isOptional()) return true;
+            expr = member->object();
+        } else if (expr->type() == Frontend::NodeType::CallExpression) {
+            const auto* call = static_cast<const Frontend::CallExpr*>(expr);
+            if (call->isOptional()) return true;
+            expr = call->callee();
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
+
+// An optional chain short-circuits as a whole (ES2024 §13.3.9): a nullish
+// value at any ?. link makes the entire chain undefined, so a?.b.c[0]()
+// never reads .c. The outermost member/call of a chain collects the links'
+// nil jumps (with how many values each leaves on the stack) and lands them
+// all on one `undefined`.
+void BytecodeGenerator::compileChainExpression(const Frontend::Expression* expr, bool continuation) {
+    auto dispatch = [&]() {
+        if (expr->type() == Frontend::NodeType::CallExpression)
+            compileCallExpression(static_cast<const Frontend::CallExpr*>(expr));
+        else
+            compileMemberExpression(static_cast<const Frontend::MemberExpr*>(expr));
+    };
+    if (continuation && chainNilJumps_) {
+        dispatch();
+        return;
+    }
+    std::vector<std::pair<size_t, int>>* saved = chainNilJumps_;
+    if (!chainHasOptionalLink(expr)) {
+        chainNilJumps_ = nullptr;
+        dispatch();
+        chainNilJumps_ = saved;
+        return;
+    }
+    std::vector<std::pair<size_t, int>> links;
+    chainNilJumps_ = &links;
+    dispatch();
+    chainNilJumps_ = saved;
+    if (links.empty()) return;
+    size_t done = emitJump(Opcode::OP_JUMP);
+    std::vector<size_t> toUndefined;
+    for (const auto& [jump, depth] : links) {
+        patchJump(jump);
+        for (int i = 0; i < depth; i++) emit(Opcode::OP_POP);
+        toUndefined.push_back(emitJump(Opcode::OP_JUMP));
+    }
+    for (size_t jump : toUndefined) patchJump(jump);
+    emitConstant(Runtime::Value::undefined());
+    patchJump(done);
+}
+
 void BytecodeGenerator::compileCallExpression(const Frontend::CallExpr* expr) {
     const Frontend::Expression* callee = expr->callee();
     const auto& args = expr->arguments();
@@ -2240,6 +2304,7 @@ void BytecodeGenerator::compileCallExpression(const Frontend::CallExpr* expr) {
         const auto* member = static_cast<const Frontend::MemberExpr*>(callee);
 
         if (!member->isComputed() && !member->isOptional() && !expr->isOptional() && !spread) {
+            chainContinuation_ = chainNilJumps_ != nullptr;
             compileExpression(member->object());
             for (const auto& arg : args) compileExpression(arg.get());
             emitIndexed(Opcode::OP_CALL_METHOD, nameConstant(
@@ -2250,11 +2315,16 @@ void BytecodeGenerator::compileCallExpression(const Frontend::CallExpr* expr) {
 
         // General method call: look the function up, keeping the object as
         // the receiver. a?.b() and a.b?.() give undefined on a nullish link.
+        chainContinuation_ = chainNilJumps_ != nullptr;
         compileExpression(member->object());               // [obj]
         size_t objectNil = SIZE_MAX;
         if (member->isOptional()) {
             emit(Opcode::OP_DUP);
             objectNil = emitJump(Opcode::OP_JUMP_IF_NIL);  // [obj, obj]
+            if (chainNilJumps_) {
+                chainNilJumps_->push_back({objectNil, 2});  // the chain's end makes it undefined
+                objectNil = SIZE_MAX;
+            }
             emit(Opcode::OP_POP);
         }
         emit(Opcode::OP_DUP);
@@ -2269,6 +2339,10 @@ void BytecodeGenerator::compileCallExpression(const Frontend::CallExpr* expr) {
         if (expr->isOptional()) {
             emit(Opcode::OP_DUP);
             functionNil = emitJump(Opcode::OP_JUMP_IF_NIL); // [obj, fn, fn]
+            if (chainNilJumps_) {
+                chainNilJumps_->push_back({functionNil, 3});
+                functionNil = SIZE_MAX;
+            }
             emit(Opcode::OP_POP);
         }
         if (spread) {
@@ -2304,11 +2378,16 @@ void BytecodeGenerator::compileCallExpression(const Frontend::CallExpr* expr) {
     // Plain call: no receiver
     if (spread) {
         emitConstant(Runtime::Value::undefined());
+        chainContinuation_ = chainNilJumps_ != nullptr;
         compileExpression(callee);
         size_t functionNil = SIZE_MAX;
         if (expr->isOptional()) {
             emit(Opcode::OP_DUP);
             functionNil = emitJump(Opcode::OP_JUMP_IF_NIL);
+            if (chainNilJumps_) {
+                chainNilJumps_->push_back({functionNil, 3});
+                functionNil = SIZE_MAX;
+            }
             emit(Opcode::OP_POP);
         }
         emitArgumentArray(args);
@@ -2325,11 +2404,16 @@ void BytecodeGenerator::compileCallExpression(const Frontend::CallExpr* expr) {
         return;
     }
 
+    chainContinuation_ = chainNilJumps_ != nullptr;
     compileExpression(callee);
     size_t functionNil = SIZE_MAX;
     if (expr->isOptional()) {
         emit(Opcode::OP_DUP);
         functionNil = emitJump(Opcode::OP_JUMP_IF_NIL);
+        if (chainNilJumps_) {
+            chainNilJumps_->push_back({functionNil, 2});
+            functionNil = SIZE_MAX;
+        }
         emit(Opcode::OP_POP);
     }
     for (const auto& arg : args) compileExpression(arg.get());
@@ -2350,6 +2434,7 @@ void BytecodeGenerator::compileMemberExpression(const Frontend::MemberExpr* expr
         emitSuperProperty(expr);
         return;
     }
+    chainContinuation_ = chainNilJumps_ != nullptr;
     compileExpression(expr->object());
 
     auto emitAccess = [&]() {
@@ -2367,7 +2452,12 @@ void BytecodeGenerator::compileMemberExpression(const Frontend::MemberExpr* expr
         return;
     }
 
-    // obj?.prop: undefined when obj is null or undefined
+    // obj?.prop: undefined when obj is null or undefined (the whole chain is)
+    if (chainNilJumps_) {
+        chainNilJumps_->push_back({emitJump(Opcode::OP_JUMP_IF_NIL), 1});
+        emitAccess();
+        return;
+    }
     size_t nilJump = emitJump(Opcode::OP_JUMP_IF_NIL);
     emitAccess();
     size_t doneJump = emitJump(Opcode::OP_JUMP);

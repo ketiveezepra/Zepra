@@ -1690,7 +1690,8 @@ ExprPtr Parser::parseObjectLiteral() {
 ExprPtr Parser::parseFunctionExpression(bool isAsync) {
     const bool isGenerator = match(TokenType::Star);  // function*
     std::string name;
-    if (check(TokenType::Identifier)) {
+    // A contextual keyword is an ordinary name here: function from(t) {}
+    if (check(TokenType::Identifier) || isContextualKeyword(currentToken_.type)) {
         name = advance().value;
     }
 
