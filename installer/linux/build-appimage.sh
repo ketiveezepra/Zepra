@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # =============================================================================
 # Zepra Browser — AppImage Builder
 # Creates a self-contained AppImage for any Linux distribution.
