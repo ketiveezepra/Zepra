@@ -336,3 +336,84 @@ TEST(ComputedStyle, LetterSpacingParsesAndInherits) {
     EXPECT_EQ(page.eval("box.style.letterSpacing = 'normal'; cs.letterSpacing"),
               page.eval("box.style.letterSpacing = ''; cs.letterSpacing"));
 }
+
+// ---------------------------------------------------------------------------
+// Animations origin: CSS animations' end states and element.animate()
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const char* kAnimationPage = R"(<!DOCTYPE html><html><head><style>
+@keyframes fadeUp { from { opacity: 0 } 50% { color: rgb(1, 2, 3) } to { opacity: 1; color: rgb(120, 200, 255) } }
+@keyframes "quoted" { 0%, 100% { opacity: 0.25 } }
+.e { opacity: 0; animation: fadeUp 0.3s ease-out forwards }
+.inf { opacity: 0; animation: fadeUp 2s infinite both }
+.none { opacity: 0; animation: fadeUp 0.2s }
+.long { opacity: 0; animation-name: fadeUp; animation-duration: 0.2s; animation-fill-mode: both }
+.rev { opacity: 0.5; animation: fadeUp 1s 2 alternate forwards }
+.imp { opacity: 0.3 !important; animation: fadeUp 1s forwards }
+.q { opacity: 0; animation: quoted 1s forwards }
+</style></head><body>
+<div id="e" class="e">e</div><div id="inf" class="inf">i</div><div id="none" class="none">n</div>
+<div id="long" class="long">l</div><div id="rev" class="rev">r</div><div id="imp" class="imp">m</div>
+<div id="q" class="q">q</div>
+<div id="w" style="opacity: 0">w</div>
+</body></html>)";
+
+}  // namespace
+
+TEST(Animations, FinishedFillingCssAnimationsKeepTheirEndKeyframe) {
+    Page page(kAnimationPage);
+    auto op = [&](const char* id) { return page.eval(std::string("getComputedStyle(document.getElementById('") + id + "')).opacity"); };
+    EXPECT_EQ(op("e"), "1");
+    EXPECT_EQ(page.eval("getComputedStyle(document.getElementById('e')).color"), "rgb(120, 200, 255)");
+    EXPECT_EQ(op("long"), "1");       // the longhands
+    EXPECT_EQ(op("q"), "0.25");       // a quoted name, a selector list
+    // An infinite animation never ends; fill-mode none drops the effect
+    EXPECT_EQ(op("inf"), "0");
+    EXPECT_EQ(op("none"), "0");
+    // Two alternate iterations end where the first began: the from keyframe
+    EXPECT_EQ(op("rev"), "0");
+    // !important beats the animations origin
+    EXPECT_EQ(op("imp"), "0.3");
+}
+
+TEST(Animations, ElementAnimateAppliesItsEffectWithoutTouchingTheStyleAttribute) {
+    Page page(kAnimationPage);
+    page.eval("var w = document.getElementById('w');"
+              "var a = w.animate([{opacity: 0}, {opacity: 1}], {duration: 1000, fill: 'forwards'});"
+              "a.pause(); a.currentTime = 500;");
+    EXPECT_EQ(page.eval("getComputedStyle(w).opacity"), "0.5");
+    EXPECT_EQ(page.eval("a.playState + '|' + w.getAnimations().length + '|' + document.getAnimations().length"), "paused|1|1");
+    page.eval("a.finish()");
+    EXPECT_EQ(page.eval("a.playState + '|' + getComputedStyle(w).opacity + '|' + w.getAttribute('style')"),
+              "finished|1|opacity: 0");
+    page.eval("a.cancel()");
+    EXPECT_EQ(page.eval("a.playState + '|' + getComputedStyle(w).opacity + '|' + w.getAnimations().length"), "idle|0|0");
+}
+
+TEST(Animations, TimingAndKeyframesAreValidatedAndInterpolated) {
+    Page page(kAnimationPage);
+    page.eval("var w = document.getElementById('w');"
+              "var a = w.animate({opacity: [0, 1], color: ['#ff0000', 'rgb(0, 0, 255)']},"
+              "                  {duration: 1000, delay: 100, iterations: 2, direction: 'alternate'});"
+              "a.pause();");
+    // In the delay, with fill auto (none): no effect
+    page.eval("a.currentTime = 50");
+    EXPECT_EQ(page.eval("getComputedStyle(w).opacity"), "0");
+    // Second iteration, alternate: running backwards
+    page.eval("a.currentTime = 1100 + 250");
+    EXPECT_EQ(page.eval("getComputedStyle(w).opacity"), "0.75");
+    EXPECT_EQ(page.eval("a.effect.getComputedTiming().currentIteration + '|' + a.effect.getComputedTiming().activeDuration"), "1|2000");
+    page.eval("a.currentTime = 600");
+    EXPECT_EQ(page.eval("getComputedStyle(w).color"), "rgb(128, 0, 128)");
+    // Invalid input throws TypeError
+    EXPECT_EQ(page.eval("var r = []; ["
+                        " function () { w.animate([{opacity: 1, offset: 0.8}, {opacity: 0, offset: 0.2}], 10) },"
+                        " function () { w.animate([{opacity: 1}], {duration: -1}) },"
+                        " function () { w.animate([{opacity: 1}], {easing: 'bogus'}) }"
+                        "].forEach(function (f) { try { f(); r.push('ok') } catch (e) { r.push(e.name) } }); r.join(',')"),
+              "TypeError,TypeError,TypeError");
+    EXPECT_EQ(page.eval("typeof Animation + typeof KeyframeEffect + typeof document.timeline.currentTime"),
+              "functionfunctionnumber");
+}

@@ -8,6 +8,7 @@
 #include "css/computed_style_values.hpp"
 
 #include <cctype>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -193,7 +194,13 @@ std::vector<std::pair<std::string, std::string>> resolve(const CSSComputedStyle&
     add("visibility", s.visibility == Visibility::Visible ? "visible" :
                       s.visibility == Visibility::Hidden ? "hidden" : "collapse");
     add("box-sizing", s.boxSizing == BoxSizing::BorderBox ? "border-box" : "content-box");
-    add("opacity", formatComputedNumber(s.opacity));
+    {
+        // <number> serialized as browsers do (up to 6 significant digits):
+        // an animated 0.25 or 0.04 must read back as itself
+        char buf[32];
+        std::snprintf(buf, sizeof buf, "%.6g", std::clamp(s.opacity, 0.0f, 1.0f));
+        add("opacity", buf);
+    }
     add("float", s.cssFloat == 1 ? "left" : s.cssFloat == 2 ? "right" : "none");
     add("width", lengthStr(s.width));
     add("height", lengthStr(s.height));

@@ -2261,3 +2261,49 @@ TEST(TextWrap, InlineElementAroundOneRunBreaksAcrossLines) {
     EXPECT_FLOAT_EQ(em.x, 0);
     EXPECT_FLOAT_EQ(em.height, 40);
 }
+
+// ---------------------------------------------------------------------------
+// Opacity multiplies down the painted tree (text runs have none of their own)
+// ---------------------------------------------------------------------------
+
+namespace {
+std::vector<std::pair<std::string, float>> g_textOpacity;
+}
+
+TEST(PaintOpacity, TextTakesTheProductOfItsAncestorsOpacity) {
+    g_textOpacity.clear();
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t) {}, [](float, float, float, float, uint32_t, float) {},
+        [](const std::string& text, float, float, uint32_t, float, const LayoutBox* box) {
+            g_textOpacity.push_back({text, box ? box->paintOpacity : -1.0f});
+        },
+        nullptr, nullptr, nullptr);
+    LayoutBox root;
+    root.width = 400; root.height = 200;
+    LayoutBox outer;
+    outer.type = LayoutType::Block; outer.width = 400; outer.height = 100; outer.opacity = 0.5f;
+    LayoutBox inner;
+    inner.type = LayoutType::Block; inner.width = 400; inner.height = 50; inner.opacity = 0.5f;
+    LayoutBox run;
+    run.type = LayoutType::Text; run.text = "quarter"; run.width = 100; run.height = 20;
+    inner.children.push_back(run);
+    outer.children.push_back(inner);
+    LayoutBox hidden;
+    hidden.type = LayoutType::Block; hidden.y = 100; hidden.width = 400; hidden.height = 50; hidden.opacity = 0.0f;
+    LayoutBox hiddenRun = run;
+    hiddenRun.text = "hidden";
+    hidden.children.push_back(hiddenRun);
+    LayoutBox plain = run;
+    plain.y = 150;
+    plain.text = "full";
+    root.children.push_back(outer);
+    root.children.push_back(hidden);
+    root.children.push_back(plain);
+    ZepraBrowser::paintBox(root, 0, 0, 10000, 0);
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ASSERT_EQ(g_textOpacity.size(), 2u);
+    EXPECT_EQ(g_textOpacity[0].first, "quarter");
+    EXPECT_FLOAT_EQ(g_textOpacity[0].second, 0.25f);
+    EXPECT_EQ(g_textOpacity[1].first, "full");
+    EXPECT_FLOAT_EQ(g_textOpacity[1].second, 1.0f);
+}
