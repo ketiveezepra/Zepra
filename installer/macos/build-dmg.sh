@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # =============================================================================
 # Zepra Browser — macOS .dmg Builder
 # Creates a distributable disk image with app bundle and EULA.

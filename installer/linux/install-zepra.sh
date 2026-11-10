@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # =============================================================================
 # Zepra Browser — Interactive Installer for Linux
 # Supports both GUI (zenity/yad) and terminal modes.

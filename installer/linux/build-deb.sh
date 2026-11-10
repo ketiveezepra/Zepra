@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # =============================================================================
 # Zepra Browser — Debian Package Builder
 # Builds a .deb package for Debian/Ubuntu/NeolyxOS
