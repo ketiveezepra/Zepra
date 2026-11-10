@@ -21,6 +21,7 @@
 #include <iostream>
 #include <cmath>
 #include <cctype>
+#include <cstdlib>
 #include <unordered_set>
 
 namespace Zepra::WebCore {
@@ -57,6 +58,93 @@ static std::vector<std::string> splitValues(const std::string& value) {
     }
     if (!token.empty()) parts.push_back(token);
     return parts;
+}
+
+// A comma-separated list's items, trimmed; commas inside functions stay
+static std::vector<std::string> splitCommaList(const std::string& value) {
+    std::vector<std::string> items;
+    std::string item;
+    int depth = 0;
+    auto flush = [&]() {
+        size_t a = item.find_first_not_of(" \t\r\n\f"), b = item.find_last_not_of(" \t\r\n\f");
+        items.push_back(a == std::string::npos ? "" : item.substr(a, b - a + 1));
+        item.clear();
+    };
+    for (char c : value) {
+        if (c == '(') depth++;
+        else if (c == ')' && depth > 0) depth--;
+        if (c == ',' && depth == 0) {
+            flush();
+            continue;
+        }
+        item += c;
+    }
+    flush();
+    return items;
+}
+
+static std::string lowerAscii(std::string text) {
+    for (char& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return text;
+}
+
+// "1.5s", "200ms": a <time>
+static bool isTimeToken(const std::string& token) {
+    std::string t = lowerAscii(token);
+    size_t unit = t.size() >= 2 && t.compare(t.size() - 2, 2, "ms") == 0 ? 2 : (!t.empty() && t.back() == 's' ? 1 : 0);
+    if (!unit || t.size() == unit) return false;
+    char* end = nullptr;
+    std::string number = t.substr(0, t.size() - unit);
+    std::strtod(number.c_str(), &end);
+    return end && *end == '\0';
+}
+
+// The animation shorthand (CSS Animations 1 §3.11) split into the
+// longhands this engine uses: per animation a duration, an easing (ignored),
+// a delay, an iteration count, a direction, a fill mode, a play state
+// (ignored) and a name, in any order
+static void setAnimationShorthand(CSSComputedStyle& style, const std::string& value) {
+    std::string names, durations, delays, counts, directions, fills;
+    auto append = [](std::string& list, const std::string& item) {
+        if (!list.empty()) list += ", ";
+        list += item;
+    };
+    for (const std::string& single : splitCommaList(value)) {
+        std::string name, duration, delay, count, direction, fill;
+        for (const std::string& token : splitValues(single)) {
+            std::string t = lowerAscii(token);
+            if (isTimeToken(t)) {
+                (duration.empty() ? duration : delay) = t;
+            } else if (t == "infinite" || (!t.empty() && (std::isdigit(static_cast<unsigned char>(t[0])) || t[0] == '.'))) {
+                count = t;
+            } else if (t == "normal" || t == "reverse" || t == "alternate" || t == "alternate-reverse") {
+                direction = t;
+            } else if (t == "forwards" || t == "backwards" || t == "both") {
+                fill = t;
+            } else if (t == "none") {
+                if (name.empty()) name = t;
+                else fill = t;
+            } else if (t == "running" || t == "paused" || t == "linear" || t == "ease" || t == "ease-in" ||
+                       t == "ease-out" || t == "ease-in-out" || t == "step-start" || t == "step-end" ||
+                       t.find('(') != std::string::npos) {
+                // play state and easing: not used
+            } else {
+                name = token;   // a <keyframes-name> keeps its case
+            }
+        }
+        append(names, name.empty() ? "none" : name);
+        append(durations, duration.empty() ? "0s" : duration);
+        append(delays, delay.empty() ? "0s" : delay);
+        append(counts, count.empty() ? "1" : count);
+        append(directions, direction.empty() ? "normal" : direction);
+        append(fills, fill.empty() ? "none" : fill);
+    }
+    style.animationName = names;
+    style.animationDuration = durations;
+    style.animationDelay = delays;
+    style.animationIterationCount = counts;
+    style.animationDirection = directions;
+    style.animationFillMode = fills;
 }
 
 // Logical properties mapped to the physical ones for horizontal-tb, ltr
@@ -206,6 +294,16 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
         CSSParser parser;
         inlineDecl = parser.parseInlineStyle(inlineStyle);
     }
+    // The animations origin (CSS Cascade 5 §6.2): above every normal
+    // declaration, below every !important one. CSS animations' keyframes
+    // first, then script animations (Web Animations' effects, written by
+    // element.animate()), which come later in the composite order.
+    std::vector<const CSSStyleDeclaration*> cssAnimationDecls;
+    std::unique_ptr<CSSStyleDeclaration> scriptAnimationDecl;
+    if (!element->animationStyle().empty()) {
+        CSSParser parser;
+        scriptAnimationDecl = parser.parseInlineStyle(element->animationStyle());
+    }
 
     auto runCascade = [&]() {
         // Step 4: Apply the normal declarations of the matched rules in order
@@ -228,6 +326,9 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
 
         // Step 5: Apply inline styles (above every normal rule)
         if (inlineDecl) applyDeclarations(computed, inlineDecl.get(), parentStyle, Importance::Normal);
+        for (const CSSStyleDeclaration* frame : cssAnimationDecls)
+            applyDeclarations(computed, frame, parentStyle, Importance::Normal);
+        if (scriptAnimationDecl) applyDeclarations(computed, scriptAnimationDecl.get(), parentStyle, Importance::Normal);
 
         // Step 6: !important declarations, in reverse origin order: author rules,
         // the inline style, user rules, user-agent rules (CSS Cascade 4, 6.4)
@@ -245,16 +346,27 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
 
     // Custom properties first: the cascade picks each one's winning value,
     // then they are resolved against each other and the inherited ones
-    CustomPropertyMap declared;
-    pass_ = Pass::CustomOnly;
-    declaredCustom_ = &declared;
-    runCascade();
-    declaredCustom_ = nullptr;
-    computed.customProperties = resolveCustomProperties(computed.customProperties, declared, &registered_);
-    // Then every other property, with var() substituted from them
-    pass_ = Pass::SkipCustom;
-    runCascade();
-    pass_ = Pass::All;
+    auto runPasses = [&]() {
+        CustomPropertyMap declared;
+        pass_ = Pass::CustomOnly;
+        declaredCustom_ = &declared;
+        runCascade();
+        declaredCustom_ = nullptr;
+        computed.customProperties = resolveCustomProperties(computed.customProperties, declared, &registered_);
+        // Then every other property, with var() substituted from them
+        pass_ = Pass::SkipCustom;
+        runCascade();
+        pass_ = Pass::All;
+    };
+    runPasses();
+    // The animation-* properties are known only now: an element with
+    // finished, filling CSS animations is cascaded again with their end
+    // keyframes in the animations origin
+    cssAnimationDecls = animationEndStates(computed);
+    if (!cssAnimationDecls.empty()) {
+        computed = parentStyle ? CSSComputedStyle::inherit(*parentStyle) : CSSComputedStyle();
+        runPasses();
+    }
 
     // <center> and align="center" stop at tables: a table doesn't pass the
     // legacy -webkit-* alignment on to its cells (cells use their own align)
@@ -1260,7 +1372,16 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     }
     else if (property == "transform") { style.transform = value; }
     else if (property == "transition") { style.transition = value; }
-    else if (property == "animation") { style.animation = value; }
+    else if (property == "animation") {
+        style.animation = value;
+        setAnimationShorthand(style, value);
+    }
+    else if (property == "animation-name") { style.animationName = value; }
+    else if (property == "animation-duration") { style.animationDuration = value; }
+    else if (property == "animation-delay") { style.animationDelay = value; }
+    else if (property == "animation-iteration-count") { style.animationIterationCount = value; }
+    else if (property == "animation-direction") { style.animationDirection = value; }
+    else if (property == "animation-fill-mode") { style.animationFillMode = value; }
     else if (property == "filter") { style.filter = value; }
 
     // =====================================================================
@@ -1391,6 +1512,67 @@ CSSLength StyleResolver::parseLength(const std::string& value) {
 
 CSSColor StyleResolver::parseColor(const std::string& value) {
     return CSSColor::parse(value);
+}
+
+
+const CSSKeyframesRule* StyleResolver::findKeyframes(const std::string& name) const {
+    // The last rule of that name wins (CSS Animations 1 §3)
+    const CSSKeyframesRule* found = nullptr;
+    for (const auto& entry : stylesheets_) {
+        CSSRuleList* rules = entry.sheet ? entry.sheet->cssRules() : nullptr;
+        for (size_t i = 0; rules && i < rules->length(); i++) {
+            auto* keyframes = dynamic_cast<const CSSKeyframesRule*>(rules->item(i));
+            if (keyframes && keyframes->name() == name) found = keyframes;
+        }
+    }
+    return found;
+}
+
+std::vector<const CSSStyleDeclaration*> StyleResolver::animationEndStates(const CSSComputedStyle& style) const {
+    std::vector<const CSSStyleDeclaration*> frames;
+    if (style.animationName.empty()) return frames;
+    const auto names = splitCommaList(style.animationName);
+    const auto fills = splitCommaList(style.animationFillMode);
+    const auto counts = splitCommaList(style.animationIterationCount);
+    const auto directions = splitCommaList(style.animationDirection);
+    // A shorter list repeats to the length of animation-name (§4.2)
+    auto at = [](const std::vector<std::string>& list, size_t i, const char* initial) {
+        if (list.empty() || (list.size() == 1 && list[0].empty())) return std::string(initial);
+        return lowerAscii(list[i % list.size()]);
+    };
+    for (size_t i = 0; i < names.size(); i++) {
+        const std::string& name = names[i];
+        if (name.empty() || lowerAscii(name) == "none") continue;
+        std::string fill = at(fills, i, "none");
+        if (fill != "forwards" && fill != "both") continue;
+        std::string count = at(counts, i, "1");
+        if (count == "infinite") continue;   // never ends
+        char* end = nullptr;
+        double iterations = std::strtod(count.c_str(), &end);
+        if (!end || *end != '\0' || !(iterations >= 0) || !std::isfinite(iterations)) iterations = 1;
+        // The direction of the last iteration decides which end it stops at
+        // (§4.6); a zero count stops at the start of the first. A fractional
+        // count stops at the nearest end of its last iteration.
+        const std::string direction = at(directions, i, "normal");
+        const long last = iterations > 0 ? static_cast<long>(std::ceil(iterations)) - 1 : 0;
+        bool forwardIteration = direction == "normal" || (direction == "alternate" && last % 2 == 0) ||
+                                (direction == "alternate-reverse" && last % 2 == 1);
+        float progress = iterations > 0 ? 1.0f : 0.0f;
+        float offset = forwardIteration ? progress : 1.0f - progress;
+        const CSSKeyframesRule* keyframes = findKeyframes(name);
+        CSSRuleList* list = keyframes ? keyframes->cssRules() : nullptr;
+        for (size_t k = 0; list && k < list->length(); k++) {
+            auto* frame = dynamic_cast<const CSSKeyframeRule*>(list->item(k));
+            if (!frame || !frame->style()) continue;
+            for (float o : frame->offsets()) {
+                if (std::fabs(o - offset) < 1e-4f) {
+                    frames.push_back(frame->style());
+                    break;
+                }
+            }
+        }
+    }
+    return frames;
 }
 
 } // namespace Zepra::WebCore

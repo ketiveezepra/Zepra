@@ -267,6 +267,16 @@ public:
     // Style
     std::string style(const std::string& property) const;
     void setStyle(const std::string& property, const std::string& value);
+
+    /// The declarations the element's script animations (element.animate())
+    /// apply now, as CSS text: the animations origin of the cascade, above
+    /// the style attribute and below !important. A change restyles the page.
+    const std::string& animationStyle() const { return animationStyle_; }
+    void setAnimationStyle(const std::string& css) {
+        if (css == animationStyle_) return;
+        animationStyle_ = css;
+        noteDomMutation();
+    }
     
     // Cloning (a <template>'s contents are cloned with it when deep)
     std::unique_ptr<DOMNode> cloneNode(bool deep) const override;
@@ -348,6 +358,7 @@ private:
     std::string tagName_;
     std::unordered_map<std::string, std::string> attributes_;
     std::unordered_map<std::string, std::string> styleMap_;
+    std::string animationStyle_;   // not cloned: animations stay with their element
     std::string dirtyValue_;
     std::unique_ptr<DOMShadowRoot> shadowRoot_;
     std::unique_ptr<DOMDocumentFragment> templateContent_;

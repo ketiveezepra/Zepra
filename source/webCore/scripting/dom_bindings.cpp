@@ -2700,6 +2700,20 @@ void DOMBindings::installComputedStyle() {
     }, 1);
     global_->set("getComputedStyle", Value::object(fn));
     vm_->setGlobal("getComputedStyle", Value::object(fn));
+
+    // __zepraSetAnimatedStyle(element, cssText): what the element's script
+    // animations (web_animations.cpp) apply now; "" when none. Engine-
+    // internal, so a bare global and not a window property.
+    auto* animated = new Function("__zepraSetAnimatedStyle", [](const FunctionCallInfo& info) -> Value {
+        Value target = info.argument(0);
+        auto* w = target.isObject() ? dynamic_cast<NodeWrapper*>(target.asObject()) : nullptr;
+        DOMElement* element = w ? asElement(w->node) : nullptr;
+        if (!element) throw JSError("TypeError", "__zepraSetAnimatedStyle: parameter 1 is not of type 'Element'.");
+        Value text = info.argument(1);
+        element->setAnimationStyle(text.isNullOrUndefined() ? std::string() : text.toString());
+        return Value::undefined();
+    }, 2);
+    vm_->setGlobal("__zepraSetAnimatedStyle", Value::object(animated));
 }
 
 // ----------------------------------------------------------------------------

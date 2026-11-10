@@ -449,6 +449,14 @@ public:
     /// parent while the element declares none. Null when there are none.
     std::shared_ptr<const CustomPropertyMap> customProperties;
     std::string animation;
+    // CSS Animations 1 longhands as declared (comma-separated lists, one
+    // entry per animation; empty: the initial value). `animation` sets all.
+    std::string animationName;
+    std::string animationDuration;
+    std::string animationDelay;
+    std::string animationIterationCount;
+    std::string animationDirection;
+    std::string animationFillMode;
     std::string filter;
     std::string cursor = "auto";
     std::string pointerEvents = "auto";

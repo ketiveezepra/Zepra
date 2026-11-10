@@ -259,19 +259,59 @@ std::unique_ptr<CSSFontFaceRule> CSSParser::parseFontFaceRule() {
     return rule;
 }
 
+// @keyframes <name> { <keyframe-selector># { <declarations> } ... }
+// (CSS Animations 1 §3). The name is an identifier or a string; a keyframe
+// whose selector is invalid is dropped when the keyframes are used.
 std::unique_ptr<CSSKeyframesRule> CSSParser::parseKeyframesRule() {
     auto rule = std::make_unique<CSSKeyframesRule>();
-    // Skip animation name
-    while (!eof() && peek() != '{') consume();
-    // Skip block
-    if (match('{')) {
-        int depth = 1;
-        while (!eof() && depth > 0) {
-            if (peek() == '{') depth++;
-            if (peek() == '}') depth--;
-            if (depth > 0) consume();
+    std::string name;
+    while (!eof() && peek() != '{' && peek() != ';') name += consume();
+    size_t a = name.find_first_not_of(" \t\r\n\f"), b = name.find_last_not_of(" \t\r\n\f");
+    name = a == std::string::npos ? "" : name.substr(a, b - a + 1);
+    if (name.size() >= 2 && (name.front() == '"' || name.front() == '\'') && name.back() == name.front())
+        name = name.substr(1, name.size() - 2);
+    rule->setName(name);
+    if (!match('{')) {
+        if (peek() == ';') consume();
+        return rule;
+    }
+    while (!eof()) {
+        skipWhitespace();
+        if (eof()) break;
+        if (peek() == '}') {
+            consume();
+            break;
         }
-        if (peek() == '}') consume();
+        std::string selector;
+        while (!eof() && peek() != '{' && peek() != '}') selector += consume();
+        if (!match('{')) continue;   // a stray '}' ends the rule on the next turn
+        // The keyframe's declarations, up to its matching '}' (strings and
+        // nested blocks such as a var() fallback are stepped over whole)
+        std::string body;
+        int depth = 1;
+        while (!eof()) {
+            char c = peek();
+            if (c == '"' || c == '\'') {
+                body += consume();
+                while (!eof() && peek() != c) {
+                    if (peek() == '\\') body += consume();
+                    if (!eof()) body += consume();
+                }
+                if (!eof()) body += consume();
+                continue;
+            }
+            if (c == '{') depth++;
+            if (c == '}' && --depth == 0) {
+                consume();
+                break;
+            }
+            body += consume();
+        }
+        auto frame = std::make_unique<CSSKeyframeRule>();
+        frame->setKeyText(selector);
+        CSSParser declarations;
+        frame->setStyle(declarations.parseInlineStyle(body));
+        rule->cssRules()->add(std::move(frame));
     }
     return rule;
 }

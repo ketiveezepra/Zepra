@@ -300,6 +300,14 @@ private:
     SelectorMatcher matcher_;
     CSSLengthContext lengthContext_;               // for math functions, set per applyProperty
 
+    /// The keyframes each of the element's finished, filling CSS animations
+    /// leaves it at (CSS Animations 1 §4.10: animation-fill-mode forwards
+    /// or both, a finite iteration count), in animation-name order. Running
+    /// animations are not sampled yet: they jump to this end state.
+    std::vector<const CSSStyleDeclaration*> animationEndStates(const CSSComputedStyle& style) const;
+    /// The last @keyframes rule called `name`, or null
+    const CSSKeyframesRule* findKeyframes(const std::string& name) const;
+
     void applyDeclarations(CSSComputedStyle& style, const CSSStyleDeclaration* decl,
                            const CSSComputedStyle* parentStyle, Importance importance = Importance::Any);
     void applyProperty(CSSComputedStyle& style, const std::string& property,

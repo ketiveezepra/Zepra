@@ -11,6 +11,7 @@
 #include "scripting/script_context.hpp"
 #include "scripting/canvas_bindings.hpp"
 #include "scripting/dom_bindings.hpp"
+#include "scripting/web_animations.hpp"
 #include "scripting/web_api_scripts.hpp"
 #include "scripting/web_storage.hpp"
 #include <iostream>
@@ -1306,7 +1307,7 @@ var MessagePort, MessageChannel, IntersectionObserver, IntersectionObserverEntry
 // provide yet, defined only when missing: Range/Selection, TextEncoder and
 // TextDecoder, AbortController, DOMException, Blob/File/FormData,
 // requestIdleCallback, reportError, escape/unescape, window.top/parent/...,
-// and Element extras (animate, compareDocumentPosition, reflected
+// and Element extras (compareDocumentPosition, reflected
 // attributes). Small and spec-shaped; enough for libraries to boot.
 const char* const kPlatformShims = R"JS(
 (function () {
@@ -1665,7 +1666,6 @@ const char* const kPlatformShims = R"JS(
   if (!d.exitFullscreen) d.exitFullscreen = function () { return Promise.resolve(); };
   if (!d.execCommand) d.execCommand = function () { return false; };
   if (!d.queryCommandSupported) d.queryCommandSupported = function () { return false; };
-  if (!d.getAnimations) d.getAnimations = function () { return []; };
   if (!d.elementFromPoint) d.elementFromPoint = function () { return null; };
   if (!d.elementsFromPoint) d.elementsFromPoint = function () { return []; };
   if (!d.createNodeIterator && d.createTreeWalker) {
@@ -1679,35 +1679,7 @@ const char* const kPlatformShims = R"JS(
   var E = typeof Element !== 'undefined' ? Element.prototype : null;
   var H = typeof HTMLElement !== 'undefined' ? HTMLElement.prototype : null;
   if (E) {
-    var animation = function (el, keyframes, options) {
-      var duration = typeof options === 'number' ? options : (options && options.duration) || 0;
-      var a = { playState: 'running', currentTime: 0, effect: null, id: (options && options.id) || '', onfinish: null, oncancel: null,
-                pending: false, playbackRate: 1, startTime: null, timeline: null, replaceState: 'active' };
-      var resolve;
-      a.finished = new Promise(function (r) { resolve = r; });
-      a.ready = Promise.resolve(a);
-      var frames = Array.isArray(keyframes) ? keyframes : keyframes ? [keyframes] : [];
-      var last = frames.length ? frames[frames.length - 1] : null;
-      var fill = options && (options.fill === 'forwards' || options.fill === 'both');
-      var done = function () {
-        if (a.playState === 'finished' || a.playState === 'idle') return;
-        a.playState = 'finished';
-        if (fill && last && el.style) for (var p in last) if (p !== 'offset' && p !== 'easing' && p !== 'composite') { try { el.style[p] = last[p]; } catch (e) {} }
-        var ev = { type: 'finish', target: a, currentTime: duration, timelineTime: null };
-        if (typeof a.onfinish === 'function') a.onfinish(ev);
-        resolve(a);
-      };
-      var timer = setTimeout(done, duration);
-      a.finish = function () { clearTimeout(timer); done(); };
-      a.cancel = function () { clearTimeout(timer); a.playState = 'idle'; if (typeof a.oncancel === 'function') a.oncancel({ type: 'cancel' }); };
-      a.play = function () {}; a.pause = function () { a.playState = 'paused'; }; a.reverse = function () {};
-      a.updatePlaybackRate = function () {}; a.persist = function () {}; a.commitStyles = function () {};
-      a.addEventListener = function (t, fn) { if (t === 'finish') a.finished.then(function () { fn({ type: 'finish' }); }); };
-      a.removeEventListener = function () {};
-      return a;
-    };
-    if (!E.animate) E.animate = function (k, o) { return animation(this, k, o); };
-    if (!E.getAnimations) E.getAnimations = function () { return []; };
+    // element.animate() and getAnimations(): web_animations.cpp
     if (!E.requestFullscreen) E.requestFullscreen = function () { return Promise.reject(new TypeError('Fullscreen is not supported')); };
     if (!E.setPointerCapture) { E.setPointerCapture = function () {}; E.releasePointerCapture = function () {}; E.hasPointerCapture = function () { return false; }; }
     if (!E.scrollIntoViewIfNeeded) E.scrollIntoViewIfNeeded = function () { if (this.scrollIntoView) this.scrollIntoView(); };
@@ -1788,6 +1760,11 @@ void ScriptContext::installWebTaskApis(Zepra::Runtime::Object* windowObj) {
     ScriptResult streams = evaluate(webApiScripts(), "<zepra-web-api-scripts>");
     if (!streams.success) {
         std::cerr << "[ScriptContext] URL/stream APIs failed to install: " << streams.error << std::endl;
+    }
+    // Web Animations (element.animate()), over the engine's animations origin
+    ScriptResult animations = evaluate(webAnimationsScript(), "<zepra-web-animations>");
+    if (!animations.success) {
+        std::cerr << "[ScriptContext] Web Animations failed to install: " << animations.error << std::endl;
     }
 }
 
