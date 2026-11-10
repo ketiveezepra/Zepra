@@ -87,6 +87,16 @@ bool Parser::match(std::initializer_list<TokenType> types) {
     return false;
 }
 
+// `in` is a binary operator again inside brackets, braces, arguments,
+// templates and nested statements ([+In] in the grammar), even within a
+// for-statement head: for (f = function () { if (k in o) ... }; ;)
+struct AllowIn {
+    bool& noIn;
+    bool saved;
+    explicit AllowIn(bool& flag) : noIn(flag), saved(flag) { noIn = false; }
+    ~AllowIn() { noIn = saved; }
+};
+
 // Words the lexer makes keywords that are ordinary identifiers outside
 // their own constructs: var get, function async(), (of) => ...
 static bool isContextualKeyword(TokenType type) {
@@ -579,6 +589,7 @@ std::vector<FunctionParam> Parser::parseParameters() {
 
 // Statement parsing
 StmtPtr Parser::parseStatement() {
+    AllowIn allowIn(noIn_);
     NestingGuard nesting(*this);
 #ifndef NDEBUG
     assertProgress();
@@ -1398,6 +1409,7 @@ ExprPtr Parser::parseCallExpression(ExprPtr callee) {
 }
 
 std::vector<ExprPtr> Parser::parseArguments() {
+    AllowIn allowIn(noIn_);
     std::vector<ExprPtr> args;
     
     if (!check(TokenType::RightParen)) {
@@ -1554,6 +1566,7 @@ ExprPtr Parser::parsePrimaryExpression() {
     
     // Parenthesized expression or arrow function
     if (match(TokenType::LeftParen)) {
+        AllowIn allowIn(noIn_);
         ExprPtr expr = parseExpression();
         consume(TokenType::RightParen, "Expected ')'");
         return expr;
@@ -1587,6 +1600,7 @@ ExprPtr Parser::parsePrimaryExpression() {
 }
 
 ExprPtr Parser::parseArrayLiteral() {
+    AllowIn allowIn(noIn_);
     std::vector<ExprPtr> elements;
     
     while (!check(TokenType::RightBracket) && !isAtEnd()) {
@@ -1616,6 +1630,7 @@ ExprPtr Parser::parseArrayLiteral() {
 }
 
 ExprPtr Parser::parseObjectLiteral() {
+    AllowIn allowIn(noIn_);
     std::vector<ObjectProperty> properties;
     
     while (!check(TokenType::RightBrace) && !isAtEnd()) {
@@ -1739,6 +1754,7 @@ bool Parser::parseTemplateParts(std::vector<std::string>& cooked, std::vector<Ex
 }
 
 ExprPtr Parser::parseTemplateLiteral() {
+    AllowIn allowIn(noIn_);
     // `Hello ${name}!`: a string, its parts joined with the substitutions
     // converted to strings (`${1}${2}` is "12", not 3)
     const SourceLocation loc = previousToken_.start;

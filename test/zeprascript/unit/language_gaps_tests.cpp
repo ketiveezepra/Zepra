@@ -263,3 +263,11 @@ TEST_F(LanguageGaps, ContextualKeywordsNameFunctionExpressions) {
     EXPECT_EQ(run("var e={to:function to(x){return x}, from:function from(x){return x+1}, of:function of(){return 3}};"
                   " r=[e.from(1), e.of(), e.from.name].join();"), "2,3,from");
 }
+
+// gsap.min.js: a function expression in a for-statement head uses `in`
+TEST_F(LanguageGaps, InIsAnOperatorAgainInsideNestedConstructsOfAForHead) {
+    EXPECT_EQ(run("var o={a:1}, out=[];"
+                  " for (var f=function(){ var c=0; for (var k in o) if (k in o) c++; return c }(), i=0; i<1; i++) out.push(f);"
+                  " for (var g=[('a' in o), {v: 'a' in o}.v, `${'a' in o}`], j=0; j<1; j++) out.push(g.join('/'));"
+                  " r=out.join();"), "1,true/true/true");
+}
