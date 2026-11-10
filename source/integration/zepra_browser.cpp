@@ -4828,6 +4828,22 @@ void render() {
             ZepraBrowser::LoadTrace::mark("load");
             ZepraBrowser::LoadTrace::summary("load");
         }
+        // The viewport scrolled (wheel, keys, scrollbar, a script): one
+        // `scroll` event per frame, before the animation frame callbacks.
+        // A new page context starts from where its tab is.
+        {
+            static const void* reportedContext = nullptr;
+            static float reportedScrollY = 0;
+            Tab* tab = activeTab();
+            float scrollY = tab ? tab->scrollY : 0;
+            if (reportedContext != g_scriptContext.get()) {
+                reportedContext = g_scriptContext.get();
+                reportedScrollY = scrollY;
+            } else if (scrollY != reportedScrollY) {
+                reportedScrollY = scrollY;
+                g_scriptContext->fireViewportScroll();
+            }
+        }
         g_scriptContext->runAnimationFrames();
         if (g_layoutRoot && Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
             relayoutDocument();

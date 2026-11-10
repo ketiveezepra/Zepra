@@ -1075,3 +1075,13 @@ TEST(ScriptElements, AdvanceParsingYieldsAtTheDeadline) {
     while (!page.script->advanceParsing(past) && calls < 10) calls++;
     EXPECT_EQ(page.eval("log.join()"), "1,2,3");
 }
+
+TEST(Events, ViewportScrollFiresAtTheDocumentAndBubblesToTheWindow) {
+    Page page(kPage);
+    page.eval("var seen = [];"
+              "document.addEventListener('scroll', function (e) { seen.push('doc:' + (e.target === document) + ':' + e.bubbles) });"
+              "window.addEventListener('scroll', function (e) { seen.push('win:' + e.isTrusted) });"
+              "document.body.addEventListener('scroll', function () { seen.push('body') });");
+    page.script->fireViewportScroll();
+    EXPECT_EQ(page.eval("seen.join(' ')"), "doc:true:true win:true");
+}
