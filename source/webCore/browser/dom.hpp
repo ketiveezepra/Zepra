@@ -69,6 +69,11 @@ public:
 };
 /// Reports a text or comment node's data change to its document's sink
 void noteCharacterDataChange(DOMNode* node, const std::string& oldValue);
+/// A text or comment node's data changed / a pseudo-class state of an
+/// element may match differently: recorded for its document's CSS engine
+/// (style_change_log.hpp), bumping domMutationVersion()
+void noteTextStyleChange(DOMNode* node);
+void noteElementStateChange(DOMElement* element, const char* pseudoClass);
 class RenderNode;
 
 /// Whether an element matches a CSS selector list, as the style cascade matches it
@@ -188,7 +193,7 @@ public:
     void setData(const std::string& data) {
         std::string old = std::move(data_);
         data_ = data;
-        noteDomMutation();
+        noteTextStyleChange(this);
         noteCharacterDataChange(this, old);
     }
     void appendData(const std::string& extra) { setData(data_ + extra); }
@@ -212,7 +217,7 @@ public:
     void setNodeValue(const std::string& value) override {
         std::string old = std::move(data_);
         data_ = value;
-        noteDomMutation();
+        noteTextStyleChange(this);
         noteCharacterDataChange(this, old);
     }
     const std::string& data() const { return data_; }
@@ -338,7 +343,7 @@ public:
     void setCustomElementState(CustomElementState state) {
         if (ceState_ == state) return;
         ceState_ = state;
-        noteDomMutation();
+        noteElementStateChange(this, "defined");
     }
     /// :defined - a built-in element or an upgraded custom element
     bool isDefined() const {
@@ -365,7 +370,7 @@ public:
     void setPopoverOpen(bool open) {
         if (popoverOpen_ == open) return;
         popoverOpen_ = open;
-        noteDomMutation();
+        noteElementStateChange(this, "popover-open");
     }
 
     // Form control state: the value the user typed or a script set (an

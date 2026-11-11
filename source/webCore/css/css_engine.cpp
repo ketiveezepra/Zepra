@@ -10,6 +10,7 @@
  */
 
 #include "css/css_engine.hpp"
+#include "browser/style_change_log.hpp"
 #include <algorithm>
 #include "browser/dom.hpp"
 #include <iostream>
@@ -683,10 +684,15 @@ std::unique_ptr<MediaList> CSSParser::parseMediaQuery(const std::string& query) 
 // ============================================================================
 
 CSSEngine::CSSEngine() {}
-CSSEngine::~CSSEngine() {}
+CSSEngine::~CSSEngine() {
+    if (document_) trackStyleChanges(document_, false);
+}
 
 void CSSEngine::initialize(DOMDocument* doc) {
+    if (document_ && document_ != doc) trackStyleChanges(document_, false);
     document_ = doc;
+    styledOnce_ = false;
+    trackStyleChanges(document_, true);
     // StyleResolver constructor already adds user-agent stylesheet
 }
 
@@ -832,7 +838,7 @@ void CSSEngine::syncShadowStyles(DOMDocument* document) {
 
 void CSSEngine::computeStyles() {
     if (!document_) return;
-    resolver_.invalidateAll();
+    applyStyleInvalidations();
 }
 
 const CSSComputedStyle* CSSEngine::getComputedStyle(DOMElement* element) {

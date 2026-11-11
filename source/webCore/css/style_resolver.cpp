@@ -524,6 +524,7 @@ const CSSComputedStyle* StyleResolver::getComputedStyle(DOMElement* element) {
     }
     
     // Compute and cache
+    stats_.stylesComputed++;
     CSSComputedStyle style = computeStyle(element, parentStyle);
     styleCache_[element] = std::move(style);
     
@@ -650,8 +651,17 @@ void StyleResolver::setShadowStyleSheets(
         }
         next[root] = match;
     }
+    // Restyled (all of it) only when some tree's sheets changed
+    bool same = next.size() == shadowScopes_.size();
+    for (auto it = next.begin(); same && it != next.end(); ++it) {
+        auto old = shadowScopes_.find(it->first);
+        same = old != shadowScopes_.end() && old->second == it->second;
+    }
     shadowScopes_ = std::move(next);
-    invalidateAll();
+    if (!same) {
+        shadowScopesChanged_ = true;
+        invalidateAll();
+    }
 }
 
 bool isInheritedProperty(const std::string& property) {
