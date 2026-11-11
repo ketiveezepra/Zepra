@@ -710,6 +710,14 @@ HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& optio
         Zepra::Networking::HttpClientConfig config;
         config.connectTimeoutMs = 10000;
         config.readTimeoutMs = 30000;  // Increased for slow sites
+        // A script or stylesheet GET whose connection goes quiet is retried
+        // on a new request instead of holding the page's scripts (and its
+        // hydration) for the full timeout; the wait is between reads, so a
+        // slow but moving transfer is not cut
+        const bool retriable = options.method == "GET" && options.body.empty() &&
+                               (options.kind == Zepra::WebCore::ResourceKind::Script ||
+                                options.kind == Zepra::WebCore::ResourceKind::Stylesheet);
+        if (retriable) config.readTimeoutMs = 6000;
         config.followRedirects = true;
         config.maxRedirects = 10;
         config.verifySsl = true;  // reject untrusted or mismatched certificates
@@ -726,6 +734,11 @@ HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& optio
         if (!options.body.empty()) request.setBody(options.body);
         
         auto netResponse = client.send(request);
+        if (retriable && netResponse.hasError() && netResponse.statusCode() == 0) {
+            std::cerr << "[Browser] " << url << ": " << netResponse.error() << "; retrying once" << std::endl;
+            Zepra::Networking::HttpClient retryClient(config);
+            netResponse = retryClient.send(request);
+        }
         
         response.statusCode = netResponse.statusCode();
         response.statusText = netResponse.statusMessage();
@@ -1606,6 +1619,8 @@ static void syncPageStyleSheets() {
     PageResources* res = activePageResources();
     if (!res || !g_document || !g_cssEngine) return;
     if (res->styles->sync(g_document.get(), g_cssEngine.get())) res->fontsDirty = true;
+    // Adding a style attribute restyles only for pages that select on it
+    Zepra::WebCore::setStyleAttributeSelectorsInUse(g_cssEngine->usesStyleAttributeSelectors());
 }
 
 static bool responseOk(const HttpResponse& r) {

@@ -381,7 +381,8 @@ void writeInlineStyle(DOMElement& element, const CSSStyleDeclaration& decl,
     if (text.empty()) {
         element.removeAttribute("style");
     } else if (text != element.getAttribute("style")) {
-        if (before && element.hasAttribute("style") && differsInPaintOnly(*before, decl))
+        if (before && (element.hasAttribute("style") || !styleAttributeSelectorsInUse()) &&
+            differsInPaintOnly(*before, decl))
             element.setStyleAttributePaintOnly(text);
         else
             element.setAttribute("style", text);

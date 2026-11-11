@@ -24,6 +24,8 @@
 #undef Always
 #endif
 #include <clocale>
+#include <string>
+#include <cstdlib>
 #include <iostream>
 #include <cstring>
 #include <sstream>
@@ -102,6 +104,7 @@ public:
         glContext_ = glXCreateContext(display_, vi, nullptr, GL_TRUE);
         glXMakeCurrent(display_, window_, glContext_);
         XFree(vi);
+        unthrottleSwapsIfAsked();
         
         // Explicitly re-apply event mask after GLX context binding
         // Required on some X11/GLX implementations where CWEventMask alone
@@ -329,6 +332,35 @@ public:
                 // Another client wants a selection we own (clipboard copy)
                 if (nativeEventHook_) nativeEventHook_(&ev);
             }
+        }
+    }
+
+    // A window the compositor finds covered gets its buffer swaps paced at
+    // about one a second (vsync'd glXSwapBuffers blocks that long). Page
+    // captures (ZEPRA_CAPTURE) and ZEPRA_NO_VSYNC=1 turn the swap interval
+    // to 0, so animation timing does not depend on what covers the window;
+    // the run loop paces frames at 60 a second itself.
+    void unthrottleSwapsIfAsked() {
+        const char* capture = std::getenv("ZEPRA_CAPTURE");
+        const char* noVsync = std::getenv("ZEPRA_NO_VSYNC");
+        bool wanted = (capture && *capture) || (noVsync && std::string(noVsync) == "1");
+        if (!wanted || !display_ || !window_) return;
+        using SwapIntervalEXT = void (*)(Display*, GLXDrawable, int);
+        using SwapIntervalMESA = int (*)(unsigned int);
+        auto ext = reinterpret_cast<SwapIntervalEXT>(
+            glXGetProcAddress(reinterpret_cast<const GLubyte*>("glXSwapIntervalEXT")));
+        auto mesa = reinterpret_cast<SwapIntervalMESA>(
+            glXGetProcAddress(reinterpret_cast<const GLubyte*>("glXSwapIntervalMESA")));
+        const char* ext_list = glXQueryExtensionsString(display_, DefaultScreen(display_));
+        std::string extensions = ext_list ? ext_list : "";
+        if (ext && extensions.find("GLX_EXT_swap_control") != std::string::npos) {
+            ext(display_, window_, 0);
+            std::cout << "[Platform] vsync off (GLX_EXT_swap_control)" << std::endl;
+        } else if (mesa && extensions.find("GLX_MESA_swap_control") != std::string::npos) {
+            int rc = mesa(0);
+            std::cout << "[Platform] vsync off (GLX_MESA_swap_control): " << (rc == 0 ? "ok" : "failed") << std::endl;
+        } else {
+            std::cerr << "[Platform] vsync could not be turned off: no swap control extension" << std::endl;
         }
     }
 

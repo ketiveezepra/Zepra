@@ -486,6 +486,15 @@ TEST(Transforms, OpacityAndTransformWritesArePaintOnly) {
     before = domMutationVersion();
     page.eval("document.getElementById('t').style.opacity = '0.5'");
     EXPECT_NE(domMutationVersion(), before);
+    // ...unless no sheet selects on it
+    EXPECT_FALSE(page.css->usesStyleAttributeSelectors());
+    setStyleAttributeSelectorsInUse(false);
+    before = domMutationVersion();
+    page.eval("document.getElementById('i').style.transform = 'scale(3)'");
+    EXPECT_EQ(domMutationVersion(), before);
+    setStyleAttributeSelectorsInUse(true);
+    page.css->addStyleSheet("div[style*=red] { color: blue }", StyleOrigin::Author);
+    EXPECT_TRUE(page.css->usesStyleAttributeSelectors());
     setPaintOnlyChangeListener(nullptr);
     takePaintOnlyChanges();
     // Without a listener, paint-only writes restyle like any other

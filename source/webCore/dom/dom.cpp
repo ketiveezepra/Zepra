@@ -178,6 +178,10 @@ void setElementDestroyedListener(std::function<void(DOMElement*)> listener) {
     paintOnlyChanges().destroyed = std::move(listener);
 }
 
+static bool s_styleAttributeSelectors = true;
+void setStyleAttributeSelectorsInUse(bool used) { s_styleAttributeSelectors = used; }
+bool styleAttributeSelectorsInUse() { return s_styleAttributeSelectors; }
+
 bool isPaintOnlyProperty(const std::string& property) {
     return property == "opacity" || property == "transform" || property == "transform-origin" ||
            property == "translate" || property == "rotate" || property == "scale";

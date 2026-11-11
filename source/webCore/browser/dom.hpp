@@ -38,6 +38,11 @@ void setPaintOnlyChangeListener(std::function<void(DOMElement*)> listener);
 /// Called as each element is destroyed (one listener; the browser's CSS
 /// animation records drop the element)
 void setElementDestroyedListener(std::function<void(DOMElement*)> listener);
+/// Whether the page's styles have attribute selectors on `style` (default
+/// true): when they do not, adding a style attribute that only holds
+/// paint-only declarations is a paint-only change too
+void setStyleAttributeSelectorsInUse(bool used);
+bool styleAttributeSelectorsInUse();
 /// opacity, transform, transform-origin, translate, rotate, scale
 bool isPaintOnlyProperty(const std::string& property);
 class DOMDocument;

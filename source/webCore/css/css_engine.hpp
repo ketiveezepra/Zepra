@@ -458,6 +458,10 @@ public:
     bool usesHoverSelectors() const { return usesHover_; }
     bool usesActiveSelectors() const { return usesActive_; }
     bool usesFocusSelectors() const { return usesFocus_; }
+    /// Whether any sheet given to the engine has an attribute selector on
+    /// `style` ([style], [style*=...]): then adding or removing the style
+    /// attribute can change what matches (it stays true once seen)
+    bool usesStyleAttributeSelectors() const { return usesStyleAttribute_; }
 
     /// Check @supports condition
     bool supports(const std::string& property, const std::string& value);
@@ -476,6 +480,8 @@ private:
     bool usesHover_ = false;
     bool usesActive_ = false;
     bool usesFocus_ = false;
+    bool usesStyleAttribute_ = false;
+    void noteStyleAttributeSelectors(const std::string& css);
     ImportFetcher importFetcher_;
     std::string baseUrl_;
 
