@@ -2204,6 +2204,19 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
     std::string href = isAnchor ? element->getAttribute("href") : linkHref;
     std::string target = isAnchor ? element->getAttribute("target") : linkTarget;
     bool nowInLink = inLink || isAnchor;
+
+    // A link's default underline is the anchor's own text-decoration, which
+    // propagates to the text inside it (CSS Text Decoration 3 §2): an anchor
+    // styled text-decoration: none leaves its descendants' text undecorated
+    // even when their own elements say nothing
+    static bool s_linkUndecorated = false;
+    struct LinkDecorationScope {
+        bool saved;
+        explicit LinkDecorationScope(bool v) : saved(s_linkUndecorated) { s_linkUndecorated = v; }
+        ~LinkDecorationScope() { s_linkUndecorated = saved; }
+    } linkDecoration(isAnchor ? (style && !style->textDecoration.empty() &&
+                                 style->textDecoration.find("underline") == std::string::npos)
+                              : s_linkUndecorated);
     
     // Process child nodes, as rendered: a shadow host's shadow tree, with
     // each <slot> replaced by the host children assigned to it
@@ -2331,6 +2344,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 box->isLink = true;
                 box->href = href;
                 box->target = target;
+                if (s_linkUndecorated && box->textDecoration.empty()) box->textDecoration = "none";
             }
             
             // Fallback margins for common tags (only when CSS engine had no computed style)
@@ -3298,6 +3312,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     inlineBox->isLink = true;
                     inlineBox->href = href;
                     inlineBox->target = target;
+                    if (s_linkUndecorated && inlineBox->textDecoration.empty()) inlineBox->textDecoration = "none";
                 }
                 
                 // Recurse into this inline box (children become its children)
