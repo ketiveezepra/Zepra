@@ -1085,3 +1085,67 @@ TEST(Events, ViewportScrollFiresAtTheDocumentAndBubblesToTheWindow) {
     page.script->fireViewportScroll();
     EXPECT_EQ(page.eval("seen.join(' ')"), "doc:true:true win:true");
 }
+
+// Per-element reflected attributes live on their own interfaces: a custom
+// element's async/open/value/disabled are plain expandos (no attribute)
+TEST(DomBindings, ReflectedAttributesOnTheirInterfaces) {
+    Page page(kPage);
+    EXPECT_EQ(page.eval("['async' in HTMLElement.prototype, 'async' in HTMLScriptElement.prototype,"
+                        " 'value' in HTMLElement.prototype, 'value' in HTMLInputElement.prototype,"
+                        " 'open' in HTMLDetailsElement.prototype, 'href' in HTMLAnchorElement.prototype,"
+                        " 'title' in HTMLElement.prototype, 'hidden' in HTMLElement.prototype].join()"),
+              "false,true,false,true,true,true,true,true");
+    EXPECT_EQ(page.eval("var c = document.createElement('my-el'); c.async = function () {}; c.open = 5;"
+                        "c.value = 'v'; c.disabled = true;"
+                        "[typeof c.async, c.open, c.value, c.hasAttribute('disabled'), c.hasAttribute('open')].join()"),
+              "function,5,v,false,false");
+    // A class prototype may define methods with those names
+    EXPECT_EQ(page.eval("function P() {} P.prototype = Object.create(HTMLElement.prototype);"
+                        "P.prototype.async = function () {}; typeof P.prototype.async"),
+              "function");
+    EXPECT_EQ(page.eval("var i = document.createElement('input'); i.disabled = true; i.value = 'q';"
+                        "var s = document.createElement('script'); s.defer = true;"
+                        "[i.hasAttribute('disabled'), i.value, s.hasAttribute('defer')].join()"),
+              "true,q,true");
+}
+
+TEST(DomBindings, AnchorUrlParts) {
+    Page page(R"(<!DOCTYPE html><body><a id="a" href="https://example.com:8080/foo/bar?x=1#h">x</a></body>)");
+    EXPECT_EQ(page.eval("var a = document.getElementById('a');"
+                        "[a.protocol, a.host, a.hostname, a.port, a.pathname, a.search, a.hash, a.origin].join(' ')"),
+              "https: example.com:8080 example.com 8080 /foo/bar ?x=1 #h https://example.com:8080");
+    EXPECT_EQ(page.eval("a.search = '?y=2'; a.pathname = 'p'; a.getAttribute('href')"),
+              "https://example.com:8080/p?y=2#h");
+    EXPECT_EQ(page.eval("document.createElement('a').pathname"), "");
+}
+
+TEST(DomBindings, AttributesNamedItem) {
+    Page page(kPage);
+    EXPECT_EQ(page.eval("var at = document.getElementById('root').attributes;"
+                        "[at.getNamedItem('class').value, at.getNamedItem('nope'), at.getNamedItemNS(null, 'id').value,"
+                        " at.getNamedItem('id').ownerElement === document.getElementById('root')].join()"),
+              "box main,,root,true");
+}
+
+// document.all is the [[IsHTMLDDA]] HTMLAllCollection
+TEST(DomBindings, DocumentAll) {
+    Page page(kPage);
+    EXPECT_EQ(page.eval("var d = document.all; var u;"
+                        "[typeof d, !!d, d == undefined, d == null, d === undefined, d === document.all,"
+                        " d.namedItem('first').id, d.item(0).tagName, d.length > 5, !u && u !== document.all].join()"),
+              "undefined,false,true,true,false,true,first,HTML,true,true");
+}
+
+// style.x = v runs attributeChangedCallback("style") before it returns, so
+// an element that reflects "style" into a property does not ping-pong
+TEST(DomBindings, StyleAssignmentRunsReactionsSynchronously) {
+    Page page(kPage);
+    EXPECT_EQ(page.eval("var log = [];"
+                        "class S extends HTMLElement { static get observedAttributes() { return ['style']; }"
+                        "  attributeChangedCallback(n, o, v) { log.push(v); if (o !== v) this.style = v; } }"
+                        "customElements.define('x-style', S);"
+                        "var e = document.createElement('x-style'); document.body.appendChild(e);"
+                        "e.style.opacity = '0.3'; var during = log.length; e.style.opacity = '';"
+                        "[during > 0, log.length < 10].join()"),
+              "true,true");
+}

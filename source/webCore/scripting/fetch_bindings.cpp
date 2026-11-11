@@ -81,7 +81,17 @@ std::vector<std::pair<std::string, std::string>> headersFromObject(Object* obj) 
 /// with get/has/set/append/delete/forEach
 Object* makeHeadersObject(VM* vm, const std::vector<std::pair<std::string, std::string>>& headers) {
     auto* obj = new Object();
-    if (vm) obj->setPrototype(vm->intrinsic(VM::Intrinsic::Object));
+    // Headers.prototype when there is one (what `x instanceof Headers`
+    // checks; the methods stay on each object)
+    Object* proto = vm ? vm->intrinsic(VM::Intrinsic::Object) : nullptr;
+    if (vm) {
+        Value ctor = vm->getGlobal("Headers");
+        if (ctor.isObject() && ctor.asObject()->isFunction()) {
+            Value p = ctor.asObject()->get("prototype");
+            if (p.isObject()) proto = p.asObject();
+        }
+    }
+    if (proto) obj->setPrototype(proto);
     auto lower = [](std::string s) {
         std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
         return s;
@@ -248,6 +258,11 @@ void ScriptContext::setupFetchGlobals(Object* windowObj) {
             }
             return Value::object(makeHeadersObject(vm_, initial));
         }, 1);
+    // Headers.prototype, for instanceof
+    auto* headersProto = new Object();
+    headersProto->setPrototype(vm_->intrinsic(VM::Intrinsic::Object));
+    headersCtor->set("prototype", Value::object(headersProto));
+    headersProto->set("constructor", Value::object(headersCtor));
     vm_->setGlobal("Headers", Value::object(headersCtor));
     windowObj->set("Headers", Value::object(headersCtor));
 

@@ -537,6 +537,8 @@ private:
     // Native stack (FAST PATH - zero allocation)
     VMCallFrame nativeStack_[NATIVE_STACK_SIZE];
     size_t nativeDepth_ = 0;
+    size_t nestedRuns_ = 0;                  // runCompiled re-entries on the C++ stack
+    static constexpr size_t kMaxNestedRuns = 1000;
     
     // Heap stack (SLOW PATH - for deep recursion)
     std::vector<VMCallFrame> heapStack_;

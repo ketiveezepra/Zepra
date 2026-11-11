@@ -192,6 +192,11 @@ public:
                objectType_ == ObjectType::BoundFunction; 
     }
     bool isCallable() const;
+
+    /// Annex B [[IsHTMLDDA]] (document.all): an object that ToBoolean makes
+    /// false, typeof reports as "undefined" and == treats like undefined
+    bool isHTMLDDA() const { return htmlDDA_; }
+    void markHTMLDDA() { htmlDDA_ = true; }
     bool isConstructor() const;
     
     // Extensibility
@@ -259,6 +264,7 @@ protected:
     bool extensible_ = true;
     bool gcMarked_ = false;
     bool gcManaged_ = false;            // True when allocated via GCHeap
+    bool htmlDDA_ = false;              // Annex B [[IsHTMLDDA]]
     uint32_t shapeId_ = 0;          // Shape identifier for IC
     static uint32_t nextShapeId_;   // Global shape counter
     

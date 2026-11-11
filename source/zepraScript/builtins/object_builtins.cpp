@@ -53,6 +53,12 @@ Runtime::Value ObjectBuiltin::keys(const Runtime::FunctionCallInfo& info) {
     return Runtime::Value::object(new Runtime::Array(std::move(result)));
 }
 
+// [[Get]] of an own enumerable key: runs getters and reads index keys
+static Runtime::Value readKey(Runtime::Object* obj, const std::string& key) {
+    if (Runtime::VM* vm = Runtime::VM::current()) return vm->getMember(Runtime::Value::object(obj), key);
+    return obj->get(key);
+}
+
 // Object.values(obj)
 Runtime::Value ObjectBuiltin::values(const Runtime::FunctionCallInfo& info) {
     if (info.argumentCount() < 1 || !info.argument(0).isObject()) {
@@ -64,7 +70,7 @@ Runtime::Value ObjectBuiltin::values(const Runtime::FunctionCallInfo& info) {
     
     std::vector<Runtime::Value> result;
     for (const auto& key : keyNames) {
-        result.push_back(obj->get(key));
+        result.push_back(readKey(obj, key));
     }
     
     return Runtime::Value::object(new Runtime::Array(std::move(result)));
@@ -83,7 +89,7 @@ Runtime::Value ObjectBuiltin::entries(const Runtime::FunctionCallInfo& info) {
     for (const auto& key : keyNames) {
         std::vector<Runtime::Value> entry = {
             Runtime::Value::string(new Runtime::String(key)),
-            obj->get(key)
+            readKey(obj, key)
         };
         result.push_back(Runtime::Value::object(new Runtime::Array(std::move(entry))));
     }
@@ -111,7 +117,7 @@ Runtime::Value ObjectBuiltin::assign(const Runtime::FunctionCallInfo& info) {
         Runtime::VM* vm = Runtime::VM::current();
         for (const auto& key : keyNames) {
             if (vm) vm->setMember(Runtime::Value::object(target), key, vm->getMember(info.argument(i), key));
-            else target->set(key, source->get(key));
+            else target->set(key, readKey(source, key));
         }
     }
     

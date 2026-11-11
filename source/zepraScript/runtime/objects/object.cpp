@@ -27,13 +27,33 @@ Object::Object(ObjectType type)
 {
 }
 
+// The element slot a canonical array-index key ("0", "17"; not "01" or
+// "-1") names, or SIZE_MAX when the key is not one
+static size_t canonicalIndexOf(const std::string& key) {
+    if (key.empty() || key.size() > 10 || key[0] < '0' || key[0] > '9') return SIZE_MAX;
+    if (key.size() > 1 && key[0] == '0') return SIZE_MAX;
+    uint64_t index = 0;
+    for (char c : key) {
+        if (c < '0' || c > '9') return SIZE_MAX;
+        index = index * 10 + static_cast<uint64_t>(c - '0');
+    }
+    return index < 0xFFFFFFFFull ? static_cast<size_t>(index) : SIZE_MAX;
+}
+
 Value Object::get(const std::string& key) const {
     // Check own properties
     auto it = properties_.find(key);
     if (it != properties_.end()) {
         return it->second;
     }
-    
+
+    // An index key written as a string ("0" from Object.keys, JSON, assign)
+    // names the dense element storage
+    if (!elements_.empty()) {
+        size_t index = canonicalIndexOf(key);
+        if (index < elements_.size() && !elements_[index].isUndefined()) return elements_[index];
+    }
+
     // Check prototype chain
     if (prototype_) {
         return prototype_->get(key);
@@ -44,11 +64,21 @@ Value Object::get(const std::string& key) const {
 
 Value Object::get(uint32_t index) const {
     if (index < elements_.size()) {
-        return elements_[index];
+        if (!elements_[index].isUndefined()) return elements_[index];
+    } else {
+        // Keyed storage (own, then the prototypes' named properties)
+        Value named = get(std::to_string(index));
+        if (!named.isUndefined()) return named;
     }
-    
-    // Fall back to string key
-    return get(std::to_string(index));
+
+    // Elements of the prototype chain: Object.create(o) must see o[0]
+    // (Polymer's mixin dedupe sets are chains of objects keyed by integers)
+    for (const Object* p = prototype_; p && p->objectType() != ObjectType::Proxy; p = p->prototype_) {
+        if (index < p->elements_.size() && !p->elements_[index].isUndefined()) {
+            return p->elements_[index];
+        }
+    }
+    return Value::undefined();
 }
 
 bool Object::set(const std::string& key, Value value) {
@@ -94,6 +124,10 @@ bool Object::has(const std::string& key) const {
     if (properties_.find(key) != properties_.end()) {
         return true;
     }
+    if (!elements_.empty()) {
+        size_t index = canonicalIndexOf(key);
+        if (index < elements_.size() && !elements_[index].isUndefined()) return true;
+    }
     if (prototype_) {
         return prototype_->has(key);
     }
@@ -104,7 +138,12 @@ bool Object::has(uint32_t index) const {
     if (index < elements_.size() && !elements_[index].isUndefined()) {
         return true;
     }
-    return has(std::to_string(index));
+    if (has(std::to_string(index))) return true;
+    // Elements of the prototype chain count too (`0 in Object.create([1])`)
+    for (const Object* p = prototype_; p && p->objectType() != ObjectType::Proxy; p = p->prototype_) {
+        if (index < p->elements_.size() && !p->elements_[index].isUndefined()) return true;
+    }
+    return false;
 }
 
 bool Object::hasOwnProperty(const std::string& key) const {
@@ -189,6 +228,7 @@ bool Object::defineProperty(const std::string& key, const PropertyDescriptor& de
 
 bool Object::lookupProperty(const std::string& key, Value& value,
                             const PropertyDescriptor*& accessor) const {
+    const size_t index = canonicalIndexOf(key);
     for (const Object* o = this; o; o = o->prototype_) {
         if (!o->descriptors_.empty()) {
             auto desc = o->descriptors_.find(key);
@@ -203,6 +243,11 @@ bool Object::lookupProperty(const std::string& key, Value& value,
             accessor = nullptr;
             return true;
         }
+        if (index < o->elements_.size() && !o->elements_[index].isUndefined()) {
+            value = o->elements_[index];
+            accessor = nullptr;
+            return true;
+        }
     }
     return false;
 }
@@ -210,7 +255,14 @@ bool Object::lookupProperty(const std::string& key, Value& value,
 std::optional<PropertyDescriptor> Object::getOwnPropertyDescriptor(const std::string& key) const {
     auto it = descriptors_.find(key);
     if (it != descriptors_.end()) {
-        return it->second;
+        PropertyDescriptor desc = it->second;
+        // A data property's value lives in properties_ (assignment updates
+        // only that); the descriptor keeps the attributes
+        if (!desc.isAccessorDescriptor()) {
+            auto current = properties_.find(key);
+            if (current != properties_.end()) desc.value = current->second;
+        }
+        return desc;
     }
     
     auto propIt = properties_.find(key);
