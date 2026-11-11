@@ -442,6 +442,19 @@ void ScriptContext::fireElementEvent(DOMElement* element, const std::string& typ
     runTask([&] { domBindings_->fireEvent(element, type, false, false); }, "event listener");
 }
 
+void ScriptContext::fireAnimationEvent(DOMElement* element, const std::string& type, const std::string& name,
+                                       double elapsedSeconds) {
+    if (!element || !vm_ || !domBindings_ || !domBindings_->isConnected(element)) return;
+    using Zepra::Runtime::Value;
+    const bool transition = type.rfind("transition", 0) == 0;
+    std::vector<std::pair<std::string, Value>> fields = {
+        {transition ? "propertyName" : "animationName", Value::string(new Zepra::Runtime::String(name))},
+        {"elapsedTime", Value::number(elapsedSeconds)},
+        {"pseudoElement", Value::string(new Zepra::Runtime::String(""))},
+    };
+    runTask([&] { domBindings_->fireEvent(element, type, true, false, fields); }, "animation event listener");
+}
+
 void ScriptContext::fireViewportScroll() {
     if (!vm_ || !domBindings_ || !document_) return;
     runTask([&] { domBindings_->fireEvent(document_, "scroll", true, false); }, "scroll listener");

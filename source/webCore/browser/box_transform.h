@@ -40,6 +40,10 @@ struct Affine {
     void mapRect(float& x, float& y, float& w, float& h) const;
 };
 
+/// The viewport vw, vh, vmin and vmax in transforms are of (the layout
+/// viewport: setLayoutViewport passes it on)
+void setTransformViewport(float width, float height);
+
 /// A length of a transform: pixels plus a percentage of the reference box
 struct TransformLength {
     float px = 0, percent = 0;

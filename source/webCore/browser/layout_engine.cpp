@@ -106,6 +106,12 @@ void registerScreenLink(float x, float y, float w, float h, const std::string& h
 
 }  // namespace
 
+static void (*s_backdrop_blur)(float, float, float, float, float, float) = nullptr;
+
+void setBackdropBlurCallback(void (*backdrop_blur)(float, float, float, float, float, float)) {
+    s_backdrop_blur = backdrop_blur;
+}
+
 void setTransformCallbacks(void (*push_transform)(const float matrix[6]), void (*pop_transform)()) {
     s_push_transform = push_transform && pop_transform ? push_transform : nullptr;
     s_pop_transform = push_transform && pop_transform ? pop_transform : nullptr;
@@ -411,11 +417,21 @@ ScrollOffset ElementScrollOffsets::get(const Zepra::WebCore::DOMElement* element
 void ElementScrollOffsets::set(const Zepra::WebCore::DOMElement* element, ScrollOffset offset) {
     for (auto& entry : offsets_) {
         if (entry.first == element) {
+            if (entry.second.x != offset.x || entry.second.y != offset.y) noteScrolled(element);
             entry.second = offset;
             return;
         }
     }
-    if (offset.x != 0 || offset.y != 0) offsets_.push_back({element, offset});
+    if (offset.x != 0 || offset.y != 0) {
+        offsets_.push_back({element, offset});
+        noteScrolled(element);
+    }
+}
+
+std::vector<const Zepra::WebCore::DOMElement*> ElementScrollOffsets::takeScrolled() {
+    std::vector<const Zepra::WebCore::DOMElement*> out;
+    out.swap(scrolled_);
+    return out;
 }
 
 void ElementScrollOffsets::prune(const LayoutBox& root) {
@@ -433,6 +449,12 @@ void ElementScrollOffsets::prune(const LayoutBox& root) {
                                       return std::find(live.begin(), live.end(), entry.first) == live.end();
                                   }),
                    offsets_.end());
+    // An element that stopped being a scroll container gets no event
+    scrolled_.erase(std::remove_if(scrolled_.begin(), scrolled_.end(),
+                                   [&](const auto* element) {
+                                       return std::find(live.begin(), live.end(), element) == live.end();
+                                   }),
+                    scrolled_.end());
 }
 
 ElementScrollOffsets& elementScrollOffsets() {
@@ -604,6 +626,7 @@ void setLayoutViewport(float width, float height, float rootOffsetX, float rootO
     s_rootOffsetX = rootOffsetX;
     s_rootOffsetY = rootOffsetY;
     s_scrollbarW = scrollbarWidth;
+    setTransformViewport(layoutViewportWidth(), layoutViewportHeight());
 }
 
 float layoutViewportWidth() { return s_viewportW > 0 ? s_viewportW : (float)g_width; }
@@ -2783,6 +2806,15 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     
     // Outer shadows under everything the box paints (CSS Backgrounds 3 §7.1)
     paintShadows(box, screenX, screenY, false);
+
+    // backdrop-filter: the page under the box, blurred, behind its
+    // background (it reads the screen: a box turned or resized by a
+    // transform goes without)
+    if (box.backdropBlur > 0 && s_backdrop_blur) {
+        atScreenCoordinates([&](float dx, float dy) {
+            s_backdrop_blur(screenX + dx, screenY + dy, box.width, box.height, box.borderRadius, box.backdropBlur);
+        });
+    }
 
     // Row and row-group backgrounds show through their cells only, not the
     // border-spacing between them (CSS 2.1 §17.5.1)

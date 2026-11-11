@@ -21,6 +21,9 @@ namespace {
 
 const float kPi = 3.14159265358979f;
 
+// The viewport vw/vh resolve against (setTransformViewport)
+float s_viewW = 1920, s_viewH = 1080;
+
 std::string lowered(std::string s) {
     for (char& ch : s) ch = (char)std::tolower((unsigned char)ch);
     return s;
@@ -114,7 +117,7 @@ struct CalcParser {
         } else if (unit == "%") {
             v.percent = n;
         } else {
-            float viewW = layoutViewportWidth(), viewH = layoutViewportHeight();
+            float viewW = s_viewW, viewH = s_viewH;
             if (unit == "px") v.px = n;
             else if (unit == "em") v.px = n * fontSize;
             else if (unit == "rem") v.px = n * 16.0f;
@@ -207,6 +210,11 @@ bool parseNumbers(const std::vector<std::string>& args, std::vector<float>& out)
 }
 
 }  // namespace
+
+void setTransformViewport(float width, float height) {
+    if (width > 0) s_viewW = width;
+    if (height > 0) s_viewH = height;
+}
 
 Affine Affine::rotation(float radians) {
     float c = std::cos(radians), s = std::sin(radians);

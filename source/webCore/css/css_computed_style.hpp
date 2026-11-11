@@ -463,6 +463,14 @@ public:
     std::string animationIterationCount;
     std::string animationDirection;
     std::string animationFillMode;
+    std::string animationTimingFunction;
+    std::string animationPlayState;
+    // CSS Transitions 1 longhands as declared (comma-separated lists;
+    // empty: the initial value). `transition` sets all four.
+    std::string transitionProperty;
+    std::string transitionDuration;
+    std::string transitionDelay;
+    std::string transitionTimingFunction;
     std::string filter;
     std::string cursor = "auto";
     std::string pointerEvents = "auto";

@@ -103,14 +103,48 @@ static bool isTimeToken(const std::string& token) {
 // longhands this engine uses: per animation a duration, an easing (ignored),
 // a delay, an iteration count, a direction, a fill mode, a play state
 // (ignored) and a name, in any order
-static void setAnimationShorthand(CSSComputedStyle& style, const std::string& value) {
-    std::string names, durations, delays, counts, directions, fills;
+// A <easing-function> token (CSS Easing 1)
+static bool isEasingToken(const std::string& t) {
+    return t == "linear" || t == "ease" || t == "ease-in" || t == "ease-out" || t == "ease-in-out" ||
+           t == "step-start" || t == "step-end" || t.rfind("cubic-bezier(", 0) == 0 || t.rfind("steps(", 0) == 0 ||
+           t.rfind("linear(", 0) == 0;
+}
+
+// transition: one list entry per transition, each "property duration
+// easing delay" in any order (CSS Transitions 1 §2.5)
+static void setTransitionShorthand(CSSComputedStyle& style, const std::string& value) {
+    std::string properties, durations, delays, easings;
     auto append = [](std::string& list, const std::string& item) {
         if (!list.empty()) list += ", ";
         list += item;
     };
     for (const std::string& single : splitCommaList(value)) {
-        std::string name, duration, delay, count, direction, fill;
+        std::string property, duration, delay, easing;
+        for (const std::string& token : splitValues(single)) {
+            std::string t = lowerAscii(token);
+            if (isTimeToken(t)) (duration.empty() ? duration : delay) = t;
+            else if (isEasingToken(t)) easing = t;
+            else if (property.empty()) property = t;
+        }
+        append(properties, property.empty() ? "all" : property);
+        append(durations, duration.empty() ? "0s" : duration);
+        append(delays, delay.empty() ? "0s" : delay);
+        append(easings, easing.empty() ? "ease" : easing);
+    }
+    style.transitionProperty = properties;
+    style.transitionDuration = durations;
+    style.transitionDelay = delays;
+    style.transitionTimingFunction = easings;
+}
+
+static void setAnimationShorthand(CSSComputedStyle& style, const std::string& value) {
+    std::string names, durations, delays, counts, directions, fills, easings, states;
+    auto append = [](std::string& list, const std::string& item) {
+        if (!list.empty()) list += ", ";
+        list += item;
+    };
+    for (const std::string& single : splitCommaList(value)) {
+        std::string name, duration, delay, count, direction, fill, easing, state;
         for (const std::string& token : splitValues(single)) {
             std::string t = lowerAscii(token);
             if (isTimeToken(t)) {
@@ -124,10 +158,12 @@ static void setAnimationShorthand(CSSComputedStyle& style, const std::string& va
             } else if (t == "none") {
                 if (name.empty()) name = t;
                 else fill = t;
-            } else if (t == "running" || t == "paused" || t == "linear" || t == "ease" || t == "ease-in" ||
-                       t == "ease-out" || t == "ease-in-out" || t == "step-start" || t == "step-end" ||
-                       t.find('(') != std::string::npos) {
-                // play state and easing: not used
+            } else if (t == "running" || t == "paused") {
+                state = t;
+            } else if (isEasingToken(t)) {
+                easing = t;
+            } else if (t.find('(') != std::string::npos) {
+                // not a keyframes name
             } else {
                 name = token;   // a <keyframes-name> keeps its case
             }
@@ -138,7 +174,11 @@ static void setAnimationShorthand(CSSComputedStyle& style, const std::string& va
         append(counts, count.empty() ? "1" : count);
         append(directions, direction.empty() ? "normal" : direction);
         append(fills, fill.empty() ? "none" : fill);
+        append(easings, easing.empty() ? "ease" : easing);
+        append(states, state.empty() ? "running" : state);
     }
+    style.animationTimingFunction = easings;
+    style.animationPlayState = states;
     style.animationName = names;
     style.animationDuration = durations;
     style.animationDelay = delays;
@@ -264,6 +304,22 @@ void StyleResolver::setStyleSheets(std::vector<StyleSheetEntry> sheets) {
     cascade_.invalidateIndex();
 }
 
+namespace {
+// Set by the browser when CSSAnimationController runs CSS animations and
+// transitions over time; without it they jump to their end state
+bool s_cssAnimationsDriven = false;
+}  // namespace
+
+void setCssAnimationsDriven(bool driven) { s_cssAnimationsDriven = driven; }
+bool cssAnimationsDriven() { return s_cssAnimationsDriven; }
+
+CSSComputedStyle StyleResolver::computeBaseStyle(DOMElement* element, const CSSComputedStyle* parentStyle) {
+    skipCssAnimations_ = true;
+    CSSComputedStyle style = computeStyle(element, parentStyle);
+    skipCssAnimations_ = false;
+    return style;
+}
+
 CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSComputedStyle* parentStyle) {
     CSSComputedStyle computed;
     
@@ -299,6 +355,13 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
     // first, then script animations (Web Animations' effects, written by
     // element.animate()), which come later in the composite order.
     std::vector<const CSSStyleDeclaration*> cssAnimationDecls;
+    std::unique_ptr<CSSStyleDeclaration> cssAnimationDecl;
+    if (s_cssAnimationsDriven && !skipCssAnimations_ && !element->cssAnimationStyle().empty()) {
+        // What the running CSS animations and transitions apply now
+        CSSParser parser;
+        cssAnimationDecl = parser.parseInlineStyle(element->cssAnimationStyle());
+        if (cssAnimationDecl) cssAnimationDecls.push_back(cssAnimationDecl.get());
+    }
     std::unique_ptr<CSSStyleDeclaration> scriptAnimationDecl;
     if (!element->animationStyle().empty()) {
         CSSParser parser;
@@ -362,8 +425,8 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
     // The animation-* properties are known only now: an element with
     // finished, filling CSS animations is cascaded again with their end
     // keyframes in the animations origin
-    cssAnimationDecls = animationEndStates(computed);
-    if (!cssAnimationDecls.empty()) {
+    if (!s_cssAnimationsDriven) cssAnimationDecls = animationEndStates(computed);
+    if (!s_cssAnimationsDriven && !cssAnimationDecls.empty()) {
         computed = parentStyle ? CSSComputedStyle::inherit(*parentStyle) : CSSComputedStyle();
         runPasses();
     }
@@ -1375,7 +1438,16 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     else if (property == "translate") { style.translate = value; }
     else if (property == "rotate") { style.rotate = value; }
     else if (property == "scale") { style.scale = value; }
-    else if (property == "transition") { style.transition = value; }
+    else if (property == "transition") {
+        style.transition = value;
+        setTransitionShorthand(style, value);
+    }
+    else if (property == "transition-property") { style.transitionProperty = value; }
+    else if (property == "transition-duration") { style.transitionDuration = value; }
+    else if (property == "transition-delay") { style.transitionDelay = value; }
+    else if (property == "transition-timing-function") { style.transitionTimingFunction = value; }
+    else if (property == "animation-timing-function") { style.animationTimingFunction = value; }
+    else if (property == "animation-play-state") { style.animationPlayState = value; }
     else if (property == "animation") {
         style.animation = value;
         setAnimationShorthand(style, value);

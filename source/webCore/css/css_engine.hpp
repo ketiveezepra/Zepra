@@ -220,6 +220,13 @@ private:
 /// Whether a property inherits by default (color, font-*, line-height, text-align, visibility...)
 bool isInheritedProperty(const std::string& property);
 
+/// CSS animations and transitions run over time (true: the browser's
+/// CSSAnimationController samples them into each element's
+/// cssAnimationStyle(), which the cascade applies) or jump to their end
+/// state (false, the default: a finished, filling animation's last keyframe)
+void setCssAnimationsDriven(bool driven);
+bool cssAnimationsDriven();
+
 /**
  * @brief Style resolver - computes final styles
  */
@@ -247,6 +254,11 @@ public:
 
     /// Compute style for element
     CSSComputedStyle computeStyle(DOMElement* element, const CSSComputedStyle* parentStyle = nullptr);
+    /// The element's style without its CSS animations and transitions (the
+    /// values they start from and go back to), not cached
+    CSSComputedStyle computeBaseStyle(DOMElement* element, const CSSComputedStyle* parentStyle = nullptr);
+    /// The last @keyframes rule called `name`, or null
+    const CSSKeyframesRule* keyframesRule(const std::string& name) const { return findKeyframes(name); }
 
     /// Get computed style (cached)
     const CSSComputedStyle* getComputedStyle(DOMElement* element);
@@ -299,6 +311,7 @@ private:
     CSSCascade cascade_;
     SelectorMatcher matcher_;
     CSSLengthContext lengthContext_;               // for math functions, set per applyProperty
+    bool skipCssAnimations_ = false;               // computeBaseStyle is running
 
     /// The keyframes each of the element's finished, filling CSS animations
     /// leaves it at (CSS Animations 1 §4.10: animation-fill-mode forwards

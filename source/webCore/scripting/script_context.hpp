@@ -247,6 +247,11 @@ public:
     /// the viewport scrolled since the last frame (HTML "run the scroll
     /// steps", once per frame before the animation frame callbacks)
     void fireViewportScroll();
+    /// Fires a CSS animation or transition event (animationstart, ...,
+    /// transitionend) at a connected element: it bubbles, with
+    /// animationName or propertyName, elapsedTime and pseudoElement ""
+    void fireAnimationEvent(DOMElement* element, const std::string& type, const std::string& name,
+                            double elapsedSeconds);
 
     // Timers
     int setTimeout(std::function<void()> callback, int delay);

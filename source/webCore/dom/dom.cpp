@@ -141,6 +141,7 @@ struct PaintOnlyChanges {
     std::vector<DOMElement*> order;
     std::unordered_set<const DOMElement*> pending;
     std::function<void(DOMElement*)> listener;
+    std::function<void(DOMElement*)> destroyed;
 };
 PaintOnlyChanges& paintOnlyChanges() {
     static PaintOnlyChanges changes;
@@ -151,6 +152,12 @@ PaintOnlyChanges& paintOnlyChanges() {
 void notePaintOnlyChange(DOMElement* element) {
     if (!element) return;
     PaintOnlyChanges& changes = paintOnlyChanges();
+    // An embedder that does not follow paint-only changes (no listener to
+    // drop the element's cached style) restyles as for any other change
+    if (!changes.listener) {
+        noteDomMutation();
+        return;
+    }
     if (changes.pending.insert(element).second) changes.order.push_back(element);
     if (changes.listener) changes.listener(element);
 }
@@ -165,6 +172,10 @@ std::vector<DOMElement*> takePaintOnlyChanges() {
 
 void setPaintOnlyChangeListener(std::function<void(DOMElement*)> listener) {
     paintOnlyChanges().listener = std::move(listener);
+}
+
+void setElementDestroyedListener(std::function<void(DOMElement*)> listener) {
+    paintOnlyChanges().destroyed = std::move(listener);
 }
 
 bool isPaintOnlyProperty(const std::string& property) {
@@ -353,7 +364,10 @@ DOMElement::DOMElement(const std::string& tagName)
       ceState_(isValidCustomElementName(tagName) ? CustomElementState::Undefined
                                                  : CustomElementState::Uncustomized) {}
 
-DOMElement::~DOMElement() { forgetPaintOnlyChange(this); }
+DOMElement::~DOMElement() {
+    forgetPaintOnlyChange(this);
+    if (paintOnlyChanges().destroyed) paintOnlyChanges().destroyed(this);
+}
 
 void DOMElement::setStyleAttributePaintOnly(const std::string& value) {
     auto it = attributes_.find("style");

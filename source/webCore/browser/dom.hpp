@@ -29,11 +29,15 @@ class DOMElement;
 /// and the transform properties, see isPaintOnlyProperty). They do not bump
 /// domMutationVersion(); the element waits here until the browser updates
 /// its boxes. The listener (the browser's style cache) hears of each one
-/// at once, so getComputedStyle() sees the new values.
+/// at once, so getComputedStyle() sees the new values. Without a listener
+/// a paint-only change is an ordinary one (noteDomMutation).
 void notePaintOnlyChange(DOMElement* element);
 /// The elements changed since the last call, each once, in change order
 std::vector<DOMElement*> takePaintOnlyChanges();
 void setPaintOnlyChangeListener(std::function<void(DOMElement*)> listener);
+/// Called as each element is destroyed (one listener; the browser's CSS
+/// animation records drop the element)
+void setElementDestroyedListener(std::function<void(DOMElement*)> listener);
 /// opacity, transform, transform-origin, translate, rotate, scale
 bool isPaintOnlyProperty(const std::string& property);
 class DOMDocument;
@@ -294,6 +298,16 @@ public:
         if (paintOnly) notePaintOnlyChange(this);
         else noteDomMutation();
     }
+    /// The declarations the element's running CSS animations and CSS
+    /// transitions apply now (CSSAnimationController), as CSS text: in the
+    /// animations origin, below script animations. `paintOnly` as above.
+    const std::string& cssAnimationStyle() const { return cssAnimationStyle_; }
+    void setCssAnimationStyle(const std::string& css, bool paintOnly = false) {
+        if (css == cssAnimationStyle_) return;
+        cssAnimationStyle_ = css;
+        if (paintOnly) notePaintOnlyChange(this);
+        else noteDomMutation();
+    }
     /// Sets the style attribute like setAttribute("style", value), for a
     /// change the caller found to touch paint-only properties only: the
     /// mutation is recorded (MutationObserver, attributeChangedCallback) but
@@ -381,6 +395,7 @@ private:
     std::unordered_map<std::string, std::string> attributes_;
     std::unordered_map<std::string, std::string> styleMap_;
     std::string animationStyle_;   // not cloned: animations stay with their element
+    std::string cssAnimationStyle_;
     std::string dirtyValue_;
     std::unique_ptr<DOMShadowRoot> shadowRoot_;
     std::unique_ptr<DOMDocumentFragment> templateContent_;
