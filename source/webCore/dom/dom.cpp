@@ -5,6 +5,7 @@
  * @brief DOM Node implementation stubs
  */
 
+#include <unordered_set>
 #include "browser/dom.hpp"
 #include "css/css_engine.hpp"
 #include "html/html_parser.hpp"
@@ -134,6 +135,49 @@ DOMNode* DOMNode::nextSibling() const {
 static uint64_t s_domMutationVersion = 0;
 uint64_t domMutationVersion() { return s_domMutationVersion; }
 void noteDomMutation() { ++s_domMutationVersion; }
+
+namespace {
+struct PaintOnlyChanges {
+    std::vector<DOMElement*> order;
+    std::unordered_set<const DOMElement*> pending;
+    std::function<void(DOMElement*)> listener;
+};
+PaintOnlyChanges& paintOnlyChanges() {
+    static PaintOnlyChanges changes;
+    return changes;
+}
+}  // namespace
+
+void notePaintOnlyChange(DOMElement* element) {
+    if (!element) return;
+    PaintOnlyChanges& changes = paintOnlyChanges();
+    if (changes.pending.insert(element).second) changes.order.push_back(element);
+    if (changes.listener) changes.listener(element);
+}
+
+std::vector<DOMElement*> takePaintOnlyChanges() {
+    PaintOnlyChanges& changes = paintOnlyChanges();
+    std::vector<DOMElement*> out;
+    out.swap(changes.order);
+    changes.pending.clear();
+    return out;
+}
+
+void setPaintOnlyChangeListener(std::function<void(DOMElement*)> listener) {
+    paintOnlyChanges().listener = std::move(listener);
+}
+
+bool isPaintOnlyProperty(const std::string& property) {
+    return property == "opacity" || property == "transform" || property == "transform-origin" ||
+           property == "translate" || property == "rotate" || property == "scale";
+}
+
+// A destroyed element is no longer waiting for its boxes to be updated
+static void forgetPaintOnlyChange(const DOMElement* element) {
+    PaintOnlyChanges& changes = paintOnlyChanges();
+    if (!changes.pending.erase(element)) return;
+    changes.order.erase(std::remove(changes.order.begin(), changes.order.end(), element), changes.order.end());
+}
 
 namespace {
 // Documents with a mutation sink, by address: a node's ownerDocument pointer
@@ -309,7 +353,16 @@ DOMElement::DOMElement(const std::string& tagName)
       ceState_(isValidCustomElementName(tagName) ? CustomElementState::Undefined
                                                  : CustomElementState::Uncustomized) {}
 
-DOMElement::~DOMElement() = default;
+DOMElement::~DOMElement() { forgetPaintOnlyChange(this); }
+
+void DOMElement::setStyleAttributePaintOnly(const std::string& value) {
+    auto it = attributes_.find("style");
+    bool had = it != attributes_.end();
+    std::string old = had ? it->second : std::string();
+    attributes_["style"] = value;
+    notePaintOnlyChange(this);
+    if (DOMMutationSink* sink = sinkOf(this)) sink->attribute(this, "style", had ? &old : nullptr);
+}
 
 static bool s_shadowRootsExist = false;
 bool shadowRootsExist() { return s_shadowRootsExist; }

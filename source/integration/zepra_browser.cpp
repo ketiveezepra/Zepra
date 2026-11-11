@@ -1287,6 +1287,8 @@ static void syncPageStyleSheets();
 
 static void rebuildLayoutTree() {
     g_layoutPainted = false;
+    // The new boxes take every element's current style
+    Zepra::WebCore::takePaintOnlyChanges();
     g_layoutPending = true;
     syncPageStyleSheets();
     // Compute styles (shadow trees bring their own <style> sheets)
@@ -1416,6 +1418,46 @@ static void rebuildLayoutTree() {
     // Recorded after building, so any DOM writes made while building cannot
     // trigger a relayout on every frame
     g_layoutDomVersion = Zepra::WebCore::domMutationVersion();
+}
+
+static void setTransform(LayoutBox* box, const CSSComputedStyle& style);
+
+// Boxes updated in place by paint-only changes (opacity, transforms) since
+// the browser started; a full restyle and rebuild is "Built layout tree"
+static uint64_t g_paintOnlyUpdates = 0;
+
+// Elements whose opacity or transform properties changed, and nothing else
+// (Zepra::WebCore::notePaintOnlyChange): their boxes take the new values
+// in place. Nothing is restyled or rebuilt; the next paint shows them.
+// When the DOM changed too, the rebuild that follows covers them.
+static void applyPaintOnlyChanges() {
+    std::vector<DOMElement*> changed = Zepra::WebCore::takePaintOnlyChanges();
+    if (changed.empty() || !g_layoutRoot || !g_cssEngine) return;
+    if (Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) return;
+    std::unordered_map<const DOMElement*, const CSSComputedStyle*> styles;
+    for (DOMElement* element : changed) styles.emplace(element, nullptr);
+    std::vector<LayoutBox*> stack{g_layoutRoot.get()};
+    while (!stack.empty()) {
+        LayoutBox* box = stack.back();
+        stack.pop_back();
+        for (auto& child : box->children) stack.push_back(&child);
+        if (!box->domElement || box->anonymous || box->type == LayoutType::Text) continue;
+        auto it = styles.find(box->domElement);
+        if (it == styles.end()) continue;
+        if (!it->second) it->second = g_cssEngine->getComputedStyle(box->domElement);
+        const CSSComputedStyle* style = it->second;
+        if (!style) continue;
+        box->opacity = style->opacity;
+        // Inline boxes are not transformable (CSS Transforms 1 §1)
+        if (box->type != LayoutType::Inline) {
+            box->transform.clear();
+            box->transformOrigin.clear();
+            setTransform(box, *style);
+        }
+        g_paintOnlyUpdates++;
+    }
+    // Script geometry follows transforms: its index is built again
+    g_layoutPass++;
 }
 
 static LayoutBox* findBoxForElement(LayoutBox* box, DOMElement* element) {
@@ -3835,6 +3877,11 @@ static void initLayoutEngine() {
     ZepraBrowser::setShadowPaintCallback(gfx::boxShadow);
     // CSS transforms: the GL modelview matrix carries every primitive and
     // glyph through them (the scissor clips are mapped by the layout engine)
+    // A paint-only style change (see applyPaintOnlyChanges) drops the
+    // element's cached style at once, so getComputedStyle() reads it anew
+    Zepra::WebCore::setPaintOnlyChangeListener([](DOMElement* element) {
+        if (g_cssEngine) g_cssEngine->invalidate(element);
+    });
     ZepraBrowser::setTransformCallbacks(
         [](const float m[6]) {
             g_nxGpu.pushTransform();
@@ -4006,6 +4053,7 @@ private:
     static bool updateLayout() {
         if (!g_layoutRoot || !g_document || !g_cssEngine) return false;
         if (Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) relayoutDocument(false);
+        else applyPaintOnlyChanges();
         if (g_layoutPending) layoutPage();
         return g_layoutRoot != nullptr;
     }
@@ -4886,6 +4934,8 @@ void render() {
     if (g_layoutRoot && Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
         relayoutDocument();
     }
+    // Opacity and transform changes only repaint
+    applyPaintOnlyChanges();
     pumpPageFonts();
     fireLinkEvents();
     // localStorage changes reach the disk (at most once a second per origin)
