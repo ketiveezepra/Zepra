@@ -6,6 +6,7 @@
  */
 
 #include "css/computed_style_values.hpp"
+#include "browser/box_transform.h"
 
 #include <cctype>
 #include <algorithm>
@@ -274,7 +275,14 @@ std::vector<std::pair<std::string, std::string>> resolve(const CSSComputedStyle&
     add("cursor", s.cursor);
     add("pointer-events", s.pointerEvents);
     if (everything || !s.boxShadow.empty()) add("box-shadow", s.boxShadow);
-    if (everything || !s.transform.empty()) add("transform", s.transform);
+    // transform: its resolved value is the matrix (CSS Transforms 1 §11),
+    // percentages taken against an empty box here (DOMBindings resolves
+    // them against the element's box); the individual properties as given
+    add("transform", ZepraBrowser::resolvedTransformValue(s.transform, 0, 0, s.fontSize));
+    add("transform-origin", s.transformOrigin.empty() ? "50% 50%" : s.transformOrigin);
+    add("translate", s.translate.empty() ? "none" : s.translate);
+    add("rotate", s.rotate.empty() ? "none" : s.rotate);
+    add("scale", s.scale.empty() ? "none" : s.scale);
     if (everything || !s.transition.empty()) add("transition", s.transition);
     return out;
 }

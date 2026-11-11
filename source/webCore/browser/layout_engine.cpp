@@ -16,6 +16,7 @@
 #include "../dom/form_controls.hpp"
 #include "gradient_raster.h"
 #include "box_shadow.h"
+#include "box_transform.h"
 
 // Viewport dimensions (defined in zepra_browser.cpp)
 extern int g_width;
@@ -46,17 +47,99 @@ static void (*s_gfx_gradient_bg)(float, float, const GradientBackground&) = null
 static void (*s_push_clip)(float, float, float, float) = nullptr;
 static void (*s_pop_clip)() = nullptr;
 
+// ---------------------------------------------------------------------------
+// Transforms: a transformed box paints through a matrix the renderer applies
+// to everything drawn between push and pop. Coordinates inside stay the
+// untransformed ones; what leaves the drawing calls for the screen (clip
+// rectangles, link areas, read-backs of the framebuffer) is mapped here.
+// ---------------------------------------------------------------------------
+
+static void (*s_push_transform)(const float matrix[6]) = nullptr;
+static void (*s_pop_transform)() = nullptr;
+
+namespace {
+
+// The product of the transforms being painted through (outermost first)
+struct PaintTransform {
+    bool active = false;
+    Affine matrix;
+};
+thread_local PaintTransform t_transform;
+
+void pushMatrix(const Affine& m) {
+    const float values[6] = {m.a, m.b, m.c, m.d, m.e, m.f};
+    s_push_transform(values);
+}
+
+// Runs `draw` with the renderer back at screen coordinates, when the
+// transform in force only moves things: (dx, dy) is how far. False (and
+// nothing drawn) under a transform that turns or resizes.
+template <typename Draw>
+bool atScreenCoordinates(Draw draw) {
+    if (!t_transform.active) {
+        draw(0.0f, 0.0f);
+        return true;
+    }
+    Affine inverse;
+    if (!t_transform.matrix.isTranslation() || !t_transform.matrix.invert(inverse)) return false;
+    pushMatrix(inverse);
+    draw(t_transform.matrix.e, t_transform.matrix.f);
+    s_pop_transform();
+    return true;
+}
+
+void (*s_raw_push_clip)(float, float, float, float) = nullptr;
+void (*s_raw_register_link)(float, float, float, float, const std::string&, const std::string&) = nullptr;
+
+// A clip is a screen rectangle: under a transform, the bounds of where the
+// clipping box appears
+void pushScreenClip(float x, float y, float w, float h) {
+    if (t_transform.active) t_transform.matrix.mapRect(x, y, w, h);
+    s_raw_push_clip(x, y, w, h);
+}
+
+// A link is clicked where it appears
+void registerScreenLink(float x, float y, float w, float h, const std::string& href, const std::string& target) {
+    if (t_transform.active) t_transform.matrix.mapRect(x, y, w, h);
+    s_raw_register_link(x, y, w, h, href, target);
+}
+
+}  // namespace
+
+void setTransformCallbacks(void (*push_transform)(const float matrix[6]), void (*pop_transform)()) {
+    s_push_transform = push_transform && pop_transform ? push_transform : nullptr;
+    s_pop_transform = push_transform && pop_transform ? pop_transform : nullptr;
+}
+
 void setLayoutClipCallbacks(void (*push_clip)(float, float, float, float), void (*pop_clip)()) {
-    s_push_clip = push_clip;
+    s_raw_push_clip = push_clip;
+    s_push_clip = push_clip ? pushScreenClip : nullptr;
     s_pop_clip = pop_clip;
 }
 
 static int (*s_save_corners)(float, float, float, float, float) = nullptr;
 static void (*s_restore_corners)(int) = nullptr;
+static int (*s_raw_save_corners)(float, float, float, float, float) = nullptr;
+static void (*s_raw_restore_corners)(int) = nullptr;
+
+// The corners are read from and drawn back to the framebuffer: under a
+// transform that only moves the box, at the place it is moved to; under any
+// other transform the box clips to its rectangle only
+static int saveScreenCorners(float x, float y, float w, float h, float r) {
+    int token = -1;
+    atScreenCoordinates([&](float dx, float dy) { token = s_raw_save_corners(x + dx, y + dy, w, h, r); });
+    return token;
+}
+
+static void restoreScreenCorners(int token) {
+    atScreenCoordinates([&](float, float) { s_raw_restore_corners(token); });
+}
 
 void setRoundedClipCallbacks(int (*save_corners)(float, float, float, float, float), void (*restore_corners)(int)) {
-    s_save_corners = save_corners;
-    s_restore_corners = restore_corners;
+    s_raw_save_corners = save_corners;
+    s_raw_restore_corners = restore_corners;
+    s_save_corners = save_corners ? saveScreenCorners : nullptr;
+    s_restore_corners = restore_corners ? restoreScreenCorners : nullptr;
 }
 
 static void (*s_gfx_polygon)(const float* xy, int count, uint32_t color, uint8_t alpha) = nullptr;
@@ -448,7 +531,8 @@ void setLayoutCallbacks(
     s_gfx_border = gfx_border;
     s_text_render = text_render;
     s_text_width = text_width;
-    s_register_link = register_link;
+    s_raw_register_link = register_link;
+    s_register_link = register_link ? registerScreenLink : nullptr;
     s_gfx_texture = gfx_texture;
     s_gfx_line = gfx_line;
 }
@@ -2295,7 +2379,7 @@ void collectFixed(const LayoutBox& box, std::vector<const LayoutBox*>& out) {
 // flex items with a z-index (CSS Flexbox §4.3)
 bool isLayered(const LayoutBox& child, const LayoutBox& parent) {
     bool item = parent.type == LayoutType::Flex || parent.type == LayoutType::Grid;
-    return child.positionType != 0 || (item && !child.zIndexAuto);
+    return child.positionType != 0 || (item && !child.zIndexAuto) || !child.transform.empty();
 }
 
 // Starts a stacking context: its layered descendants paint inside it
@@ -2304,6 +2388,7 @@ bool isLayered(const LayoutBox& child, const LayoutBox& parent) {
 bool startsContext(const LayoutBox& box, bool flexItem) {
     if (box.positionType == 3 || box.positionType == 4) return true;
     if (!box.zIndexAuto && (box.positionType != 0 || flexItem)) return true;
+    if (!box.transform.empty()) return true;  // CSS Transforms 1 §3
     return box.opacity < 0.999f;
 }
 
@@ -2466,6 +2551,47 @@ std::vector<const LayoutBox*> fixedBoxesInPaintOrder(const LayoutBox& root) {
 
 static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY, float viewportHeight, float scrollY);
 
+namespace {
+
+// While a transformed box paints: its matrix is pushed on the renderer and
+// multiplied into the frame's, and the clip in force is restated in the
+// box's own (untransformed) coordinates
+struct TransformScope {
+    bool active = false;
+    bool flat = false;  // scale(0) and the like: the box has no area to paint
+    PaintTransform outer;
+    std::vector<ClipRect> outerClips;
+
+    TransformScope(const LayoutBox& box, float x, float y) {
+        Affine m, inverse;
+        if (box.transform.empty() || !s_push_transform || !boxTransform(box, x, y, m)) return;
+        if (!m.invert(inverse)) {
+            flat = true;
+            return;
+        }
+        active = true;
+        outer = t_transform;
+        t_transform.matrix = outer.active ? outer.matrix * m : m;
+        t_transform.active = true;
+        pushMatrix(m);
+        outerClips.swap(t_clipStack);
+        if (!outerClips.empty()) {
+            ClipRect clip = outerClips.back();
+            float cx = clip.x0, cy = clip.y0, cw = clip.x1 - clip.x0, ch = clip.y1 - clip.y0;
+            inverse.mapRect(cx, cy, cw, ch);
+            t_clipStack.push_back({cx, cy, cx + cw, cy + ch, m.isTranslation() ? clip.radius : 0.0f});
+        }
+    }
+    ~TransformScope() {
+        if (!active) return;
+        t_clipStack.swap(outerClips);
+        s_pop_transform();
+        t_transform = outer;
+    }
+};
+
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // background-clip: text (CSS Backgrounds 4 §2.1): the background of the
 // nearest such box, sampled under each character of its text
@@ -2585,6 +2711,7 @@ void paintBox(const LayoutBox& box, float offsetX, float offsetY,
     t_frame.count = 0;
     t_frame.depth = 0;
     t_frame.opacity = 1.0f;
+    t_transform = {};
     paintBoxImpl(box, offsetX, offsetY, viewportHeight, scrollY);
     t_frame.active = false;
     t_frame.root = nullptr;
@@ -2608,23 +2735,25 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
         ~OpacityGuard() { t_frame.opacity = saved; }
     } og{t_frame.opacity};
     t_frame.opacity = box.paintOpacity;
+
+    float screenX = offsetX + box.x;
+    float screenY = offsetY + box.y - scrollY;
+
+    // Save for hit testing (where the box was laid out: a transform is
+    // applied on top of it, see toBoxSpace)
+    box.screenX = screenX;
+    box.screenY = screenY;
+
+    // A transformed box, and everything in it, is drawn through its matrix
+    TransformScope transformed(box, screenX, screenY);
+    if (transformed.flat) return;
+
     if (box.visibilityHidden) {
         // visibility:hidden — skip painting this box but still paint children
         // (children inherit visibility but can override to visible)
-        float screenX2 = offsetX + box.x;
-        float screenY2 = offsetY + box.y - scrollY;
-        box.screenX = screenX2;
-        box.screenY = screenY2;
-        paintChildren(box, screenX2, screenY2, viewportHeight);
+        paintChildren(box, screenX, screenY, viewportHeight);
         return;
     }
-    
-    float screenX = offsetX + box.x;
-    float screenY = offsetY + box.y - scrollY;
-    
-    // Save for hit testing
-    box.screenX = screenX;
-    box.screenY = screenY;
 
     // border-radius: 50% and the like: a percentage of the box (of its
     // smaller side, as corners here are circular)
@@ -2642,9 +2771,11 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
     if (box.borderRadius > 0 && box.width > 0 && box.height > 0)
         box.borderRadius = std::min({box.borderRadius, box.width / 2.0f, box.height / 2.0f});
     
-    // Skip if off-screen (culling)
-    if (screenY + box.height < 0 || screenY > viewportHeight) {
-        return;
+    // Skip if off-screen (culling), where the box appears
+    {
+        float cullX = screenX, cullY = screenY, cullW = box.width, cullH = box.height;
+        if (t_transform.active) t_transform.matrix.mapRect(cullX, cullY, cullW, cullH);
+        if (cullY + cullH < 0 || cullY > viewportHeight) return;
     }
     
     // The background colour's own alpha (rgba(), #rrggbbaa) times opacity
@@ -2681,7 +2812,14 @@ static void paintBoxImpl(const LayoutBox& box, float offsetX, float offsetY,
             // no colour of its own
         } else if (box.blendMode != 0 && s_gfx_blend_fill) {
             // mix-blend-mode: mixed with what is already drawn under it
-            s_gfx_blend_fill(screenX, screenY, box.width, box.height, box.borderRadius, box.bgColor, alpha, box.blendMode);
+            // (it reads the screen under the box: a box that is turned or
+            // resized by a transform is filled without the blend)
+            bool blended = atScreenCoordinates([&](float dx, float dy) {
+                s_gfx_blend_fill(screenX + dx, screenY + dy, box.width, box.height, box.borderRadius, box.bgColor,
+                                 alpha, box.blendMode);
+            });
+            if (!blended && s_gfx_rrect)
+                s_gfx_rrect(screenX, screenY, box.width, box.height, box.borderRadius, box.bgColor, alpha);
         } else if ((box.borderRadius > 0 || alpha < 255) && s_gfx_rrect) {
             // Translucent fills go through the rounded-rect path, the one that
             // takes an alpha (a radius of 0 is a plain rectangle)

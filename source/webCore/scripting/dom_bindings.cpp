@@ -5,6 +5,7 @@
  * @brief Live DOM wrappers and DOM events for page scripts (see dom_bindings.hpp)
  */
 
+#include "browser/box_transform.h"
 #include <typeinfo>
 #include <cstdlib>
 #include <iostream>
@@ -2983,7 +2984,18 @@ std::vector<std::pair<std::string, std::string>> DOMBindings::computedValues(DOM
     if (!computedStyleSource_) return {};
     const CSSComputedStyle* style = computedStyleSource_(element);
     if (!style) return {};
-    return computedStyleProperties(*style);
+    auto values = computedStyleProperties(*style);
+    // A transform's percentages are of the element's border box: resolve
+    // them against its laid-out size (no box: none apply)
+    if (style->transform.find('%') != std::string::npos && geometry_) {
+        ElementGeometry g = geometry_->elementGeometry(element, false);
+        for (auto& [name, value] : values) {
+            if (name == "transform")
+                value = ZepraBrowser::resolvedTransformValue(style->transform, (float)g.boxWidth, (float)g.boxHeight,
+                                                             style->fontSize);
+        }
+    }
+    return values;
 }
 
 // ============================================================================

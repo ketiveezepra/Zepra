@@ -1371,6 +1371,10 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         }
     }
     else if (property == "transform") { style.transform = value; }
+    else if (property == "transform-origin") { style.transformOrigin = value; }
+    else if (property == "translate") { style.translate = value; }
+    else if (property == "rotate") { style.rotate = value; }
+    else if (property == "scale") { style.scale = value; }
     else if (property == "transition") { style.transition = value; }
     else if (property == "animation") {
         style.animation = value;

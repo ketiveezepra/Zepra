@@ -181,6 +181,13 @@ struct LayoutBox {
     // Opacity (0.0 = transparent, 1.0 = opaque)
     float opacity = 1.0f;
     
+    // The box's transform functions (CSS Transforms: the translate, rotate
+    // and scale properties' first, then `transform`; "" for none) and its
+    // transform-origin ("" is 50% 50%). Paint, hit testing and script
+    // geometry apply them (box_transform.h); layout does not.
+    std::string transform;
+    std::string transformOrigin;
+
     // mix-blend-mode of the box's background colour (blend_modes.h; 0 normal)
     uint8_t blendMode = 0;
     // background-clip: text: the background shows through the text of the
@@ -593,6 +600,11 @@ float widestForcedLine(const LayoutBox& box);
  */
 void paintBox(const LayoutBox& box, float offsetX, float offsetY, 
               float viewportHeight, float scrollY);
+
+/// A transformed box paints between push (the matrix its content is drawn
+/// through, as CSS matrix(a, b, c, d, e, f), on top of the ones already
+/// pushed) and pop. Without them transforms are not painted.
+void setTransformCallbacks(void (*push_transform)(const float matrix[6]), void (*pop_transform)());
 
 /// The position: fixed boxes under `root`, in paint order (bottom first:
 /// by z-index, then tree order). Hit testing checks them, last first,

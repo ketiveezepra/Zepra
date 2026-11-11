@@ -2028,6 +2028,23 @@ static int usedBorderStyle(const CSSComputedStyle& style) {
 
 // outline-* on a box (an outline style of none or hidden draws nothing;
 // auto, a focus ring, is drawn solid)
+// The box's transform (CSS Transforms 1/2): translate, rotate and scale
+// first, then the transform list; paint and hit testing apply it
+static void setTransform(LayoutBox* box, const CSSComputedStyle& style) {
+    std::string functions = ZepraBrowser::individualTransformFunctions(style.translate, style.rotate, style.scale);
+    std::string list = style.transform;
+    std::string lowered = list;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::tolower);
+    if (lowered == "none") list.clear();
+    if (!functions.empty() && !list.empty()) functions += ' ';
+    functions += list;
+    // An invalid list is no transform (and no stacking context)
+    ZepraBrowser::Affine check;
+    if (functions.empty() || !ZepraBrowser::parseTransformList(functions, 0, 0, 16, check)) return;
+    box->transform = functions;
+    box->transformOrigin = style.transformOrigin;
+}
+
 static void setOutline(LayoutBox* box, const CSSComputedStyle& style) {
     Zepra::WebCore::BorderStyle b = Zepra::WebCore::BorderStyle::Solid;
     if (style.outlineStyle != "auto" && !Zepra::WebCore::parseBorderStyle(style.outlineStyle, b)) return;
@@ -3034,6 +3051,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     
                     // Visual
                     blockBox->opacity = childStyle->opacity;
+                    setTransform(blockBox, *childStyle);
                     blockBox->overflowHidden = (childStyle->overflowX == OverflowValue::Hidden || 
                                                 childStyle->overflowY == OverflowValue::Hidden);
                     // Clipping and scrolling (overflow other than visible): the
@@ -3815,6 +3833,14 @@ static void initLayoutEngine() {
     ZepraBrowser::setRoundedClipCallbacks(gfx::saveCorners, gfx::restoreCorners);
     ZepraBrowser::setBlendFillCallback(gfx::blendFill);
     ZepraBrowser::setShadowPaintCallback(gfx::boxShadow);
+    // CSS transforms: the GL modelview matrix carries every primitive and
+    // glyph through them (the scissor clips are mapped by the layout engine)
+    ZepraBrowser::setTransformCallbacks(
+        [](const float m[6]) {
+            g_nxGpu.pushTransform();
+            g_nxGpu.multiplyTransform(m[0], m[1], m[2], m[3], m[4], m[5]);
+        },
+        [] { g_nxGpu.popTransform(); });
     
     std::cout << "[Layout] Layout engine initialized (rounded rect + gradient support)" << std::endl;
     
@@ -5654,6 +5680,9 @@ LayoutBox* findBoxAt(LayoutBox* box, float x, float y) {
             if (LayoutBox* found = findBoxAt(const_cast<LayoutBox*>(*it), x, y)) return found;
         }
     }
+    // A transformed box is hit where it appears: the point is taken back to
+    // where the box and its content were laid out
+    if (!ZepraBrowser::toBoxSpace(*box, x, y)) return nullptr;
     // A clipping box's content is only visible (and hit) inside it
     if (ZepraBrowser::clipsContent(*box) && !boxContains(box, x, y)) return nullptr;
     
@@ -6268,6 +6297,7 @@ bool loadResources() {
 // Deepest DOM element whose box contains the point (screen coordinates)
 static DOMElement* findElementAt(LayoutBox* box, float x, float y) {
     if (!box) return nullptr;
+    if (!ZepraBrowser::toBoxSpace(*box, x, y)) return nullptr;
     if (ZepraBrowser::clipsContent(*box) && !boxContains(box, x, y)) return nullptr;
     for (auto it = box->children.rbegin(); it != box->children.rend(); ++it) {
         if (DOMElement* el = findElementAt(&(*it), x, y)) return el;

@@ -443,6 +443,12 @@ public:
 
     std::string boxShadow;
     std::string transform;
+    std::string transformOrigin;    // "" = 50% 50%
+    // The individual transform properties (CSS Transforms 2 §5), as
+    // declared; "" = none. They apply before `transform`.
+    std::string translate;
+    std::string rotate;
+    std::string scale;
     std::string transition;
 
     /// Custom properties (--name), resolved and inherited; shared with the
