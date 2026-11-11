@@ -508,6 +508,93 @@ TEST(AbsoluteLayout, InsetsStretchAnAutoSizedBox) {
     EXPECT_FALSE(cover.cssWidth.isSet() && !cover.cssWidth.isAuto());
 }
 
+TEST(FlexLayout, IndefiniteColumnLeavesNoFreeSpace) {
+    // A column with an auto height is as tall as its items: flex-grow and
+    // justify-content: center have nothing to distribute (it used a
+    // 999999px placeholder height for that, so items grew to ~1e6 px)
+    LayoutBox flex = makeFlex(1, 0);
+    flex.justifyContent = 2;
+    LayoutBox& fixed = addBox(flex, LayoutType::Block);
+    fixed.cssHeight = LayoutLength::px(30);
+    LayoutBox& grow = addBox(flex, LayoutType::Block);
+    grow.flexGrow = 1;
+    grow.flexBasis = LayoutLength::px(0);
+    addBox(grow, LayoutType::Inline).text = "x";
+    ZepraBrowser::layoutBlock(flex, 600, 0);
+    EXPECT_FLOAT_EQ(fixed.y, 0);
+    EXPECT_FLOAT_EQ(grow.y, 30);
+    EXPECT_LT(grow.height, 40) << "keeps its content height";
+    EXPECT_LT(flex.height, 80);
+}
+
+TEST(FlexLayout, FlexedColumnItemIsDefiniteForItsChildren) {
+    // height: 400px column > empty spacer + flex: 1 column > header + flex: 1
+    LayoutBox outer = makeFlex(1, 0);
+    outer.cssHeight = LayoutLength::px(400);
+    LayoutBox& spacer = addBox(outer, LayoutType::Block);
+    LayoutBox& middle = addBox(outer, LayoutType::Flex);
+    middle.flexDirection = 1;
+    middle.flexGrow = 1;
+    middle.flexBasis = LayoutLength::px(0);
+    LayoutBox& head = addBox(middle, LayoutType::Block);
+    head.cssHeight = LayoutLength::px(20);
+    LayoutBox& inner = addBox(middle, LayoutType::Block);
+    inner.flexGrow = 1;
+    inner.flexBasis = LayoutLength::px(0);
+    inner.overflowY = 2;
+    ZepraBrowser::layoutBlock(outer, 300, 0);
+    EXPECT_FLOAT_EQ(spacer.height, 0) << "an empty item takes no space";
+    EXPECT_FLOAT_EQ(middle.height, 400);
+    EXPECT_FLOAT_EQ(inner.y, 20);
+    EXPECT_FLOAT_EQ(inner.height, 380);
+}
+
+TEST(AbsoluteLayout, PercentageHeightsResolveAgainstDefiniteContainingBlocks) {
+    // position: relative; height: 300px > absolute top/bottom > height: 100%
+    LayoutBox parent;
+    parent.type = LayoutType::Block;
+    parent.positionType = 1;
+    parent.cssHeight = LayoutLength::px(300);
+    LayoutBox& abs = addBox(parent, LayoutType::Block);
+    abs.positionType = 2;
+    abs.cssTop = LayoutLength::px(10);
+    abs.cssBottom = LayoutLength::px(20);
+    LayoutBox& full = addBox(abs, LayoutType::Block);
+    full.cssHeight = LayoutLength::pct(100);
+    LayoutBox& half = addBox(parent, LayoutType::Block);
+    half.cssHeight = LayoutLength::pct(50);
+    LayoutBox& autoParent = addBox(parent, LayoutType::Block);
+    LayoutBox& indefinite = addBox(autoParent, LayoutType::Block);
+    indefinite.cssHeight = LayoutLength::pct(50);
+    addBox(indefinite, LayoutType::Inline).text = "x";
+    ZepraBrowser::layoutBlock(parent, 400, 0);
+    EXPECT_FLOAT_EQ(abs.height, 270);
+    EXPECT_FLOAT_EQ(full.height, 270);
+    EXPECT_FLOAT_EQ(half.height, 150);
+    EXPECT_GT(indefinite.height, 0) << "a percentage of an auto height behaves as auto";
+    EXPECT_TRUE(half.cssHeight.isPercent()) << "the specified percentage is kept for the next pass";
+}
+
+TEST(AbsoluteLayout, FixedInsetHeightReachesAbsoluteChildren) {
+    // YouTube's guide drawer: fixed top/bottom > absolute top:0;bottom:0
+    ZepraBrowser::setLayoutViewport(1000, 600);
+    LayoutBox root;
+    root.type = LayoutType::Block;
+    LayoutBox& fixed = addBox(root, LayoutType::Block);
+    fixed.positionType = 3;
+    fixed.cssTop = LayoutLength::px(56);
+    fixed.cssBottom = LayoutLength::px(0);
+    fixed.cssWidth = LayoutLength::px(240);
+    LayoutBox& inner = addBox(fixed, LayoutType::Block);
+    inner.positionType = 2;
+    inner.cssTop = inner.cssBottom = LayoutLength::px(0);
+    ZepraBrowser::layoutBlock(root, 1000, 0);
+    EXPECT_FLOAT_EQ(fixed.height, 544);
+    EXPECT_FLOAT_EQ(inner.height, 544);
+    EXPECT_FALSE(fixed.cssHeight.isSet() && !fixed.cssHeight.isAuto()) << "the auto height is kept";
+    ZepraBrowser::setLayoutViewport(0, 0);
+}
+
 TEST(FlexLayout, TextAlignDoesNotMoveCentredItemsAgain) {
     // display: flex; justify-content: center; text-align: center
     LayoutBox flex = makeFlex(0, 3);

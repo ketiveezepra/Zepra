@@ -1284,6 +1284,7 @@ static bool g_layoutPending = true;  // the tree was rebuilt and not laid out si
 
 // The page's sheets follow its <style>/<link> elements (defined with the loader)
 static void syncPageStyleSheets();
+static float pageViewportHeight();
 
 static void rebuildLayoutTree() {
     g_layoutPainted = false;
@@ -1396,6 +1397,22 @@ static void rebuildLayoutTree() {
     }
      
     // Build LayoutBox tree directly from DOM
+    // The body's percentage height resolves against <html>'s height, which
+    // is a percentage of the viewport (the initial containing block) or a
+    // length; html's auto height leaves it indefinite (CSS 2.1 §10.5)
+    {
+        float rootBase = -1;
+        DOMElement* html = g_document->documentElement();
+        const CSSComputedStyle* htmlStyle = html && g_cssEngine ? g_cssEngine->getComputedStyle(html) : nullptr;
+        if (htmlStyle) {
+            const auto& h = htmlStyle->height;
+            if (h.unit == Zepra::WebCore::CSSLength::Unit::Px) rootBase = h.value;
+            else if (h.unit == Zepra::WebCore::CSSLength::Unit::Percent)
+                rootBase = h.value / 100.0f * pageViewportHeight() + h.pxOffset;
+        }
+        ZepraBrowser::setRootPercentageBase(rootBase);
+    }
+
     if (g_document->body()) {
         buildLayoutFromDOM(g_document->body(), g_layoutRoot.get(), false, "", "");
     }
