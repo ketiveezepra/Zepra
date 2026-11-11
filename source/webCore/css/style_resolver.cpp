@@ -318,6 +318,8 @@ CSSComputedStyle StyleResolver::computeBaseStyle(DOMElement* element, const CSSC
     CSSComputedStyle style = computeStyle(element, parentStyle);
     skipCssAnimations_ = false;
     return style;
+}
+
 /**
  * @brief Blockification (CSS Display 3 §2.7, CSS 2.1 §9.7): an absolutely
  * positioned or floated box, and a flex or grid item, has a block-level
