@@ -44,6 +44,11 @@ noframes, param, rp, template {
     display: none !important;
 }
 
+/* A popover is rendered only while showing (HTML Popover API) */
+[popover]:not(:popover-open):not(dialog[open]) {
+    display: none;
+}
+
 /* ==========================================================================
    Block-Level Elements
    ========================================================================== */

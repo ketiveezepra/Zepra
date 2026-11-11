@@ -1189,3 +1189,23 @@ TEST(DomBindings, StyleAssignmentRunsReactionsSynchronously) {
                         "[during > 0, log.length < 10].join()"),
               "true,true");
 }
+
+// Popover API: showPopover/hidePopover/togglePopover change the showing
+// state behind :popover-open (YouTube's tooltip popover stays hidden until
+// shown); beforetoggle fires at once, toggle after the script, coalesced
+TEST(DomBindings, PopoverShowingState) {
+    Page page(kPage);
+    page.eval("var p = document.createElement('div'); p.setAttribute('popover', 'manual'); document.body.appendChild(p);"
+              "var log = []; p.addEventListener('beforetoggle', function (e) { log.push('b:' + e.newState); });"
+              "p.addEventListener('toggle', function (e) { log.push('t:' + e.oldState + '>' + e.newState); });");
+    EXPECT_EQ(page.eval("p.matches(':popover-open')"), "false");
+    EXPECT_EQ(page.eval("p.showPopover(); [p.matches(':popover-open'), log.join()].join(' ')"), "true b:open");
+    EXPECT_EQ(page.eval("log.join()"), "b:open,t:closed>open") << "toggle runs after the script";
+    EXPECT_EQ(page.eval("log = []; var r = [p.togglePopover(), p.togglePopover(true)]; r.join()"), "false,true");
+    EXPECT_EQ(page.eval("log.join()"), "b:closed,b:open") << "closed then reopened: no net toggle";
+    EXPECT_EQ(page.eval("var q = document.createElement('div'); document.body.appendChild(q);"
+                        "try { q.showPopover(); 'no' } catch (e) { e.name }"), "NotSupportedError");
+    page.eval("p.addEventListener('beforetoggle', function (e) { if (e.newState === 'open') e.preventDefault(); });"
+              "p.hidePopover(); p.showPopover();");
+    EXPECT_EQ(page.eval("p.matches(':popover-open')"), "false") << "a canceled beforetoggle keeps it closed";
+}
