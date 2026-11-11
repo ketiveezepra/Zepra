@@ -26,6 +26,8 @@ namespace Zepra::Runtime {
 
 namespace Zepra::WebCore {
 
+class HTMLDocumentParser;
+
 using ConsoleHandler = std::function<void(const std::string& level, const std::string& message)>;
 /// Receives every console entry with its structured values (see ConsoleMessage).
 /// When set, it replaces the plain ConsoleHandler.
@@ -231,7 +233,28 @@ public:
     /// scripts). It returns between two scripts once `deadline` passed.
     /// Returns true once DOMContentLoaded fired (at once on later calls).
     void beginParsing(std::function<uint32_t(DOMElement*)> firstLineOf);
+    /// The same, with the document's own incremental parser (HTML §13.2):
+    /// advanceParsing() runs `parser` up to each </script>, prepares that
+    /// script with the tree built so far (inline ones run at once, a
+    /// parser-blocking one stops the parser until it arrived and ran) and
+    /// goes on; document.write() inserts at the parser's insertion point.
+    /// `parser` builds the document this context was initialized with.
+    void beginParsing(std::unique_ptr<HTMLDocumentParser> parser,
+                      std::function<uint32_t(DOMElement*)> firstLineOf);
     bool advanceParsing(std::chrono::steady_clock::time_point deadline);
+    /// The parser beginParsing() was given, while it has input to parse
+    HTMLDocumentParser* activeParser() const;
+
+    /// document.write(text): into the parser's input at its insertion
+    /// point, tokenized (and its scripts run) before it returns. With no
+    /// insertion point it is ignored while an external script runs or the
+    /// page's parser is still active, else it implies document.open().
+    void documentWrite(const std::string& text);
+    /// document.open(): unless the page's parser is active, the document
+    /// loses its children and a script-created parser takes the writes
+    void documentOpen();
+    /// document.close(): the script-created parser parses to its end
+    void documentClose();
     /// Whether a load begun with beginParsing() is past DOMContentLoaded
     bool parsingDone() const { return parsePhase_ == ParsePhase::Idle || parsePhase_ == ParsePhase::Done; }
     /// Runs the async and script-inserted scripts whose source arrived, each
@@ -552,6 +575,22 @@ private:
     std::function<uint32_t(DOMElement*)> parserFirstLine_;
     /// The parser-blocking script the walk waits for
     std::shared_ptr<PendingScript> parserBlockingScript_;
+    /// The document's incremental parser (beginParsing with a parser, or
+    /// document.open()); null for a document parsed before scripts run
+    std::unique_ptr<HTMLDocumentParser> parser_;
+    /// External scripts running (document.write without an insertion
+    /// point is ignored meanwhile: HTML's ignore-destructive-writes counter)
+    int ignoreDestructiveWrites_ = 0;
+    /// Keeps the elements the parser still refers to alive (in
+    /// pendingScriptStore_) while scripts may remove them
+    void pinParserElements();
+    /// Prepares the script the parser stopped for
+    void prepareParserScript(DOMElement* script);
+    /// Parses up to the insertion point (document.write), running the
+    /// scripts met on the way; stops at a parser-blocking script
+    void parseWrittenInput();
+    /// document.readyState changes, with readystatechange at the document
+    void setDocumentReadiness(const std::string& state);
     void collectParserScripts(std::function<uint32_t(DOMElement*)> firstLineOf);
     /// Without `wait`, false when it stopped: a script's source is not here
     /// yet, or `deadline` passed. With `wait`, it blocks for sources.

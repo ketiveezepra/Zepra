@@ -277,7 +277,22 @@ std::optional<std::u32string> HTML5Tokenizer::lookupNamedCharRef(
 // ─── Main tokenize loop ───────────────────────────────────────────────────────
 
 void HTML5Tokenizer::tokenize() {
+    inputClosed_ = true;
+    limit_ = std::string::npos;
+    while (run() == RunResult::Paused) {
+    }
+}
+
+HTML5Tokenizer::RunResult HTML5Tokenizer::run() {
     while (true) {
+        if (pauseRequested_) {
+            pauseRequested_ = false;
+            return RunResult::Paused;
+        }
+        if (finished_) return RunResult::Finished;
+        if (!hasReconsume_ && (pos_ >= limit_ || (pos_ >= src_.size() && !inputClosed_))) {
+            return RunResult::NeedInput;
+        }
         char32_t c = nextChar();
 
         switch (state_) {
@@ -358,16 +373,15 @@ void HTML5Tokenizer::tokenize() {
         case TokenizerState::ScriptDataDoubleEscapeEnd: processScriptDataDoubleEscapeEnd(c); break;
         default:
             // Unknown state — emit char and stay
-            if (c == kEOF) { emitEOF(); return; }
+            if (c == kEOF) { emitEOF(); finished_ = true; return RunResult::Finished; }
             emitCharacter(c);
             break;
         }
 
         // Check if we emitted EOF — both in handler and via state
         if (c == kEOF && !hasReconsume_) {
-            // Most states handle EOF inline; if we reach here something unusual happened
-            // but we already emitted EOF in the switch case, so return
-            break;
+            // Most states handle EOF inline (the switch emitted it)
+            finished_ = true;
         }
     }
 }

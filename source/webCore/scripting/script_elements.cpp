@@ -31,6 +31,7 @@
 #include "scripting/script_context.hpp"
 #include "scripting/dom_bindings.hpp"
 #include "scripting/page_url.hpp"
+#include "html/html_parser.hpp"
 
 #include "runtime/execution/vm.hpp"
 #include "runtime/objects/object.hpp"
@@ -62,6 +63,7 @@ struct PendingScript {
     bool module = false;
     bool ready = false;              // the source is here (or the fetch failed)
     bool failed = false;             // fire error instead of running
+    bool parserInserted = false;     // the parser stopped for it (not defer/async)
     std::string url;                 // the script's URL (the page's, inline)
     std::string source;
     std::string error;
@@ -133,6 +135,11 @@ void ScriptContext::setupScriptElements() {
     vm_->setGlobal("__zepraPendingScripts__", Value::object(pendingScriptStore_));
     domBindings_->setScriptElementHook([this](DOMElement* script) { prepareScript(script, false); });
     domBindings_->setDocumentUrlSource([this] { return pageUrl_; });
+    DOMBindings::DocumentStreamHooks hooks;
+    hooks.write = [this](const std::string& text) { documentWrite(text); };
+    hooks.open = [this] { documentOpen(); };
+    hooks.close = [this] { documentClose(); };
+    domBindings_->setDocumentStreamHooks(std::move(hooks));
 }
 
 void ScriptContext::prepareScript(DOMElement* element, bool parserInserted, uint32_t firstLine) {
@@ -184,6 +191,7 @@ void ScriptContext::prepareScript(DOMElement* element, bool parserInserted, uint
         else asyncScripts_.push_back(script);
         return;
     }
+    script->parserInserted = parserInserted && !async && !(defer && script->external);
     if (!script->external) {
         executeScriptElement(*script);
         return;
@@ -253,7 +261,24 @@ bool ScriptContext::advanceParserScripts(bool wait, std::chrono::steady_clock::t
             if (!scriptSourceReady(*blocking, wait)) return false;
             parserBlockingScript_.reset();
             runTask([&] { executeScriptElement(*blocking); }, "script");
-            if (pastDeadline()) return parserScriptNext_ >= parserScriptCount_;
+            if (pastDeadline()) return parser_ ? parser_->done() : parserScriptNext_ >= parserScriptCount_;
+            continue;
+        }
+        if (parser_) {
+            if (parser_->scriptCreated()) return true;
+            // The script the parser stopped at before parsing began here
+            // (the browser runs it up to its first script), else the next one
+            DOMElement* element = parser_->takePausedScript();
+            if (!element) {
+                if (parser_->done() || parser_->pump() != HTMLDocumentParser::Stop::Script) {
+                    // Done (the network parser's input is complete)
+                    pendingScriptStore_->deleteProperty("parserRefs");
+                    return true;
+                }
+                element = parser_->takePausedScript();
+            }
+            if (element) prepareParserScript(element);
+            if (!parserBlockingScript_ && pastDeadline()) return parser_->done();
             continue;
         }
         if (parserScriptNext_ >= parserScriptCount_) return true;
@@ -287,13 +312,113 @@ void ScriptContext::runParserScripts(const std::function<uint32_t(DOMElement*)>&
 }
 
 void ScriptContext::beginParsing(std::function<uint32_t(DOMElement*)> firstLineOf) {
+    parser_.reset();
     collectParserScripts(std::move(firstLineOf));
+}
+
+void ScriptContext::beginParsing(std::unique_ptr<HTMLDocumentParser> parser,
+                                 std::function<uint32_t(DOMElement*)> firstLineOf) {
+    parserScriptCount_ = parserScriptNext_ = 0;
+    parserBlockingScript_.reset();
+    parserFirstLine_ = std::move(firstLineOf);
+    parser_ = std::move(parser);
+    parsePhase_ = parser_ && vm_ && domBindings_ && pendingScriptStore_ ? ParsePhase::ParserScripts : ParsePhase::Idle;
+    if (parsePhase_ == ParsePhase::Idle) parser_.reset();
+}
+
+HTMLDocumentParser* ScriptContext::activeParser() const {
+    return parser_ && !parser_->done() ? parser_.get() : nullptr;
+}
+
+void ScriptContext::pinParserElements() {
+    if (!parser_ || !pendingScriptStore_ || !domBindings_) return;
+    // A script may take an open element out of the tree; the parser keeps
+    // inserting into it (as browsers do), so its wrapper must own it
+    Object* refs = new Object();
+    size_t i = 0;
+    for (DOMElement* element : parser_->referencedElements()) {
+        refs->set(std::to_string(i++), domBindings_->wrap(element));
+    }
+    pendingScriptStore_->set("parserRefs", Value::object(refs));
+}
+
+void ScriptContext::prepareParserScript(DOMElement* script) {
+    pinParserElements();
+    prepareScript(script, true, parserFirstLine_ ? parserFirstLine_(script) : 1);
+    // A script-created parser has no one waiting to resume it later: its
+    // external scripts keep their order but run as they arrive
+    if (parserBlockingScript_ && parser_ && parser_->scriptCreated()) {
+        orderedScripts_.push_back(parserBlockingScript_);
+        parserBlockingScript_.reset();
+    }
+}
+
+void ScriptContext::parseWrittenInput() {
+    while (parser_ && !parser_->done() && !parserBlockingScript_) {
+        HTMLDocumentParser::Stop stop = parser_->pumpToInsertionPoint();
+        if (stop != HTMLDocumentParser::Stop::Script) break;
+        if (DOMElement* element = parser_->takePausedScript()) prepareParserScript(element);
+    }
+}
+
+void ScriptContext::documentWrite(const std::string& text) {
+    if (!document_ || !domBindings_) return;
+    if (!parser_ || !parser_->hasInsertionPoint()) {
+        if (ignoreDestructiveWrites_ > 0 || activeParser()) {
+            // An async or deferred external script, a timer during the load:
+            // browsers ignore these writes rather than wipe the page
+            log("[document.write] ignored: no insertion point (the call came from an "
+                "asynchronously loaded script or a task during the load)");
+            return;
+        }
+        documentOpen();
+        if (!parser_ || !parser_->hasInsertionPoint()) return;
+    }
+    parser_->insertAtInsertionPoint(text);
+    // A parser-blocking script is pending: the text waits in the input
+    // stream until the parser resumes after it
+    if (parserBlockingScript_) return;
+    parseWrittenInput();
+}
+
+void ScriptContext::documentOpen() {
+    if (!document_ || !domBindings_ || !vm_) return;
+    // The page's parser is still at work: open() does nothing; an open
+    // stream stays open
+    if (activeParser()) return;
+    domBindings_->removeChildrenOf(document_);
+    parser_ = std::make_unique<HTMLDocumentParser>(document_);
+    setDocumentReadiness("loading");
+    std::cout << "[JS] document.open(): the document was cleared for writing" << std::endl;
+}
+
+void ScriptContext::documentClose() {
+    if (!parser_ || !parser_->scriptCreated() || parser_->done()) return;
+    parser_->closeInput();
+    parseWrittenInput();
+    if (parser_ && parser_->done()) {
+        pendingScriptStore_->deleteProperty("parserRefs");
+        setDocumentReadiness("interactive");
+        setDocumentReadiness("complete");
+    }
+}
+
+void ScriptContext::setDocumentReadiness(const std::string& state) {
+    if (!domBindings_ || domBindings_->readyState() == state) return;
+    domBindings_->setReadyState(state);
+    if (vm_ && document_) {
+        runTask([this] { domBindings_->fireEvent(document_, "readystatechange", false, false); },
+                "readystatechange listener");
+    }
 }
 
 bool ScriptContext::advanceParsing(std::chrono::steady_clock::time_point deadline) {
     if (parsePhase_ == ParsePhase::ParserScripts) {
         if (!advanceParserScripts(false, deadline)) return false;
         parsePhase_ = ParsePhase::DeferredScripts;
+        // The parser stopped: the document is interactive before the defer
+        // scripts run (HTML "the end", step 3)
+        setDocumentReadiness("interactive");
         if (std::chrono::steady_clock::now() >= deadline) return false;
     }
     if (parsePhase_ == ParsePhase::DeferredScripts) {
@@ -394,7 +519,26 @@ void ScriptContext::executeScriptElement(PendingScript& script) {
     }
     DOMElement* previous = domBindings_->currentScript();
     domBindings_->setCurrentScript(script.module ? nullptr : element);
+    // A parser script runs with the insertion point just after its end tag
+    // (document.write goes there); the old one comes back after it, moved
+    // past what this script wrote
+    HTMLDocumentParser* parser = script.parserInserted && parser_ && !parser_->scriptCreated() &&
+                                 !parser_->done() ? parser_.get() : nullptr;
+    bool hadInsertionPoint = false;
+    size_t oldInsertionPoint = 0, inputBefore = 0;
+    if (parser) {
+        hadInsertionPoint = parser->hasInsertionPoint();
+        oldInsertionPoint = parser->insertionPointOffset();
+        inputBefore = parser->inputSize();
+        parser->defineInsertionPoint();
+    }
+    if (script.external) ignoreDestructiveWrites_++;
     ScriptResult result = evaluate(script.source, script.url, script.external ? 1 : script.firstLine);
+    if (script.external) ignoreDestructiveWrites_--;
+    if (parser && parser == parser_.get() && !parser->done()) {
+        if (hadInsertionPoint) parser->restoreInsertionPoint(oldInsertionPoint + (parser->inputSize() - inputBefore));
+        else parser->undefineInsertionPoint();
+    }
     domBindings_->setCurrentScript(previous);
     if (!result.success) {
         std::cerr << "[JS] Uncaught error in " << (script.external ? script.url : std::string("inline script"))

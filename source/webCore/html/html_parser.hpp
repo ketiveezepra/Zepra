@@ -115,6 +115,88 @@ private:
     std::vector<DOMElement*> activeFormattingElements_;
 };
 
+class HTML5TreeConstructor;
+
+/**
+ * @brief A document's own parser, run a piece at a time (HTML §13.2.1).
+ *
+ * The parser stops after each </script> end tag so the script runs with
+ * the tree built up to that point; its driver (ScriptContext) prepares the
+ * script and resumes the parser once the script ran (or, for a
+ * parser-blocking external script, once it arrived and ran). While a
+ * parser script runs, the insertion point is just after its end tag:
+ * document.write() inserts text there, and the driver tokenizes it before
+ * write() returns (pumpToInsertionPoint).
+ *
+ * A script-created parser (document.open()) parses into an existing
+ * document; its input stays open (the insertion point is its end) until
+ * close().
+ *
+ * Not copyable or movable: the tokenizer refers to the input string.
+ */
+class HTMLDocumentParser {
+public:
+    /// The network parser for a whole page (the input is closed)
+    explicit HTMLDocumentParser(std::string html);
+    /// A script-created parser building `document` (which must be empty)
+    explicit HTMLDocumentParser(DOMDocument* document);
+    ~HTMLDocumentParser();
+    HTMLDocumentParser(const HTMLDocumentParser&) = delete;
+    HTMLDocumentParser& operator=(const HTMLDocumentParser&) = delete;
+
+    enum class Stop {
+        Script,      ///< a </script> was parsed: takePausedScript()
+        NeedInput,   ///< at the insertion point / the end of open input
+        Done         ///< the end of the input was parsed
+    };
+    /// Parses as far as the input goes (pauses at scripts)
+    Stop pump();
+    /// Parses up to the insertion point (pauses at scripts); with no
+    /// insertion point defined, like pump()
+    Stop pumpToInsertionPoint();
+    /// The script whose end tag stopped the last pump, once
+    DOMElement* takePausedScript();
+
+    /// The insertion point: defined (at the current position) while a
+    /// parser-inserted script the parser stopped for runs. A
+    /// script-created parser always has one, at the end of its input.
+    void defineInsertionPoint();
+    void undefineInsertionPoint();
+    bool hasInsertionPoint() const;
+    /// Where the insertion point is (an offset into the input)
+    size_t insertionPointOffset() const { return insertionPoint_; }
+    /// Puts back an insertion point saved before a nested script ran
+    void restoreInsertionPoint(size_t offset);
+    /// document.write: puts `text` into the input at the insertion point
+    /// (after what earlier writes put there). False without one.
+    bool insertAtInsertionPoint(const std::string& text);
+    /// document.close: the input ends after what was written so far
+    void closeInput();
+
+    bool done() const { return done_; }
+    bool scriptCreated() const { return scriptCreated_; }
+    DOMDocument* document() const;
+    /// Ownership of the document the network parser made; the parse can
+    /// go on (the caller keeps the document alive while it does)
+    std::unique_ptr<DOMDocument> releaseDocument();
+    /// Elements the parser will still insert into or refer to (they must
+    /// stay alive when a script removes them)
+    std::vector<DOMElement*> referencedElements() const;
+    /// Characters of input consumed so far (for tracing)
+    size_t position() const;
+    size_t inputSize() const { return input_.size(); }
+
+private:
+    Stop run(size_t limit);
+
+    std::string input_;
+    std::unique_ptr<HTML5TreeConstructor> tree_;
+    bool scriptCreated_ = false;
+    bool done_ = false;
+    bool insertionPointDefined_ = false;
+    size_t insertionPoint_ = 0;
+};
+
 /**
  * @brief HTML serializer (DOM to string)
  */

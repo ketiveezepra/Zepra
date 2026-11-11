@@ -2195,10 +2195,25 @@ void DOMBindings::installDocumentInterface() {
     }
 
     method(p, "hasFocus", 0, [](const FunctionCallInfo&) -> Value { return Value::boolean(true); });
-    // document.write is not supported (the page is parsed before scripts run)
-    for (const char* name : {"write", "writeln", "open", "close"}) {
-        method(p, name, 0, [](const FunctionCallInfo&) -> Value { return Value::undefined(); });
+    // document.write()/writeln(): the arguments joined, into the page's
+    // parser at its insertion point (ScriptContext::documentWrite)
+    for (bool line : {false, true}) {
+        method(p, line ? "writeln" : "write", 0, [this, line](const FunctionCallInfo& info) -> Value {
+            std::string text;
+            for (size_t i = 0; i < info.argumentCount(); i++) text += info.argument(i).toString();
+            if (line) text += "\n";
+            if (streamHooks_.write) streamHooks_.write(text);
+            return Value::undefined();
+        });
     }
+    method(p, "open", 0, [this](const FunctionCallInfo& info) -> Value {
+        if (streamHooks_.open) streamHooks_.open();
+        return info.thisValue();
+    });
+    method(p, "close", 0, [this](const FunctionCallInfo&) -> Value {
+        if (streamHooks_.close) streamHooks_.close();
+        return Value::undefined();
+    });
     auto createElement = [this](DOMDocument& d, const std::string& tag, bool svg) -> Value {
         if (tag.empty()) {
             throwDOMException("InvalidCharacterError", "Failed to execute 'createElement' on 'Document': The tag name provided ('') is not a valid name.");

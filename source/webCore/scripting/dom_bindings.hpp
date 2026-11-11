@@ -95,6 +95,19 @@ public:
     void setPageGeometry(PageGeometry* geometry) { geometry_ = geometry; }
     /// document.readyState: "loading", "interactive" or "complete"
     void setReadyState(const std::string& state) { readyState_ = state; }
+    const std::string& readyState() const { return readyState_; }
+    /// document.write()/writeln() (the text, writeln's newline included),
+    /// document.open() and document.close(): the page's parser
+    /// (ScriptContext). Without hooks they do nothing.
+    struct DocumentStreamHooks {
+        std::function<void(const std::string& text)> write;
+        std::function<void()> open;
+        std::function<void()> close;
+    };
+    void setDocumentStreamHooks(DocumentStreamHooks hooks) { streamHooks_ = std::move(hooks); }
+    /// Removes every child of `parent` as a script would (removed nodes
+    /// stay alive while a script can reach them): document.open()
+    void removeChildrenOf(DOMNode* parent) { removeAllChildren(parent); }
     /// Where getComputedStyle() reads styles (the browser's CSS engine).
     /// Without one every computed value is "".
     void setComputedStyleSource(ComputedStyleSource source) { computedStyleSource_ = std::move(source); }
@@ -222,6 +235,7 @@ private:
     std::string readyState_ = "loading";
     SubmitHandler submitHandler_;
     ScriptElementHook scriptHook_;
+    DocumentStreamHooks streamHooks_;
     DOMElement* currentScript_ = nullptr;
     std::function<std::string()> documentUrlSource_;
     /// The focused control's value when it got focus (or last committed);
