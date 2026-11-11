@@ -2641,39 +2641,18 @@ bool VM::iteratorStep(const Value& iterator, Value& value) {
 
 // Upvalue management
 RuntimeUpvalue* VM::captureUpvalue(Value* local) {
-    // Look for existing open upvalue for this location
-    RuntimeUpvalue* prevUpvalue = nullptr;
-    RuntimeUpvalue* upvalue = openUpvalues_;
-    
-    while (upvalue != nullptr && upvalue->location() > local) {
-        prevUpvalue = upvalue;
-        upvalue = upvalue->next;
-    }
-    
-    // Reuse existing upvalue if found
-    if (upvalue != nullptr && upvalue->location() == local) {
-        return upvalue;
-    }
-    
-    // Create new upvalue
-    RuntimeUpvalue* createdUpvalue = new RuntimeUpvalue(local);
-    createdUpvalue->next = upvalue;
-    
-    // Insert into linked list
-    if (prevUpvalue == nullptr) {
-        openUpvalues_ = createdUpvalue;
-    } else {
-        prevUpvalue->next = createdUpvalue;
-    }
-    
-    return createdUpvalue;
+    // One upvalue per stack slot, shared by every closure over it
+    auto [it, inserted] = openUpvalues_.try_emplace(local, nullptr);
+    if (inserted) it->second = new RuntimeUpvalue(local);
+    return it->second;
 }
 
 void VM::closeUpvalues(Value* last) {
-    while (openUpvalues_ != nullptr && openUpvalues_->location() >= last) {
-        RuntimeUpvalue* upvalue = openUpvalues_;
-        upvalue->close();
-        openUpvalues_ = upvalue->next;
+    while (!openUpvalues_.empty()) {
+        auto top = std::prev(openUpvalues_.end());
+        if (top->first < last) break;
+        top->second->close();
+        openUpvalues_.erase(top);
     }
 }
 
@@ -2779,8 +2758,7 @@ Value VM::resumeGenerator(GeneratorFrame* frame, Value yieldVal, const std::vect
             Value* slot = bottom + it->first;
             *slot = it->second->get();
             it->second->reopen(slot);
-            it->second->next = openUpvalues_;
-            openUpvalues_ = it->second;
+            openUpvalues_[slot] = it->second;
         }
         frame->savedUpvalues.clear();
         // The try blocks the body was inside when it paused, for the run() below
@@ -2870,9 +2848,9 @@ void VM::suspendGenerator(Value yielded) {
 
     gen->savedUpvalues.clear();
     Value* bottom = stack_.data() + base;
-    for (RuntimeUpvalue* upvalue = openUpvalues_; upvalue && upvalue->location() >= bottom;
-         upvalue = upvalue->next) {
-        gen->savedUpvalues.emplace_back(static_cast<size_t>(upvalue->location() - bottom), upvalue);
+    // Highest slot first, as the list this replaced was ordered
+    for (auto it = openUpvalues_.rbegin(); it != openUpvalues_.rend() && it->first >= bottom; ++it) {
+        gen->savedUpvalues.emplace_back(static_cast<size_t>(it->first - bottom), it->second);
     }
 
     yieldedValue_ = yielded;

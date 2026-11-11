@@ -37,6 +37,7 @@ public:
     // Index of a string constant, adding it if new; `existing` is reused as
     // the value when it already holds that string
     size_t stringConstant(const std::string& text, Runtime::Value existing);
+    bool findStringConstant(const std::string& text, size_t& index) const;
     
     // Patching for jumps
     size_t currentOffset() const { return code_.size(); }
@@ -45,7 +46,6 @@ public:
     // Access
     const std::vector<uint8_t>& code() const { return code_; }
     const std::vector<Runtime::Value>& constants() const { return constants_; }
-    const std::vector<uint32_t>& lines() const { return lines_; }
     
     uint8_t at(size_t offset) const { return code_[offset]; }
     Runtime::Value constant(size_t index) const { return constants_[index]; }
@@ -56,6 +56,10 @@ public:
     const std::string& sourceName() const;
     void setSourceName(std::shared_ptr<const std::string> name) { sourceName_ = std::move(name); }
     
+    // Compiling is done: drop the constant de-duplication tables (they copy
+    // every string constant) and spare vector capacity
+    void finish();
+
     // Debug
     void disassemble(const std::string& name) const;
     size_t disassembleInstruction(size_t offset) const;
@@ -63,7 +67,14 @@ public:
 private:
     std::vector<uint8_t> code_;
     std::vector<Runtime::Value> constants_;
-    std::vector<uint32_t> lines_;
+    // Source position table, run-length encoded: (first code offset, line)
+    // for each run of bytes with the same line. A position per code byte
+    // took four times the memory of the bytecode itself.
+    struct LineRun {
+        uint32_t offset;
+        uint32_t line;
+    };
+    std::vector<LineRun> lineRuns_;
     std::shared_ptr<const std::string> sourceName_;
 
     // Constant de-duplication
@@ -115,8 +126,35 @@ struct JumpContext {
 struct CompilerState {
     CompilerState* enclosing = nullptr;
     BytecodeChunk chunk;
+    // Locals in slot order. Push and pop them only through pushLocal() and
+    // popLocal(), which keep localSlots in step.
     std::vector<Local> locals;
     std::vector<Upvalue> upvalues;
+
+    // Name -> the slots holding that name, innermost (highest) last. Module
+    // bundles put tens of thousands of locals in one function, where a
+    // linear scan per identifier made compiling quadratic.
+    std::unordered_map<std::string, std::vector<uint32_t>> localSlots;
+    // (index, isLocal) -> position in upvalues
+    std::unordered_map<uint32_t, uint16_t> upvalueSlots;
+
+    void pushLocal(Local local) {
+        localSlots[local.name].push_back(static_cast<uint32_t>(locals.size()));
+        locals.push_back(std::move(local));
+    }
+    void popLocal() {
+        auto it = localSlots.find(locals.back().name);
+        if (it != localSlots.end()) {
+            it->second.pop_back();
+            if (it->second.empty()) localSlots.erase(it);
+        }
+        locals.pop_back();
+    }
+    // The innermost slot named `name`, or -1
+    int findLocal(const std::string& name) const {
+        auto it = localSlots.find(name);
+        return it == localSlots.end() ? -1 : static_cast<int>(it->second.back());
+    }
     int scopeDepth = 0;
     std::string functionName;
     bool isMethod = false;
@@ -301,6 +339,10 @@ private:
     void emitIndexed(Opcode op, size_t index);
     void emitNameOperand(Opcode op, const std::string& name);
     size_t nameConstant(const std::string& name);
+    // One String per distinct constant text in this compile, shared by all
+    // its chunks: a bundle repeats the same names in thousands of functions
+    Runtime::String* internedString(const std::string& text);
+    std::unordered_map<std::string, Runtime::String*> internedStrings_;
 
     size_t makeConstant(Runtime::Value value);
     void emitConstant(Runtime::Value value);

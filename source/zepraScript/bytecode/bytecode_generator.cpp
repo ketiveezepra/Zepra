@@ -27,8 +27,10 @@ namespace Zepra::Bytecode {
 
 // BytecodeChunk implementation
 void BytecodeChunk::write(uint8_t byte, uint32_t line) {
+    if (lineRuns_.empty() || lineRuns_.back().line != line) {
+        lineRuns_.push_back({static_cast<uint32_t>(code_.size()), line});
+    }
     code_.push_back(byte);
-    lines_.push_back(line);
 }
 
 void BytecodeChunk::write(Opcode op, uint32_t line) {
@@ -38,6 +40,15 @@ void BytecodeChunk::write(Opcode op, uint32_t line) {
 void BytecodeChunk::writeShort(uint16_t value, uint32_t line) {
     write(static_cast<uint8_t>((value >> 8) & 0xFF), line);
     write(static_cast<uint8_t>(value & 0xFF), line);
+}
+
+void BytecodeChunk::finish() {
+    std::unordered_map<std::string, size_t>().swap(stringConstants_);
+    std::unordered_map<uint64_t, size_t>().swap(numberConstants_);
+    std::vector<size_t>().swap(simpleConstants_);
+    code_.shrink_to_fit();
+    constants_.shrink_to_fit();
+    lineRuns_.shrink_to_fit();
 }
 
 size_t BytecodeChunk::addConstant(Runtime::Value value) {
@@ -70,6 +81,13 @@ size_t BytecodeChunk::addConstant(Runtime::Value value) {
     return constants_.size() - 1;
 }
 
+bool BytecodeChunk::findStringConstant(const std::string& text, size_t& index) const {
+    auto it = stringConstants_.find(text);
+    if (it == stringConstants_.end()) return false;
+    index = it->second;
+    return true;
+}
+
 size_t BytecodeChunk::stringConstant(const std::string& text, Runtime::Value existing) {
     auto it = stringConstants_.find(text);
     if (it != stringConstants_.end()) return it->second;
@@ -90,8 +108,11 @@ void BytecodeChunk::patchJump(size_t offset) {
 }
 
 uint32_t BytecodeChunk::lineAt(size_t offset) const {
-    if (offset < lines_.size()) return lines_[offset];
-    return 0;
+    if (offset >= code_.size() || lineRuns_.empty()) return 0;
+    // The last run starting at or before offset
+    auto run = std::upper_bound(lineRuns_.begin(), lineRuns_.end(), offset,
+                                [](size_t value, const LineRun& r) { return value < r.offset; });
+    return run == lineRuns_.begin() ? 0 : std::prev(run)->line;
 }
 
 const std::string& BytecodeChunk::sourceName() const {
@@ -270,6 +291,7 @@ std::unique_ptr<BytecodeChunk> BytecodeGenerator::compile(const Frontend::Progra
         return nullptr;
     }
     stampSource(mainState.chunk);
+    mainState.chunk.finish();
     return std::make_unique<BytecodeChunk>(std::move(mainState.chunk));
 }
 
@@ -328,8 +350,16 @@ void BytecodeGenerator::emitLocal(Opcode op, int slot) {
 }
 
 size_t BytecodeGenerator::nameConstant(const std::string& name) {
-    size_t index = currentChunk()->stringConstant(name, Runtime::Value::undefined());
-    return index;
+    BytecodeChunk* chunk = currentChunk();
+    size_t index;
+    if (chunk->findStringConstant(name, index)) return index;
+    return chunk->stringConstant(name, Runtime::Value::string(internedString(name)));
+}
+
+Runtime::String* BytecodeGenerator::internedString(const std::string& text) {
+    auto [it, inserted] = internedStrings_.try_emplace(text, nullptr);
+    if (inserted) it->second = new Runtime::String(text);
+    return it->second;
 }
 
 void BytecodeGenerator::emitNameOperand(Opcode op, const std::string& name) {
@@ -391,7 +421,7 @@ void BytecodeGenerator::endScope() {
         } else {
             emit(Opcode::OP_POP);
         }
-        current_->locals.pop_back();
+        current_->popLocal();
     }
 }
 
@@ -403,7 +433,7 @@ void BytecodeGenerator::addLocal(const std::string& name, bool isConst) {
     local.name = name;
     local.depth = current_->scopeDepth;
     local.isConst = isConst;
-    current_->locals.push_back(local);
+    current_->pushLocal(std::move(local));
 }
 
 int BytecodeGenerator::addTemporary(const char* name) {
@@ -412,13 +442,9 @@ int BytecodeGenerator::addTemporary(const char* name) {
 }
 
 int BytecodeGenerator::resolveLocal(const std::string& name) {
-    for (int i = static_cast<int>(current_->locals.size()) - 1; i >= 0; i--) {
-        if (current_->locals[i].name == name) {
-            if (name == "arguments") current_->usesArguments = true;
-            return i;
-        }
-    }
-    return -1;
+    const int slot = current_->findLocal(name);
+    if (slot >= 0 && name == "arguments") current_->usesArguments = true;
+    return slot;
 }
 
 int BytecodeGenerator::resolveUpvalue(const std::string& name) {
@@ -432,12 +458,11 @@ int BytecodeGenerator::resolveUpvalueIn(CompilerState* state, const std::string&
     CompilerState* enclosing = state->enclosing;
     if (!enclosing) return -1;
 
-    for (int i = static_cast<int>(enclosing->locals.size()) - 1; i >= 0; i--) {
-        if (enclosing->locals[i].name == name) {
-            enclosing->locals[i].isCaptured = true;
-            if (name == "arguments") enclosing->usesArguments = true;
-            return addUpvalue(state, static_cast<uint16_t>(i), true);
-        }
+    const int slot = enclosing->findLocal(name);
+    if (slot >= 0) {
+        enclosing->locals[slot].isCaptured = true;
+        if (name == "arguments") enclosing->usesArguments = true;
+        return addUpvalue(state, static_cast<uint16_t>(slot), true);
     }
 
     int outer = resolveUpvalueIn(enclosing, name);
@@ -446,30 +471,28 @@ int BytecodeGenerator::resolveUpvalueIn(CompilerState* state, const std::string&
 }
 
 int BytecodeGenerator::addUpvalue(CompilerState* state, uint16_t index, bool isLocal) {
-    for (size_t i = 0; i < state->upvalues.size(); i++) {
-        if (state->upvalues[i].index == index && state->upvalues[i].isLocal == isLocal) {
-            return static_cast<int>(i);
-        }
-    }
+    const uint32_t key = static_cast<uint32_t>(index) | (isLocal ? 0x10000u : 0u);
+    auto found = state->upvalueSlots.find(key);
+    if (found != state->upvalueSlots.end()) return found->second;
     if (state->upvalues.size() >= 0xFFFF) {
         error("Too many captured variables in one function (max 65535)");
         return 0;
     }
+    const auto position = static_cast<uint16_t>(state->upvalues.size());
     state->upvalues.push_back({index, isLocal});
-    return static_cast<int>(state->upvalues.size()) - 1;
+    state->upvalueSlots.emplace(key, position);
+    return position;
 }
 
 void BytecodeGenerator::declareVariable(const std::string& name, bool isConst) {
     if (current_->scopeDepth == 0) {
         return;  // Script top level: a global
     }
-    for (int i = static_cast<int>(current_->locals.size()) - 1; i >= 0; i--) {
-        const Local& local = current_->locals[i];
-        if (local.depth < current_->scopeDepth) break;
-        if (local.name == name) {
-            error("Identifier '" + name + "' has already been declared");
-            break;
-        }
+    // Locals are ordered by depth, so the innermost one with this name is
+    // in the current scope exactly when the scope already declares it
+    const int existing = current_->findLocal(name);
+    if (existing >= 0 && current_->locals[existing].depth >= current_->scopeDepth) {
+        error("Identifier '" + name + "' has already been declared");
     }
     addLocal(name, isConst);
 }
@@ -1073,7 +1096,7 @@ void BytecodeGenerator::compileReturnStatement(const Frontend::ReturnStmt* stmt)
     emit(Opcode::OP_RETURN);
     // Nothing after the return runs: drop the scope without emitting pops
     while (!current_->locals.empty() && current_->locals.back().depth >= current_->scopeDepth) {
-        current_->locals.pop_back();
+        current_->popLocal();
     }
     current_->scopeDepth--;
 }
@@ -1168,7 +1191,7 @@ void BytecodeGenerator::compileTryStatement(const Frontend::TryStmt* stmt) {
             emit(Opcode::OP_THROW);
             // unreachable: drop the scope without pops
             while (!current_->locals.empty() && current_->locals.back().depth >= current_->scopeDepth) {
-                current_->locals.pop_back();
+                current_->popLocal();
             }
             current_->scopeDepth--;
             current_->finallies.push_back({finalizer, current_->tryDepth});
@@ -1389,6 +1412,7 @@ void BytecodeGenerator::compileFunction(const FunctionSource& source, Runtime::F
     fn->setDebugNames(std::move(paramNames), std::move(localNames));
 
     stampSource(fnState.chunk);
+    fnState.chunk.finish();
     auto chunk = std::make_unique<BytecodeChunk>(std::move(fnState.chunk));
     fn->setBytecodeChunk(chunk.get());
     retainChunk(std::move(chunk));

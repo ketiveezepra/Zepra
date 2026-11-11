@@ -11,6 +11,7 @@
 #include "environment.hpp"
 #include "bytecode/opcode.hpp"
 #include <vector>
+#include <map>
 #include <memory>
 #include <functional>
 #include <stack>
@@ -585,8 +586,10 @@ private:
     void declareLexicalGlobal(const std::string& name);
     void initializeLexicalGlobal(const std::string& name, const Value& value, bool isConst);
     
-    // Open upvalues (linked list, ordered by stack slot)
-    RuntimeUpvalue* openUpvalues_ = nullptr;
+    // Open upvalues by stack slot. A module function with tens of thousands
+    // of captured locals made the sorted linked list this replaced cost a
+    // walk of the whole list per closure created.
+    std::map<Value*, RuntimeUpvalue*> openUpvalues_;
     
     // Exception handling
     std::vector<ExceptionHandler> exceptionHandlers_;

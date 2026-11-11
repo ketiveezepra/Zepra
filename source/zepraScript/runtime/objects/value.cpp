@@ -239,15 +239,29 @@ bool Value::strictEquals(const Value& other) const {
 
 // Arithmetic operations
 Value Value::add(const Value& left, const Value& right) {
-    // String concatenation
+    // String concatenation (the VM has applied ToPrimitive already). Strings
+    // are joined by String::concatenate, which makes long results ropes
+    // instead of copying both sides on every `s += piece`.
     if (left.isString() || right.isString()) {
-        std::string text = left.toString();
-        std::string tail = right.toString();
-        if (Utf16::needsSurrogateJoin(text, tail)) {
-            return Value::string(new String(Utf16::joinSurrogates(text, tail)));
+        if (left.isString() && right.isString()) {
+            return Value::string(String::concatenate(left.asString(), right.asString()));
         }
-        text += tail;
-        return Value::string(new String(std::move(text)));
+        // One side is not a string: its text is short unless it is huge
+        // itself, so a String is made for it only when the other is long
+        const String* text = left.isString() ? left.asString() : right.asString();
+        std::string other = left.isString() ? right.toString() : left.toString();
+        if (text->byteLength() >= 256) {
+            auto* piece = new String(std::move(other));
+            return Value::string(left.isString() ? String::concatenate(text, piece)
+                                                 : String::concatenate(piece, text));
+        }
+        std::string joined = left.isString() ? text->value() : std::move(other);
+        const std::string& tail = left.isString() ? other : text->value();
+        if (Utf16::needsSurrogateJoin(joined, tail)) {
+            return Value::string(new String(Utf16::joinSurrogates(joined, tail)));
+        }
+        joined += tail;
+        return Value::string(new String(std::move(joined)));
     }
     
     // Numeric addition
@@ -266,12 +280,7 @@ Value Value::divide(const Value& left, const Value& right) {
     double a = left.toNumber();
     double b = right.toNumber();
     
-    if (b == 0.0) {
-        if (a == 0.0) return Value::number(std::nan(""));
-        return Value::number(a > 0 ? std::numeric_limits<double>::infinity() 
-                                   : -std::numeric_limits<double>::infinity());
-    }
-    
+    // IEEE 754 division: x/0 and x/-0 are signed infinities, 0/0 and NaN/0 NaN
     return Value::number(a / b);
 }
 
