@@ -299,6 +299,9 @@ private:
     CSSCascade cascade_;
     SelectorMatcher matcher_;
     CSSLengthContext lengthContext_;               // for math functions, set per applyProperty
+    /// What rem resolves against: the root element's font size, known once
+    /// the root is styled (its own rem lengths use the initial 16px)
+    float rootFontSize_ = 16.0f;
 
     /// The keyframes each of the element's finished, filling CSS animations
     /// leaves it at (CSS Animations 1 §4.10: animation-fill-mode forwards

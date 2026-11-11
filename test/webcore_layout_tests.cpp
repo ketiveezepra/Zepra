@@ -212,6 +212,39 @@ TEST(Cascade, PseudoElementRulesSkipTheElement) {
 // Math functions and logical properties (Tailwind v4 output)
 // ---------------------------------------------------------------------------
 
+TEST(Cascade, RemFollowsTheRootFontSizeAndBodyInheritsIt) {
+    // YouTube's html { font-size: 62.5% }: 1rem is 10px, and the body (which
+    // the UA sheet gives no font of its own) inherits the root's font
+    StyledDoc d("<!doctype html><html id=r><body id=y><div id=a>x</div></body></html>",
+                "html { font-size: 62.5%; font-family: Roboto, Arial, sans-serif; width: 2rem; }"
+                "#a { font-size: 1.4rem; width: 20rem; padding-left: 1rem; height: calc(2rem + 4px); }");
+    EXPECT_FLOAT_EQ(d.style("r")->fontSize, 10.0f);
+    EXPECT_FLOAT_EQ(d.style("r")->width.value, 32.0f) << "the root's own rem is the initial 16px";
+    EXPECT_FLOAT_EQ(d.style("y")->fontSize, 10.0f);
+    EXPECT_EQ(d.style("y")->fontFamily, "Roboto, Arial, sans-serif");
+    const CSSComputedStyle* a = d.style("a");
+    EXPECT_FLOAT_EQ(a->fontSize, 14.0f);
+    EXPECT_FLOAT_EQ(a->width.value, 200.0f);
+    EXPECT_EQ(a->width.unit, CSSLength::Unit::Px);
+    EXPECT_FLOAT_EQ(a->paddingLeft.value, 10.0f);
+    EXPECT_FLOAT_EQ(a->height.toPx(14, 10, 1280, 800, 0), 24.0f);
+}
+
+TEST(Cascade, DisplayInitialValueAndBlockification) {
+    StyledDoc d("<!doctype html><div id=f style='display:flex'><span id=i>a</span><x-y id=c>b</x-y></div>"
+                "<x-z id=u>c</x-z><span id=p style='position:fixed'>d</span><em id=l style='float:left'>e</em>"
+                "<span id=t style='display:inline-flex;position:absolute'>f</span><br id=b>",
+                "");
+    EXPECT_EQ(d.style("u")->display, DisplayValue::Inline) << "unknown and custom elements are inline";
+    EXPECT_EQ(d.style("i")->display, DisplayValue::Block) << "flex items are blockified";
+    EXPECT_EQ(d.style("c")->display, DisplayValue::Block);
+    EXPECT_EQ(d.style("p")->display, DisplayValue::Block) << "position: fixed";
+    EXPECT_EQ(d.style("l")->display, DisplayValue::Block) << "float";
+    EXPECT_EQ(d.style("t")->display, DisplayValue::Flex);
+    EXPECT_EQ(d.style("b")->display, DisplayValue::Inline);
+    EXPECT_EQ(d.style("f")->display, DisplayValue::Flex);
+}
+
 TEST(MathFunctions, CalcKeepsAUniformUnitAndMixesTheRest) {
     // Tailwind's spacing scale: --spacing times a number
     StyledDoc d("<!doctype html><div id=a><p id=b>x</p></div>",
@@ -220,8 +253,9 @@ TEST(MathFunctions, CalcKeepsAUniformUnitAndMixesTheRest) {
                 "     width: calc(100% - 20px); margin-top: calc(1rem + 4px); }"
                 "#b { padding: calc(1px + 1px) 0; line-height: calc(2 / 1.5); }");
     const CSSComputedStyle* a = d.style("a");
-    EXPECT_EQ(a->height.unit, CSSLength::Unit::Rem);
-    EXPECT_FLOAT_EQ(a->height.value, 1.5f);
+    // rem is absolute once the root's font size is known: computed as px
+    EXPECT_EQ(a->height.unit, CSSLength::Unit::Px);
+    EXPECT_FLOAT_EQ(a->height.value, 24.0f);
     // Font-relative paddings are resolved against the element's font size
     EXPECT_EQ(a->paddingLeft.unit, CSSLength::Unit::Px);
     EXPECT_FLOAT_EQ(a->paddingLeft.value, 24.0f);

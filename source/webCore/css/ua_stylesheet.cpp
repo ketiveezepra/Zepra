@@ -27,6 +27,7 @@ const char* ZepraUAStylesheet::getStylesheet() {
 html {
     display: block;
     color: #1f2328;
+    font-family: sans-serif;
 }
 
 /* ==========================================================================
@@ -47,11 +48,11 @@ noframes, param, rp, template {
    Block-Level Elements
    ========================================================================== */
 
+/* The page's font is set on html (or inherited from it): the body only
+   inherits, as in other engines, so html { font-size: 62.5% } reaches it */
 body {
     display: block;
     margin: 8px;
-    font-family: sans-serif;
-    font-size: 16px;
 }
 
 address, article, aside, div, footer,

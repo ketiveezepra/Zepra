@@ -305,6 +305,14 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
     CSSComputedStyle computed;
     
     if (!element) return computed;
+
+    // The root element: its rem lengths use the initial font size, and its
+    // font size is what every other element's rem means (CSS Values 4 §6.1.1).
+    // Styles are computed parent first, so the root is always done before
+    // the elements under it.
+    DOMDocument* document = element->ownerDocument();
+    const bool isRoot = document && document->documentElement() == element;
+    if (isRoot) rootFontSize_ = 16.0f;
     
     // Step 1: Start with inherited values from parent
     if (parentStyle) {
@@ -421,7 +429,7 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
         if (len.unit == CSSLength::Unit::Em || len.unit == CSSLength::Unit::Rem ||
             len.unit == CSSLength::Unit::Pt || len.unit == CSSLength::Unit::Ex ||
             len.unit == CSSLength::Unit::Ch) {
-            len = CSSLength::px(len.toPx(computed.fontSize, 16.0f, 0, 0, 0));
+            len = CSSLength::px(len.toPx(computed.fontSize, rootFontSize_, 0, 0, 0));
         }
     };
     for (CSSLength* len : {&computed.marginTop, &computed.marginRight, &computed.marginBottom,
@@ -430,6 +438,7 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
         resolveFontRelative(*len);
     }
     zeroUnstyledBorders(computed);
+    if (isRoot) rootFontSize_ = computed.fontSize > 0 ? computed.fontSize : 16.0f;
     
     return computed;
 }
@@ -495,7 +504,7 @@ const CSSComputedStyle* StyleResolver::getPseudoElementStyle(DOMElement* element
         if (len->unit == CSSLength::Unit::Em || len->unit == CSSLength::Unit::Rem ||
             len->unit == CSSLength::Unit::Pt || len->unit == CSSLength::Unit::Ex ||
             len->unit == CSSLength::Unit::Ch) {
-            *len = CSSLength::px(len->toPx(computed.fontSize, 16.0f, 0, 0, 0));
+            *len = CSSLength::px(len->toPx(computed.fontSize, rootFontSize_, 0, 0, 0));
         }
     }
 
@@ -638,6 +647,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     // What a math function's em/vw terms resolve against: the font size so
     // far (the parent's until font-size itself is applied) and the viewport
     lengthContext_.fontSize = style.fontSize;
+    lengthContext_.rootFontSize = rootFontSize_;
     lengthContext_.viewportWidth = static_cast<float>(mediaEnvironment().width);
     lengthContext_.viewportHeight = static_cast<float>(mediaEnvironment().height);
 
@@ -831,7 +841,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         CSSLength len = parseLength(value);
         if (!len.isAuto()) {
             float parentFontSize = parentStyle ? parentStyle->fontSize : 16.0f;
-            style.fontSize = len.toPx(parentFontSize, 16.0f, 1920, 1080, 0);
+            style.fontSize = len.toPx(parentFontSize, rootFontSize_, 1920, 1080, 0);
         }
     }
     else if (property == "font-family") { style.fontFamily = value; }
@@ -875,7 +885,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         if (value == "normal") style.letterSpacing = 0;
         else {
             CSSLength len = parseLength(value);
-            if (!len.isAuto()) style.letterSpacing = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+            if (!len.isAuto()) style.letterSpacing = len.toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
         }
     }
     else if (property == "word-spacing") {
@@ -883,7 +893,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         if (value == "normal") style.wordSpacing = 0;
         else {
             CSSLength len = parseLength(value);
-            if (!len.isAuto()) style.wordSpacing = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+            if (!len.isAuto()) style.wordSpacing = len.toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
         }
     }
     else if (property == "white-space") { style.whiteSpace = value; }
@@ -894,8 +904,8 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     else if (property == "border-spacing") {
         auto parts = splitValues(value);
         if (!parts.empty()) {
-            float h = parseLength(parts[0]).toPx(style.fontSize, 16.0f, 1920, 1080, 0);
-            float v = parts.size() > 1 ? parseLength(parts[1]).toPx(style.fontSize, 16.0f, 1920, 1080, 0) : h;
+            float h = parseLength(parts[0]).toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
+            float v = parts.size() > 1 ? parseLength(parts[1]).toPx(style.fontSize, rootFontSize_, 1920, 1080, 0) : h;
             style.borderSpacingH = std::max(0.0f, h);
             style.borderSpacingV = std::max(0.0f, v);
         }
@@ -928,7 +938,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
             if (evaluateCSSMath(value, lengthContext_, math)) {
                 if (math.isNumber) setNumber(math.number);
                 else if (math.length.unit == CSSLength::Unit::Percent) setPx(math.length.value / 100.0f * style.fontSize);
-                else setPx(math.length.toPx(style.fontSize, 16.0f, lengthContext_.viewportWidth,
+                else setPx(math.length.toPx(style.fontSize, rootFontSize_, lengthContext_.viewportWidth,
                                             lengthContext_.viewportHeight, 0));
             }
         } else if (value.find_first_of("0123456789.") != std::string::npos) {
@@ -940,7 +950,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
             else if (unit == "%") setPx(val / 100.0f * style.fontSize);
             else {
                 CSSLength len = parseLength(value);
-                if (!len.isAuto()) setPx(len.toPx(style.fontSize, 16.0f, lengthContext_.viewportWidth,
+                if (!len.isAuto()) setPx(len.toPx(style.fontSize, rootFontSize_, lengthContext_.viewportWidth,
                                                   lengthContext_.viewportHeight, 0));
             }
         }
@@ -1023,21 +1033,21 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     // =====================================================================
     else if (property == "border-width") {
         CSSLength len = parseLength(value);
-        float px = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        float px = len.toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
         style.borderTopWidth = px; style.borderRightWidth = px;
         style.borderBottomWidth = px; style.borderLeftWidth = px;
     }
     else if (property == "border-top-width") {
-        style.borderTopWidth = parseLength(value).toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        style.borderTopWidth = parseLength(value).toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
     }
     else if (property == "border-right-width") {
-        style.borderRightWidth = parseLength(value).toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        style.borderRightWidth = parseLength(value).toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
     }
     else if (property == "border-bottom-width") {
-        style.borderBottomWidth = parseLength(value).toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        style.borderBottomWidth = parseLength(value).toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
     }
     else if (property == "border-left-width") {
-        style.borderLeftWidth = parseLength(value).toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        style.borderLeftWidth = parseLength(value).toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
     }
     else if (property == "border-color") {
         CSSColor c = parseColor(value);
@@ -1052,7 +1062,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         // The first value (a percentage of the box is resolved when painting)
         auto parts = splitValues(value);
         CSSLength len = parseLength(parts.empty() ? value : parts[0]);
-        float px = len.unit == CSSLength::Unit::Percent ? 0 : len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        float px = len.unit == CSSLength::Unit::Percent ? 0 : len.toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
         style.borderTopLeftRadius = px; style.borderTopRightRadius = px;
         style.borderBottomRightRadius = px; style.borderBottomLeftRadius = px;
         style.borderTopLeftRadiusPercent = len.unit == CSSLength::Unit::Percent ? len.value : 0;
@@ -1060,17 +1070,17 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     else if (property == "border-top-left-radius") {
         CSSLength len = parseLength(value);
         bool percent = len.unit == CSSLength::Unit::Percent;
-        style.borderTopLeftRadius = percent ? 0 : len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        style.borderTopLeftRadius = percent ? 0 : len.toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
         style.borderTopLeftRadiusPercent = percent ? len.value : 0;
     }
     else if (property == "border-top-right-radius") {
-        style.borderTopRightRadius = parseLength(value).toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        style.borderTopRightRadius = parseLength(value).toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
     }
     else if (property == "border-bottom-right-radius") {
-        style.borderBottomRightRadius = parseLength(value).toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        style.borderBottomRightRadius = parseLength(value).toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
     }
     else if (property == "border-bottom-left-radius") {
-        style.borderBottomLeftRadius = parseLength(value).toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        style.borderBottomLeftRadius = parseLength(value).toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
     }
     else if (property == "border" || property == "border-top" || 
              property == "border-right" || property == "border-bottom" || 
@@ -1093,7 +1103,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
             // words parse as black, so "1px" would otherwise count as a colour
             if (std::isdigit((unsigned char)token[0]) || token[0] == '.') {
                 CSSLength len = parseLength(token);
-                if (!len.isAuto()) bw = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+                if (!len.isAuto()) bw = len.toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
                 continue;
             }
             if (token[0] == '#' || token.substr(0,3) == "rgb" || 
@@ -1101,7 +1111,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
                 bc = CSSColor::parse(token); continue;
             }
             CSSLength len = parseLength(token);
-            if (!len.isAuto()) bw = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+            if (!len.isAuto()) bw = len.toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
         }
         if (property == "border") {
             style.borderTopWidth = bw; style.borderRightWidth = bw;
@@ -1389,7 +1399,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
             if (t.empty() || !(std::isdigit((unsigned char)t[0]) || t[0] == '.')) return false;
             CSSLength len = parseLength(t);
             if (len.isAuto()) return false;
-            style.textStrokeWidth = std::max(0.0f, len.toPx(style.fontSize, 16.0f, lengthContext_.viewportWidth,
+            style.textStrokeWidth = std::max(0.0f, len.toPx(style.fontSize, rootFontSize_, lengthContext_.viewportWidth,
                                                             lengthContext_.viewportHeight, 0));
             return true;
         };
@@ -1513,7 +1523,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
             if (t == "thick") { width = 5; continue; }
             if (std::isdigit((unsigned char)t[0]) || t[0] == '.') {
                 CSSLength len = parseLength(t);
-                if (!len.isAuto()) width = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+                if (!len.isAuto()) width = len.toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
                 continue;
             }
             color = parseColor(token);
@@ -1524,7 +1534,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     }
     else if (property == "outline-width") {
         CSSLength len = parseLength(value);
-        if (!len.isAuto()) style.outlineWidth = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        if (!len.isAuto()) style.outlineWidth = len.toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
     }
     else if (property == "outline-color") { style.outlineColor = parseColor(value); }
     else if (property == "outline-style") {
@@ -1534,7 +1544,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     }
     else if (property == "outline-offset") {
         CSSLength len = parseLength(value);
-        if (!len.isAuto()) style.outlineOffset = len.toPx(style.fontSize, 16.0f, 1920, 1080, 0);
+        if (!len.isAuto()) style.outlineOffset = len.toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
     }
 }
 
@@ -1546,7 +1556,11 @@ CSSLength StyleResolver::parseLength(const std::string& value) {
     // Every unit, scientific notation and the math functions (calc(),
     // min(), max(), clamp()) live in CSSLength::parse; the context carries
     // the element's font size and the viewport for their em/vw terms
-    return CSSLength::parse(value, lengthContext_);
+    CSSLength len = CSSLength::parse(value, lengthContext_);
+    // rem is absolute once the root's font size is known: computed as px,
+    // so layout never resolves it against a default
+    if (len.unit == CSSLength::Unit::Rem) len = CSSLength::px(len.value * rootFontSize_);
+    return len;
 }
 
 CSSColor StyleResolver::parseColor(const std::string& value) {
