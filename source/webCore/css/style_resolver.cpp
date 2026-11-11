@@ -264,6 +264,43 @@ void StyleResolver::setStyleSheets(std::vector<StyleSheetEntry> sheets) {
     cascade_.invalidateIndex();
 }
 
+/**
+ * @brief Blockification (CSS Display 3 §2.7, CSS 2.1 §9.7): an absolutely
+ * positioned or floated box, and a flex or grid item, has a block-level
+ * display: inline and inline-block become block, inline-flex flex,
+ * inline-grid grid, inline-table table, and the internal table displays
+ * block. none and contents are left alone.
+ */
+static void blockifyDisplay(CSSComputedStyle& style, const CSSComputedStyle* parentStyle) {
+    bool outOfFlow = style.position == PositionValue::Absolute || style.position == PositionValue::Fixed;
+    bool floated = style.cssFloat != 0 && !outOfFlow;
+    bool item = false;
+    if (parentStyle && !outOfFlow) {
+        DisplayValue p = parentStyle->display;
+        item = p == DisplayValue::Flex || p == DisplayValue::InlineFlex ||
+               p == DisplayValue::Grid || p == DisplayValue::InlineGrid;
+    }
+    if (!outOfFlow && !floated && !item) return;
+    switch (style.display) {
+        case DisplayValue::Inline:
+        case DisplayValue::InlineBlock:
+        case DisplayValue::TableRow:
+        case DisplayValue::TableCell:
+        case DisplayValue::TableRowGroup:
+        case DisplayValue::TableHeaderGroup:
+        case DisplayValue::TableFooterGroup:
+        case DisplayValue::TableColumn:
+        case DisplayValue::TableColumnGroup:
+        case DisplayValue::TableCaption:
+            style.display = DisplayValue::Block;
+            break;
+        case DisplayValue::InlineFlex: style.display = DisplayValue::Flex; break;
+        case DisplayValue::InlineGrid: style.display = DisplayValue::Grid; break;
+        case DisplayValue::InlineTable: style.display = DisplayValue::Table; break;
+        default: break;
+    }
+}
+
 CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSComputedStyle* parentStyle) {
     CSSComputedStyle computed;
     
@@ -367,6 +404,8 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
         computed = parentStyle ? CSSComputedStyle::inherit(*parentStyle) : CSSComputedStyle();
         runPasses();
     }
+
+    blockifyDisplay(computed, parentStyle);
 
     // <center> and align="center" stop at tables: a table doesn't pass the
     // legacy -webkit-* alignment on to its cells (cells use their own align)
