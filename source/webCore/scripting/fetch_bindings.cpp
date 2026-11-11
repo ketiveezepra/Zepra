@@ -2,7 +2,7 @@
 // Licensed under KPL-2.0. See LICENSE file for details.
 /**
  * @file fetch_bindings.cpp
- * @brief fetch(), XMLHttpRequest and Headers for page scripts
+ * @brief fetch(), Request, Response, XMLHttpRequest and Headers for page scripts
  *
  * A request goes to the FetchHandler the browser installed, which performs
  * it on a worker thread and calls back from there. The callback only drops
@@ -13,6 +13,9 @@
  */
 
 #include "scripting/script_context.hpp"
+#include "scripting/page_url.hpp"
+
+#include "builtins/typed_array.hpp"
 
 #include "runtime/async/promise.hpp"
 #include "runtime/execution/js_error.hpp"
@@ -144,6 +147,218 @@ Object* makeHeadersObject(VM* vm, const std::vector<std::pair<std::string, std::
     return obj;
 }
 
+
+/// The header list a HeadersInit gives: a Headers object, a record
+/// ({name: value}) or a sequence of [name, value] pairs
+std::vector<std::pair<std::string, std::string>> headersFromInit(const Value& init) {
+    std::vector<std::pair<std::string, std::string>> out;
+    if (!init.isObject()) return out;
+    Object* obj = init.asObject();
+    if (auto* arr = dynamic_cast<Array*>(obj)) {
+        for (size_t i = 0; i < arr->length(); i++) {
+            Value pair = arr->get((uint32_t)i);
+            if (!pair.isObject()) {
+                throw JSError("TypeError", "Failed to construct 'Headers': The provided value cannot be converted to a sequence.");
+            }
+            Object* p = pair.asObject();
+            auto* pairArray = dynamic_cast<Array*>(p);
+            double count = pairArray ? (double)pairArray->length() : p->get("length").toNumber();
+            if (count != 2) {
+                throw JSError("TypeError", "Failed to construct 'Headers': Invalid value");
+            }
+            out.emplace_back(p->get(0u).toString(), p->get(1u).toString());
+        }
+        return out;
+    }
+    return headersFromObject(obj);
+}
+
+bool hasHeader(const std::vector<std::pair<std::string, std::string>>& headers, const std::string& name) {
+    for (const auto& h : headers) {
+        if (equalsIgnoreCase(h.first, name)) return true;
+    }
+    return false;
+}
+
+/**
+ * @brief A BodyInit's bytes and the Content-Type it implies (Fetch
+ * "extract a body"): strings are UTF-8 text, ArrayBuffer and views give their
+ * bytes, URLSearchParams its serialization; other objects their string.
+ */
+void extractBody(VM* vm, const Value& body, std::string& bytes, std::string& contentType) {
+    contentType.clear();
+    if (body.isString()) {
+        bytes = body.toString();
+        contentType = "text/plain;charset=UTF-8";
+        return;
+    }
+    if (body.isObject()) {
+        Object* obj = body.asObject();
+        if (auto* view = dynamic_cast<Builtins::TypedArrayObject*>(obj)) {
+            bytes.assign(reinterpret_cast<const char*>(view->data()), view->byteLength());
+            return;
+        }
+        if (auto* buffer = dynamic_cast<Builtins::ArrayBufferObject*>(obj)) {
+            bytes.assign(reinterpret_cast<const char*>(buffer->data()), buffer->byteLength());
+            return;
+        }
+        Value ctor = obj->get("constructor");
+        if (ctor.isObject() && ctor.asObject()->get("name").toString() == "URLSearchParams") {
+            contentType = "application/x-www-form-urlencoded;charset=UTF-8";
+        }
+        bytes = vm ? vm->toPrimitiveValue(body, true).toString() : body.toString();
+        return;
+    }
+    bytes = body.toString();
+    contentType = "text/plain;charset=UTF-8";
+}
+
+/// The method a script gave, normalized as the Fetch Standard says: the six
+/// standard methods are upper-cased, CONNECT/TRACE/TRACK are forbidden
+std::string normalizeMethod(const std::string& method) {
+    if (method.empty()) {
+        throw JSError("TypeError", "Failed to construct 'Request': '' is not a valid HTTP method.");
+    }
+    for (unsigned char c : method) {
+        // an HTTP token
+        if (c <= 0x20 || c >= 0x7f || std::string("\"(),/:;<=>?@[\\]{}").find((char)c) != std::string::npos) {
+            throw JSError("TypeError", "Failed to construct 'Request': '" + method + "' is not a valid HTTP method.");
+        }
+    }
+    std::string up = upper(method);
+    if (up == "CONNECT" || up == "TRACE" || up == "TRACK") {
+        throw JSError("TypeError", "Failed to construct 'Request': '" + method + "' HTTP method is unsupported.");
+    }
+    for (const char* standard : {"DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT"}) {
+        if (up == standard) return up;
+    }
+    return method;
+}
+
+/// A Request's state; its fields are also plain properties scripts read
+class RequestObject : public Object {
+public:
+    std::string url;
+    std::string method = "GET";
+    std::string body;
+    bool hasBody = false;
+};
+
+/// What `new Request(input, init)` (and fetch(input, init)) computes
+struct RequestData {
+    std::string url;
+    std::string method = "GET";
+    std::vector<std::pair<std::string, std::string>> headers;
+    std::string body;
+    bool hasBody = false;
+    std::string mode = "cors";
+    std::string credentials = "same-origin";
+    std::string cache = "default";
+    std::string redirect = "follow";
+    std::string referrer = "about:client";
+    std::string referrerPolicy;
+    std::string integrity;
+    bool keepalive = false;
+    Value signal = Value::null();
+};
+
+/// Fetch's Request constructor steps, minus streams: copies a Request input,
+/// resolves a URL input against `baseUrl` (left as given when there is no
+/// usable base, the browser's handler resolves it then), applies `init`
+RequestData readRequest(VM* vm, const std::string& baseUrl, const Value& input, const Value& initValue) {
+    RequestData data;
+    auto* source = input.isObject() ? dynamic_cast<RequestObject*>(input.asObject()) : nullptr;
+    if (source) {
+        data.url = source->url;
+        data.method = source->method;
+        Value h = source->get("headers");
+        if (h.isObject()) data.headers = headersFromObject(h.asObject());
+        data.body = source->body;
+        data.hasBody = source->hasBody;
+        for (auto [field, key] : {std::pair{&data.mode, "mode"}, {&data.credentials, "credentials"},
+                                  {&data.cache, "cache"}, {&data.redirect, "redirect"},
+                                  {&data.referrer, "referrer"}, {&data.referrerPolicy, "referrerPolicy"},
+                                  {&data.integrity, "integrity"}}) {
+            Value v = source->get(key);
+            if (v.isString()) *field = v.toString();
+        }
+        data.keepalive = source->get("keepalive").toBoolean();
+        data.signal = source->get("signal");
+    } else {
+        std::string text = input.isObject() && vm ? vm->toPrimitiveValue(input, true).toString() : input.toString();
+        PageUrl resolved = PageUrl::resolve(baseUrl, text);
+        data.url = resolved.valid && resolved.protocol != "about:" ? resolved.href() : text;
+    }
+    if (!initValue.isObject()) return data;
+    Object* init = initValue.asObject();
+    Value v = init->get("method");
+    if (!v.isUndefined()) data.method = normalizeMethod(v.toString());
+    v = init->get("headers");
+    if (!v.isUndefined()) data.headers = headersFromInit(v);
+    for (auto [field, key] : {std::pair{&data.mode, "mode"}, {&data.credentials, "credentials"},
+                              {&data.cache, "cache"}, {&data.redirect, "redirect"},
+                              {&data.referrer, "referrer"}, {&data.referrerPolicy, "referrerPolicy"},
+                              {&data.integrity, "integrity"}}) {
+        v = init->get(key);
+        if (!v.isUndefined()) *field = v.toString();
+    }
+    v = init->get("keepalive");
+    if (!v.isUndefined()) data.keepalive = v.toBoolean();
+    v = init->get("signal");
+    if (!v.isUndefined()) data.signal = v;
+    v = init->get("body");
+    if (!v.isNullOrUndefined()) {
+        std::string contentType;
+        extractBody(vm, v, data.body, contentType);
+        data.hasBody = true;
+        if (!contentType.empty() && !hasHeader(data.headers, "Content-Type")) {
+            data.headers.emplace_back("Content-Type", contentType);
+        }
+    } else if (init->has("body")) {
+        data.body.clear();
+        data.hasBody = false;
+    }
+    if (data.hasBody && (data.method == "GET" || data.method == "HEAD")) {
+        throw JSError("TypeError", "Failed to construct 'Request': Request with GET/HEAD method cannot have body.");
+    }
+    return data;
+}
+
+/// A Request object for `data`, inheriting `proto` (Request.prototype)
+RequestObject* makeRequestObject(VM* vm, Object* proto, const RequestData& data) {
+    auto* req = new RequestObject();
+    if (proto) req->setPrototype(proto);
+    req->url = data.url;
+    req->method = data.method;
+    req->body = data.body;
+    req->hasBody = data.hasBody;
+    req->set("url", str(data.url));
+    req->set("method", str(data.method));
+    req->set("headers", Value::object(makeHeadersObject(vm, data.headers)));
+    req->set("mode", str(data.mode));
+    req->set("credentials", str(data.credentials));
+    req->set("cache", str(data.cache));
+    req->set("redirect", str(data.redirect));
+    req->set("referrer", str(data.referrer));
+    req->set("referrerPolicy", str(data.referrerPolicy));
+    req->set("integrity", str(data.integrity));
+    req->set("keepalive", Value::boolean(data.keepalive));
+    req->set("signal", data.signal);
+    req->set("destination", str(""));
+    req->set("bodyUsed", Value::boolean(false));
+    return req;
+}
+
+/// The FetchRequest the browser performs for `data`
+FetchRequest toFetchRequest(const RequestData& data) {
+    FetchRequest req;
+    req.url = data.url;
+    req.method = data.method;
+    req.headers = data.headers;
+    if (data.hasBody) req.body = data.body;
+    return req;
+}
+
 /// A ProgressEvent-like object for XHR listeners
 Object* makeXhrEvent(VM* vm, const std::string& type, Object* target, size_t loaded) {
     auto* ev = new Object();
@@ -210,25 +425,17 @@ void ScriptContext::setupFetchGlobals(Object* windowObj) {
                     "Failed to execute 'fetch': 1 argument required, but only 0 present."));
                 return result;
             }
+            // The Request constructor's steps; their errors reject the promise
             FetchRequest req;
-            if (args[0].isObject()) {
-                Object* request = args[0].asObject();
-                req.url = request->get("url").toString();
-                if (request->has("method")) req.method = upper(request->get("method").toString());
-                Value h = request->get("headers");
-                if (h.isObject()) req.headers = headersFromObject(h.asObject());
-            } else {
-                req.url = args[0].toString();
+            Value thrown;
+            bool ok = catchAsValue(vm_, [&] {
+                req = toFetchRequest(readRequest(vm_, pageUrl_, args[0],
+                                                 args.size() > 1 ? args[1] : Value::undefined()));
+            }, thrown);
+            if (!ok) {
+                promise->reject(thrown);
+                return result;
             }
-            if (args.size() > 1 && args[1].isObject()) {
-                Object* init = args[1].asObject();
-                if (init->has("method")) req.method = upper(init->get("method").toString());
-                Value h = init->get("headers");
-                if (h.isObject()) req.headers = headersFromObject(h.asObject());
-                Value body = init->get("body");
-                if (!body.isNullOrUndefined()) req.body = body.toString();
-            }
-            if (req.method.empty()) req.method = "GET";
             int id = nextFetchId_++;
             callbackStore_->set("F" + std::to_string(id), result);
             startFetch(id, false, req);
@@ -240,22 +447,8 @@ void ScriptContext::setupFetchGlobals(Object* windowObj) {
     // --- Headers ---
     auto* headersCtor = createNativeFunction("Headers",
         [this](Context*, const std::vector<Value>& args) -> Value {
-            std::vector<std::pair<std::string, std::string>> initial;
-            if (!args.empty() && args[0].isObject()) {
-                Object* init = args[0].asObject();
-                auto* arr = dynamic_cast<Array*>(init);
-                if (arr) {
-                    // [[name, value], ...]
-                    for (size_t i = 0; i < arr->length(); i++) {
-                        Value pair = arr->get((uint32_t)i);
-                        if (!pair.isObject()) continue;
-                        initial.emplace_back(pair.asObject()->get(0u).toString(),
-                                             pair.asObject()->get(1u).toString());
-                    }
-                } else {
-                    initial = headersFromObject(init);
-                }
-            }
+            std::vector<std::pair<std::string, std::string>> initial =
+                headersFromInit(args.empty() ? Value::undefined() : args[0]);
             return Value::object(makeHeadersObject(vm_, initial));
         }, 1);
     // Headers.prototype, for instanceof
@@ -265,6 +458,151 @@ void ScriptContext::setupFetchGlobals(Object* windowObj) {
     headersProto->set("constructor", Value::object(headersCtor));
     vm_->setGlobal("Headers", Value::object(headersCtor));
     windowObj->set("Headers", Value::object(headersCtor));
+
+    // --- Request ---
+    auto* requestProto = new Object();
+    requestProto->setPrototype(objectProto);
+    auto* requestCtor = createNativeFunction("Request",
+        [this, requestProto](Context*, const std::vector<Value>& args) -> Value {
+            if (args.empty()) {
+                throw JSError("TypeError", "Failed to construct 'Request': 1 argument required, but only 0 present.");
+            }
+            RequestData data = readRequest(vm_, pageUrl_, args[0], args.size() > 1 ? args[1] : Value::undefined());
+            return Value::object(makeRequestObject(vm_, requestProto, data));
+        }, 1);
+    requestCtor->set("prototype", Value::object(requestProto));
+    requestProto->set("constructor", Value::object(requestCtor));
+    auto requestMethod = [requestProto](const char* name, BuiltinFn fn) {
+        requestProto->set(name, Value::object(new Function(name, std::move(fn), 0)));
+    };
+    auto thisRequest = [](const FunctionCallInfo& info, const char* name) -> RequestObject* {
+        Value t = info.thisValue();
+        auto* req = t.isObject() ? dynamic_cast<RequestObject*>(t.asObject()) : nullptr;
+        if (!req) throw JSError("TypeError", std::string("Illegal invocation: Request.prototype.") + name);
+        return req;
+    };
+    // Reads the body once, as text
+    auto consumeRequest = [this](RequestObject* req, Value& error) -> bool {
+        if (req->get("bodyUsed").toBoolean()) {
+            error = makeScriptError("TypeError", "Failed to execute 'text' on 'Request': body stream already read");
+            return false;
+        }
+        if (req->hasBody) req->set("bodyUsed", Value::boolean(true));
+        return true;
+    };
+    requestMethod("clone", [this, requestProto, thisRequest](const FunctionCallInfo& info) -> Value {
+        RequestObject* req = thisRequest(info, "clone");
+        if (req->get("bodyUsed").toBoolean()) {
+            throw JSError("TypeError", "Failed to execute 'clone' on 'Request': Request body is already used");
+        }
+        RequestData data = readRequest(vm_, pageUrl_, Value::object(req), Value::undefined());
+        return Value::object(makeRequestObject(vm_, requestProto, data));
+    });
+    requestMethod("text", [thisRequest, consumeRequest](const FunctionCallInfo& info) -> Value {
+        RequestObject* req = thisRequest(info, "text");
+        Value error;
+        if (!consumeRequest(req, error)) return Value::object(Promise::rejected(error));
+        return Value::object(Promise::resolved(str(req->body)));
+    });
+    requestMethod("json", [this, thisRequest, consumeRequest](const FunctionCallInfo& info) -> Value {
+        RequestObject* req = thisRequest(info, "json");
+        Value error;
+        if (!consumeRequest(req, error)) return Value::object(Promise::rejected(error));
+        Value json = globalObject_ ? globalObject_->get("JSON") : Value::undefined();
+        Value parse = json.isObject() ? json.asObject()->get("parse") : Value::undefined();
+        Value parsed, thrown;
+        if (!isFunction(parse)) return Value::object(Promise::rejected(makeScriptError("TypeError", "JSON.parse is not available")));
+        bool ok = catchAsValue(vm_, [&] { parsed = callValue(vm_, parse, json, {str(req->body)}); }, thrown);
+        return Value::object(ok ? Promise::resolved(parsed) : Promise::rejected(thrown));
+    });
+    vm_->setGlobal("Request", Value::object(requestCtor));
+    windowObj->set("Request", Value::object(requestCtor));
+
+    // --- Response ---
+    // Responses fetch() resolves with and `new Response(body, init)` share
+    // Response.prototype; their methods are per object (makeFetchResponse)
+    auto* responseProto = new Object();
+    responseProto->setPrototype(objectProto);
+    // A Response made by script: status 200-599, a body from any BodyInit
+    auto makeScriptResponse = [this](const Value& bodyValue, const Value& initValue, const std::string& type) -> Object* {
+        auto response = std::make_shared<FetchResponse>();
+        response->status = 200;
+        if (initValue.isObject()) {
+            Object* init = initValue.asObject();
+            Value v = init->get("status");
+            if (!v.isUndefined()) {
+                double status = v.toNumber();
+                if (!(status >= 200 && status <= 599) || status != (double)(int)status) {
+                    throw JSError("RangeError", "Failed to construct 'Response': The status provided (" +
+                                  v.toString() + ") is outside the range [200, 599].");
+                }
+                response->status = (int)status;
+            }
+            v = init->get("statusText");
+            if (!v.isUndefined()) response->statusText = v.toString();
+            v = init->get("headers");
+            if (!v.isUndefined()) response->headers = headersFromInit(v);
+        }
+        if (!bodyValue.isNullOrUndefined()) {
+            int s = response->status;
+            if (s == 101 || s == 103 || s == 204 || s == 205 || s == 304) {
+                throw JSError("TypeError", "Failed to construct 'Response': Response with null body status cannot have body");
+            }
+            std::string contentType;
+            extractBody(vm_, bodyValue, response->body, contentType);
+            if (!contentType.empty() && !hasHeader(response->headers, "Content-Type")) {
+                response->headers.emplace_back("Content-Type", contentType);
+            }
+        }
+        Object* res = makeFetchResponse(response);
+        res->set("type", str(type));
+        return res;
+    };
+    auto* responseCtor = createNativeFunction("Response",
+        [makeScriptResponse](Context*, const std::vector<Value>& args) -> Value {
+            return Value::object(makeScriptResponse(args.empty() ? Value::undefined() : args[0],
+                                                    args.size() > 1 ? args[1] : Value::undefined(), "default"));
+        }, 0);
+    responseCtor->set("prototype", Value::object(responseProto));
+    responseProto->set("constructor", Value::object(responseCtor));
+    responseCtor->set("error", Value::object(createNativeFunction("error",
+        [this](Context*, const std::vector<Value>&) -> Value {
+            auto response = std::make_shared<FetchResponse>();
+            Object* res = makeFetchResponse(response);
+            res->set("type", str("error"));
+            return Value::object(res);
+        }, 0)));
+    responseCtor->set("json", Value::object(createNativeFunction("json",
+        [this, makeScriptResponse](Context*, const std::vector<Value>& args) -> Value {
+            Value json = globalObject_ ? globalObject_->get("JSON") : Value::undefined();
+            Value stringify = json.isObject() ? json.asObject()->get("stringify") : Value::undefined();
+            if (!isFunction(stringify)) throw JSError("TypeError", "JSON.stringify is not available");
+            Value text = callValue(vm_, stringify, json, {args.empty() ? Value::undefined() : args[0]});
+            if (text.isUndefined()) {
+                throw JSError("TypeError", "Failed to execute 'json' on 'Response': The data is not JSON serializable");
+            }
+            Object* res = makeScriptResponse(text, args.size() > 1 ? args[1] : Value::undefined(), "default");
+            Value headers = res->get("headers");
+            if (headers.isObject()) headers.asObject()->set("content-type", str("application/json"));
+            return Value::object(res);
+        }, 1)));
+    responseCtor->set("redirect", Value::object(createNativeFunction("redirect",
+        [this](Context*, const std::vector<Value>& args) -> Value {
+            int status = args.size() > 1 ? (int)args[1].toNumber() : 302;
+            if (status != 301 && status != 302 && status != 303 && status != 307 && status != 308) {
+                throw JSError("RangeError", "Failed to execute 'redirect' on 'Response': Invalid status code");
+            }
+            auto response = std::make_shared<FetchResponse>();
+            response->status = status;
+            std::string target = args.empty() ? std::string() : args[0].toString();
+            PageUrl resolved = PageUrl::resolve(pageUrl_, target);
+            response->headers.emplace_back("Location", resolved.valid ? resolved.href() : target);
+            Object* res = makeFetchResponse(response);
+            res->set("type", str("default"));
+            return Value::object(res);
+        }, 1)));
+    vm_->setGlobal("Response", Value::object(responseCtor));
+    windowObj->set("Response", Value::object(responseCtor));
 
     // --- XMLHttpRequest ---
     // XMLHttpRequest.prototype exists (libraries read and patch it); the
@@ -509,7 +847,14 @@ Value ScriptContext::makeScriptError(const std::string& type, const std::string&
 
 Object* ScriptContext::makeFetchResponse(const std::shared_ptr<const FetchResponse>& response) {
     auto* res = new Object();
-    res->setPrototype(vm_->intrinsic(VM::Intrinsic::Object));
+    // Response.prototype, for instanceof (the methods stay on each object)
+    Object* proto = vm_->intrinsic(VM::Intrinsic::Object);
+    Value ctor = vm_->getGlobal("Response");
+    if (ctor.isObject() && ctor.asObject()->isFunction()) {
+        Value p = ctor.asObject()->get("prototype");
+        if (p.isObject()) proto = p.asObject();
+    }
+    res->setPrototype(proto);
     const int status = response->status;
     res->set("ok", Value::boolean(status >= 200 && status < 300));
     res->set("status", Value::number(status));
