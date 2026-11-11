@@ -285,44 +285,54 @@ Value Value::power(const Value& left, const Value& right) {
     return Value::number(std::pow(left.toNumber(), right.toNumber()));
 }
 
+namespace {
+
+// ToUint32 / ToInt32 (ES2024 §7.1.7, §7.1.6): truncate, then wrap modulo
+// 2^32. A plain static_cast saturates (or is undefined) past the int32
+// range: 0xffffffff & 1 gave 0 and 4294967295 | 0 gave -2147483648.
+uint32_t toUint32Bits(double d) {
+    if (!std::isfinite(d) || d == 0) return 0;
+    double t = std::trunc(d);
+    double m = std::fmod(t, 4294967296.0);
+    if (m < 0) m += 4294967296.0;
+    return static_cast<uint32_t>(m);
+}
+
+int32_t toInt32Bits(double d) { return static_cast<int32_t>(toUint32Bits(d)); }
+
+} // namespace
+
 Value Value::bitwiseAnd(const Value& left, const Value& right) {
-    int32_t a = static_cast<int32_t>(left.toNumber());
-    int32_t b = static_cast<int32_t>(right.toNumber());
-    return Value::number(static_cast<double>(a & b));
+    return Value::number(static_cast<double>(toInt32Bits(left.toNumber()) & toInt32Bits(right.toNumber())));
 }
 
 Value Value::bitwiseOr(const Value& left, const Value& right) {
-    int32_t a = static_cast<int32_t>(left.toNumber());
-    int32_t b = static_cast<int32_t>(right.toNumber());
-    return Value::number(static_cast<double>(a | b));
+    return Value::number(static_cast<double>(toInt32Bits(left.toNumber()) | toInt32Bits(right.toNumber())));
 }
 
 Value Value::bitwiseXor(const Value& left, const Value& right) {
-    int32_t a = static_cast<int32_t>(left.toNumber());
-    int32_t b = static_cast<int32_t>(right.toNumber());
-    return Value::number(static_cast<double>(a ^ b));
+    return Value::number(static_cast<double>(toInt32Bits(left.toNumber()) ^ toInt32Bits(right.toNumber())));
 }
 
 Value Value::bitwiseNot(const Value& val) {
-    int32_t a = static_cast<int32_t>(val.toNumber());
-    return Value::number(static_cast<double>(~a));
+    return Value::number(static_cast<double>(~toInt32Bits(val.toNumber())));
 }
 
 Value Value::leftShift(const Value& left, const Value& right) {
-    int32_t a = static_cast<int32_t>(left.toNumber());
-    uint32_t b = static_cast<uint32_t>(right.toNumber()) & 0x1F;
-    return Value::number(static_cast<double>(a << b));
+    uint32_t a = toUint32Bits(left.toNumber());
+    uint32_t b = toUint32Bits(right.toNumber()) & 0x1F;
+    return Value::number(static_cast<double>(static_cast<int32_t>(a << b)));
 }
 
 Value Value::rightShift(const Value& left, const Value& right) {
-    int32_t a = static_cast<int32_t>(left.toNumber());
-    uint32_t b = static_cast<uint32_t>(right.toNumber()) & 0x1F;
+    int32_t a = toInt32Bits(left.toNumber());
+    uint32_t b = toUint32Bits(right.toNumber()) & 0x1F;
     return Value::number(static_cast<double>(a >> b));
 }
 
 Value Value::unsignedRightShift(const Value& left, const Value& right) {
-    uint32_t a = static_cast<uint32_t>(left.toNumber());
-    uint32_t b = static_cast<uint32_t>(right.toNumber()) & 0x1F;
+    uint32_t a = toUint32Bits(left.toNumber());
+    uint32_t b = toUint32Bits(right.toNumber()) & 0x1F;
     return Value::number(static_cast<double>(a >> b));
 }
 

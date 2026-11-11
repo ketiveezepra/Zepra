@@ -442,6 +442,11 @@ void ScriptContext::fireElementEvent(DOMElement* element, const std::string& typ
     runTask([&] { domBindings_->fireEvent(element, type, false, false); }, "event listener");
 }
 
+void ScriptContext::fireViewportScroll() {
+    if (!vm_ || !domBindings_ || !document_) return;
+    runTask([&] { domBindings_->fireEvent(document_, "scroll", true, false); }, "scroll listener");
+}
+
 size_t ScriptContext::pendingScriptCount() const {
     return deferredScripts_.size() + orderedScripts_.size() + asyncScripts_.size();
 }

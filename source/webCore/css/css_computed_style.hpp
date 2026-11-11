@@ -407,6 +407,11 @@ public:
     // -webkit-text-fill-color (inherited); without one, text fills with color
     bool hasTextFillColor = false;
     CSSColor textFillColor;
+    // -webkit-text-stroke (inherited): width in px (0 = none) and colour
+    // (currentcolor when hasTextStrokeColor is false)
+    float textStrokeWidth = 0;
+    bool hasTextStrokeColor = false;
+    CSSColor textStrokeColor;
     float letterSpacing = 0;
     float wordSpacing = 0;
     std::string whiteSpace = "normal";
@@ -444,6 +449,14 @@ public:
     /// parent while the element declares none. Null when there are none.
     std::shared_ptr<const CustomPropertyMap> customProperties;
     std::string animation;
+    // CSS Animations 1 longhands as declared (comma-separated lists, one
+    // entry per animation; empty: the initial value). `animation` sets all.
+    std::string animationName;
+    std::string animationDuration;
+    std::string animationDelay;
+    std::string animationIterationCount;
+    std::string animationDirection;
+    std::string animationFillMode;
     std::string filter;
     std::string cursor = "auto";
     std::string pointerEvents = "auto";

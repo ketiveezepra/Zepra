@@ -186,6 +186,9 @@ CSSComputedStyle CSSComputedStyle::inherit(const CSSComputedStyle& parent) {
     style.borderCollapse = parent.borderCollapse;
     style.hasTextFillColor = parent.hasTextFillColor;
     style.textFillColor = parent.textFillColor;
+    style.textStrokeWidth = parent.textStrokeWidth;
+    style.hasTextStrokeColor = parent.hasTextStrokeColor;
+    style.textStrokeColor = parent.textStrokeColor;
     style.customProperties = parent.customProperties;  // custom properties inherit
     return style;
 }

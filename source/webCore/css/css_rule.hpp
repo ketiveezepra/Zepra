@@ -232,6 +232,14 @@ public:
 
     /// Style
     CSSStyleDeclaration* style() { return style_.get(); }
+    const CSSStyleDeclaration* style() const { return style_.get(); }
+    void setStyle(std::unique_ptr<CSSStyleDeclaration> style) {
+        if (style) style_ = std::move(style);
+    }
+
+    /// The keyframe's offsets in [0, 1] ("from" 0, "to" 1, "40%" 0.4); an
+    /// invalid selector gives none
+    std::vector<float> offsets() const;
 
     std::string cssText() const override;
     void setCssText(const std::string& text) override;

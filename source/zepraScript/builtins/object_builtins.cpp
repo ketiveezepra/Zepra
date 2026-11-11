@@ -105,8 +105,13 @@ Runtime::Value ObjectBuiltin::assign(const Runtime::FunctionCallInfo& info) {
         Runtime::Object* source = info.argument(i).asObject();
         std::vector<std::string> keyNames = source->keys();
         
+        // [[Get]] and [[Set]] (ES2024 §20.1.2.1): a getter on the source
+        // runs (a module's "default" export getter copied onto its default
+        // function, as bundlers do), a setter on the target is called
+        Runtime::VM* vm = Runtime::VM::current();
         for (const auto& key : keyNames) {
-            target->set(key, source->get(key));
+            if (vm) vm->setMember(Runtime::Value::object(target), key, vm->getMember(info.argument(i), key));
+            else target->set(key, source->get(key));
         }
     }
     
@@ -431,7 +436,9 @@ Runtime::Value ObjectBuiltin::fromEntries(const Runtime::FunctionCallInfo& info)
         throw std::runtime_error("Object.fromEntries requires an iterable");
     }
     
+    // OrdinaryObjectCreate(%Object.prototype%) (ES2024 §20.1.2.7)
     Runtime::Object* result = new Runtime::Object();
+    if (Runtime::VM* vm = Runtime::VM::current()) result->setPrototype(vm->intrinsic(Runtime::VM::Intrinsic::Object));
     Runtime::Value iterable = info.argument(0);
     
     if (!iterable.isObject()) {

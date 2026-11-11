@@ -7,6 +7,8 @@
 
 #include "css/css_rule.hpp"
 #include "css/css_style_sheet.hpp"
+#include <cctype>
+#include <cstdlib>
 
 namespace Zepra::WebCore {
 
@@ -51,14 +53,46 @@ CSSKeyframesRule::CSSKeyframesRule() : cssRules_(std::make_unique<CSSRuleList>()
 CSSKeyframesRule::~CSSKeyframesRule() = default;
 void CSSKeyframesRule::appendRule(const std::string& rule) {}
 void CSSKeyframesRule::deleteRule(const std::string& select) {}
-CSSKeyframeRule* CSSKeyframesRule::findRule(const std::string& select) const { return nullptr; }
+CSSKeyframeRule* CSSKeyframesRule::findRule(const std::string& select) const {
+    // The last keyframe with exactly this selector (CSSOM: findRule)
+    CSSKeyframeRule* found = nullptr;
+    for (size_t i = 0; cssRules_ && i < cssRules_->length(); i++) {
+        auto* frame = dynamic_cast<CSSKeyframeRule*>(cssRules_->item(i));
+        if (frame && frame->keyText() == select) found = frame;
+    }
+    return found;
+}
 std::string CSSKeyframesRule::cssText() const { return "@keyframes " + name_ + " { }"; }
 void CSSKeyframesRule::setCssText(const std::string& text) {}
 
 // CSSKeyframeRule
 CSSKeyframeRule::CSSKeyframeRule() : style_(std::make_unique<CSSStyleDeclaration>()) {}
 CSSKeyframeRule::~CSSKeyframeRule() = default;
-std::string CSSKeyframeRule::cssText() const { return keyText_ + " { }"; }
+std::vector<float> CSSKeyframeRule::offsets() const {
+    // <keyframe-selector># : from | to | <percentage [0,100]> (CSS Animations 1 §3)
+    std::vector<float> out;
+    size_t start = 0;
+    for (size_t i = 0; i <= keyText_.size(); i++) {
+        if (i < keyText_.size() && keyText_[i] != ',') continue;
+        std::string part = keyText_.substr(start, i - start);
+        start = i + 1;
+        size_t a = part.find_first_not_of(" \t\r\n\f"), b = part.find_last_not_of(" \t\r\n\f");
+        if (a == std::string::npos) continue;
+        part = part.substr(a, b - a + 1);
+        for (char& c : part) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (part == "from") { out.push_back(0.0f); continue; }
+        if (part == "to") { out.push_back(1.0f); continue; }
+        if (part.size() < 2 || part.back() != '%') continue;
+        char* end = nullptr;
+        std::string number = part.substr(0, part.size() - 1);
+        float value = std::strtof(number.c_str(), &end);
+        if (!end || *end != '\0' || !(value >= 0.0f && value <= 100.0f)) continue;
+        out.push_back(value / 100.0f);
+    }
+    return out;
+}
+
+std::string CSSKeyframeRule::cssText() const { return keyText_ + " { " + (style_ ? style_->cssText() : "") + " }"; }
 void CSSKeyframeRule::setCssText(const std::string& text) {}
 
 // CSSImportRule

@@ -231,3 +231,43 @@ TEST_F(LanguageGaps, DataView) {
                   " var u=new Uint8Array(b); r=[u[0],u[1],d.getUint16(0,true),d.getFloat32(4,true),d.byteLength].join();"),
               "18,52,13330,1.5,8");
 }
+
+// Bundler interop: Turbopack copies a module's exports onto its default
+// function with Object.assign, through the exports' getters
+TEST_F(LanguageGaps, ObjectAssignRunsSourceGetters) {
+    EXPECT_EQ(run("var n={}; Object.defineProperty(n,'default',{enumerable:true,get:function(){return R}});"
+                  " function R(){} Object.assign(R,n); var t={}; var log=[];"
+                  " Object.defineProperty(t,'s',{set:function(v){log.push(v)}}); Object.assign(t,{s:7});"
+                  " r=[R.default===R, log.join(), typeof Object.getOwnPropertyDescriptor(t,'s').set].join();"), "true,7,function");
+}
+
+TEST_F(LanguageGaps, JsonAndFromEntriesObjectsAreOrdinary) {
+    EXPECT_EQ(run("var a=JSON.parse('{\"x\":{\"y\":1}}'), b=Object.fromEntries([['k',1]]);"
+                  " r=[Object.getPrototypeOf(a)===Object.prototype, a.x.hasOwnProperty('y'),"
+                  "    Object.getPrototypeOf(b)===Object.prototype, typeof b.toString].join();"),
+              "true,true,true,function");
+}
+
+TEST_F(LanguageGaps, OptionalChainShortCircuitsWholeChain) {
+    EXPECT_EQ(run("var a=null, b={c:{d:[function(){return 7}]}}; var calls=0; function f(){calls++; return 1}"
+                  " r=[a?.b.c.d, b?.c.d[0](), a?.b(), a?.[f()], b.c?.x?.y, calls].join('|');"),
+              "|7||||0");
+}
+
+TEST_F(LanguageGaps, BitwiseOperatorsWrapModulo2To32) {
+    EXPECT_EQ(run("r=[0xffffffff & 1, 4294967295|0, 4294967296|0, -1>>>0, 1<<31, 2147483648>>0].join();"),
+              "1,-1,0,4294967295,-2147483648,-2147483648");
+}
+
+TEST_F(LanguageGaps, ContextualKeywordsNameFunctionExpressions) {
+    EXPECT_EQ(run("var e={to:function to(x){return x}, from:function from(x){return x+1}, of:function of(){return 3}};"
+                  " r=[e.from(1), e.of(), e.from.name].join();"), "2,3,from");
+}
+
+// gsap.min.js: a function expression in a for-statement head uses `in`
+TEST_F(LanguageGaps, InIsAnOperatorAgainInsideNestedConstructsOfAForHead) {
+    EXPECT_EQ(run("var o={a:1}, out=[];"
+                  " for (var f=function(){ var c=0; for (var k in o) if (k in o) c++; return c }(), i=0; i<1; i++) out.push(f);"
+                  " for (var g=[('a' in o), {v: 'a' in o}.v, `${'a' in o}`], j=0; j<1; j++) out.push(g.join('/'));"
+                  " r=out.join();"), "1,true/true/true");
+}

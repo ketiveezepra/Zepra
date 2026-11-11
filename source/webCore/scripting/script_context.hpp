@@ -243,6 +243,10 @@ public:
     /// Fires a simple event (no bubbling, not cancelable) at an element, as
     /// a task: `load`/`error` of a resource the browser loaded for it
     void fireElementEvent(DOMElement* element, const std::string& type);
+    /// Fires `scroll` at the document (it bubbles to the window), as a task:
+    /// the viewport scrolled since the last frame (HTML "run the scroll
+    /// steps", once per frame before the animation frame callbacks)
+    void fireViewportScroll();
 
     // Timers
     int setTimeout(std::function<void()> callback, int delay);
