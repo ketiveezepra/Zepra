@@ -149,33 +149,11 @@ void method(Object* obj, const std::string& name, size_t arity, BuiltinFn fn) {
     defineHidden(obj, name, Value::object(new Function(name, withReactions(std::move(fn)), arity)));
 }
 
-// An assignment that reaches a DOM accessor through a plain object's
-// prototype chain (`Sub.prototype.async = fn`, where Sub's prototype inherits
-// from HTMLElement.prototype) creates an own data property on that object.
-// Some reflected attributes live higher in our prototype chain than in other
-// browsers (async, open, value, ... on HTMLElement), and libraries such as
-// Polymer assign methods with those names to their class prototypes.
-BuiltinFn shadowingSetter(std::string name, BuiltinFn setter) {
-    return [name, setter = std::move(setter)](const FunctionCallInfo& info) -> Value {
-        Value self = info.thisValue();
-        if (self.isObject() && typeid(*self.asObject()) == typeid(Object)) {
-            PropertyDescriptor own;
-            own.value = info.argument(0);
-            own.attributes = PropertyAttribute::Writable | PropertyAttribute::Enumerable |
-                             PropertyAttribute::Configurable;
-            self.asObject()->defineProperty(name, own);
-            return Value::undefined();
-        }
-        return setter(info);
-    };
-}
-
 void accessor(Object* obj, const std::string& name, BuiltinFn getter, BuiltinFn setter = nullptr) {
     PropertyDescriptor desc;
     desc.getter = Value::object(new Function("get " + name, std::move(getter), 0));
     if (setter) {
-        desc.setter = Value::object(new Function("set " + name,
-            shadowingSetter(name, withReactions(std::move(setter))), 1));
+        desc.setter = Value::object(new Function("set " + name, withReactions(std::move(setter)), 1));
     }
     desc.attributes = PropertyAttribute::Configurable | PropertyAttribute::Enumerable;
     obj->defineProperty(name, desc);
@@ -417,7 +395,30 @@ public:
         return index < decl->length() ? str(decl->item(index)) : Value::undefined();
     }
 
+    // style.x = v and delete style.x are [CEReactions] (CSSOM): the
+    // attributeChangedCallback for "style" runs before the assignment returns.
+    // Deferring it lets stale old/new pairs pile up and ping-pong forever with
+    // elements that observe "style" (YouTube's yt-icon).
     bool set(const std::string& key, Value value) override {
+        CEReactionsScope reactions;
+        bool done = setStyle(key, value);
+        reactions.leave();
+        return done;
+    }
+
+    bool has(const std::string& key) const override {
+        return methods_->has(key) || looksLikeCssProperty(key) || Object::has(key);
+    }
+
+    bool deleteProperty(const std::string& key) override {
+        CEReactionsScope reactions;
+        bool done = deleteStyle(key);
+        reactions.leave();
+        return done;
+    }
+
+private:
+    bool setStyle(const std::string& key, Value value) {
         DOMElement* el = element();
         if (!el) return true;
         if (key == "cssText") {
@@ -435,11 +436,7 @@ public:
         return true;
     }
 
-    bool has(const std::string& key) const override {
-        return methods_->has(key) || looksLikeCssProperty(key) || Object::has(key);
-    }
-
-    bool deleteProperty(const std::string& key) override {
+    bool deleteStyle(const std::string& key) {
         if (DOMElement* el = element(); el && looksLikeCssProperty(key)) {
             auto decl = parseInlineStyle(*el);
             decl->removeProperty(cssPropertyName(key));
@@ -449,7 +446,6 @@ public:
         return Object::deleteProperty(key);
     }
 
-private:
     NodeWrapper* owner_;
     Object* methods_;
 };
@@ -865,6 +861,22 @@ void DOMBindings::installNode() {
         if (!(i >= 0) || i >= static_cast<double>(t.asObject()->length())) return Value::null();
         return t.asObject()->get(static_cast<uint32_t>(i));
     }, 1);
+    // NamedNodeMap.getNamedItem / getNamedItemNS over the attributes
+    // snapshot: the Attr whose qualified name matches, else null
+    attrNamedItemFn_ = new Function("getNamedItem", [](const FunctionCallInfo& info) -> Value {
+        Value t = info.thisValue();
+        if (!t.isObject() || info.argumentCount() == 0) return Value::null();
+        // getNamedItemNS(namespace, localName) passes the name second
+        const bool ns = info.argumentCount() > 1;
+        std::string want = lower(info.argument(ns ? 1 : 0).toString());
+        Object* list = t.asObject();
+        const size_t n = list->length();
+        for (size_t i = 0; i < n; ++i) {
+            Value attr = list->get(static_cast<uint32_t>(i));
+            if (attr.isObject() && attr.asObject()->get("name").toString() == want) return attr;
+        }
+        return Value::null();
+    }, 1);
 
     Object* p = nodeProto_;
     accessor(p, "nodeType", on<DOMNode>("nodeType", [](DOMNode& n, const Info&) {
@@ -1125,9 +1137,17 @@ void DOMBindings::installElement() {
             attr->set("name", str(name));
             attr->set("localName", str(name));
             attr->set("value", str(value));
+            attr->set("nodeName", str(name));
+            attr->set("nodeType", Value::number(2));
+            attr->set("namespaceURI", Value::null());
+            attr->set("prefix", Value::null());
+            attr->set("specified", Value::boolean(true));
+            attr->set("ownerElement", wrap(&e));
             list->push(Value::object(attr));
         }
         defineHidden(list, "item", Value::object(listItemFn_));
+        defineHidden(list, "getNamedItem", Value::object(attrNamedItemFn_));
+        defineHidden(list, "getNamedItemNS", Value::object(attrNamedItemFn_));
         return Value::object(list);
     }));
     method(p, "getAttribute", 1, on<DOMElement>("getAttribute", [](DOMElement& e, const Info& info) {
@@ -1310,24 +1330,17 @@ void DOMBindings::installElement() {
     // HTMLElement
     htmlElementProto_ = makeInterface("HTMLElement", elementProto_);
     Object* h = htmlElementProto_;
+    // Attributes every HTML element reflects (HTML §3.2.6, §6.6); the
+    // per-element ones (href, src, async, disabled, value, ...) live on their
+    // own interfaces below, so a custom element's `async`/`open`/`value`
+    // stays an ordinary expando as in other browsers
     for (const auto& [property, attribute] : std::initializer_list<std::pair<const char*, const char*>>{
-             {"title", "title"}, {"lang", "lang"}, {"dir", "dir"}, {"accessKey", "accesskey"},
-             {"href", "href"}, {"src", "src"}, {"alt", "alt"}, {"type", "type"}, {"name", "name"},
-             {"placeholder", "placeholder"}, {"rel", "rel"}, {"target", "target"}, {"action", "action"},
-             {"method", "method"}, {"htmlFor", "for"}, {"content", "content"}, {"media", "media"},
-             {"charset", "charset"}, {"autocomplete", "autocomplete"}, {"pattern", "pattern"},
-             {"min", "min"}, {"max", "max"}, {"step", "step"}, {"label", "label"}, {"download", "download"}}) {
+             {"title", "title"}, {"lang", "lang"}, {"dir", "dir"}, {"accessKey", "accesskey"}}) {
         reflect(h, property, attribute);
     }
-    // Reflected boolean attributes: present or absent
-    for (const auto& [property, attribute] : std::initializer_list<std::pair<const char*, const char*>>{
-             {"hidden", "hidden"}, {"disabled", "disabled"}, {"defaultChecked", "checked"}, {"selected", "selected"},
-             {"readOnly", "readonly"}, {"required", "required"}, {"multiple", "multiple"},
-             {"autofocus", "autofocus"}, {"defer", "defer"}, {"async", "async"}, {"open", "open"},
-             {"noValidate", "novalidate"}, {"controls", "controls"}, {"loop", "loop"}, {"muted", "muted"},
-             {"autoplay", "autoplay"}, {"inert", "inert"}}) {
+    auto reflectBool = [](Object* proto, const char* property, const char* attribute) {
         std::string attr = attribute;
-        accessor(h, property,
+        accessor(proto, property,
             on<DOMElement>(property, [attr](DOMElement& e, const Info&) { return Value::boolean(e.hasAttribute(attr)); }),
             on<DOMElement>(property, [attr](DOMElement& e, const Info& info) {
                 if (info.argument(0).toBoolean()) {
@@ -1337,7 +1350,8 @@ void DOMBindings::installElement() {
                 }
                 return Value::undefined();
             }));
-    }
+    };
+    for (const char* property : {"hidden", "autofocus", "inert"}) reflectBool(h, property, property);
     accessor(h, "tabIndex",
         on<DOMElement>("tabIndex", [](DOMElement& e, const Info&) {
             std::string v = e.getAttribute("tabindex");
@@ -1349,9 +1363,8 @@ void DOMBindings::installElement() {
         }));
     // value: what the control holds (typed or set), not the attribute;
     // defaultValue is the attribute (a textarea's text)
-    accessor(h, "value",
-        on<DOMElement>("value", [](DOMElement& e, const Info&) { return str(formControlValue(&e)); }),
-        on<DOMElement>("value", [this](DOMElement& e, const Info& info) {
+    BuiltinFn valueGet = on<DOMElement>("value", [](DOMElement& e, const Info&) { return str(formControlValue(&e)); });
+    BuiltinFn valueSet = on<DOMElement>("value", [this](DOMElement& e, const Info& info) {
             std::string v = info.argument(0).isNull() ? "" : info.argument(0).toString();
             std::string tag = lower(e.tagName());
             if (tag == "select") {
@@ -1372,24 +1385,22 @@ void DOMBindings::installElement() {
                 e.setAttribute("value", v);
             }
             return Value::undefined();
-        }));
-    accessor(h, "defaultValue",
-        on<DOMElement>("defaultValue", [](DOMElement& e, const Info&) {
+        });
+    BuiltinFn defaultValueGet = on<DOMElement>("defaultValue", [](DOMElement& e, const Info&) {
             return str(lower(e.tagName()) == "textarea" ? textOf(e) : e.getAttribute("value"));
-        }),
-        on<DOMElement>("defaultValue", [this](DOMElement& e, const Info& info) {
+        });
+    BuiltinFn defaultValueSet = on<DOMElement>("defaultValue", [this](DOMElement& e, const Info& info) {
             std::string v = info.argument(0).isNull() ? "" : info.argument(0).toString();
             if (lower(e.tagName()) == "textarea") setText(&e, v);
             else e.setAttribute("value", v);
             return Value::undefined();
-        }));
-    accessor(h, "checked",
-        on<DOMElement>("checked", [](DOMElement& e, const Info&) { return Value::boolean(formControlChecked(&e)); }),
-        on<DOMElement>("checked", [](DOMElement& e, const Info& info) {
+        });
+    BuiltinFn checkedGet = on<DOMElement>("checked", [](DOMElement& e, const Info&) { return Value::boolean(formControlChecked(&e)); });
+    BuiltinFn checkedSet = on<DOMElement>("checked", [](DOMElement& e, const Info& info) {
             setFormControlChecked(&e, info.argument(0).toBoolean());
             noteDomMutation();
             return Value::undefined();
-        }));
+        });
 
     // element.style
     Object* styleMethods = new Object();
@@ -1473,6 +1484,79 @@ void DOMBindings::installElement() {
         tagInterfaces_[t.tag] = {t.name, proto};
     }
     makeInterface("HTMLUnknownElement", htmlElementProto_);
+
+    // Per-element reflected attributes, on the interfaces that define them
+    auto protosOf = [&byName, mediaProto](std::initializer_list<const char*> names) {
+        std::vector<Object*> out;
+        for (const char* n : names) {
+            if (std::string(n) == "HTMLMediaElement") { out.push_back(mediaProto); continue; }
+            auto it = byName.find(n);
+            if (it != byName.end() && it->second) out.push_back(it->second);
+        }
+        return out;
+    };
+    struct Reflected { const char* property; const char* attribute; std::initializer_list<const char*> interfaces; };
+    const Reflected strings[] = {
+        {"href", "href", {"HTMLAnchorElement", "HTMLAreaElement", "HTMLLinkElement", "HTMLBaseElement"}},
+        {"src", "src", {"HTMLImageElement", "HTMLScriptElement", "HTMLIFrameElement", "HTMLEmbedElement",
+                        "HTMLInputElement", "HTMLSourceElement", "HTMLTrackElement", "HTMLMediaElement"}},
+        {"alt", "alt", {"HTMLImageElement", "HTMLAreaElement", "HTMLInputElement"}},
+        {"type", "type", {"HTMLAnchorElement", "HTMLLinkElement", "HTMLScriptElement", "HTMLButtonElement",
+                          "HTMLInputElement", "HTMLEmbedElement", "HTMLObjectElement", "HTMLSourceElement",
+                          "HTMLOListElement", "HTMLStyleElement"}},
+        {"name", "name", {"HTMLAnchorElement", "HTMLButtonElement", "HTMLFieldSetElement", "HTMLFormElement",
+                          "HTMLIFrameElement", "HTMLImageElement", "HTMLInputElement", "HTMLMapElement",
+                          "HTMLMetaElement", "HTMLObjectElement", "HTMLOutputElement", "HTMLSelectElement",
+                          "HTMLSlotElement", "HTMLTextAreaElement", "HTMLEmbedElement"}},
+        {"placeholder", "placeholder", {"HTMLInputElement", "HTMLTextAreaElement"}},
+        {"rel", "rel", {"HTMLAnchorElement", "HTMLAreaElement", "HTMLLinkElement", "HTMLFormElement"}},
+        {"target", "target", {"HTMLAnchorElement", "HTMLAreaElement", "HTMLBaseElement", "HTMLFormElement"}},
+        {"action", "action", {"HTMLFormElement"}},
+        {"method", "method", {"HTMLFormElement"}},
+        {"htmlFor", "for", {"HTMLLabelElement", "HTMLOutputElement"}},
+        {"content", "content", {"HTMLMetaElement"}},
+        {"media", "media", {"HTMLLinkElement", "HTMLStyleElement", "HTMLSourceElement", "HTMLMetaElement"}},
+        {"charset", "charset", {"HTMLMetaElement", "HTMLScriptElement"}},
+        {"autocomplete", "autocomplete", {"HTMLInputElement", "HTMLSelectElement", "HTMLTextAreaElement", "HTMLFormElement"}},
+        {"pattern", "pattern", {"HTMLInputElement"}},
+        {"min", "min", {"HTMLInputElement", "HTMLMeterElement"}},
+        {"max", "max", {"HTMLInputElement", "HTMLMeterElement", "HTMLProgressElement"}},
+        {"step", "step", {"HTMLInputElement"}},
+        {"label", "label", {"HTMLOptionElement", "HTMLOptGroupElement", "HTMLTrackElement"}},
+        {"download", "download", {"HTMLAnchorElement", "HTMLAreaElement"}},
+    };
+    for (const auto& r : strings) {
+        for (Object* proto : protosOf(r.interfaces)) reflect(proto, r.property, r.attribute);
+    }
+    const Reflected booleans[] = {
+        {"disabled", "disabled", {"HTMLButtonElement", "HTMLFieldSetElement", "HTMLInputElement", "HTMLOptGroupElement",
+                                  "HTMLOptionElement", "HTMLSelectElement", "HTMLTextAreaElement", "HTMLLinkElement"}},
+        {"defaultChecked", "checked", {"HTMLInputElement"}},
+        {"selected", "selected", {"HTMLOptionElement"}},
+        {"readOnly", "readonly", {"HTMLInputElement", "HTMLTextAreaElement"}},
+        {"required", "required", {"HTMLInputElement", "HTMLSelectElement", "HTMLTextAreaElement"}},
+        {"multiple", "multiple", {"HTMLInputElement", "HTMLSelectElement"}},
+        {"defer", "defer", {"HTMLScriptElement"}},
+        {"async", "async", {"HTMLScriptElement"}},
+        {"open", "open", {"HTMLDetailsElement", "HTMLDialogElement"}},
+        {"noValidate", "novalidate", {"HTMLFormElement"}},
+        {"controls", "controls", {"HTMLMediaElement"}},
+        {"loop", "loop", {"HTMLMediaElement"}},
+        {"muted", "muted", {"HTMLMediaElement"}},
+        {"autoplay", "autoplay", {"HTMLMediaElement"}},
+    };
+    for (const auto& r : booleans) {
+        for (Object* proto : protosOf(r.interfaces)) reflectBool(proto, r.property, r.attribute);
+    }
+    for (Object* proto : protosOf({"HTMLInputElement", "HTMLTextAreaElement", "HTMLSelectElement", "HTMLOptionElement",
+                                   "HTMLButtonElement", "HTMLLIElement", "HTMLDataElement", "HTMLOutputElement",
+                                   "HTMLProgressElement", "HTMLMeterElement"})) {
+        accessor(proto, "value", valueGet, valueSet);
+    }
+    for (Object* proto : protosOf({"HTMLInputElement", "HTMLTextAreaElement", "HTMLOutputElement"})) {
+        accessor(proto, "defaultValue", defaultValueGet, defaultValueSet);
+    }
+    for (Object* proto : protosOf({"HTMLInputElement"})) accessor(proto, "checked", checkedGet, checkedSet);
 
     // DOMTokenList
     tokenListProto_ = makeInterface("DOMTokenList", nullptr);
@@ -1992,6 +2076,39 @@ void DOMBindings::installDocumentInterface() {
         return elementList(found);
     }));
 
+    // document.all: one HTMLAllCollection per bindings. It has [[IsHTMLDDA]]
+    // (falsy, typeof "undefined", == undefined) as in browsers, which is what
+    // `x === document.all` sanitizer checks (YouTube's) rely on. length,
+    // item() and namedItem() are live; there is no indexed access.
+    {
+        Object* allProto = makeInterface("HTMLAllCollection", nullptr);
+        accessor(allProto, "length", [this](const FunctionCallInfo&) -> Value {
+            std::vector<DOMElement*> found;
+            if (document_) collectByTag(*document_, "*", found);
+            return Value::number(static_cast<double>(found.size()));
+        });
+        method(allProto, "item", 1, [this](const FunctionCallInfo& info) -> Value {
+            std::vector<DOMElement*> found;
+            if (document_) collectByTag(*document_, "*", found);
+            double i = info.argument(0).toNumber();
+            if (i >= 0 && i < static_cast<double>(found.size())) return wrap(found[static_cast<size_t>(i)]);
+            return Value::null();
+        });
+        method(allProto, "namedItem", 1, [this](const FunctionCallInfo& info) -> Value {
+            std::vector<DOMElement*> found;
+            if (document_) collectByTag(*document_, "*", found);
+            std::string name = argString(info, 0);
+            for (DOMElement* e : found) {
+                if (e->getAttribute("id") == name || e->getAttribute("name") == name) return wrap(e);
+            }
+            return Value::null();
+        });
+        allCollection_ = new Object();
+        allCollection_->setPrototype(allProto);
+        allCollection_->markHTMLDDA();
+        accessor(p, "all", [this](const FunctionCallInfo&) -> Value { return Value::object(allCollection_); });
+    }
+
     method(p, "hasFocus", 0, [](const FunctionCallInfo&) -> Value { return Value::boolean(true); });
     // document.write is not supported (the page is parsed before scripts run)
     for (const char* name : {"write", "writeln", "open", "close"}) {
@@ -2289,6 +2406,64 @@ void DOMBindings::installForms() {
         ctor->set("prototype", Value::object(option));
         vm_->setGlobal("Option", Value::object(ctor));
         if (global_) defineHidden(global_, "Option", Value::object(ctor));
+    }
+    // HTMLHyperlinkElementUtils (<a>, <area>): href is the resolved URL and
+    // its parts read like location's. Setting a part rewrites href.
+    {
+        auto parsed = [this](DOMElement& e) {
+            return PageUrl::resolve(documentUrl(), e.getAttribute("href"));
+        };
+        for (const char* tag : {"a", "area"}) {
+            Object* proto = tagInterfaces_[tag].second;
+            if (!proto) continue;
+            accessor(proto, "href",
+                on<DOMElement>("href", [parsed](DOMElement& e, const Info&) {
+                    if (!e.hasAttribute("href")) return str("");
+                    PageUrl url = parsed(e);
+                    return str(url.valid ? url.href() : e.getAttribute("href"));
+                }),
+                on<DOMElement>("href", [](DOMElement& e, const Info& info) {
+                    e.setAttribute("href", info.argument(0).toString());
+                    return Value::undefined();
+                }));
+            using Part = std::string (*)(const PageUrl&);
+            const std::pair<const char*, Part> parts[] = {
+                {"protocol", [](const PageUrl& u) { return u.protocol; }},
+                {"host", [](const PageUrl& u) { return u.host(); }},
+                {"hostname", [](const PageUrl& u) { return u.hostname; }},
+                {"port", [](const PageUrl& u) { return u.port; }},
+                {"pathname", [](const PageUrl& u) { return u.pathname; }},
+                {"search", [](const PageUrl& u) { return u.search(); }},
+                {"hash", [](const PageUrl& u) { return u.hash(); }},
+                {"origin", [](const PageUrl& u) { return u.origin(); }},
+                {"username", [](const PageUrl& u) { return u.username; }},
+                {"password", [](const PageUrl& u) { return u.password; }},
+            };
+            for (const auto& [name, part] : parts) {
+                std::string property = name;
+                BuiltinFn setter = nullptr;
+                if (property == "pathname" || property == "search" || property == "hash") {
+                    setter = on<DOMElement>(name, [parsed, property](DOMElement& e, const Info& info) {
+                        PageUrl url = parsed(e);
+                        if (!url.valid) return Value::undefined();
+                        std::string v = info.argument(0).toString();
+                        if (!v.empty() && v[0] == (property == "search" ? '?' : '#')) v.erase(0, 1);
+                        if (property == "pathname") url.pathname = v.empty() || v[0] != '/' ? "/" + v : v;
+                        if (property == "search") { url.query = v; url.hasQuery = !v.empty(); }
+                        if (property == "hash") { url.fragment = v; url.hasFragment = !v.empty(); }
+                        e.setAttribute("href", url.href());
+                        return Value::undefined();
+                    });
+                }
+                accessor(proto, name,
+                    on<DOMElement>(name, [parsed, part](DOMElement& e, const Info&) {
+                        if (!e.hasAttribute("href")) return str("");
+                        PageUrl url = parsed(e);
+                        return str(url.valid ? part(url) : "");
+                    }),
+                    setter);
+            }
+        }
     }
     // HTMLScriptElement: src reads as an absolute URL; async is true for a
     // script a script made until it says otherwise ("force async"); text is

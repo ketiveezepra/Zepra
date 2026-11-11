@@ -39,6 +39,10 @@ bool Value::isFalsy() const {
         return n == 0.0 || std::isnan(n);
     }
     if (isString()) return asString()->value().empty();
+    if (isObject()) {
+        Object* obj = asObject();
+        return obj && obj->isHTMLDDA();
+    }
     return false;
 }
 
@@ -183,6 +187,13 @@ bool Value::equals(const Value& other) const {
     // null == undefined
     if ((isNull() && other.isUndefined()) ||
         (isUndefined() && other.isNull())) {
+        return true;
+    }
+    // Annex B: an [[IsHTMLDDA]] object == null and == undefined
+    if ((isNull() || isUndefined()) && other.isObject() && other.asObject() && other.asObject()->isHTMLDDA()) {
+        return true;
+    }
+    if ((other.isNull() || other.isUndefined()) && isObject() && asObject() && asObject()->isHTMLDDA()) {
         return true;
     }
     

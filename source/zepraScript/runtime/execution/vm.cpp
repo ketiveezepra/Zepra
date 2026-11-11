@@ -1155,6 +1155,7 @@ void VM::dispatch(Opcode op) {
             Value a = pop();
             std::string type;
             if (a.isUndefined()) type = "undefined";
+            else if (a.isObject() && a.asObject()->isHTMLDDA()) type = "undefined";
             else if (a.isNull()) type = "object";
             else if (a.isBoolean()) type = "boolean";
             else if (a.isNumber()) type = "number";
@@ -1964,6 +1965,17 @@ Value VM::executeCallback(Function* fn, Value thisValue, const std::vector<Value
 // constructor (`isConstruct`) a non-object result yields `this`, which
 // super() into a built-in parent may have replaced.
 Value VM::runCompiled(Function* fn, Value thisValue, const std::vector<Value>& callArgs, bool isConstruct) {
+    // Each nested run (a getter, a callback from a builtin or the DOM) is a
+    // C++ re-entry of the interpreter; unbounded JS recursion through them
+    // would overflow the native stack. Throw a catchable RangeError instead.
+    if (nestedRuns_ >= kMaxNestedRuns) {
+        throw std::runtime_error("Maximum call stack size exceeded");
+    }
+    struct NestedRun {
+        size_t& n;
+        explicit NestedRun(size_t& count) : n(count) { ++n; }
+        ~NestedRun() { --n; }
+    } nestedRun(nestedRuns_);
     VM* previousVM = currentVM_;
     currentVM_ = this;
     const Bytecode::BytecodeChunk* savedChunk = chunk_;

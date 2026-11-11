@@ -251,6 +251,8 @@ private:
     Zepra::Runtime::Object* focusEventProto_ = nullptr;
     Zepra::Runtime::Object* submitEventProto_ = nullptr;
     Zepra::Runtime::Object* listItemFn_ = nullptr;  // item(i) on the arrays standing in for NodeLists
+    Zepra::Runtime::Object* attrNamedItemFn_ = nullptr;  // getNamedItem(name) on element.attributes
+    Zepra::Runtime::Object* allCollection_ = nullptr;    // document.all (one falsy HTMLAllCollection)
     /// Per-tag interfaces (HTMLDivElement, HTMLCanvasElement, ...) by lowercase tag
     std::unordered_map<std::string, std::pair<std::string, Zepra::Runtime::Object*>> tagInterfaces_;
 

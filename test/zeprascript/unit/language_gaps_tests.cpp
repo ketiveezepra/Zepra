@@ -271,3 +271,44 @@ TEST_F(LanguageGaps, InIsAnOperatorAgainInsideNestedConstructsOfAForHead) {
                   " for (var g=[('a' in o), {v: 'a' in o}.v, `${'a' in o}`], j=0; j<1; j++) out.push(g.join('/'));"
                   " r=out.join();"), "1,true/true/true");
 }
+
+// Integer keys are found through the prototype chain (Polymer's mixin dedupe
+// sets are Object.create chains keyed by integers) and by string ("0")
+TEST_F(LanguageGaps, IndexedPropertiesOnThePrototypeChain) {
+    EXPECT_EQ(run("var a = Object.create(null); a[0] = 'x'; var b = Object.create(a); b[1] = 'y';"
+                  "var c = Object.create(b); r = [c[0], c[1], c[2], 0 in c, 1 in c, 2 in c].join();"),
+              "x,y,,true,true,false");
+    EXPECT_EQ(run("r = Object.create([7, 8])[1];"), "8");
+}
+
+TEST_F(LanguageGaps, IndexKeysThroughStringKeyedPaths) {
+    EXPECT_EQ(run("var o = {a: 1}; o[0] = 'z'; o[3] = 't';"
+                  "r = JSON.stringify([Object.values(o), Object.entries(o), Object.assign({}, o), o, {...o}]);"),
+              "[[\"z\",\"t\",1],[[\"0\",\"z\"],[\"3\",\"t\"],[\"a\",1]],{\"0\":\"z\",\"3\":\"t\",\"a\":1},"
+              "{\"0\":\"z\",\"3\":\"t\",\"a\":1},{\"0\":\"z\",\"3\":\"t\",\"a\":1}]");
+    // Getters run in Object.values / entries / assign
+    EXPECT_EQ(run("var g = {}; Object.defineProperty(g, 'v', {get: function () { return 'G'; }, enumerable: true});"
+                  "r = Object.values(g)[0] + Object.entries(g)[0][1] + Object.assign({}, g).v;"),
+              "GGG");
+}
+
+// After an assignment, getOwnPropertyDescriptor reports the new value
+// (YouTube re-captures patched DOM methods this way)
+TEST_F(LanguageGaps, DescriptorValueFollowsAssignment) {
+    EXPECT_EQ(run("var o = {}; Object.defineProperty(o, 'm', {value: 1, writable: true, configurable: true});"
+                  "o.m = 2; var d = Object.getOwnPropertyDescriptor(o, 'm');"
+                  "r = [d.value, d.writable, d.enumerable].join();"),
+              "2,true,false");
+}
+
+// Unbounded recursion through getters / builtin callbacks is a RangeError,
+// not a native stack overflow
+TEST_F(LanguageGaps, NestedRunRecursionIsARangeError) {
+    EXPECT_EQ(run("var o = {}; Object.defineProperty(o, 'x', {get: function () { return this.x; }});"
+                  "try { o.x; r = 'no'; } catch (e) { r = e.name; }"),
+              "RangeError");
+    EXPECT_EQ(run("function f() { return [0].map(f); } try { f(); r = 'no'; } catch (e) { r = e.name; }"),
+              "RangeError");
+    EXPECT_EQ(run("r = [1, 2, 3].map(function (x) { return [x].map(function (y) { return y * 2; })[0]; }).join();"),
+              "2,4,6");
+}
