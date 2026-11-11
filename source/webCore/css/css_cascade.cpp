@@ -873,6 +873,11 @@ bool CSSCascade::compoundMatches(DOMElement* element, const std::string& compoun
                 if (!matches) return false;
                 continue;
             }
+            if (pseudoName == "popover-open") {
+                // A popover in the showing state (showPopover())
+                if (!element->hasAttribute("popover") || !element->popoverOpen()) return false;
+                continue;
+            }
             if (pseudoName == "link" || pseudoName == "any-link" || pseudoName == "visited" ||
                 pseudoName == "enabled" || pseudoName == "disabled" ||
                 pseudoName == "checked" || pseudoName == "placeholder-shown" ||

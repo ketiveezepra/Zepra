@@ -273,7 +273,9 @@ public:
     // Box Model
     // =========================================================================
 
-    DisplayValue display = DisplayValue::Block;  // Default to block (custom elements like <c-wiz>)
+    // The initial value (CSS Display 3): elements the UA sheet does not list,
+    // custom and unknown ones included, are inline as in every browser
+    DisplayValue display = DisplayValue::Inline;
     PositionValue position = PositionValue::Static;
     Visibility visibility = Visibility::Visible;
     BoxSizing boxSizing = BoxSizing::ContentBox;

@@ -312,3 +312,30 @@ TEST_F(LanguageGaps, NestedRunRecursionIsARangeError) {
     EXPECT_EQ(run("r = [1, 2, 3].map(function (x) { return [x].map(function (y) { return y * 2; })[0]; }).join();"),
               "2,4,6");
 }
+
+// for-in enumerates inherited enumerable properties too, own ones first,
+// with shadowed names listed once (Polymer keeps prototype defaults as the
+// prototype of its pending-changes object and walks it with for-in)
+TEST_F(LanguageGaps, ForInWalksThePrototypeChain) {
+    EXPECT_EQ(run("var p = {guideIcon: 'menu'}; var o = Object.create(p); o.a = 1;"
+                  "var k = []; for (var x in o) k.push(x); r = k.join();"),
+              "a,guideIcon");
+    EXPECT_EQ(run("var s = Object.create({a: 1, b: 2}); s.a = 5; var k = []; for (var x in s) k.push(x);"
+                  "var h = Object.create({z: 1}); Object.defineProperty(h, 'z', {value: 2, enumerable: false});"
+                  "for (var y in h) k.push(y); r = k.join();"),
+              "a,b");
+    EXPECT_EQ(run("function C() { this.i = 1; } C.prototype.m = function () {};"
+                  "var k = []; for (var x in new C()) k.push(x); for (var y in 'ab') k.push(y); r = k.join();"),
+              "i,m,0,1");
+}
+
+// Members of the built-ins, a function's prototype and prototype.constructor
+// are not enumerable, so for-in over plain objects and arrays lists only data
+TEST_F(LanguageGaps, BuiltinMembersAreNotEnumerable) {
+    EXPECT_EQ(run("var k = []; for (var x in {a: 1}) k.push(x); for (var y in [7]) k.push(y);"
+                  "function F() {} class K { m() {} }"
+                  "k.push(Object.keys(Object.prototype).length, Object.keys(Array.prototype).length,"
+                  "      Object.keys(F.prototype).length, Object.keys(K.prototype).length, Object.keys(F).length);"
+                  "r = k.join();"),
+              "a,0,0,0,0,0,0");
+}

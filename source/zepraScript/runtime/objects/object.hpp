@@ -176,6 +176,10 @@ public:
     bool lookupProperty(const std::string& key, Value& value,
                         const PropertyDescriptor*& accessor) const;
     
+    /// Clears [[Enumerable]] on every own named property: built-in objects'
+    /// members are non-enumerable (ECMA-262 §18)
+    void makeOwnPropertiesNonEnumerable();
+
     // Property enumeration
     std::vector<std::string> getOwnPropertyNames() const;
     std::vector<std::string> keys() const;  // Enumerable only

@@ -822,6 +822,21 @@ static void layoutFixed(LayoutBox& box, float viewportW, float vpH) {
     float bottom = hasB ? box.cssBottom.resolve(vpH, box.fontSize, viewportW, vpH) : 0;
 
     bool autoWidth = !box.cssWidth.isSet() || box.cssWidth.isAuto();
+    bool autoHeight = !box.cssHeight.isSet() || box.cssHeight.isAuto();
+    // An auto height between two insets is known before the box is laid
+    // out, so its absolutely positioned and percentage-height children
+    // resolve against it (§10.6.4), as for position: absolute
+    LayoutLength savedHeight = box.cssHeight, savedWidth = box.cssWidth;
+    int savedSizing = box.boxSizing;
+    if (autoHeight && hasT && hasB) {
+        box.cssHeight = LayoutLength::px(std::max(0.0f, vpH - top - bottom - box.marginTop - box.marginBottom));
+        if (box.boxSizing != 1 && !autoWidth) {
+            box.cssWidth = LayoutLength::px(box.cssWidth.resolve(vpW, box.fontSize, viewportW, vpH) +
+                                            (box.boxSizing == 0 ? box.paddingLeft + box.paddingRight +
+                                                                      box.borderLeft + box.borderRight : 0.0f));
+        }
+        box.boxSizing = 1;
+    }
     if (autoWidth && hasL && hasR) {
         layoutBlock(box, std::max(0.0f, vpW - left - right), 0);  // stretched between the insets
     } else if (autoWidth && !box.isImage) {
@@ -833,9 +848,12 @@ static void layoutFixed(LayoutBox& box, float viewportW, float vpH) {
     } else {
         layoutBlock(box, vpW, 0);
     }
-    bool autoHeight = !box.cssHeight.isSet() || box.cssHeight.isAuto();
-    if (autoHeight && hasT && hasB)
+    if (autoHeight && hasT && hasB) {
         box.height = std::max(box.height, vpH - top - bottom - box.marginTop - box.marginBottom);
+        box.cssHeight = savedHeight;
+        box.cssWidth = savedWidth;
+        box.boxSizing = savedSizing;
+    }
 
     if (hasL) box.x = left + box.marginLeft;
     else if (hasR) box.x = vpW - right - box.width - box.marginRight;
@@ -895,6 +913,23 @@ bool isBlockLevel(LayoutType type) {
     }
 }
 
+// Percentage heights (CSS 2.1 §10.5) resolve against the containing block's
+// height when it is definite, else they behave as auto. s_percentHeightBase
+// is that height for the boxes layoutBlock is laying out now (-1 when it is
+// not definite); each box sets it for its own children.
+static thread_local float s_percentHeightBase = -1;
+static float s_rootPercentageBase = -1;
+
+void setRootPercentageBase(float height) { s_rootPercentageBase = height; }
+
+namespace {
+struct PercentHeightBaseScope {
+    float saved;
+    explicit PercentHeightBaseScope(float base) : saved(s_percentHeightBase) { s_percentHeightBase = base; }
+    ~PercentHeightBaseScope() { s_percentHeightBase = saved; }
+};
+}  // namespace
+
 void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     // Guard against deep recursion (complex pages like github.com with 1800+ boxes)
     static thread_local int s_depth = 0;
@@ -903,6 +938,28 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
 
     // A pass over the whole tree starts from the boxes as built
     if (s_depth == 1) resetLayoutState(box);
+
+    // A percentage height becomes a length against a definite containing
+    // block height, or auto without one; restored when this layout ends, as
+    // the box may be laid out again in another context
+    struct HeightRestore {
+        LayoutBox& b; LayoutLength saved;
+        ~HeightRestore() { b.cssHeight = saved; }
+    } heightRestore{box, box.cssHeight};
+    if (box.cssHeight.isPercent()) {
+        float base = s_depth == 1 ? s_rootPercentageBase : s_percentHeightBase;
+        box.cssHeight = base >= 0 ? LayoutLength::px(std::max(0.0f, box.cssHeight.resolve(base, box.fontSize, 0, 0)))
+                                  : LayoutLength::autoVal();
+    }
+    // What this box's children's percentages resolve against: its content
+    // height when that is specified
+    float childBase = -1;
+    if (box.cssHeight.isSet() && !box.cssHeight.isAuto()) {
+        float h = box.cssHeight.resolve(0, box.fontSize, layoutViewportWidth(), layoutViewportHeight());
+        if (box.boxSizing == 1) h -= box.paddingTop + box.paddingBottom + box.borderTop + box.borderBottom;
+        childBase = std::max(0.0f, h);
+    }
+    PercentHeightBaseScope percentBase(childBase);
 
     if (box.type == LayoutType::Table) {
         layoutTable(box, containingWidth, startY);
@@ -1090,7 +1147,9 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                     maxChildBottom = std::max(maxChildBottom, bottom);
                 }
                 child.height = maxChildBottom + child.paddingBottom + child.borderBottom;
-                if (child.height == 0) child.height = child.fontSize + 8;
+                // A text run is at least a line tall; an empty item stays
+                // 0 (an empty <div> in a column takes no space)
+                if (child.height == 0 && !child.text.empty()) child.height = child.fontSize + 8;
             }
             
             FlexChild fc;
@@ -1146,6 +1205,38 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
             }
         }
         
+        // A column whose height is indefinite is as tall as its items'
+        // hypothetical main sizes (CSS Flexbox §9.2 step 3, §9.3 step 4): each
+        // item keeps its flex base size clamped by min/max-height (min-height:
+        // auto is the content height unless the item clips its overflow), and
+        // no free space is left for flex-grow or justify-content. The large
+        // placeholder size above only kept items from shrinking while the
+        // lines were built.
+        if (mainSizeAuto) {
+            float tallest = 0;
+            for (auto& line : lines) {
+                float sum = 0;
+                for (size_t i = 0; i < line.items.size(); ++i) {
+                    FlexChild& fc = line.items[i];
+                    const LayoutBox& c = *fc.ptr;
+                    float hyp = fc.flexBasis;
+                    if (c.cssMinHeight.isSet() && !c.cssMinHeight.isAuto() && !c.cssMinHeight.isPercent()) {
+                        hyp = std::max(hyp, c.cssMinHeight.resolve(0, c.fontSize, vpW, vpH) + c.marginTop + c.marginBottom);
+                    } else if (!c.overflowHidden && c.overflowY == 0) {
+                        hyp = std::max(hyp, fc.contentMain);
+                    }
+                    if (c.cssMaxHeight.isSet() && !c.cssMaxHeight.isAuto() && !c.cssMaxHeight.isPercent()) {
+                        hyp = std::min(hyp, c.cssMaxHeight.resolve(0, c.fontSize, vpW, vpH) + c.marginTop + c.marginBottom);
+                    }
+                    fc.flexBasis = fc.mainSize = hyp;
+                    sum += hyp + (i > 0 ? flexGap : 0);
+                }
+                line.mainSize = sum;
+                tallest = std::max(tallest, sum);
+            }
+            containerMainSize = tallest;
+        }
+
         // Wrap-reverse: reverse line stacking order
         if (box.wrapReverse && lines.size() > 1) {
             std::reverse(lines.begin(), lines.end());
@@ -1410,6 +1501,26 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                     }
                 }
                 
+                // A column item whose height flexing changed is laid out again
+                // at that height, which is definite for its own children
+                // (CSS Flexbox §9.8): a flex: 1 item's flex: 1 child or
+                // height: 100% child fills it
+                if (isColumn && !child.children.empty() && !child.isImage &&
+                    std::fabs(fc.mainSize - fc.contentMain) > 0.5f) {
+                    float finalH = child.height, finalW = child.width;
+                    LayoutLength savedH = child.cssHeight, savedW = child.cssWidth;
+                    int savedSizing = child.boxSizing;
+                    child.cssHeight = LayoutLength::px(finalH);
+                    child.cssWidth = LayoutLength::px(finalW);
+                    child.boxSizing = 1;
+                    layoutBlock(child, finalW + child.marginLeft + child.marginRight, 0);
+                    child.cssHeight = savedH;
+                    child.cssWidth = savedW;
+                    child.boxSizing = savedSizing;
+                    child.height = finalH;
+                    child.width = finalW;
+                }
+
                 if (isColumn) {
                     child.x = childX + child.marginLeft + crossOffset + crossCursor;
                     child.y = box.paddingTop + box.borderTop + cursor + child.marginTop;
@@ -1579,6 +1690,16 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 float contentW = maxChildRight + child.paddingRight + child.borderRight;
                 if (contentW > 0 && contentW < availWidth)
                     child.width = contentW;
+            } else if (child.type == LayoutType::Inline && !wrappedRun && run.text.empty() &&
+                       child.children.empty() && child.paddingLeft == 0 && child.paddingRight == 0 &&
+                       child.paddingTop == 0 && child.paddingBottom == 0 && child.borderLeft == 0 &&
+                       child.borderRight == 0 && child.borderTop == 0 && child.borderBottom == 0 &&
+                       child.marginLeft == 0 && child.marginRight == 0) {
+                // An empty inline element (<span></span>, an unknown or
+                // custom element with no content) adds no line height: a
+                // line with nothing else is zero-height (CSS 2.1 §9.4.2)
+                child.width = 0;
+                child.height = 0;
             } else {
                 bool forcedBreaks = run.text.find('\n') != std::string::npos;
                 float textW = forcedBreaks ? widestForcedLine(run) : measureTextWidth(run.text, run.fontSize, &run);
@@ -1809,8 +1930,12 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                     child.boxSizing = 1;
                 }
             }
-            // Lay the child out to resolve its own dimensions
-            layoutBlock(child, autoWidth && hasLeft && hasRight ? padW : contentWidth, 0);
+            // Lay the child out to resolve its own dimensions; a percentage
+            // height is of this padding box (§10.5)
+            {
+                PercentHeightBaseScope absBase(padH);
+                layoutBlock(child, autoWidth && hasLeft && hasRight ? padW : contentWidth, 0);
+            }
             child.cssWidth = savedWidth;
             child.cssHeight = savedHeight;
             child.boxSizing = savedSizing;
@@ -1830,6 +1955,7 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
             }
         }
         else if (child.positionType == 3) {
+            PercentHeightBaseScope fixedBase(vpH);  // the viewport
             layoutFixed(child, vpW, vpH);
         }
         else if (child.positionType == 1) {

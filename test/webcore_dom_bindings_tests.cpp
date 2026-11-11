@@ -602,6 +602,46 @@ TEST(FetchBindings, WithoutAHandlerFetchRejects) {
 // Web Storage
 // ----------------------------------------------------------------------------
 
+TEST(FetchBindings, RequestAndResponseConstructors) {
+    Page page(kPage);
+    FakeNetwork net;
+    net.install(*page.script);
+    // A Request carries method, headers and body into fetch(); init overrides it
+    EXPECT_EQ(page.eval("var rq = new Request('/youtubei/v1/guide?key=1', {method: 'post', headers: [['X-Goog', 'a']], body: '{\"c\":1}', credentials: 'include'});"
+                        "[rq instanceof Request, rq.method, rq.headers.get('x-goog'), rq.credentials, rq.mode, rq.bodyUsed].join()"),
+              "true,POST,a,include,cors,false");
+    EXPECT_EQ(page.eval("try { new Request('/x', {body: 'b'}); 'no' } catch (e) { e.name }"), "TypeError");
+    EXPECT_EQ(page.eval("try { new Request('/x', {method: 'TRACE'}); 'no' } catch (e) { e.name }"), "TypeError");
+    EXPECT_EQ(page.eval("new Request('/x', {method: 'patch'}).method + new Request(rq).method"), "patchPOST");
+    page.eval("fetch(rq).then(function(r) { console.log('got ' + (r instanceof Response) + ' ' + r.status); });"
+              "fetch(new Request('/bytes', {method: 'PUT', body: new Uint8Array([65, 0, 66])}));");
+    ASSERT_EQ(net.requests.size(), 2u);
+    EXPECT_EQ(net.requests[0].method, "POST");
+    EXPECT_EQ(net.requests[0].url, "/youtubei/v1/guide?key=1");
+    EXPECT_EQ(net.requests[0].body, "{\"c\":1}");
+    ASSERT_EQ(net.requests[0].headers.size(), 2u) << "the given header and the body's Content-Type";
+    EXPECT_EQ(net.requests[1].body, std::string("A\0B", 3));
+    net.answer(0, 200, "{}");
+    page.script->processTimers();
+    ASSERT_EQ(page.console.size(), 1u);
+    EXPECT_EQ(page.console[0], "log: got true 200");
+
+    // Response made by script: body, status, headers; json() parses it
+    page.console.clear();
+    page.eval("var rs = new Response('{\"a\":[1,2]}', {status: 201, headers: {'X-A': 'b'}});"
+              "console.log([rs instanceof Response, rs.status, rs.ok, rs.headers.get('x-a'), rs.headers.get('content-type'), rs.type].join());"
+              "rs.json().then(function(j) { console.log('json ' + j.a[1]); });"
+              "new Response(null).text().then(function(t) { console.log('empty [' + t + ']'); });"
+              "Response.json({k: 3}).json().then(function(j) { console.log('static ' + j.k); });"
+              "try { new Response('', {status: 99}); } catch (e) { console.log(e.name); }"
+              "console.log(Response.error().type + ' ' + Response.error().status);");
+    page.script->processTimers();
+    std::string all;
+    for (const auto& line : page.console) all += line + "|";
+    EXPECT_EQ(all, "log: true,201,true,b,text/plain;charset=UTF-8,default|log: RangeError|log: error 0|"
+                   "log: json 2|log: empty []|log: static 3|");
+}
+
 TEST(WebStorage, AreaOrderQuotaAndFileFormat) {
     StorageArea area(20);
     EXPECT_TRUE(area.setItem("b", "1"));
@@ -1148,4 +1188,24 @@ TEST(DomBindings, StyleAssignmentRunsReactionsSynchronously) {
                         "e.style.opacity = '0.3'; var during = log.length; e.style.opacity = '';"
                         "[during > 0, log.length < 10].join()"),
               "true,true");
+}
+
+// Popover API: showPopover/hidePopover/togglePopover change the showing
+// state behind :popover-open (YouTube's tooltip popover stays hidden until
+// shown); beforetoggle fires at once, toggle after the script, coalesced
+TEST(DomBindings, PopoverShowingState) {
+    Page page(kPage);
+    page.eval("var p = document.createElement('div'); p.setAttribute('popover', 'manual'); document.body.appendChild(p);"
+              "var log = []; p.addEventListener('beforetoggle', function (e) { log.push('b:' + e.newState); });"
+              "p.addEventListener('toggle', function (e) { log.push('t:' + e.oldState + '>' + e.newState); });");
+    EXPECT_EQ(page.eval("p.matches(':popover-open')"), "false");
+    EXPECT_EQ(page.eval("p.showPopover(); [p.matches(':popover-open'), log.join()].join(' ')"), "true b:open");
+    EXPECT_EQ(page.eval("log.join()"), "b:open,t:closed>open") << "toggle runs after the script";
+    EXPECT_EQ(page.eval("log = []; var r = [p.togglePopover(), p.togglePopover(true)]; r.join()"), "false,true");
+    EXPECT_EQ(page.eval("log.join()"), "b:closed,b:open") << "closed then reopened: no net toggle";
+    EXPECT_EQ(page.eval("var q = document.createElement('div'); document.body.appendChild(q);"
+                        "try { q.showPopover(); 'no' } catch (e) { e.name }"), "NotSupportedError");
+    page.eval("p.addEventListener('beforetoggle', function (e) { if (e.newState === 'open') e.preventDefault(); });"
+              "p.hidePopover(); p.showPopover();");
+    EXPECT_EQ(page.eval("p.matches(':popover-open')"), "false") << "a canceled beforetoggle keeps it closed";
 }

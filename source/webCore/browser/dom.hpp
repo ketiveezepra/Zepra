@@ -359,6 +359,14 @@ public:
     void setActive(bool v)  { active_ = v; }
     void setChecked(bool v) { checked_ = v; }
     void setDisabled(bool v){ disabled_ = v; }
+    /// The popover showing state (HTML Popover API): :popover-open matches
+    /// it; showPopover()/hidePopover() change it and restyle the page
+    bool popoverOpen() const { return popoverOpen_; }
+    void setPopoverOpen(bool open) {
+        if (popoverOpen_ == open) return;
+        popoverOpen_ = open;
+        noteDomMutation();
+    }
 
     // Form control state: the value the user typed or a script set (an
     // <input>'s "dirty value"), and the checkedness a click or a script gave a
@@ -421,6 +429,7 @@ private:
     bool active_   = false;
     bool checked_  = false;
     bool disabled_ = false;
+    bool popoverOpen_ = false;
 };
 
 /**

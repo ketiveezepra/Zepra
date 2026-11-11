@@ -212,6 +212,9 @@ private:
     DOMElement* pointer_ = nullptr;
     FunctionCompiler compileFunction_;
     DOMDocument* document_ = nullptr;
+    /// Popovers with a queued toggle event, and the oldState it reports
+    /// (HTML "popover toggle task tracker": later changes coalesce into it)
+    std::unordered_map<DOMElement*, std::string> pendingPopoverToggles_;
     CanvasRegistry* canvases_ = nullptr;
     ComputedStyleSource computedStyleSource_;
     PseudoElementStyleSource pseudoStyleSource_;

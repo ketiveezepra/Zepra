@@ -1725,7 +1725,6 @@ const char* const kPlatformShims = R"JS(
     accessor(H, 'outerText', function () { return this.innerText; });
     accessor(H, 'role', function () { return this.getAttribute('role'); }, function (v) { this.setAttribute('role', String(v)); });
     accessor(H, 'ariaLabel', function () { return this.getAttribute('aria-label'); }, function (v) { this.setAttribute('aria-label', String(v)); });
-    if (!H.showPopover) { H.showPopover = function () {}; H.hidePopover = function () {}; H.togglePopover = function () { return false; }; }
   }
 })();
 )JS";

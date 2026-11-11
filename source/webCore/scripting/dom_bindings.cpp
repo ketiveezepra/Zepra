@@ -1504,6 +1504,59 @@ void DOMBindings::installElement() {
         return Value::undefined();
     }));
 
+    // Popover API: the showing state behind :popover-open, with beforetoggle
+    // (cancelable when opening) and toggle events. Not yet: the top layer,
+    // light dismiss and closing other auto popovers.
+    auto setPopover = [this](DOMElement& e, bool open, const char* name) {
+        if (!e.hasAttribute("popover")) {
+            throwDOMError(vm_, "NotSupportedError", std::string("Failed to execute '") + name +
+                          "' on 'HTMLElement': Not supported on elements that do not have a valid value for the 'popover' attribute.");
+        }
+        if (e.popoverOpen() == open) return;
+        if (open && !isConnectedTo(&e, document_)) {
+            throwDOMError(vm_, "InvalidStateError", std::string("Failed to execute '") + name +
+                          "' on 'HTMLElement': Invalid on disconnected popover elements.");
+        }
+        std::vector<std::pair<std::string, Value>> states = {
+            {"oldState", str(open ? "closed" : "open")}, {"newState", str(open ? "open" : "closed")}};
+        if (!fireEvent(&e, "beforetoggle", false, open, states) && open) return;
+        e.setPopoverOpen(open);
+        // toggle is queued (after this script), one per element: a pending
+        // one keeps its oldState and reports the state when it runs
+        auto pending = pendingPopoverToggles_.find(&e);
+        if (pending != pendingPopoverToggles_.end()) return;
+        pendingPopoverToggles_[&e] = open ? "closed" : "open";
+        Value wrapper = Value::object(wrapperOf(&e));
+        DOMElement* key = &e;
+        vm_->enqueueJob([this, wrapper, key]() {
+            auto it = pendingPopoverToggles_.find(key);
+            if (it == pendingPopoverToggles_.end()) return;
+            std::string oldState = it->second;
+            pendingPopoverToggles_.erase(it);  // also when the element is gone
+            auto* node = wrapper.isObject() ? nodeOf(wrapper.asObject()) : nullptr;
+            auto* el = node && node->nodeType() == NodeType::Element ? static_cast<DOMElement*>(node) : nullptr;
+            if (el != key) return;
+            std::string newState = el->popoverOpen() ? "open" : "closed";
+            if (oldState == newState) return;
+            fireEvent(el, "toggle", false, false, {{"oldState", str(oldState)}, {"newState", str(newState)}});
+        });
+    };
+    method(h, "showPopover", 0, on<DOMElement>("showPopover", [setPopover](DOMElement& e, const Info&) {
+        setPopover(e, true, "showPopover");
+        return Value::undefined();
+    }));
+    method(h, "hidePopover", 0, on<DOMElement>("hidePopover", [setPopover](DOMElement& e, const Info&) {
+        setPopover(e, false, "hidePopover");
+        return Value::undefined();
+    }));
+    method(h, "togglePopover", 0, on<DOMElement>("togglePopover", [setPopover](DOMElement& e, const Info& info) {
+        Value force = info.argument(0);
+        if (force.isObject()) force = force.asObject()->get("force");  // togglePopover({force})
+        bool open = force.isUndefined() ? !e.popoverOpen() : force.toBoolean();
+        setPopover(e, open, "togglePopover");
+        return Value::boolean(e.popoverOpen());
+    }));
+
     // Per-tag interfaces below HTMLElement (HTMLMediaElement between it and audio/video)
     Object* mediaProto = makeInterface("HTMLMediaElement", htmlElementProto_);
     std::unordered_map<std::string, Object*> byName;
