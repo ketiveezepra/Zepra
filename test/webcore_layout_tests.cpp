@@ -212,6 +212,60 @@ TEST(Cascade, PseudoElementRulesSkipTheElement) {
 // Math functions and logical properties (Tailwind v4 output)
 // ---------------------------------------------------------------------------
 
+TEST(Cascade, RemFollowsTheRootFontSizeAndBodyInheritsIt) {
+    // YouTube's html { font-size: 62.5% }: 1rem is 10px, and the body (which
+    // the UA sheet gives no font of its own) inherits the root's font
+    StyledDoc d("<!doctype html><html id=r><body id=y><div id=a>x</div></body></html>",
+                "html { font-size: 62.5%; font-family: Roboto, Arial, sans-serif; width: 2rem; }"
+                "#a { font-size: 1.4rem; width: 20rem; padding-left: 1rem; height: calc(2rem + 4px); }");
+    EXPECT_FLOAT_EQ(d.style("r")->fontSize, 10.0f);
+    EXPECT_FLOAT_EQ(d.style("r")->width.value, 32.0f) << "the root's own rem is the initial 16px";
+    EXPECT_FLOAT_EQ(d.style("y")->fontSize, 10.0f);
+    EXPECT_EQ(d.style("y")->fontFamily, "Roboto, Arial, sans-serif");
+    const CSSComputedStyle* a = d.style("a");
+    EXPECT_FLOAT_EQ(a->fontSize, 14.0f);
+    EXPECT_FLOAT_EQ(a->width.value, 200.0f);
+    EXPECT_EQ(a->width.unit, CSSLength::Unit::Px);
+    EXPECT_FLOAT_EQ(a->paddingLeft.value, 10.0f);
+    EXPECT_FLOAT_EQ(a->height.toPx(14, 10, 1280, 800, 0), 24.0f);
+}
+
+TEST(Cascade, FlexShorthand) {
+    StyledDoc d("<!doctype html><div id=a></div><div id=b></div><div id=c></div><div id=d></div>"
+                "<div id=e></div><div id=f></div><div id=g></div>",
+                "#a { flex: 0 1 732px; } #b { flex: 1; } #c { flex: 2 3; } #d { flex: 300px; }"
+                "#e { flex: none; } #f { flex: 1 1 0; } #g { flex: 0 1 40%; }");
+    auto check = [&](const char* id, float grow, float shrink, CSSLength::Unit unit, float basis) {
+        const CSSComputedStyle* s = d.style(id);
+        EXPECT_FLOAT_EQ(s->flexGrow, grow) << id;
+        EXPECT_FLOAT_EQ(s->flexShrink, shrink) << id;
+        EXPECT_EQ(s->flexBasis.unit, unit) << id;
+        if (unit != CSSLength::Unit::Auto) EXPECT_FLOAT_EQ(s->flexBasis.value, basis) << id;
+    };
+    check("a", 0, 1, CSSLength::Unit::Px, 732);
+    check("b", 1, 1, CSSLength::Unit::Px, 0);
+    check("c", 2, 3, CSSLength::Unit::Px, 0);
+    check("d", 1, 1, CSSLength::Unit::Px, 300);
+    check("e", 0, 0, CSSLength::Unit::Auto, 0);
+    check("f", 1, 1, CSSLength::Unit::Px, 0);
+    check("g", 0, 1, CSSLength::Unit::Percent, 40);
+}
+
+TEST(Cascade, DisplayInitialValueAndBlockification) {
+    StyledDoc d("<!doctype html><div id=f style='display:flex'><span id=i>a</span><x-y id=c>b</x-y></div>"
+                "<x-z id=u>c</x-z><span id=p style='position:fixed'>d</span><em id=l style='float:left'>e</em>"
+                "<span id=t style='display:inline-flex;position:absolute'>f</span><br id=b>",
+                "");
+    EXPECT_EQ(d.style("u")->display, DisplayValue::Inline) << "unknown and custom elements are inline";
+    EXPECT_EQ(d.style("i")->display, DisplayValue::Block) << "flex items are blockified";
+    EXPECT_EQ(d.style("c")->display, DisplayValue::Block);
+    EXPECT_EQ(d.style("p")->display, DisplayValue::Block) << "position: fixed";
+    EXPECT_EQ(d.style("l")->display, DisplayValue::Block) << "float";
+    EXPECT_EQ(d.style("t")->display, DisplayValue::Flex);
+    EXPECT_EQ(d.style("b")->display, DisplayValue::Inline);
+    EXPECT_EQ(d.style("f")->display, DisplayValue::Flex);
+}
+
 TEST(MathFunctions, CalcKeepsAUniformUnitAndMixesTheRest) {
     // Tailwind's spacing scale: --spacing times a number
     StyledDoc d("<!doctype html><div id=a><p id=b>x</p></div>",
@@ -220,8 +274,9 @@ TEST(MathFunctions, CalcKeepsAUniformUnitAndMixesTheRest) {
                 "     width: calc(100% - 20px); margin-top: calc(1rem + 4px); }"
                 "#b { padding: calc(1px + 1px) 0; line-height: calc(2 / 1.5); }");
     const CSSComputedStyle* a = d.style("a");
-    EXPECT_EQ(a->height.unit, CSSLength::Unit::Rem);
-    EXPECT_FLOAT_EQ(a->height.value, 1.5f);
+    // rem is absolute once the root's font size is known: computed as px
+    EXPECT_EQ(a->height.unit, CSSLength::Unit::Px);
+    EXPECT_FLOAT_EQ(a->height.value, 24.0f);
     // Font-relative paddings are resolved against the element's font size
     EXPECT_EQ(a->paddingLeft.unit, CSSLength::Unit::Px);
     EXPECT_FLOAT_EQ(a->paddingLeft.value, 24.0f);
@@ -451,6 +506,93 @@ TEST(AbsoluteLayout, InsetsStretchAnAutoSizedBox) {
     EXPECT_FLOAT_EQ(inset.height, 58);
     // The specified (auto) sizes are kept for the next layout pass
     EXPECT_FALSE(cover.cssWidth.isSet() && !cover.cssWidth.isAuto());
+}
+
+TEST(FlexLayout, IndefiniteColumnLeavesNoFreeSpace) {
+    // A column with an auto height is as tall as its items: flex-grow and
+    // justify-content: center have nothing to distribute (it used a
+    // 999999px placeholder height for that, so items grew to ~1e6 px)
+    LayoutBox flex = makeFlex(1, 0);
+    flex.justifyContent = 2;
+    LayoutBox& fixed = addBox(flex, LayoutType::Block);
+    fixed.cssHeight = LayoutLength::px(30);
+    LayoutBox& grow = addBox(flex, LayoutType::Block);
+    grow.flexGrow = 1;
+    grow.flexBasis = LayoutLength::px(0);
+    addBox(grow, LayoutType::Inline).text = "x";
+    ZepraBrowser::layoutBlock(flex, 600, 0);
+    EXPECT_FLOAT_EQ(fixed.y, 0);
+    EXPECT_FLOAT_EQ(grow.y, 30);
+    EXPECT_LT(grow.height, 40) << "keeps its content height";
+    EXPECT_LT(flex.height, 80);
+}
+
+TEST(FlexLayout, FlexedColumnItemIsDefiniteForItsChildren) {
+    // height: 400px column > empty spacer + flex: 1 column > header + flex: 1
+    LayoutBox outer = makeFlex(1, 0);
+    outer.cssHeight = LayoutLength::px(400);
+    LayoutBox& spacer = addBox(outer, LayoutType::Block);
+    LayoutBox& middle = addBox(outer, LayoutType::Flex);
+    middle.flexDirection = 1;
+    middle.flexGrow = 1;
+    middle.flexBasis = LayoutLength::px(0);
+    LayoutBox& head = addBox(middle, LayoutType::Block);
+    head.cssHeight = LayoutLength::px(20);
+    LayoutBox& inner = addBox(middle, LayoutType::Block);
+    inner.flexGrow = 1;
+    inner.flexBasis = LayoutLength::px(0);
+    inner.overflowY = 2;
+    ZepraBrowser::layoutBlock(outer, 300, 0);
+    EXPECT_FLOAT_EQ(spacer.height, 0) << "an empty item takes no space";
+    EXPECT_FLOAT_EQ(middle.height, 400);
+    EXPECT_FLOAT_EQ(inner.y, 20);
+    EXPECT_FLOAT_EQ(inner.height, 380);
+}
+
+TEST(AbsoluteLayout, PercentageHeightsResolveAgainstDefiniteContainingBlocks) {
+    // position: relative; height: 300px > absolute top/bottom > height: 100%
+    LayoutBox parent;
+    parent.type = LayoutType::Block;
+    parent.positionType = 1;
+    parent.cssHeight = LayoutLength::px(300);
+    LayoutBox& abs = addBox(parent, LayoutType::Block);
+    abs.positionType = 2;
+    abs.cssTop = LayoutLength::px(10);
+    abs.cssBottom = LayoutLength::px(20);
+    LayoutBox& full = addBox(abs, LayoutType::Block);
+    full.cssHeight = LayoutLength::pct(100);
+    LayoutBox& half = addBox(parent, LayoutType::Block);
+    half.cssHeight = LayoutLength::pct(50);
+    LayoutBox& autoParent = addBox(parent, LayoutType::Block);
+    LayoutBox& indefinite = addBox(autoParent, LayoutType::Block);
+    indefinite.cssHeight = LayoutLength::pct(50);
+    addBox(indefinite, LayoutType::Inline).text = "x";
+    ZepraBrowser::layoutBlock(parent, 400, 0);
+    EXPECT_FLOAT_EQ(abs.height, 270);
+    EXPECT_FLOAT_EQ(full.height, 270);
+    EXPECT_FLOAT_EQ(half.height, 150);
+    EXPECT_GT(indefinite.height, 0) << "a percentage of an auto height behaves as auto";
+    EXPECT_TRUE(half.cssHeight.isPercent()) << "the specified percentage is kept for the next pass";
+}
+
+TEST(AbsoluteLayout, FixedInsetHeightReachesAbsoluteChildren) {
+    // YouTube's guide drawer: fixed top/bottom > absolute top:0;bottom:0
+    ZepraBrowser::setLayoutViewport(1000, 600);
+    LayoutBox root;
+    root.type = LayoutType::Block;
+    LayoutBox& fixed = addBox(root, LayoutType::Block);
+    fixed.positionType = 3;
+    fixed.cssTop = LayoutLength::px(56);
+    fixed.cssBottom = LayoutLength::px(0);
+    fixed.cssWidth = LayoutLength::px(240);
+    LayoutBox& inner = addBox(fixed, LayoutType::Block);
+    inner.positionType = 2;
+    inner.cssTop = inner.cssBottom = LayoutLength::px(0);
+    ZepraBrowser::layoutBlock(root, 1000, 0);
+    EXPECT_FLOAT_EQ(fixed.height, 544);
+    EXPECT_FLOAT_EQ(inner.height, 544);
+    EXPECT_FALSE(fixed.cssHeight.isSet() && !fixed.cssHeight.isAuto()) << "the auto height is kept";
+    ZepraBrowser::setLayoutViewport(0, 0);
 }
 
 TEST(FlexLayout, TextAlignDoesNotMoveCentredItemsAgain) {

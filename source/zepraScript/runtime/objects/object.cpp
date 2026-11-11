@@ -304,6 +304,23 @@ std::vector<std::string> Object::getOwnPropertyNames() const {
     return names;
 }
 
+void Object::makeOwnPropertiesNonEnumerable() {
+    for (const std::string& key : orderedNamedKeys()) {
+        if (isInternalPropertyKey(key)) continue;
+        auto it = descriptors_.find(key);
+        if (it != descriptors_.end()) {
+            it->second.attributes = it->second.attributes & ~PropertyAttribute::Enumerable;
+            continue;
+        }
+        auto value = properties_.find(key);
+        if (value == properties_.end()) continue;
+        PropertyDescriptor desc;
+        desc.value = value->second;
+        desc.attributes = PropertyAttribute::Writable | PropertyAttribute::Configurable;
+        descriptors_[key] = desc;
+    }
+}
+
 std::vector<std::string> Object::keys() const {
     if (objectType_ == ObjectType::Proxy) return static_cast<const Proxy*>(this)->proxyEnumerableKeys();
     std::vector<std::string> result;

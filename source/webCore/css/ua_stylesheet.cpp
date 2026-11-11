@@ -27,6 +27,7 @@ const char* ZepraUAStylesheet::getStylesheet() {
 html {
     display: block;
     color: #1f2328;
+    font-family: sans-serif;
 }
 
 /* ==========================================================================
@@ -43,15 +44,20 @@ noframes, param, rp, template {
     display: none !important;
 }
 
+/* A popover is rendered only while showing (HTML Popover API) */
+[popover]:not(:popover-open):not(dialog[open]) {
+    display: none;
+}
+
 /* ==========================================================================
    Block-Level Elements
    ========================================================================== */
 
+/* The page's font is set on html (or inherited from it): the body only
+   inherits, as in other engines, so html { font-size: 62.5% } reaches it */
 body {
     display: block;
     margin: 8px;
-    font-family: sans-serif;
-    font-size: 16px;
 }
 
 address, article, aside, div, footer,
@@ -66,6 +72,14 @@ address {
 center {
     display: block;
     text-align: -webkit-center;
+}
+
+listing, plaintext, xmp, optgroup, frameset, frame {
+    display: block;
+}
+
+slot {
+    display: contents;
 }
 
 p {
@@ -328,6 +342,7 @@ textarea {
 }
 
 button {
+    text-align: center;
     padding: 4px 12px;
     border: 1px solid #ccc;
     background-color: #f0f0f0;
@@ -346,6 +361,7 @@ fieldset {
 }
 
 legend {
+    display: block;
     padding-left: 2px;
     padding-right: 2px;
 }

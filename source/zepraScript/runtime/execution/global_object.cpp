@@ -83,6 +83,8 @@ void GlobalObject::initialize() {
 
     // Global functions
     initializeGlobalFunctions();
+
+    hideBuiltinMembers();
 }
 
 void GlobalObject::installInto(VM& vm, const std::vector<std::string>& except) const {
@@ -134,6 +136,33 @@ Value objectFromValue(VM& vm, const Value& value) {
 }
 
 } // namespace
+
+// ECMA-262 §18: every property of the standard built-in objects is
+// non-enumerable. Several were stored as plain (enumerable) properties, which
+// a for-in over any object would list once it walks the prototype chain
+// (Object.prototype.hasOwnProperty, Array.prototype.push, ...).
+void GlobalObject::hideBuiltinMembers() {
+    VM& vm = vmOf(context_);
+    std::vector<Object*> owners;
+    auto add = [&owners](Object* o) {
+        if (o && std::find(owners.begin(), owners.end(), o) == owners.end()) owners.push_back(o);
+    };
+    for (int kind = 0; kind < static_cast<int>(VM::Intrinsic::Count); ++kind) {
+        add(vm.intrinsic(static_cast<VM::Intrinsic>(kind)));
+    }
+    for (const std::string& name : getOwnPropertyNames()) {
+        Value v = get(name);
+        if (!v.isObject() || v.asObject() == this) continue;
+        Object* builtin = v.asObject();
+        add(builtin);
+        Value proto = builtin->get("prototype");
+        if (proto.isObject()) {
+            add(proto.asObject());
+            add(proto.asObject()->prototype());  // e.g. %TypedArray%.prototype
+        }
+    }
+    for (Object* o : owners) o->makeOwnPropertiesNonEnumerable();
+}
 
 void GlobalObject::initializeObjectConstructor() {
     VM& vm = vmOf(context_);

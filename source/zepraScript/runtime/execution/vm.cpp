@@ -1365,19 +1365,34 @@ void VM::dispatch(Opcode op) {
         }
 
         case Opcode::OP_FOR_IN: {
+            // EnumerateObjectProperties (ECMA-262 §14.7.5.9): the object's
+            // enumerable string keys, then those of each prototype in turn;
+            // a name seen lower in the chain (enumerable or not) shadows the
+            // same name further up. A string primitive enumerates its indices.
             Value obj = pop();
-            if (obj.isObject()) {
-                std::vector<std::string> keysStr = obj.asObject()->keys();
-                std::vector<Value> keysVal;
-                keysVal.reserve(keysStr.size());
-                for (const auto& k : keysStr) {
-                    keysVal.push_back(Value::string(new String(k)));
+            std::vector<Value> keysVal;
+            if (obj.isString()) {
+                size_t length = static_cast<size_t>(getProperty(obj, "length").toNumber());
+                keysVal.reserve(length);
+                for (size_t i = 0; i < length; ++i) keysVal.push_back(Value::string(new String(std::to_string(i))));
+            } else if (obj.isObject()) {
+                std::unordered_set<std::string> seen;
+                int depth = 0;
+                for (Object* o = obj.asObject(); o && depth < 10000; o = prototypeOf(o), ++depth) {
+                    std::vector<std::string> enumerable = o->keys();
+                    std::unordered_set<std::string> enumerableSet(enumerable.begin(), enumerable.end());
+                    for (const auto& k : enumerable) {
+                        if (seen.insert(k).second) keysVal.push_back(Value::string(new String(k)));
+                    }
+                    // Non-enumerable own names still hide inherited ones
+                    if (o->objectType() != ObjectType::Proxy) {
+                        for (const auto& k : o->getOwnPropertyNames()) {
+                            if (!enumerableSet.count(k)) seen.insert(k);
+                        }
+                    }
                 }
-                Array* keysArray = new Array(keysVal);
-                push(Value::object(keysArray));
-            } else {
-                push(Value::object(new Array()));
             }
+            push(Value::object(new Array(keysVal)));
             break;
         }
 
@@ -2269,9 +2284,11 @@ Object* VM::intrinsic(Intrinsic kind) {
     switch (kind) {
         case Intrinsic::Object:
             slot = Builtins::ObjectBuiltin::createObjectPrototype(nullptr);
+            slot->makeOwnPropertiesNonEnumerable();  // built-in members (§18)
             return slot;
         case Intrinsic::Function:
             slot = createFunctionPrototype();
+            slot->makeOwnPropertiesNonEnumerable();
             return slot;
         case Intrinsic::Array:
             slot = Builtins::ArrayBuiltin::createArrayPrototype(nullptr);
@@ -2302,6 +2319,7 @@ Object* VM::intrinsic(Intrinsic kind) {
     }
     // Everything but Object.prototype itself inherits from it
     slot->setPrototype(intrinsic(Intrinsic::Object));
+    slot->makeOwnPropertiesNonEnumerable();  // built-in members (§18)
     return slot;
 }
 
@@ -2370,8 +2388,16 @@ Object* VM::ensurePrototypeObject(Function* fn) {
     if (!fn->isCompiled() || !fn->isConstructor()) return nullptr;
     Object* proto = new Object();
     proto->setPrototype(intrinsic(Intrinsic::Object));
-    proto->set("constructor", Value::object(fn));
-    fn->set("prototype", Value::object(proto));
+    // prototype.constructor and the function's own prototype are not
+    // enumerable (ECMA-262 MakeConstructor / MakeClassConstructor)
+    PropertyDescriptor ctorDesc;
+    ctorDesc.value = Value::object(fn);
+    ctorDesc.attributes = PropertyAttribute::Writable | PropertyAttribute::Configurable;
+    proto->defineProperty("constructor", ctorDesc);
+    PropertyDescriptor protoDesc;
+    protoDesc.value = Value::object(proto);
+    protoDesc.attributes = PropertyAttribute::Writable;
+    fn->defineProperty("prototype", protoDesc);
     return proto;
 }
 

@@ -496,6 +496,10 @@ void setCanvasPaintCallback(
 // scrollbarWidth: the part of the width the page's scrollbar covers, which
 // position: fixed boxes do not lay out under (their containing block is the
 // viewport minus its scrollbar, CSS 2.1 §10.1; vw units still include it)
+/// The height a percentage height on the root box (the body) resolves
+/// against: the <html> element's definite height, or -1 when html's height
+/// is auto (the body's percentage then behaves as auto, CSS 2.1 §10.5)
+void setRootPercentageBase(float height);
 void setLayoutViewport(float width, float height, float rootOffsetX = 0, float rootOffsetY = 0,
                        float scrollbarWidth = 0);
 float layoutViewportWidth();

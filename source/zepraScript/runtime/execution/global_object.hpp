@@ -73,6 +73,8 @@ public:
     static Value evaluateSourceText(const std::string& source, const char* what, const std::string& name);
 
 private:
+    /// Makes every member of the standard library non-enumerable
+    void hideBuiltinMembers();
     void initializeObjectConstructor();
     void initializeArrayConstructor();
     void initializeStringConstructor();

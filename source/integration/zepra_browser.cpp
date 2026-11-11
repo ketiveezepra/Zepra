@@ -1284,6 +1284,7 @@ static bool g_layoutPending = true;  // the tree was rebuilt and not laid out si
 
 // The page's sheets follow its <style>/<link> elements (defined with the loader)
 static void syncPageStyleSheets();
+static float pageViewportHeight();
 
 static void rebuildLayoutTree() {
     g_layoutPainted = false;
@@ -1396,6 +1397,22 @@ static void rebuildLayoutTree() {
     }
      
     // Build LayoutBox tree directly from DOM
+    // The body's percentage height resolves against <html>'s height, which
+    // is a percentage of the viewport (the initial containing block) or a
+    // length; html's auto height leaves it indefinite (CSS 2.1 §10.5)
+    {
+        float rootBase = -1;
+        DOMElement* html = g_document->documentElement();
+        const CSSComputedStyle* htmlStyle = html && g_cssEngine ? g_cssEngine->getComputedStyle(html) : nullptr;
+        if (htmlStyle) {
+            const auto& h = htmlStyle->height;
+            if (h.unit == Zepra::WebCore::CSSLength::Unit::Px) rootBase = h.value;
+            else if (h.unit == Zepra::WebCore::CSSLength::Unit::Percent)
+                rootBase = h.value / 100.0f * pageViewportHeight() + h.pxOffset;
+        }
+        ZepraBrowser::setRootPercentageBase(rootBase);
+    }
+
     if (g_document->body()) {
         buildLayoutFromDOM(g_document->body(), g_layoutRoot.get(), false, "", "");
     }
@@ -2187,6 +2204,19 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
     std::string href = isAnchor ? element->getAttribute("href") : linkHref;
     std::string target = isAnchor ? element->getAttribute("target") : linkTarget;
     bool nowInLink = inLink || isAnchor;
+
+    // A link's default underline is the anchor's own text-decoration, which
+    // propagates to the text inside it (CSS Text Decoration 3 §2): an anchor
+    // styled text-decoration: none leaves its descendants' text undecorated
+    // even when their own elements say nothing
+    static bool s_linkUndecorated = false;
+    struct LinkDecorationScope {
+        bool saved;
+        explicit LinkDecorationScope(bool v) : saved(s_linkUndecorated) { s_linkUndecorated = v; }
+        ~LinkDecorationScope() { s_linkUndecorated = saved; }
+    } linkDecoration(isAnchor ? (style && !style->textDecoration.empty() &&
+                                 style->textDecoration.find("underline") == std::string::npos)
+                              : s_linkUndecorated);
     
     // Process child nodes, as rendered: a shadow host's shadow tree, with
     // each <slot> replaced by the host children assigned to it
@@ -2314,6 +2344,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 box->isLink = true;
                 box->href = href;
                 box->target = target;
+                if (s_linkUndecorated && box->textDecoration.empty()) box->textDecoration = "none";
             }
             
             // Fallback margins for common tags (only when CSS engine had no computed style)
@@ -2344,6 +2375,16 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
             std::string childTag = childElement->tagName();
             // std::cout << "[Layout] Visiting tag: " << childTag << std::endl;
             std::transform(childTag.begin(), childTag.end(), childTag.begin(), ::tolower);
+
+            // display: none makes no box, form controls and replaced
+            // elements included (their own paths below never check it)
+            if (g_cssEngine) {
+#pragma push_macro("None")
+#undef None
+                const CSSComputedStyle* hiddenStyle = g_cssEngine->getComputedStyle(childElement);
+                if (hiddenStyle && hiddenStyle->display == DisplayValue::None) continue;
+#pragma pop_macro("None")
+            }
             
             // Handle input elements
             if (childTag == "input") {
@@ -2593,21 +2634,15 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 }
             }
             
-            // Handle button and button-like inputs
-            if (childTag == "button" || 
-                (childTag == "input" && (childElement->getAttribute("type") == "submit" || 
-                                         childElement->getAttribute("type") == "button" ||
-                                         childElement->getAttribute("type") == "reset"))) {
+            // Button-like inputs: a label from their value. (A <button> is an
+            // ordinary container: its content, icons included, is laid out
+            // below like any element's, with the UA sheet's look.)
+            if (childTag == "input" && (childElement->getAttribute("type") == "submit" || 
+                                        childElement->getAttribute("type") == "button" ||
+                                        childElement->getAttribute("type") == "reset")) {
                 LayoutBox* btnBox = addChild(parentBox);
                 btnBox->type = LayoutType::InlineBlock;
-                
-                if (childTag == "button") {
-                    btnBox->text = childElement->textContent();
-                    if (btnBox->text.empty() && childElement->hasAttribute("value"))
-                        btnBox->text = childElement->getAttribute("value");
-                } else {
-                    btnBox->text = childElement->getAttribute("value");
-                }
+                btnBox->text = childElement->getAttribute("value");
                 
                 // Default text by type
                 if (btnBox->text.empty()) {
@@ -2620,12 +2655,13 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 if (style) {
                     btnBox->fontSize = style->fontSize > 0 ? style->fontSize : 14;
                     btnBox->color = cssColorToRGB(style->color);
+                    // The page's (or the UA sheet's) background; a
+                    // transparent one paints nothing
                     if (!style->backgroundColor.isTransparent()) {
                         btnBox->bgColor = cssColorToRGB(style->backgroundColor);
-                    } else {
-                        btnBox->bgColor = 0x2563EB; // Default button blue
+                        btnBox->bgAlpha = style->backgroundColor.a;
+                        btnBox->hasBgColor = true;
                     }
-                    btnBox->hasBgColor = true;
                     btnBox->fontWeight = static_cast<int>(style->fontWeight);
                     btnBox->fontFamily = style->fontFamily;
                     btnBox->bold = (btnBox->fontWeight >= 600);
@@ -2948,6 +2984,9 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     childTag == "address" || childTag == "details" || childTag == "summary") {
                     isBlockElement = true;
                 }
+                // <br> is inline (CSS display), but this layout has no forced
+                // break inside a line: an empty block ends the line instead
+                if (childTag == "br") isBlockElement = true;
             }
             
             if (isBlockElement) {
@@ -3273,6 +3312,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     inlineBox->isLink = true;
                     inlineBox->href = href;
                     inlineBox->target = target;
+                    if (s_linkUndecorated && inlineBox->textDecoration.empty()) inlineBox->textDecoration = "none";
                 }
                 
                 // Recurse into this inline box (children become its children)
