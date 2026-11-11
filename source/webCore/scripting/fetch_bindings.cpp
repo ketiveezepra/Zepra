@@ -68,6 +68,14 @@ Value str(const std::string& s) { return Value::string(new String(s)); }
 
 bool isFunction(const Value& v) { return v.isObject() && v.asObject()->isFunction(); }
 
+/// A non-enumerable data property (an interface prototype's constructor)
+void defineHiddenProperty(Object* target, const std::string& name, const Value& value) {
+    PropertyDescriptor desc;
+    desc.value = value;
+    desc.attributes = PropertyAttribute::Writable | PropertyAttribute::Configurable;
+    target->defineProperty(name, desc);
+}
+
 /// The header fields of a `Headers` object or a plain {name: value} object
 std::vector<std::pair<std::string, std::string>> headersFromObject(Object* obj) {
     std::vector<std::pair<std::string, std::string>> out;
@@ -455,7 +463,7 @@ void ScriptContext::setupFetchGlobals(Object* windowObj) {
     auto* headersProto = new Object();
     headersProto->setPrototype(vm_->intrinsic(VM::Intrinsic::Object));
     headersCtor->set("prototype", Value::object(headersProto));
-    headersProto->set("constructor", Value::object(headersCtor));
+    defineHiddenProperty(headersProto, "constructor", Value::object(headersCtor));
     vm_->setGlobal("Headers", Value::object(headersCtor));
     windowObj->set("Headers", Value::object(headersCtor));
 
@@ -471,7 +479,7 @@ void ScriptContext::setupFetchGlobals(Object* windowObj) {
             return Value::object(makeRequestObject(vm_, requestProto, data));
         }, 1);
     requestCtor->set("prototype", Value::object(requestProto));
-    requestProto->set("constructor", Value::object(requestCtor));
+    defineHiddenProperty(requestProto, "constructor", Value::object(requestCtor));
     auto requestMethod = [requestProto](const char* name, BuiltinFn fn) {
         requestProto->set(name, Value::object(new Function(name, std::move(fn), 0)));
     };
@@ -564,7 +572,7 @@ void ScriptContext::setupFetchGlobals(Object* windowObj) {
                                                     args.size() > 1 ? args[1] : Value::undefined(), "default"));
         }, 0);
     responseCtor->set("prototype", Value::object(responseProto));
-    responseProto->set("constructor", Value::object(responseCtor));
+    defineHiddenProperty(responseProto, "constructor", Value::object(responseCtor));
     responseCtor->set("error", Value::object(createNativeFunction("error",
         [this](Context*, const std::vector<Value>&) -> Value {
             auto response = std::make_shared<FetchResponse>();
@@ -761,7 +769,7 @@ void ScriptContext::setupFetchGlobals(Object* windowObj) {
             return Value::object(xhr);
         }, 0);
     xhrCtor->set("prototype", Value::object(xhrProto));
-    xhrProto->set("constructor", Value::object(xhrCtor));
+    defineHiddenProperty(xhrProto, "constructor", Value::object(xhrCtor));
     xhrCtor->set("UNSENT", Value::number(0));
     xhrCtor->set("OPENED", Value::number(1));
     xhrCtor->set("HEADERS_RECEIVED", Value::number(2));
