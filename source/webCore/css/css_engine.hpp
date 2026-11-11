@@ -398,9 +398,12 @@ public:
     /// Initialize with document
     void initialize(DOMDocument* document);
 
-    /// Parse and add stylesheet; `href` is the URL of a <link> sheet (empty for <style>)
+    /// Parse and add stylesheet; `href` is the URL of a <link> sheet (empty for <style>).
+    /// `media`: the media query list of the sheet's element (a <link> or
+    /// <style> media attribute; empty = all): its rules apply while it
+    /// matches, as if the sheet were inside @media.
     void addStyleSheet(const std::string& css, StyleOrigin origin = StyleOrigin::Author,
-                       const std::string& href = "");
+                       const std::string& href = "", const std::string& media = "");
 
     /// The stylesheets in cascade order, with their origins (sheet->href() is set for <link> sheets)
     const std::vector<StyleResolver::StyleSheetEntry>& styleSheets() const { return resolver_.styleSheets(); }

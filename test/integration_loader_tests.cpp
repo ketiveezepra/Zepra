@@ -14,6 +14,7 @@
 
 #include "browser/dom.hpp"
 #include "css/css_engine.hpp"
+#include "css/media_query.hpp"
 #include "html/html_parser.hpp"
 
 #include <atomic>
@@ -200,6 +201,34 @@ TEST(PageStyles, DynamicStyleAndLinkElements) {
     EXPECT_TRUE(page.styles->takeLinkEvents().empty());
     page.doc->head()->removeChild(good);
     EXPECT_EQ(page.color("x"), "3,3,3");
+}
+
+// The media attribute of <style> and <link>: the sheet applies while its
+// queries match, re-evaluated as the viewport changes; a link for other
+// media does not hold back the first paint
+TEST(PageStyles, MediaAttributes) {
+    MediaEnvironment saved = mediaEnvironment();
+    MediaEnvironment narrow = saved;
+    narrow.width = 500;
+    setMediaEnvironment(narrow);
+    StylePage page(R"HTML(<html><head><style>#x{color:rgb(1,1,1)}</style>
+        <style media="(min-width: 800px)">#x{color:rgb(2,2,2)}</style>
+        <style media="print">#y{color:rgb(3,3,3)}</style>
+        <link rel="stylesheet" media="print" href="p.css"></head>
+        <body><div id="x"></div><div id="y"></div></body></html>)HTML");
+    EXPECT_TRUE(page.styles->allSettled(page.doc.get()));   // the print link does not block
+    EXPECT_EQ(page.color("x"), "1,1,1");
+    EXPECT_EQ(page.color("y"), "0,0,0");
+    MediaEnvironment wide = saved;
+    wide.width = 1200;
+    EXPECT_TRUE(setMediaEnvironment(wide));
+    EXPECT_EQ(page.color("x"), "2,2,2");
+    page.styles->resourceArrived("https://site.test/p.css", true, "#x{color:rgb(4,4,4)}", "");
+    EXPECT_EQ(page.color("x"), "2,2,2");
+    // Changing the attribute applies at the next sync
+    page.doc->getElementsByTagName("style")[2]->setAttribute("media", "screen");
+    EXPECT_EQ(page.color("y"), "3,3,3");
+    setMediaEnvironment(saved);
 }
 
 // The tree builder gathers character tokens before putting them into the
