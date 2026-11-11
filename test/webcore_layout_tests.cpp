@@ -230,6 +230,27 @@ TEST(Cascade, RemFollowsTheRootFontSizeAndBodyInheritsIt) {
     EXPECT_FLOAT_EQ(a->height.toPx(14, 10, 1280, 800, 0), 24.0f);
 }
 
+TEST(Cascade, FlexShorthand) {
+    StyledDoc d("<!doctype html><div id=a></div><div id=b></div><div id=c></div><div id=d></div>"
+                "<div id=e></div><div id=f></div><div id=g></div>",
+                "#a { flex: 0 1 732px; } #b { flex: 1; } #c { flex: 2 3; } #d { flex: 300px; }"
+                "#e { flex: none; } #f { flex: 1 1 0; } #g { flex: 0 1 40%; }");
+    auto check = [&](const char* id, float grow, float shrink, CSSLength::Unit unit, float basis) {
+        const CSSComputedStyle* s = d.style(id);
+        EXPECT_FLOAT_EQ(s->flexGrow, grow) << id;
+        EXPECT_FLOAT_EQ(s->flexShrink, shrink) << id;
+        EXPECT_EQ(s->flexBasis.unit, unit) << id;
+        if (unit != CSSLength::Unit::Auto) EXPECT_FLOAT_EQ(s->flexBasis.value, basis) << id;
+    };
+    check("a", 0, 1, CSSLength::Unit::Px, 732);
+    check("b", 1, 1, CSSLength::Unit::Px, 0);
+    check("c", 2, 3, CSSLength::Unit::Px, 0);
+    check("d", 1, 1, CSSLength::Unit::Px, 300);
+    check("e", 0, 0, CSSLength::Unit::Auto, 0);
+    check("f", 1, 1, CSSLength::Unit::Px, 0);
+    check("g", 0, 1, CSSLength::Unit::Percent, 40);
+}
+
 TEST(Cascade, DisplayInitialValueAndBlockification) {
     StyledDoc d("<!doctype html><div id=f style='display:flex'><span id=i>a</span><x-y id=c>b</x-y></div>"
                 "<x-z id=u>c</x-z><span id=p style='position:fixed'>d</span><em id=l style='float:left'>e</em>"

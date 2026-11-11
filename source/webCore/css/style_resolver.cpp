@@ -1205,11 +1205,45 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
     }
     else if (property == "flex-basis") { style.flexBasis = parseLength(value); }
     else if (property == "flex") {
-        // Shorthand: "1" or "1 0 auto" or "none" or "auto"
-        if (value == "none") { style.flexGrow = 0; style.flexShrink = 0; style.flexBasis = CSSLength::auto_(); }
-        else if (value == "auto") { style.flexGrow = 1; style.flexShrink = 1; style.flexBasis = CSSLength::auto_(); }
+        // none | [ <flex-grow> <flex-shrink>? || <flex-basis> ] (CSS Flexbox
+        // §7.1.1): an omitted shrink is 1, an omitted basis 0 when a grow
+        // factor is given, and a lone basis means 1 1 <basis>. A third
+        // unitless 0 after two numbers is the basis.
+        std::string v = lowerAscii(value);
+        if (v == "none") { style.flexGrow = 0; style.flexShrink = 0; style.flexBasis = CSSLength::auto_(); }
+        else if (v == "auto") { style.flexGrow = 1; style.flexShrink = 1; style.flexBasis = CSSLength::auto_(); }
+        else if (v == "initial") { style.flexGrow = 0; style.flexShrink = 1; style.flexBasis = CSSLength::auto_(); }
         else {
-            try { style.flexGrow = std::stof(value); style.flexShrink = 1; style.flexBasis = CSSLength::px(0); } catch (...) {}
+            auto isNumber = [](const std::string& t) {
+                if (t.empty()) return false;
+                char* end = nullptr;
+                std::strtod(t.c_str(), &end);
+                return end && *end == '\0';
+            };
+            std::vector<float> numbers;
+            std::string basis;
+            bool valid = true;
+            bool previousWasNumber = false;
+            for (const std::string& part : splitValues(v)) {
+                bool number = isNumber(part);
+                if (number && numbers.size() == 2 && basis.empty() && std::strtof(part.c_str(), nullptr) == 0) {
+                    basis = "0px";
+                } else if (number && (numbers.empty() || (numbers.size() == 1 && previousWasNumber))) {
+                    numbers.push_back(std::strtof(part.c_str(), nullptr));
+                } else if (!number && basis.empty()) {
+                    basis = part;
+                } else {
+                    valid = false;
+                }
+                previousWasNumber = number;
+            }
+            if (valid && (!numbers.empty() || !basis.empty())) {
+                style.flexGrow = numbers.empty() ? 1.0f : numbers[0];
+                style.flexShrink = numbers.size() > 1 ? numbers[1] : 1.0f;
+                if (basis.empty()) style.flexBasis = CSSLength::px(0);
+                else if (basis == "auto" || basis == "content") style.flexBasis = CSSLength::auto_();
+                else style.flexBasis = parseLength(basis);
+            }
         }
     }
     else if (property == "order") {
