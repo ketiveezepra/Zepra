@@ -11,6 +11,7 @@
 #include <sstream>
 #include <cmath>
 #include <chrono>
+#include "runtime/execution/Sandbox.h"
 
 #include "config.hpp"
 #include "frontend/source_code.hpp"
@@ -772,9 +773,9 @@ void evaluate(const std::string& code, Runtime::VM& vm) {
         auto program = parser.parseProgram();
         
         auto t1 = std::chrono::steady_clock::now();
-        fprintf(stderr, "[phase] parse: %ldms, stmts=%zu\n",
+        fprintf(stderr, "[phase] parse: %ldms, stmts=%zu, rss=%zuMB\n",
             std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count(),
-            program ? program->body().size() : 0);
+            program ? program->body().size() : 0, Runtime::processResidentBytes() >> 20);
         
         if (parser.hasErrors()) {
             for (const auto& err : parser.errors()) {
@@ -788,9 +789,9 @@ void evaluate(const std::string& code, Runtime::VM& vm) {
         auto chunk = generator.compile(program.get());
         
         auto t2 = std::chrono::steady_clock::now();
-        fprintf(stderr, "[phase] compile: %ldms, bytecode=%zu bytes\n",
+        fprintf(stderr, "[phase] compile: %ldms, bytecode=%zu bytes, rss=%zuMB\n",
             std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count(),
-            chunk ? chunk->code().size() : 0);
+            chunk ? chunk->code().size() : 0, Runtime::processResidentBytes() >> 20);
         
         if (generator.hasErrors()) {
             for (const auto& err : generator.errors()) {
@@ -803,8 +804,9 @@ void evaluate(const std::string& code, Runtime::VM& vm) {
         Runtime::ExecutionResult result = vm.execute(chunk.get());
         
         auto t3 = std::chrono::steady_clock::now();
-        fprintf(stderr, "[phase] execute: %ldms\n",
-            std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count());
+        fprintf(stderr, "[phase] execute: %ldms, rss=%zuMB\n",
+            std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count(),
+            Runtime::processResidentBytes() >> 20);
         
         if (result.status == Runtime::ExecutionResult::Status::Error) {
             std::cerr << "Runtime error: " << result.error << "\n";

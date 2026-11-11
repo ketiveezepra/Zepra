@@ -7,9 +7,22 @@
 
 #include "builtins/math.hpp"
 #include <algorithm>
+#include <cmath>
 #include "runtime/objects/function.hpp"
 
 namespace Zepra::Builtins {
+
+namespace {
+// ToUint32 (ES2024 §7.1.7): truncate, then wrap modulo 2^32; NaN and the
+// infinities are 0. A plain cast is undefined outside the uint32 range.
+uint32_t toUint32(double number) {
+    if (number >= 0 && number < 4294967296.0) return static_cast<uint32_t>(number);
+    if (!std::isfinite(number)) return 0;
+    double wrapped = std::fmod(std::trunc(number), 4294967296.0);
+    if (wrapped < 0) wrapped += 4294967296.0;
+    return static_cast<uint32_t>(wrapped);
+}
+} // namespace
 
 std::mt19937& MathBuiltin::getRandomEngine() {
     static std::random_device rd;
@@ -19,33 +32,38 @@ std::mt19937& MathBuiltin::getRandomEngine() {
 
 // Basic operations
 Value MathBuiltin::abs(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::abs(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::abs(args[0].toNumber()));
 }
 
 Value MathBuiltin::ceil(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::ceil(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::ceil(args[0].toNumber()));
 }
 
 Value MathBuiltin::floor(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::floor(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::floor(args[0].toNumber()));
 }
 
 Value MathBuiltin::round(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::round(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    // floor(x + 0.5), keeping -0 for [-0.5, -0] (std::round rounds halves away from zero)
+    const double x = args[0].toNumber();
+    if (!std::isfinite(x) || x == 0) return Value::number(x);
+    if (x < 0 && x >= -0.5) return Value::number(-0.0);
+    const double f = std::floor(x);
+    return Value::number(x - f >= 0.5 ? f + 1 : f);
 }
 
 Value MathBuiltin::trunc(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::trunc(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::trunc(args[0].toNumber()));
 }
 
 Value MathBuiltin::sign(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    double val = args[0].asNumber();
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    double val = args[0].toNumber();
     if (val > 0) return Value::number(1);
     if (val < 0) return Value::number(-1);
     return Value::number(val); // +0, -0, or NaN
@@ -53,150 +71,147 @@ Value MathBuiltin::sign(Runtime::Context*, const std::vector<Value>& args) {
 
 // Power/root
 Value MathBuiltin::pow(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.size() < 2 || !args[0].isNumber() || !args[1].isNumber()) 
-        return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::pow(args[0].asNumber(), args[1].asNumber()));
+    if (args.size() < 2) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::pow(args[0].toNumber(), args[1].toNumber()));
 }
 
 Value MathBuiltin::sqrt(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::sqrt(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::sqrt(args[0].toNumber()));
 }
 
 Value MathBuiltin::cbrt(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::cbrt(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::cbrt(args[0].toNumber()));
 }
 
 Value MathBuiltin::hypot(Runtime::Context*, const std::vector<Value>& args) {
     double sum = 0;
+    bool nan = false;
     for (const auto& arg : args) {
-        if (arg.isNumber()) {
-            double val = arg.asNumber();
-            sum += val * val;
-        }
+        const double val = arg.toNumber();
+        if (std::isinf(val)) return Value::number(std::numeric_limits<double>::infinity());
+        if (std::isnan(val)) nan = true;
+        sum += val * val;
     }
-    return Value::number(std::sqrt(sum));
+    return Value::number(nan ? std::numeric_limits<double>::quiet_NaN() : std::sqrt(sum));
 }
 
 // Exponential/logarithmic
 Value MathBuiltin::exp(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::exp(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::exp(args[0].toNumber()));
 }
 
 Value MathBuiltin::expm1(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::expm1(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::expm1(args[0].toNumber()));
 }
 
 Value MathBuiltin::log(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::log(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::log(args[0].toNumber()));
 }
 
 Value MathBuiltin::log10(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::log10(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::log10(args[0].toNumber()));
 }
 
 Value MathBuiltin::log2(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::log2(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::log2(args[0].toNumber()));
 }
 
 Value MathBuiltin::log1p(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::log1p(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::log1p(args[0].toNumber()));
 }
 
 // Trigonometric
 Value MathBuiltin::sin(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::sin(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::sin(args[0].toNumber()));
 }
 
 Value MathBuiltin::cos(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::cos(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::cos(args[0].toNumber()));
 }
 
 Value MathBuiltin::tan(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::tan(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::tan(args[0].toNumber()));
 }
 
 Value MathBuiltin::asin(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::asin(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::asin(args[0].toNumber()));
 }
 
 Value MathBuiltin::acos(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::acos(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::acos(args[0].toNumber()));
 }
 
 Value MathBuiltin::atan(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::atan(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::atan(args[0].toNumber()));
 }
 
 Value MathBuiltin::atan2(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.size() < 2 || !args[0].isNumber() || !args[1].isNumber()) 
-        return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::atan2(args[0].asNumber(), args[1].asNumber()));
+    if (args.size() < 2) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::atan2(args[0].toNumber(), args[1].toNumber()));
 }
 
 // Hyperbolic
 Value MathBuiltin::sinh(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::sinh(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::sinh(args[0].toNumber()));
 }
 
 Value MathBuiltin::cosh(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::cosh(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::cosh(args[0].toNumber()));
 }
 
 Value MathBuiltin::tanh(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::tanh(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::tanh(args[0].toNumber()));
 }
 
 Value MathBuiltin::asinh(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::asinh(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::asinh(args[0].toNumber()));
 }
 
 Value MathBuiltin::acosh(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::acosh(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::acosh(args[0].toNumber()));
 }
 
 Value MathBuiltin::atanh(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(std::atanh(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(std::atanh(args[0].toNumber()));
 }
 
 // Min/max
 Value MathBuiltin::min(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty()) return Value::number(std::numeric_limits<double>::infinity());
     double result = std::numeric_limits<double>::infinity();
     for (const auto& arg : args) {
-        if (arg.isNumber()) {
-            result = std::min(result, arg.asNumber());
-        }
+        const double v = arg.toNumber();
+        if (std::isnan(v)) return Value::number(v);
+        if (v < result || (v == 0 && result == 0 && std::signbit(v))) result = v;
     }
     return Value::number(result);
 }
 
 Value MathBuiltin::max(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty()) return Value::number(-std::numeric_limits<double>::infinity());
     double result = -std::numeric_limits<double>::infinity();
     for (const auto& arg : args) {
-        if (arg.isNumber()) {
-            result = std::max(result, arg.asNumber());
-        }
+        const double v = arg.toNumber();
+        if (std::isnan(v)) return Value::number(v);
+        if (v > result || (v == 0 && result == 0 && !std::signbit(v))) result = v;
     }
     return Value::number(result);
 }
@@ -209,8 +224,7 @@ Value MathBuiltin::random(Runtime::Context*, const std::vector<Value>&) {
 
 // Bit manipulation
 Value MathBuiltin::clz32(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(32);
-    uint32_t n = static_cast<uint32_t>(args[0].asNumber());
+    uint32_t n = args.empty() ? 0 : toUint32(args[0].toNumber());
     if (n == 0) return Value::number(32);
     int count = 0;
     while ((n & 0x80000000) == 0) { n <<= 1; count++; }
@@ -218,15 +232,15 @@ Value MathBuiltin::clz32(Runtime::Context*, const std::vector<Value>& args) {
 }
 
 Value MathBuiltin::imul(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.size() < 2 || !args[0].isNumber() || !args[1].isNumber()) return Value::number(0);
-    int32_t a = static_cast<int32_t>(args[0].asNumber());
-    int32_t b = static_cast<int32_t>(args[1].asNumber());
-    return Value::number(static_cast<double>(a * b));
+    // 32-bit multiplication with wraparound (done unsigned: signed overflow is UB)
+    const uint32_t a = toUint32(args.size() > 0 ? args[0].toNumber() : 0);
+    const uint32_t b = toUint32(args.size() > 1 ? args[1].toNumber() : 0);
+    return Value::number(static_cast<double>(static_cast<int32_t>(a * b)));
 }
 
 Value MathBuiltin::fround(Runtime::Context*, const std::vector<Value>& args) {
-    if (args.empty() || !args[0].isNumber()) return Value::number(std::numeric_limits<double>::quiet_NaN());
-    return Value::number(static_cast<float>(args[0].asNumber()));
+    if (args.empty()) return Value::number(std::numeric_limits<double>::quiet_NaN());
+    return Value::number(static_cast<float>(args[0].toNumber()));
 }
 
 Object* MathBuiltin::createMathObject() {

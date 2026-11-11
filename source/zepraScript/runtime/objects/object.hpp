@@ -283,24 +283,44 @@ protected:
 class String : public Object {
 public:
     String(std::string value);
-    
+
+    /**
+     * @brief The concatenation `left + right`, without copying either side.
+     *
+     * Use concatenate(), which picks a rope only where it pays. The text is
+     * built on its first read (value(), utf16(), non-ASCII length()), then
+     * the node holds a flat string like any other. Building a string with
+     * `s += piece` was quadratic in time and, since strings are not
+     * collected, in memory: every intermediate copy stayed allocated.
+     */
+    String(const String* left, const String* right);
+
+    // left + right, as a flat string or a rope (callers never see which)
+    static String* concatenate(const String* left, const String* right);
+
     // The text in WTF-8 (UTF-8 plus 3-byte lone surrogates; see string_utf16.hpp)
-    const std::string& value() const { return value_; }
+    const std::string& value() const {
+        if (left_) flatten();
+        return value_;
+    }
+    // Length of the WTF-8 text in bytes, without flattening a rope
+    size_t byteLength() const { return left_ ? ropeBytes_ : value_.size(); }
     // Length in UTF-16 code units, as JavaScript sees it
     size_t length() const override {
-        return isAscii() ? value_.size() : utf16().size();
+        return isAscii() ? byteLength() : utf16().size();
     }
     
-    // ASCII strings index bytes directly; computed once
+    // ASCII strings index bytes directly; computed once (ropes know it from
+    // their halves)
     bool isAscii() const {
-        if (ascii_ < 0) ascii_ = asciiText(value_) ? 1 : 0;
+        if (ascii_ < 0) ascii_ = asciiText(value()) ? 1 : 0;
         return ascii_ == 1;
     }
     // UTF-16 code units, built on first use and cached (for non-ASCII text)
     const std::u16string& utf16() const;
     // Code unit at `index` (< length())
     char16_t codeUnitAt(size_t index) const {
-        return isAscii() ? static_cast<unsigned char>(value_[index]) : utf16()[index];
+        return isAscii() ? static_cast<unsigned char>(value()[index]) : utf16()[index];
     }
     // Code units [from, to) as WTF-8 text
     std::string substringUnits(size_t from, size_t to) const;
@@ -324,7 +344,18 @@ public:
     
 private:
     static bool asciiText(const std::string& text);
-    std::string value_;
+    // The text ends with a lone lead surrogate / starts with a lone trail
+    // surrogate, so a concatenation must join the halves into one character
+    bool endsWithLeadSurrogate() const;
+    bool startsWithTrailSurrogate() const;
+    void flatten() const;
+
+    mutable std::string value_;
+    // A rope until flattened: the two halves, and the total byte length
+    mutable const String* left_ = nullptr;
+    mutable const String* right_ = nullptr;
+    size_t ropeBytes_ = 0;
+    int8_t ropeEdges_ = 0;                            // bit 0: ends with lead, bit 1: starts with trail
     mutable int8_t ascii_ = -1;                       // -1: not computed yet
     mutable std::unique_ptr<std::u16string> utf16_;   // non-ASCII only
 };

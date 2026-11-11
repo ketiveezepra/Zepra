@@ -13,6 +13,8 @@
 #include "frontend/syntax_checker.hpp"
 #include "frontend/parser.hpp"
 #include "frontend/source_code.hpp"
+#include <fstream>
+#include <cstdlib>
 #include <algorithm>
 #include "builtins/promise_builtin.hpp"
 #include "builtins/console.hpp"
@@ -273,6 +275,14 @@ Value GlobalObject::evaluateSourceText(const std::string& source, const char* wh
     if (!vm->codeGenerationFromStringsAllowed()) {
         throw JSError("EvalError", std::string("Code generation from strings disallowed for this context (") + what + ")");
     }
+    // ZEPRA_DUMP_EVAL=<dir> (debugging): each eval/Function source to a file
+    if (const char* dir = std::getenv("ZEPRA_DUMP_EVAL")) {
+        static int dumped = 0;
+        if (dumped < 200) {
+            std::ofstream out(std::string(dir) + "/eval-" + std::to_string(dumped++) + ".js");
+            out << source;
+        }
+    }
     auto sourceCode = Frontend::SourceCode::fromString(source, name);
     Frontend::Parser parser(sourceCode.get());
     auto program = parser.parseProgram();
@@ -285,9 +295,13 @@ Value GlobalObject::evaluateSourceText(const std::string& source, const char* wh
     if (generator.hasErrors() || !chunk) {
         throw JSError("SyntaxError", generator.hasErrors() ? generator.errors().front() : "Invalid source");
     }
+    // The chunk is this evaluation's top-level code and is freed when it
+    // returns: execute() has unwound every frame and handler into it, and
+    // the functions it created run their own bodies' chunks (owned by the
+    // generator's retained list), never this one. Retaining it kept every
+    // eval/new Function source compiled since page load.
     ExecutionResult result = vm->execute(chunk.get());
-    // Functions created by the code reference its chunk's constants
-    vm->retainChunk(std::move(chunk));
+    chunk.reset();
     if (result.status == ExecutionResult::Status::Exception) throw ThrownException(result.value);
     if (result.status == ExecutionResult::Status::Error) throw std::runtime_error(result.error);
     return result.value;

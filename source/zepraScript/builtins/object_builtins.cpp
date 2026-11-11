@@ -241,7 +241,20 @@ Runtime::Value ObjectBuiltin::create(const Runtime::FunctionCallInfo& info) {
     
     Runtime::Object* obj = new Runtime::Object();
     obj->setPrototype(proto);
-    
+
+    // The second argument defines own properties, as Object.defineProperties
+    // does. Obfuscated code builds objects this way (an accessor named
+    // `prototype`, a `value` data property) and fails in a loop without it.
+    const Runtime::Value properties = info.argument(1);
+    if (!properties.isUndefined()) {
+        if (!properties.isObject()) {
+            throw Runtime::JSError("TypeError", "Property description must be an object: " + properties.toString());
+        }
+        std::vector<Runtime::Value> subArgs = {Runtime::Value::object(obj), properties};
+        Runtime::FunctionCallInfo subInfo(info.context(), Runtime::Value::undefined(), subArgs);
+        defineProperties(subInfo);
+    }
+
     return Runtime::Value::object(obj);
 }
 

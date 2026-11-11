@@ -49,6 +49,7 @@ set(ZEPRASCRIPT_UNIT_TEST_SOURCES
     unit/jit_stress_test.cpp
     unit/syntax_p0_tests.cpp
     unit/language_gaps_tests.cpp
+    unit/engine_memory_tests.cpp
 )
 
 add_executable(zeprascript-unit-tests ${ZEPRASCRIPT_UNIT_TEST_SOURCES})

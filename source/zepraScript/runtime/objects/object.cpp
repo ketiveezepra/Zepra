@@ -487,12 +487,81 @@ String::String(std::string value)
     setPrototype(getStringPrototype());
 }
 
+
+String::String(const String* left, const String* right)
+    : Object(ObjectType::String)
+    , left_(left)
+    , right_(right)
+    , ropeBytes_(left->byteLength() + right->byteLength())
+{
+    setPrototype(getStringPrototype());
+    ascii_ = left->isAscii() && right->isAscii() ? 1 : 0;
+    ropeEdges_ = static_cast<int8_t>((right->endsWithLeadSurrogate() ? 1 : 0) |
+                                     (left->startsWithTrailSurrogate() ? 2 : 0));
+}
+
+// Below this size a flat copy costs no more than a rope node
+static constexpr size_t kMinRopeBytes = 256;
+
+String* String::concatenate(const String* left, const String* right) {
+    if (right->byteLength() == 0) return const_cast<String*>(left);
+    if (left->byteLength() == 0) return const_cast<String*>(right);
+    if (left->endsWithLeadSurrogate() && right->startsWithTrailSurrogate()) {
+        return new String(Utf16::joinSurrogates(left->value(), right->value()));
+    }
+    if (left->byteLength() + right->byteLength() < kMinRopeBytes) {
+        std::string text;
+        text.reserve(left->byteLength() + right->byteLength());
+        text += left->value();
+        text += right->value();
+        return new String(std::move(text));
+    }
+    return new String(left, right);
+}
+
+bool String::endsWithLeadSurrogate() const {
+    if (left_) return (ropeEdges_ & 1) != 0;
+    if (value_.size() < 3) return false;
+    const auto* x = reinterpret_cast<const unsigned char*>(value_.data() + value_.size() - 3);
+    return x[0] == 0xED && (x[1] & 0xF0) == 0xA0;
+}
+
+bool String::startsWithTrailSurrogate() const {
+    if (left_) return (ropeEdges_ & 2) != 0;
+    if (value_.size() < 3) return false;
+    const auto* y = reinterpret_cast<const unsigned char*>(value_.data());
+    return y[0] == 0xED && (y[1] & 0xF0) == 0xB0;
+}
+
+// Builds the text of a rope, leaves left to right, with an explicit stack:
+// `s += x` in a loop makes ropes hundreds of thousands of nodes deep
+void String::flatten() const {
+    std::string text;
+    text.reserve(ropeBytes_);
+    std::vector<const String*> pending;
+    pending.push_back(right_);
+    pending.push_back(left_);
+    while (!pending.empty()) {
+        const String* node = pending.back();
+        pending.pop_back();
+        if (node->left_) {
+            pending.push_back(node->right_);
+            pending.push_back(node->left_);
+        } else {
+            text += node->value_;
+        }
+    }
+    value_ = std::move(text);
+    left_ = nullptr;
+    right_ = nullptr;
+}
+
 bool String::asciiText(const std::string& text) {
     return Utf16::isAscii(text);
 }
 
 const std::u16string& String::utf16() const {
-    if (!utf16_) utf16_ = std::make_unique<std::u16string>(Utf16::toUtf16(value_));
+    if (!utf16_) utf16_ = std::make_unique<std::u16string>(Utf16::toUtf16(value()));
     return *utf16_;
 }
 
@@ -500,7 +569,7 @@ std::string String::substringUnits(size_t from, size_t to) const {
     const size_t size = length();
     if (to > size) to = size;
     if (from >= to) return std::string();
-    if (isAscii()) return value_.substr(from, to - from);
+    if (isAscii()) return value().substr(from, to - from);
     return Utf16::fromUtf16(utf16().data() + from, to - from);
 }
 
@@ -508,7 +577,7 @@ Value String::charAt(size_t index) const {
     if (index >= length()) {
         return Value::string(new String(""));
     }
-    if (isAscii()) return Value::string(new String(std::string(1, value_[index])));
+    if (isAscii()) return Value::string(new String(std::string(1, value()[index])));
     std::string unit;
     Utf16::appendWtf8(unit, utf16()[index]);
     return Value::string(new String(std::move(unit)));
@@ -522,10 +591,7 @@ int String::charCodeAt(size_t index) const {
 }
 
 String* String::concat(const String* other) const {
-    if (Utf16::needsSurrogateJoin(value_, other->value_)) {
-        return new String(Utf16::joinSurrogates(value_, other->value_));
-    }
-    return new String(value_ + other->value_);
+    return concatenate(this, other);
 }
 
 String* String::substring(size_t start, size_t end) const {
@@ -534,35 +600,35 @@ String* String::substring(size_t start, size_t end) const {
 }
 
 String* String::toLowerCase() const {
-    std::string result = value_;
+    std::string result = value();
     std::transform(result.begin(), result.end(), result.begin(), ::tolower);
     return new String(result);
 }
 
 String* String::toUpperCase() const {
-    std::string result = value_;
+    std::string result = value();
     std::transform(result.begin(), result.end(), result.begin(), ::toupper);
     return new String(result);
 }
 
 String* String::trim() const {
     const std::string whitespace = " \t\n\r\f\v";
-    size_t start = value_.find_first_not_of(whitespace);
+    size_t start = value().find_first_not_of(whitespace);
     if (start == std::string::npos) {
         return new String("");
     }
-    size_t end = value_.find_last_not_of(whitespace);
-    return new String(value_.substr(start, end - start + 1));
+    size_t end = value().find_last_not_of(whitespace);
+    return new String(value().substr(start, end - start + 1));
 }
 
 int String::indexOf(const std::string& search, size_t start) const {
-    if (start >= value_.size()) return -1;
-    size_t pos = value_.find(search, start);
+    if (start >= value().size()) return -1;
+    size_t pos = value().find(search, start);
     return pos == std::string::npos ? -1 : static_cast<int>(pos);
 }
 
 int String::lastIndexOf(const std::string& search) const {
-    size_t pos = value_.rfind(search);
+    size_t pos = value().rfind(search);
     return pos == std::string::npos ? -1 : static_cast<int>(pos);
 }
 
@@ -571,13 +637,13 @@ bool String::includes(const std::string& search, size_t start) const {
 }
 
 bool String::startsWith(const std::string& prefix, size_t start) const {
-    if (start + prefix.size() > value_.size()) return false;
-    return value_.compare(start, prefix.size(), prefix) == 0;
+    if (start + prefix.size() > value().size()) return false;
+    return value().compare(start, prefix.size(), prefix) == 0;
 }
 
 bool String::endsWith(const std::string& suffix) const {
-    if (suffix.size() > value_.size()) return false;
-    return value_.compare(value_.size() - suffix.size(), suffix.size(), suffix) == 0;
+    if (suffix.size() > value().size()) return false;
+    return value().compare(value().size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
 // =============================================================================
