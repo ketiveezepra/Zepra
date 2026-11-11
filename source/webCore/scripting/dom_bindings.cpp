@@ -5,6 +5,7 @@
  * @brief Live DOM wrappers and DOM events for page scripts (see dom_bindings.hpp)
  */
 
+#include "browser/box_transform.h"
 #include <typeinfo>
 #include <cstdlib>
 #include <iostream>
@@ -352,13 +353,39 @@ std::unique_ptr<CSSStyleDeclaration> parseInlineStyle(const DOMElement& element)
     return parser.parseInlineStyle(element.getAttribute("style"));
 }
 
-void writeInlineStyle(DOMElement& element, const CSSStyleDeclaration& decl) {
+// Whether two declaration blocks differ only in paint-only properties
+// (opacity and the transform properties): such a change repaints the
+// element without restyling or laying out the page
+bool differsInPaintOnly(const CSSStyleDeclaration& before, const CSSStyleDeclaration& after) {
+    auto same = [&](const std::string& name) {
+        return before.getPropertyValue(name) == after.getPropertyValue(name) &&
+               before.getPropertyPriority(name) == after.getPropertyPriority(name);
+    };
+    for (const CSSStyleDeclaration* decl : {&before, &after}) {
+        for (size_t i = 0; i < decl->length(); i++) {
+            std::string name = decl->item(i);
+            if (!isPaintOnlyProperty(name) && !same(name)) return false;
+        }
+    }
+    return true;
+}
+
+// Writes the style attribute from `decl`. `before` is the declaration block
+// the attribute held: when only paint-only properties changed (and the
+// attribute stays, so [style] selectors match as they did) the page is not
+// restyled.
+void writeInlineStyle(DOMElement& element, const CSSStyleDeclaration& decl,
+                      const CSSStyleDeclaration* before = nullptr) {
     std::string text = decl.cssText();
     while (!text.empty() && text.back() == ' ') text.pop_back();
     if (text.empty()) {
         element.removeAttribute("style");
     } else if (text != element.getAttribute("style")) {
-        element.setAttribute("style", text);
+        if (before && (element.hasAttribute("style") || !styleAttributeSelectorsInUse()) &&
+            differsInPaintOnly(*before, decl))
+            element.setStyleAttributePaintOnly(text);
+        else
+            element.setAttribute("style", text);
     }
 }
 
@@ -429,10 +456,13 @@ private:
         }
         if (!looksLikeCssProperty(key)) return Object::set(key, value);
         auto decl = parseInlineStyle(*el);
+        std::string name = cssPropertyName(key);
+        std::unique_ptr<CSSStyleDeclaration> before;
+        if (isPaintOnlyProperty(name)) before = parseInlineStyle(*el);
         std::string text = value.isNull() ? "" : value.toString();
-        if (text.empty()) decl->removeProperty(cssPropertyName(key));
-        else decl->setProperty(cssPropertyName(key), text, "");
-        writeInlineStyle(*el, *decl);
+        if (text.empty()) decl->removeProperty(name);
+        else decl->setProperty(name, text, "");
+        writeInlineStyle(*el, *decl, before.get());
         return true;
     }
 
@@ -1421,9 +1451,11 @@ void DOMBindings::installElement() {
         auto decl = parseInlineStyle(*el);
         std::string name = cssPropertyName(argString(info, 0));
         std::string value = info.argument(1).isNullOrUndefined() ? "" : info.argument(1).toString();
+        std::unique_ptr<CSSStyleDeclaration> before;
+        if (isPaintOnlyProperty(name)) before = parseInlineStyle(*el);
         if (value.empty()) decl->removeProperty(name);
         else decl->setProperty(name, value, lower(info.argument(2).isUndefined() ? "" : argString(info, 2)));
-        writeInlineStyle(*el, *decl);
+        writeInlineStyle(*el, *decl, before.get());
         return Value::undefined();
     });
     method(styleMethods, "removeProperty", 1, [](const FunctionCallInfo& info) -> Value {
@@ -2938,7 +2970,16 @@ void DOMBindings::installComputedStyle() {
         DOMElement* element = w ? asElement(w->node) : nullptr;
         if (!element) throw JSError("TypeError", "__zepraSetAnimatedStyle: parameter 1 is not of type 'Element'.");
         Value text = info.argument(1);
-        element->setAnimationStyle(text.isNullOrUndefined() ? std::string() : text.toString());
+        std::string css = text.isNullOrUndefined() ? std::string() : text.toString();
+        // An animation of opacity or transforms only repaints the element
+        bool paintOnly = false;
+        if (css != element->animationStyle()) {
+            CSSParser parser;
+            auto before = parser.parseInlineStyle(element->animationStyle());
+            auto after = parser.parseInlineStyle(css);
+            paintOnly = before && after && differsInPaintOnly(*before, *after);
+        }
+        element->setAnimationStyle(css, paintOnly);
         return Value::undefined();
     }, 2);
     vm_->setGlobal("__zepraSetAnimatedStyle", Value::object(animated));
@@ -3036,7 +3077,20 @@ std::vector<std::pair<std::string, std::string>> DOMBindings::computedValues(DOM
     if (!computedStyleSource_) return {};
     const CSSComputedStyle* style = computedStyleSource_(element);
     if (!style) return {};
-    return computedStyleProperties(*style);
+    auto values = computedStyleProperties(*style);
+    // A transform's percentages are of the element's border box: resolve
+    // them against its laid-out size (no box: none apply)
+    // (copied first: laying the page out may restyle it, freeing `style`)
+    if (style->transform.find('%') != std::string::npos && geometry_) {
+        const std::string transform = style->transform;
+        const float fontSize = style->fontSize;
+        ElementGeometry g = geometry_->elementGeometry(element, false);
+        for (auto& [name, value] : values) {
+            if (name == "transform")
+                value = ZepraBrowser::resolvedTransformValue(transform, (float)g.boxWidth, (float)g.boxHeight, fontSize);
+        }
+    }
+    return values;
 }
 
 // ============================================================================

@@ -66,6 +66,7 @@
 #include "html_parser.hpp"
 #include "browser/dom.hpp"
 #include "css/css_engine.hpp"
+#include "css/css_animations.hpp"
 #include "rendering/web_font_loader.hpp"
 #include "rendering/web_font_decoder.hpp"
 #include "css/ua_stylesheet.h"
@@ -709,6 +710,14 @@ HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& optio
         Zepra::Networking::HttpClientConfig config;
         config.connectTimeoutMs = 10000;
         config.readTimeoutMs = 30000;  // Increased for slow sites
+        // A script or stylesheet GET whose connection goes quiet is retried
+        // on a new request instead of holding the page's scripts (and its
+        // hydration) for the full timeout; the wait is between reads, so a
+        // slow but moving transfer is not cut
+        const bool retriable = options.method == "GET" && options.body.empty() &&
+                               (options.kind == Zepra::WebCore::ResourceKind::Script ||
+                                options.kind == Zepra::WebCore::ResourceKind::Stylesheet);
+        if (retriable) config.readTimeoutMs = 6000;
         config.followRedirects = true;
         config.maxRedirects = 10;
         config.verifySsl = true;  // reject untrusted or mismatched certificates
@@ -725,6 +734,11 @@ HttpResponse httpRequest(const std::string& url, const HttpRequestOptions& optio
         if (!options.body.empty()) request.setBody(options.body);
         
         auto netResponse = client.send(request);
+        if (retriable && netResponse.hasError() && netResponse.statusCode() == 0) {
+            std::cerr << "[Browser] " << url << ": " << netResponse.error() << "; retrying once" << std::endl;
+            Zepra::Networking::HttpClient retryClient(config);
+            netResponse = retryClient.send(request);
+        }
         
         response.statusCode = netResponse.statusCode();
         response.statusText = netResponse.statusMessage();
@@ -1278,6 +1292,14 @@ static void setBackgroundImage(LayoutBox* box, const CSSComputedStyle& style) {
 // scripts and scroll position are left untouched.
 // DOM version (Zepra::WebCore::domMutationVersion) the layout tree reflects
 static uint64_t g_layoutDomVersion = 0;
+// CSS animations and transitions of the active page, sampled at the frame's
+// time (milliseconds of a steady clock, set at the start of each frame)
+static Zepra::WebCore::CSSAnimationController g_cssAnimations;
+static double g_frameTimeMs = 0;
+static double steadyMs() {
+    using namespace std::chrono;
+    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
 // Bumped by every layout pass over g_layoutRoot: positions may have moved
 static uint64_t g_layoutPass = 0;
 static bool g_layoutPending = true;  // the tree was rebuilt and not laid out since
@@ -1286,8 +1308,29 @@ static bool g_layoutPending = true;  // the tree was rebuilt and not laid out si
 static void syncPageStyleSheets();
 static float pageViewportHeight();
 
+static void rebuildLayoutTreeOnce();
+
+// Restyles and rebuilds the box tree. CSS animations and transitions follow
+// the new styles; when that changes values other than opacity and
+// transforms (a transition just started, an animation's first frame), the
+// tree is built once more with them, so no frame shows the unanimated style.
 static void rebuildLayoutTree() {
+    rebuildLayoutTreeOnce();
+    if (!g_document || !g_cssEngine) return;
+    // (a page load restyles before the frame's time is taken)
+    const double now = std::max(g_frameTimeMs, steadyMs());
+    g_cssAnimations.update(g_document.get(), g_cssEngine->resolver(), now);
+    g_cssAnimations.tick(now);
+    if (Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
+        rebuildLayoutTreeOnce();
+        g_cssAnimations.update(g_document.get(), g_cssEngine->resolver(), now);
+    }
+}
+
+static void rebuildLayoutTreeOnce() {
     g_layoutPainted = false;
+    // The new boxes take every element's current style
+    Zepra::WebCore::takePaintOnlyChanges();
     g_layoutPending = true;
     syncPageStyleSheets();
     // Compute styles (shadow trees bring their own <style> sheets)
@@ -1435,6 +1478,55 @@ static void rebuildLayoutTree() {
     g_layoutDomVersion = Zepra::WebCore::domMutationVersion();
 }
 
+static void setTransform(LayoutBox* box, const CSSComputedStyle& style);
+
+// Boxes updated in place by paint-only changes (opacity, transforms) since
+// the browser started; a full restyle and rebuild is "Built layout tree"
+static uint64_t g_paintOnlyUpdates = 0;
+
+// Elements whose opacity or transform properties changed, and nothing else
+// (Zepra::WebCore::notePaintOnlyChange): their boxes take the new values
+// in place. Nothing is restyled or rebuilt; the next paint shows them.
+// When the DOM changed too, the rebuild that follows covers them.
+static void applyPaintOnlyChanges() {
+    std::vector<DOMElement*> changed = Zepra::WebCore::takePaintOnlyChanges();
+    if (changed.empty() || !g_layoutRoot || !g_cssEngine) return;
+    if (Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) return;
+    // Their transitions start (el.style.opacity = 0 under transition: opacity)
+    // and take their first values now
+    g_cssAnimations.updateElements(g_document.get(), changed, g_cssEngine->resolver(), g_frameTimeMs);
+    g_cssAnimations.tick(g_frameTimeMs);
+    for (DOMElement* element : Zepra::WebCore::takePaintOnlyChanges()) {
+        if (std::find(changed.begin(), changed.end(), element) == changed.end()) changed.push_back(element);
+    }
+    // A transition of something else than opacity or transforms restyles
+    if (Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) return;
+    std::unordered_map<const DOMElement*, const CSSComputedStyle*> styles;
+    for (DOMElement* element : changed) styles.emplace(element, nullptr);
+    std::vector<LayoutBox*> stack{g_layoutRoot.get()};
+    while (!stack.empty()) {
+        LayoutBox* box = stack.back();
+        stack.pop_back();
+        for (auto& child : box->children) stack.push_back(&child);
+        if (!box->domElement || box->anonymous || box->type == LayoutType::Text) continue;
+        auto it = styles.find(box->domElement);
+        if (it == styles.end()) continue;
+        if (!it->second) it->second = g_cssEngine->getComputedStyle(box->domElement);
+        const CSSComputedStyle* style = it->second;
+        if (!style) continue;
+        box->opacity = style->opacity;
+        // Inline boxes are not transformable (CSS Transforms 1 §1)
+        if (box->type != LayoutType::Inline) {
+            box->transform.clear();
+            box->transformOrigin.clear();
+            setTransform(box, *style);
+        }
+        g_paintOnlyUpdates++;
+    }
+    // Script geometry follows transforms: its index is built again
+    g_layoutPass++;
+}
+
 static LayoutBox* findBoxForElement(LayoutBox* box, DOMElement* element) {
     if (!box || !element) return nullptr;
     if (box->domElement == element) return box;
@@ -1544,6 +1636,8 @@ static void syncPageStyleSheets() {
     PageResources* res = activePageResources();
     if (!res || !g_document || !g_cssEngine) return;
     if (res->styles->sync(g_document.get(), g_cssEngine.get())) res->fontsDirty = true;
+    // Adding a style attribute restyles only for pages that select on it
+    Zepra::WebCore::setStyleAttributeSelectorsInUse(g_cssEngine->usesStyleAttributeSelectors());
 }
 
 static bool responseOk(const HttpResponse& r) {
@@ -1827,6 +1921,7 @@ static void commitPageLoad(int tabId, PageLoad& load) {
     g_styledLines.clear();
     // The old document's elements are about to be destroyed
     Zepra::WebCore::interactionState() = {};
+    g_cssAnimations.clear();
     g_document = std::move(load.document);
     const std::string& html = *load.html;
 
@@ -2045,6 +2140,37 @@ static int usedBorderStyle(const CSSComputedStyle& style) {
 
 // outline-* on a box (an outline style of none or hidden draws nothing;
 // auto, a focus ring, is drawn solid)
+// The box's transform (CSS Transforms 1/2): translate, rotate and scale
+// first, then the transform list; paint and hit testing apply it
+static void setTransform(LayoutBox* box, const CSSComputedStyle& style) {
+    std::string functions = ZepraBrowser::individualTransformFunctions(style.translate, style.rotate, style.scale);
+    std::string list = style.transform;
+    std::string lowered = list;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::tolower);
+    if (lowered == "none") list.clear();
+    if (!functions.empty() && !list.empty()) functions += ' ';
+    functions += list;
+    // An invalid list is no transform (and no stacking context)
+    ZepraBrowser::Affine check;
+    if (functions.empty() || !ZepraBrowser::parseTransformList(functions, 0, 0, 16, check)) return;
+    box->transform = functions;
+    box->transformOrigin = style.transformOrigin;
+}
+
+// The blur(N) of a backdrop-filter list ("blur(12px) saturate(1.5)"), in
+// px; 0 when it has none. The other filter functions are not applied.
+static float backdropBlurOf(const std::string& filter) {
+    size_t at = filter.find("blur(");
+    if (at == std::string::npos) return 0;
+    const char* start = filter.c_str() + at + 5;
+    char* end = nullptr;
+    double v = std::strtod(start, &end);
+    if (end == start || !std::isfinite(v) || v <= 0) return 0;
+    std::string unit(end, std::min<size_t>(3, strlen(end)));
+    if (unit.rfind("em", 0) == 0) v *= 16;
+    return (float)std::min(v, 100.0);
+}
+
 static void setOutline(LayoutBox* box, const CSSComputedStyle& style) {
     Zepra::WebCore::BorderStyle b = Zepra::WebCore::BorderStyle::Solid;
     if (style.outlineStyle != "auto" && !Zepra::WebCore::parseBorderStyle(style.outlineStyle, b)) return;
@@ -3073,6 +3199,8 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     
                     // Visual
                     blockBox->opacity = childStyle->opacity;
+                    setTransform(blockBox, *childStyle);
+                    blockBox->backdropBlur = backdropBlurOf(childStyle->backdropFilter);
                     blockBox->overflowHidden = (childStyle->overflowX == OverflowValue::Hidden || 
                                                 childStyle->overflowY == OverflowValue::Hidden);
                     // Clipping and scrolling (overflow other than visible): the
@@ -3569,6 +3697,77 @@ void blendFill(float x, float y, float w, float h, float radius, uint32_t color,
     g_nxGpu.destroyTexture(tex);
 }
 
+// backdrop-filter: blur(): the pixels under the box are read back, blurred
+// on the CPU (three box blurs approximate the Gaussian) and drawn back
+// inside the box's rounded rectangle, before its background
+void backdropBlur(float x, float y, float w, float h, float radius, float blur) {
+    float scale = g_width > 0 ? (float)g_nxGpu.width() / (float)g_width : 1.0f;
+    int px = (int)std::floor(x * scale), py = (int)std::floor(y * scale);
+    int pw = (int)std::ceil((x + w) * scale) - px, ph = (int)std::ceil((y + h) * scale) - py;
+    int fbw = g_nxGpu.width(), fbh = g_nxGpu.height();
+    int x0 = std::max(0, px), y0 = std::max(0, py), x1 = std::min(fbw, px + pw), y1 = std::min(fbh, py + ph);
+    if (x1 <= x0 || y1 <= y0) return;
+    int rw = x1 - x0, rh = y1 - y0;
+    // Large areas are blurred at a lower resolution
+    if ((size_t)rw * rh > (size_t)4000 * 1200) return;
+    std::vector<uint8_t> under;
+    if (!g_nxGpu.readPixels(x0, fbh - y1, rw, rh, under)) return;
+    // Gaussian sigma = blur; box widths for three passes (W3C filter effects)
+    float sigma = blur * scale;
+    int d = std::max(1, (int)std::floor(sigma * 3.0f * std::sqrt(2.0f * 3.14159265f) / 4.0f + 0.5f));
+    std::vector<float> a((size_t)rw * rh * 3), b(a.size());
+    for (int j = 0; j < rh; j++) {
+        const uint8_t* src = &under[(size_t)(rh - 1 - j) * rw * 3];  // GL rows run bottom-up
+        for (int i = 0; i < rw * 3; i++) a[(size_t)j * rw * 3 + i] = src[i];
+    }
+    auto pass = [&](std::vector<float>& in, std::vector<float>& out, bool horizontal) {
+        int n = horizontal ? rw : rh, lines = horizontal ? rh : rw;
+        int lo = d / 2, hi = d - lo - 1;  // window [i - lo, i + hi], edges clamped
+        for (int l = 0; l < lines; l++) {
+            for (int c = 0; c < 3; c++) {
+                auto at = [&](int k) -> float& {
+                    k = std::clamp(k, 0, n - 1);
+                    size_t idx = horizontal ? ((size_t)l * rw + k) : ((size_t)k * rw + l);
+                    return in[idx * 3 + c];
+                };
+                float sum = 0;
+                for (int k = -lo; k <= hi; k++) sum += at(k);
+                for (int k = 0; k < n; k++) {
+                    size_t idx = horizontal ? ((size_t)l * rw + k) : ((size_t)k * rw + l);
+                    out[idx * 3 + c] = sum / d;
+                    sum += at(k + hi + 1) - at(k - lo);
+                }
+            }
+        }
+    };
+    for (int k = 0; k < 3; k++) {
+        pass(a, b, true);
+        pass(b, a, false);
+    }
+    float r = std::min({radius, w / 2, h / 2}) * scale;
+    std::vector<uint8_t> rgba((size_t)rw * rh * 4);
+    for (int j = 0; j < rh; j++) {
+        for (int i = 0; i < rw; i++) {
+            size_t s = ((size_t)j * rw + i) * 3;
+            uint8_t* o = &rgba[((size_t)j * rw + i) * 4];
+            o[0] = (uint8_t)std::clamp(a[s], 0.0f, 255.0f);
+            o[1] = (uint8_t)std::clamp(a[s + 1], 0.0f, 255.0f);
+            o[2] = (uint8_t)std::clamp(a[s + 2], 0.0f, 255.0f);
+            float inside = 1;
+            if (r > 0) {
+                float cx = x0 + i + 0.5f - px, cy = y0 + j + 0.5f - py;
+                float qx = std::clamp(cx, r, pw - r), qy = std::clamp(cy, r, ph - r);
+                inside = std::clamp(r - std::hypot(cx - qx, cy - qy) + 0.5f, 0.0f, 1.0f);
+            }
+            o[3] = (uint8_t)std::lround(inside * 255);
+        }
+    }
+    uint32_t tex = g_nxGpu.createTexture(rw, rh, rgba.data());
+    if (!tex) return;
+    g_nxGpu.drawTexture(tex, NXRender::Rect(x0 / scale, y0 / scale, rw / scale, rh / scale));
+    g_nxGpu.destroyTexture(tex);
+}
+
 // Rounded overflow clips: the four corner squares of a clipping box, read
 // before its content paints and drawn back outside the curve afterwards
 struct SavedCorners {
@@ -3855,6 +4054,23 @@ static void initLayoutEngine() {
     ZepraBrowser::setRoundedClipCallbacks(gfx::saveCorners, gfx::restoreCorners);
     ZepraBrowser::setBlendFillCallback(gfx::blendFill);
     ZepraBrowser::setShadowPaintCallback(gfx::boxShadow);
+    ZepraBrowser::setBackdropBlurCallback(gfx::backdropBlur);
+    // CSS transforms: the GL modelview matrix carries every primitive and
+    // glyph through them (the scissor clips are mapped by the layout engine)
+    // A paint-only style change (see applyPaintOnlyChanges) drops the
+    // element's cached style at once, so getComputedStyle() reads it anew
+    // CSS animations and transitions run over time (CSSAnimationController)
+    Zepra::WebCore::setCssAnimationsDriven(true);
+    Zepra::WebCore::setElementDestroyedListener([](DOMElement* element) { g_cssAnimations.forget(element); });
+    Zepra::WebCore::setPaintOnlyChangeListener([](DOMElement* element) {
+        if (g_cssEngine) g_cssEngine->invalidate(element);
+    });
+    ZepraBrowser::setTransformCallbacks(
+        [](const float m[6]) {
+            g_nxGpu.pushTransform();
+            g_nxGpu.multiplyTransform(m[0], m[1], m[2], m[3], m[4], m[5]);
+        },
+        [] { g_nxGpu.popTransform(); });
     
     std::cout << "[Layout] Layout engine initialized (rounded rect + gradient support)" << std::endl;
     
@@ -4020,6 +4236,7 @@ private:
     static bool updateLayout() {
         if (!g_layoutRoot || !g_document || !g_cssEngine) return false;
         if (Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) relayoutDocument(false);
+        else applyPaintOnlyChanges();
         if (g_layoutPending) layoutPage();
         return g_layoutRoot != nullptr;
     }
@@ -4861,6 +5078,7 @@ void render() {
     pumpPageLoad();
 
     // === SCRIPT TIMERS AND ANIMATION FRAMES ===
+    g_frameTimeMs = steadyMs();
     if (g_scriptContext) {
         g_scriptContext->processTimers();
         if (g_traceLoadPending && g_scriptContext->pendingScriptCount() == 0) {
@@ -4883,8 +5101,19 @@ void render() {
                 reportedScrollY = scrollY;
                 g_scriptContext->fireViewportScroll();
             }
+            // Scroll containers that moved (wheel, scrollbar, scrollTop):
+            // `scroll` at the element, not bubbling
+            for (const DOMElement* element : ZepraBrowser::elementScrollOffsets().takeScrolled())
+                g_scriptContext->fireElementEvent(const_cast<DOMElement*>(element), "scroll");
         }
         g_scriptContext->runAnimationFrames();
+        // CSS animations and transitions take this frame's values; their
+        // events go out after (CSS Animations 1 §4.2: with the frame)
+        if (g_layoutRoot) {
+            g_cssAnimations.tick(g_frameTimeMs);
+            for (const auto& event : g_cssAnimations.takeEvents())
+                g_scriptContext->fireAnimationEvent(event.target, event.type, event.name, event.elapsedSeconds);
+        }
         if (g_layoutRoot && Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
             relayoutDocument();
         } else if (g_releaseDetachedPending) {
@@ -4900,6 +5129,8 @@ void render() {
     if (g_layoutRoot && Zepra::WebCore::domMutationVersion() != g_layoutDomVersion) {
         relayoutDocument();
     }
+    // Opacity and transform changes only repaint
+    applyPaintOnlyChanges();
     pumpPageFonts();
     fireLinkEvents();
     // localStorage changes reach the disk (at most once a second per origin)
@@ -5694,6 +5925,9 @@ LayoutBox* findBoxAt(LayoutBox* box, float x, float y) {
             if (LayoutBox* found = findBoxAt(const_cast<LayoutBox*>(*it), x, y)) return found;
         }
     }
+    // A transformed box is hit where it appears: the point is taken back to
+    // where the box and its content were laid out
+    if (!ZepraBrowser::toBoxSpace(*box, x, y)) return nullptr;
     // A clipping box's content is only visible (and hit) inside it
     if (ZepraBrowser::clipsContent(*box) && !boxContains(box, x, y)) return nullptr;
     
@@ -6308,6 +6542,7 @@ bool loadResources() {
 // Deepest DOM element whose box contains the point (screen coordinates)
 static DOMElement* findElementAt(LayoutBox* box, float x, float y) {
     if (!box) return nullptr;
+    if (!ZepraBrowser::toBoxSpace(*box, x, y)) return nullptr;
     if (ZepraBrowser::clipsContent(*box) && !boxContains(box, x, y)) return nullptr;
     for (auto it = box->children.rbegin(); it != box->children.rend(); ++it) {
         if (DOMElement* el = findElementAt(&(*it), x, y)) return el;

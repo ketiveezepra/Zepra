@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <list>
@@ -181,6 +182,16 @@ struct LayoutBox {
     // Opacity (0.0 = transparent, 1.0 = opaque)
     float opacity = 1.0f;
     
+    // The box's transform functions (CSS Transforms: the translate, rotate
+    // and scale properties' first, then `transform`; "" for none) and its
+    // transform-origin ("" is 50% 50%). Paint, hit testing and script
+    // geometry apply them (box_transform.h); layout does not.
+    std::string transform;
+    std::string transformOrigin;
+    // backdrop-filter: blur(N) (Filter Effects 2 §3): what is painted under
+    // the box shows through its background blurred by N px (0: none)
+    float backdropBlur = 0;
+
     // mix-blend-mode of the box's background colour (blend_modes.h; 0 normal)
     uint8_t blendMode = 0;
     // background-clip: text: the background shows through the text of the
@@ -374,15 +385,25 @@ class ElementScrollOffsets {
 public:
     ScrollOffset get(const Zepra::WebCore::DOMElement* element) const;
     void set(const Zepra::WebCore::DOMElement* element, ScrollOffset offset);
-    void clear() { offsets_.clear(); }
+    void clear() {
+        offsets_.clear();
+        scrolled_.clear();
+    }
     bool empty() const { return offsets_.empty(); }
     /// Forgets elements that are no longer scroll containers in `root`'s
     /// tree (removed, or restyled), so a freed element's address is not
     /// reused with an old position
     void prune(const LayoutBox& root);
+    /// The elements whose scroll position changed since the last call, each
+    /// once, in order (they get a `scroll` event, CSSOM View §13.1)
+    std::vector<const Zepra::WebCore::DOMElement*> takeScrolled();
 
 private:
     std::vector<std::pair<const Zepra::WebCore::DOMElement*, ScrollOffset>> offsets_;
+    std::vector<const Zepra::WebCore::DOMElement*> scrolled_;
+    void noteScrolled(const Zepra::WebCore::DOMElement* element) {
+        if (std::find(scrolled_.begin(), scrolled_.end(), element) == scrolled_.end()) scrolled_.push_back(element);
+    }
 };
 
 /// The page's scroll containers (the one set paintBox and the geometry read)
@@ -597,6 +618,15 @@ float widestForcedLine(const LayoutBox& box);
  */
 void paintBox(const LayoutBox& box, float offsetX, float offsetY, 
               float viewportHeight, float scrollY);
+
+/// A transformed box paints between push (the matrix its content is drawn
+/// through, as CSS matrix(a, b, c, d, e, f), on top of the ones already
+/// pushed) and pop. Without them transforms are not painted.
+void setTransformCallbacks(void (*push_transform)(const float matrix[6]), void (*pop_transform)());
+
+/// Blurs what is already painted inside the rectangle (screen coordinates,
+/// rounded corners of `radius`) by a Gaussian of `blur` px (backdrop-filter)
+void setBackdropBlurCallback(void (*backdrop_blur)(float x, float y, float w, float h, float radius, float blur));
 
 /// The position: fixed boxes under `root`, in paint order (bottom first:
 /// by z-index, then tree order). Hit testing checks them, last first,

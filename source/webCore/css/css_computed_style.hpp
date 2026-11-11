@@ -445,6 +445,12 @@ public:
 
     std::string boxShadow;
     std::string transform;
+    std::string transformOrigin;    // "" = 50% 50%
+    // The individual transform properties (CSS Transforms 2 §5), as
+    // declared; "" = none. They apply before `transform`.
+    std::string translate;
+    std::string rotate;
+    std::string scale;
     std::string transition;
 
     /// Custom properties (--name), resolved and inherited; shared with the
@@ -459,6 +465,14 @@ public:
     std::string animationIterationCount;
     std::string animationDirection;
     std::string animationFillMode;
+    std::string animationTimingFunction;
+    std::string animationPlayState;
+    // CSS Transitions 1 longhands as declared (comma-separated lists;
+    // empty: the initial value). `transition` sets all four.
+    std::string transitionProperty;
+    std::string transitionDuration;
+    std::string transitionDelay;
+    std::string transitionTimingFunction;
     std::string filter;
     std::string cursor = "auto";
     std::string pointerEvents = "auto";

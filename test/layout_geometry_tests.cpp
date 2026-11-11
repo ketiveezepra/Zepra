@@ -668,3 +668,43 @@ TEST(ScrollContainers, ScrollIntoViewScrollsTheContainersFirst) {
     // #list's scrollport (5 + 90): 195 - 95
     EXPECT_EQ(page.eval("document.getElementById('list').scrollTop"), "100");
 }
+
+TEST(LayoutGeometryIndex, TransformsMoveTheBoxesScriptsSee) {
+    // getBoundingClientRect is of the transformed box (CSS Transforms 1 §6)
+    Page page;
+    page.root.children.front().transform = "translateX(100px)";
+    LayoutBox& frame = *std::next(page.root.children.begin());
+    frame.transform = "scale(2)";   // about its centre: (8 + 200, 120 + 100)
+    page.geometry.reindex();
+    ElementGeometry box = page.geometry.elementGeometry(page.byId("box"));
+    ASSERT_EQ(box.rects.size(), 1u);
+    EXPECT_DOUBLE_EQ(box.rects[0].x, 128);
+    EXPECT_DOUBLE_EQ(box.rects[0].width, 300);
+    EXPECT_DOUBLE_EQ(box.boxWidth, 300);   // the untransformed size
+    // A descendant moves with its transformed ancestor
+    ElementGeometry inner = page.geometry.elementGeometry(page.byId("inner"));
+    ASSERT_EQ(inner.rects.size(), 1u);
+    EXPECT_DOUBLE_EQ(inner.rects[0].x, 20 + 208 + 2 * (33 - 208));
+    EXPECT_DOUBLE_EQ(inner.rects[0].y, 20 + 220 + 2 * (150 - 220));
+    EXPECT_DOUBLE_EQ(inner.rects[0].width, 200);
+    EXPECT_DOUBLE_EQ(inner.rects[0].height, 80);
+    EXPECT_EQ(page.eval("var r = document.getElementById('box').getBoundingClientRect(); r.left + ',' + r.width"),
+              "128,300");
+}
+
+TEST(ScrollContainers, MovedContainersAreReportedOnceForTheirScrollEvent) {
+    ScrollPage page;
+    ZepraBrowser::elementScrollOffsets().takeScrolled();
+    ZepraBrowser::scrollContainerTo(page.box("list"), 0, 30);
+    ZepraBrowser::scrollContainerTo(page.box("list"), 0, 40);
+    ZepraBrowser::scrollContainerTo(page.box("nested"), 0, 25);
+    ZepraBrowser::scrollContainerTo(page.box("nested"), 0, 25);   // no move: no second entry
+    auto moved = ZepraBrowser::elementScrollOffsets().takeScrolled();
+    ASSERT_EQ(moved.size(), 2u);
+    EXPECT_EQ(moved[0], page.byId("list"));
+    EXPECT_EQ(moved[1], page.byId("nested"));
+    EXPECT_TRUE(ZepraBrowser::elementScrollOffsets().takeScrolled().empty());
+    ZepraBrowser::scrollContainerTo(page.box("list"), 0, 40);    // already there
+    EXPECT_TRUE(ZepraBrowser::elementScrollOffsets().takeScrolled().empty());
+    ZepraBrowser::elementScrollOffsets().clear();
+}

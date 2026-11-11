@@ -417,3 +417,178 @@ TEST(Animations, TimingAndKeyframesAreValidatedAndInterpolated) {
     EXPECT_EQ(page.eval("typeof Animation + typeof KeyframeEffect + typeof document.timeline.currentTime"),
               "functionfunctionnumber");
 }
+
+// ---------------------------------------------------------------------------
+// Transforms in getComputedStyle, paint-only style changes, CSS animations
+// and transitions over time
+// ---------------------------------------------------------------------------
+
+#include "css/css_animations.hpp"
+
+namespace {
+
+const char* kTransformPage = R"(<!DOCTYPE html><html><head><style>
+#t { transform: rotate(90deg) translateX(10px); transform-origin: left top }
+#i { translate: 0 100%; scale: 1.5 }
+@keyframes slide { from { transform: translateX(0) } to { transform: translateX(200px) } }
+@keyframes fade { 50% { opacity: 0.5 } }
+#a { animation: slide 1s linear 2 alternate both }
+#f { animation: fade 2s linear infinite }
+#tr { transition: opacity 1s linear, background-color 1s linear; opacity: 1; background-color: rgb(0, 0, 0) }
+#tr.on { opacity: 0; background-color: rgb(200, 100, 0) }
+</style></head><body>
+<div id="t">t</div><div id="i">i</div><div id="n" style="color: red">n</div>
+<div id="a">a</div><div id="f">f</div><div id="tr">tr</div>
+</body></html>)";
+
+}  // namespace
+
+TEST(Transforms, ComputedTransformIsAMatrix) {
+    Page page(kTransformPage);
+    auto cs = [&](const char* id, const char* prop) {
+        return page.eval(std::string("getComputedStyle(document.getElementById('") + id + "'))." + prop);
+    };
+    EXPECT_EQ(cs("t", "transform"), "matrix(0, 1, -1, 0, 0, 10)");
+    EXPECT_EQ(cs("t", "transformOrigin"), "left top");
+    EXPECT_EQ(cs("n", "transform"), "none");
+    EXPECT_EQ(cs("n", "translate"), "none");
+    // The individual properties stay as declared; transform does not include them
+    EXPECT_EQ(cs("i", "translate"), "0 100%");
+    EXPECT_EQ(cs("i", "scale"), "1.5");
+    EXPECT_EQ(cs("i", "transform"), "none");
+    page.eval("document.getElementById('n').style.transform = 'translate(5px, 6px)'");
+    EXPECT_EQ(cs("n", "transform"), "matrix(1, 0, 0, 1, 5, 6)");
+}
+
+TEST(Transforms, OpacityAndTransformWritesArePaintOnly) {
+    Page page(kTransformPage);
+    std::vector<DOMElement*> heard;
+    setPaintOnlyChangeListener([&](DOMElement* e) {
+        heard.push_back(e);
+        page.css->invalidate(e);
+    });
+    takePaintOnlyChanges();
+    uint64_t before = domMutationVersion();
+    page.eval("var n = document.getElementById('n'); n.style.opacity = '0.25'; n.style.transform = 'scale(2)';"
+              "n.style.setProperty('opacity', '0.5')");
+    EXPECT_EQ(domMutationVersion(), before);   // no restyle of the page
+    auto changed = takePaintOnlyChanges();
+    ASSERT_EQ(changed.size(), 1u);              // the element, once
+    EXPECT_EQ(changed[0]->getAttribute("id"), "n");
+    EXPECT_EQ(heard.size(), 3u);
+    EXPECT_EQ(page.eval("n.getAttribute('style')"), "color: red; opacity: 0.5; transform: scale(2);");
+    EXPECT_EQ(page.eval("getComputedStyle(n).opacity + '|' + getComputedStyle(n).transform"),
+              "0.5|matrix(2, 0, 0, 2, 0, 0)");
+    // Anything else restyles as before
+    page.eval("n.style.width = '10px'");
+    EXPECT_NE(domMutationVersion(), before);
+    // Adding the style attribute changes what [style] matches: a full change
+    before = domMutationVersion();
+    page.eval("document.getElementById('t').style.opacity = '0.5'");
+    EXPECT_NE(domMutationVersion(), before);
+    // ...unless no sheet selects on it
+    EXPECT_FALSE(page.css->usesStyleAttributeSelectors());
+    setStyleAttributeSelectorsInUse(false);
+    before = domMutationVersion();
+    page.eval("document.getElementById('i').style.transform = 'scale(3)'");
+    EXPECT_EQ(domMutationVersion(), before);
+    setStyleAttributeSelectorsInUse(true);
+    page.css->addStyleSheet("div[style*=red] { color: blue }", StyleOrigin::Author);
+    EXPECT_TRUE(page.css->usesStyleAttributeSelectors());
+    setPaintOnlyChangeListener(nullptr);
+    takePaintOnlyChanges();
+    // Without a listener, paint-only writes restyle like any other
+    before = domMutationVersion();
+    page.eval("n.style.opacity = '0.75'");
+    EXPECT_NE(domMutationVersion(), before);
+}
+
+TEST(CssAnimations, EasingAndInterpolation) {
+    EXPECT_DOUBLE_EQ(cssEasing("linear", 0.3), 0.3);
+    EXPECT_NEAR(cssEasing("ease", 0.5), 0.8024, 1e-3);
+    EXPECT_NEAR(cssEasing("cubic-bezier(0.4, 0, 0.2, 1)", 0.5), 0.7755, 1e-3);
+    EXPECT_DOUBLE_EQ(cssEasing("steps(4, end)", 0.3), 0.25);
+    EXPECT_DOUBLE_EQ(cssEasing("steps(4, start)", 0.3), 0.5);
+    EXPECT_DOUBLE_EQ(cssEasing("step-end", 0.99), 0.0);
+    EXPECT_DOUBLE_EQ(cssTimeMs("0.3s"), 300);
+    EXPECT_DOUBLE_EQ(cssTimeMs("150ms"), 150);
+    EXPECT_EQ(interpolateCssValue("width", "10px", "30px", 0.5), "20px");
+    EXPECT_EQ(interpolateCssValue("transform", "translateX(0)", "translateX(200px)", 0.25), "translateX(50px)");
+    EXPECT_EQ(interpolateCssValue("transform", "none", "translate(10px, 20%) scale(3)", 0.5),
+              "translate(5px, 10%) scale(2)");
+    EXPECT_EQ(interpolateCssValue("color", "rgb(0, 0, 0)", "rgb(200, 100, 0)", 0.5), "rgba(100, 50, 0, 1)");
+    // Premultiplied: fading in from transparent keeps the target colour
+    EXPECT_EQ(interpolateCssValue("background-color", "rgba(0, 0, 0, 0)", "rgb(200, 0, 0)", 0.5),
+              "rgba(200, 0, 0, 0.5)");
+    // Different shapes flip at the midpoint
+    EXPECT_EQ(interpolateCssValue("display", "block", "none", 0.4), "block");
+    EXPECT_EQ(interpolateCssValue("display", "block", "none", 0.6), "none");
+}
+
+TEST(CssAnimations, AnimationsRunOverTimeAndSendTheirEvents) {
+    setCssAnimationsDriven(true);
+    {
+        Page page(kTransformPage);
+        DOMElement* a = page.doc->getElementById("a");
+        DOMElement* f = page.doc->getElementById("f");
+        CSSAnimationController controller;
+        controller.update(page.doc.get(), page.css->resolver(), 1000);
+        controller.tick(1250);
+        EXPECT_EQ(a->cssAnimationStyle(), "transform: translateX(50px);");
+        // 50% of fade is 0.5; the implicit 0% and 100% are the element's own 1
+        EXPECT_EQ(f->cssAnimationStyle(), "opacity: 0.875;");
+        controller.tick(2500);   // second iteration, alternate: back from the end
+        EXPECT_EQ(a->cssAnimationStyle(), "transform: translateX(100px);");
+        controller.tick(3500);   // finished, fill both: where the last iteration ends
+        EXPECT_EQ(a->cssAnimationStyle(), "transform: translateX(0px);");
+        std::vector<std::string> events;
+        for (const auto& e : controller.takeEvents())
+            if (e.target == a) events.push_back(e.type + ":" + e.name);
+        EXPECT_EQ(events, (std::vector<std::string>{"animationstart:slide", "animationiteration:slide",
+                                                    "animationend:slide"}));
+        // The cascade applies the animated values (the animations origin)
+        page.css->computeStyles();
+        EXPECT_EQ(page.eval("getComputedStyle(document.getElementById('f')).opacity"), "0.75");
+        controller.tick(4000);   // fade: 3000 ms in, half way through its second cycle
+        page.css->computeStyles();
+        EXPECT_EQ(page.eval("getComputedStyle(document.getElementById('f')).opacity"), "0.5");
+        // Removing the animation drops its values
+        page.eval("document.getElementById('a').style.animation = 'none'");
+        page.css->computeStyles();
+        controller.update(page.doc.get(), page.css->resolver(), 4100);
+        controller.tick(4100);
+        EXPECT_EQ(a->cssAnimationStyle(), "");
+    }
+    setCssAnimationsDriven(false);
+}
+
+TEST(CssAnimations, TransitionsStartFromTheOldValue) {
+    setCssAnimationsDriven(true);
+    {
+        Page page(kTransformPage);
+        DOMElement* tr = page.doc->getElementById("tr");
+        CSSAnimationController controller;
+        controller.update(page.doc.get(), page.css->resolver(), 0);
+        controller.tick(0);
+        EXPECT_EQ(tr->cssAnimationStyle(), "");   // nothing changed yet
+        page.eval("document.getElementById('tr').className = 'on'");
+        page.css->computeStyles();
+        controller.update(page.doc.get(), page.css->resolver(), 1000);
+        controller.tick(1500);
+        EXPECT_EQ(tr->cssAnimationStyle(), "background-color: rgba(100, 50, 0, 1); opacity: 0.5;");
+        // Reversed half way: back from where it is
+        page.eval("document.getElementById('tr').className = ''");
+        page.css->computeStyles();
+        controller.update(page.doc.get(), page.css->resolver(), 1500);
+        controller.tick(2000);
+        EXPECT_EQ(tr->cssAnimationStyle(), "background-color: rgba(50, 25, 0, 1); opacity: 0.75;");
+        controller.tick(2600);
+        EXPECT_EQ(tr->cssAnimationStyle(), "");
+        std::vector<std::string> events;
+        for (const auto& e : controller.takeEvents())
+            if (e.name == "opacity") events.push_back(e.type);
+        EXPECT_EQ(events, (std::vector<std::string>{"transitionrun", "transitionstart", "transitionrun",
+                                                    "transitionstart", "transitionend"}));
+    }
+    setCssAnimationsDriven(false);
+}

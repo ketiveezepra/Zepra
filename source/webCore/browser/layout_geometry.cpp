@@ -38,31 +38,44 @@ void LayoutGeometryIndex::build(const PageLayout& page) {
         float x, y;
         const DOMElement* parentOwner;
         int container;  // innermost scroll container around the box
+        bool transformed;
+        Affine matrix;  // the transforms of its ancestors
     };
     std::vector<Item> stack;
     const DOMElement* rootOwner = page.body ? page.body : page.root->domElement;
     // Children pushed in reverse so the walk keeps tree order
-    auto pushChildren = [&](const LayoutBox& box, float x, float y, const DOMElement* owner, int container) {
+    auto pushChildren = [&](const LayoutBox& box, float x, float y, const DOMElement* owner, int container,
+                            bool transformed, const Affine& matrix) {
         for (auto it = box.children.rbegin(); it != box.children.rend(); ++it) {
-            stack.push_back({&*it, x + it->x, y + it->y, owner, container});
+            stack.push_back({&*it, x + it->x, y + it->y, owner, container, transformed, matrix});
         }
     };
-    pushChildren(*page.root, rootX, rootY, rootOwner, -1);
+    pushChildren(*page.root, rootX, rootY, rootOwner, -1, false, Affine());
     while (!stack.empty()) {
         Item item = stack.back();
         stack.pop_back();
         const LayoutBox& box = *item.box;
         if (box.type == LayoutType::None) continue;
+        // A transform moves where the box and its content appear (CSS
+        // Transforms 1 §6: getBoundingClientRect is of the transformed box)
+        Affine own;
+        if (boxTransform(box, item.x, item.y, own)) {
+            item.matrix = item.transformed ? item.matrix * own : own;
+            item.transformed = true;
+        }
         const DOMElement* owner = box.domElement;
         if (owner && !box.anonymous && owner != item.parentOwner) {
-            boxes_[owner].push_back({item.box, item.x, item.y, item.container});
+            Placed placed{item.box, item.x, item.y, item.container};
+            placed.transformed = item.transformed;
+            placed.matrix = item.matrix;
+            boxes_[owner].push_back(placed);
         }
         int inner = item.container;
         if (isScrollContainer(box)) {
             containers_.push_back({item.box, item.container});
             inner = (int)containers_.size() - 1;
         }
-        pushChildren(box, item.x, item.y, owner, inner);
+        pushChildren(box, item.x, item.y, owner, inner, item.transformed, item.matrix);
     }
 }
 
@@ -105,11 +118,15 @@ ElementGeometry LayoutGeometryIndex::geometryOf(const PageLayout& page, const DO
     g.hasBox = true;
     for (const Placed& p : found->second) {
         ScrollOffset s = scrollAround(p.container);
-        g.rects.push_back({left + p.x - s.x, top + p.y - s.y, p.box->width, p.box->height});
+        float x = p.x, y = p.y, w = p.box->width, h = p.box->height;
+        if (p.transformed) p.matrix.mapRect(x, y, w, h);
+        g.rects.push_back({left + x - s.x, top + y - s.y, w, h});
     }
     const Placed& first = found->second.front();
     const LayoutBox& box = *first.box;
     g.inlineBox = box.type == LayoutType::Inline;
+    g.boxWidth = box.width;
+    g.boxHeight = box.height;
     g.position = box.positionType;
     g.borderTop = box.borderTop;
     g.borderRight = box.borderRight;

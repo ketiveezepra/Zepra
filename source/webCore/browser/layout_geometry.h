@@ -19,6 +19,7 @@
 #pragma once
 
 #include "layout_engine.h"
+#include "box_transform.h"
 #include "scripting/page_geometry.hpp"
 
 #include <unordered_map>
@@ -69,6 +70,8 @@ private:
         const LayoutBox* box;
         float x, y;     ///< border-box origin, relative to the root box's, unscrolled
         int container;  ///< innermost scroll container around the box (containers_), -1: none
+        bool transformed = false;  ///< the box or an ancestor has a transform:
+        Affine matrix;             ///< where its root-relative points appear (scrolling aside)
     };
     struct Container {
         const LayoutBox* box;

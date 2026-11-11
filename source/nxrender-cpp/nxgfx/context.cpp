@@ -178,6 +178,12 @@ void GpuContext::popTransform() {
     glPopMatrix();
 }
 
+void GpuContext::multiplyTransform(float a, float b, float c, float d, float e, float f) {
+    // Column-major 4x4: the plane's part of it
+    const GLfloat m[16] = {a, b, 0, 0, c, d, 0, 0, 0, 0, 1, 0, e, f, 0, 1};
+    glMultMatrixf(m);
+}
+
 void GpuContext::translate(float x, float y) {
     glTranslatef(x, y, 0);
 }

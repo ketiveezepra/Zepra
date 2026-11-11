@@ -22,6 +22,29 @@ class DOMElement;
 /// renderer compares it to know when the layout must be rebuilt.
 uint64_t domMutationVersion();
 void noteDomMutation();
+
+class DOMElement;
+/// Paint-only changes: an element's style changed in properties that need
+/// neither restyling other elements nor laying the page out again (opacity
+/// and the transform properties, see isPaintOnlyProperty). They do not bump
+/// domMutationVersion(); the element waits here until the browser updates
+/// its boxes. The listener (the browser's style cache) hears of each one
+/// at once, so getComputedStyle() sees the new values. Without a listener
+/// a paint-only change is an ordinary one (noteDomMutation).
+void notePaintOnlyChange(DOMElement* element);
+/// The elements changed since the last call, each once, in change order
+std::vector<DOMElement*> takePaintOnlyChanges();
+void setPaintOnlyChangeListener(std::function<void(DOMElement*)> listener);
+/// Called as each element is destroyed (one listener; the browser's CSS
+/// animation records drop the element)
+void setElementDestroyedListener(std::function<void(DOMElement*)> listener);
+/// Whether the page's styles have attribute selectors on `style` (default
+/// true): when they do not, adding a style attribute that only holds
+/// paint-only declarations is a paint-only change too
+void setStyleAttributeSelectorsInUse(bool used);
+bool styleAttributeSelectorsInUse();
+/// opacity, transform, transform-origin, translate, rotate, scale
+bool isPaintOnlyProperty(const std::string& property);
 class DOMDocument;
 class DOMNode;
 class DOMElement;
@@ -272,11 +295,29 @@ public:
     /// apply now, as CSS text: the animations origin of the cascade, above
     /// the style attribute and below !important. A change restyles the page.
     const std::string& animationStyle() const { return animationStyle_; }
-    void setAnimationStyle(const std::string& css) {
+    /// `paintOnly`: the caller found that only paint-only properties
+    /// changed (notePaintOnlyChange instead of a restyle of the page)
+    void setAnimationStyle(const std::string& css, bool paintOnly = false) {
         if (css == animationStyle_) return;
         animationStyle_ = css;
-        noteDomMutation();
+        if (paintOnly) notePaintOnlyChange(this);
+        else noteDomMutation();
     }
+    /// The declarations the element's running CSS animations and CSS
+    /// transitions apply now (CSSAnimationController), as CSS text: in the
+    /// animations origin, below script animations. `paintOnly` as above.
+    const std::string& cssAnimationStyle() const { return cssAnimationStyle_; }
+    void setCssAnimationStyle(const std::string& css, bool paintOnly = false) {
+        if (css == cssAnimationStyle_) return;
+        cssAnimationStyle_ = css;
+        if (paintOnly) notePaintOnlyChange(this);
+        else noteDomMutation();
+    }
+    /// Sets the style attribute like setAttribute("style", value), for a
+    /// change the caller found to touch paint-only properties only: the
+    /// mutation is recorded (MutationObserver, attributeChangedCallback) but
+    /// the page is not restyled
+    void setStyleAttributePaintOnly(const std::string& value);
     
     // Cloning (a <template>'s contents are cloned with it when deep)
     std::unique_ptr<DOMNode> cloneNode(bool deep) const override;
@@ -367,6 +408,7 @@ private:
     std::unordered_map<std::string, std::string> attributes_;
     std::unordered_map<std::string, std::string> styleMap_;
     std::string animationStyle_;   // not cloned: animations stay with their element
+    std::string cssAnimationStyle_;
     std::string dirtyValue_;
     std::unique_ptr<DOMShadowRoot> shadowRoot_;
     std::unique_ptr<DOMDocumentFragment> templateContent_;

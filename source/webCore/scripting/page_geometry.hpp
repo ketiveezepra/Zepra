@@ -33,6 +33,9 @@ struct ElementGeometry {
     double scrollWidth = 0, scrollHeight = 0;  ///< padding box grown to fit the content (if asked for)
     bool scrollContainer = false;  ///< overflow other than visible/clip: scrollTop/scrollLeft move it
     double scrollTop = 0, scrollLeft = 0;  ///< its scroll position
+    /// The first box's border-box size before any transform (what the
+    /// percentages of its `transform` are of)
+    double boxWidth = 0, boxHeight = 0;
 
     /// The smallest rectangle holding every border box (getBoundingClientRect)
     GeometryRect bounds() const;

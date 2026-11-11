@@ -690,6 +690,23 @@ void CSSEngine::initialize(DOMDocument* doc) {
     // StyleResolver constructor already adds user-agent stylesheet
 }
 
+void CSSEngine::noteStyleAttributeSelectors(const std::string& css) {
+    if (usesStyleAttribute_) return;
+    // "[style", any case, with white space allowed after the bracket
+    for (size_t i = css.find('['); i != std::string::npos; i = css.find('[', i + 1)) {
+        size_t j = i + 1;
+        while (j < css.size() && std::isspace(static_cast<unsigned char>(css[j]))) j++;
+        if (css.size() - j >= 5 && std::tolower(static_cast<unsigned char>(css[j])) == 's' &&
+            std::tolower(static_cast<unsigned char>(css[j + 1])) == 't' &&
+            std::tolower(static_cast<unsigned char>(css[j + 2])) == 'y' &&
+            std::tolower(static_cast<unsigned char>(css[j + 3])) == 'l' &&
+            std::tolower(static_cast<unsigned char>(css[j + 4])) == 'e') {
+            usesStyleAttribute_ = true;
+            return;
+        }
+    }
+}
+
 void CSSEngine::addStyleSheet(const std::string& css, StyleOrigin origin, const std::string& href) {
     usesHover_  = usesHover_  || css.find(":hover") != std::string::npos;
     usesActive_ = usesActive_ || css.find(":active") != std::string::npos;
@@ -704,6 +721,7 @@ void CSSEngine::addSheetWithImports(const std::string& css, StyleOrigin origin, 
                                     std::vector<std::string>& chain) {
     // Deep enough for real sites (WordPress themes import two or three levels)
     constexpr size_t kMaxImportDepth = 16;
+    noteStyleAttributeSelectors(css);
     std::shared_ptr<CSSStyleSheet> sheet = parser_.parse(css);
     if (!sheet) return;
     sheet->setHref(href);
@@ -777,7 +795,10 @@ void CSSEngine::syncShadowStyles(DOMDocument* document) {
                 if (el->tagName() == "style") {
                     std::string css = el->textContent();
                     auto& sheet = shadowSheetCache_[css];
-                    if (!sheet) sheet = parser_.parse(css);
+                    if (!sheet) {
+                        noteStyleAttributeSelectors(css);
+                        sheet = parser_.parse(css);
+                    }
                     if (sheet) sheets.push_back(sheet);
                     used.insert(css);
                     continue;

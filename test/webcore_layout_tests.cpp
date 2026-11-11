@@ -16,6 +16,7 @@
 #include "browser/blend_modes.h"
 #include "browser/dom.hpp"
 #include "browser/box_shadow.h"
+#include "browser/box_transform.h"
 #include "browser/gradient_raster.h"
 #include "browser/layout_engine.h"
 #include "css/css_engine.hpp"
@@ -23,6 +24,7 @@
 #include "css/ua_stylesheet.h"
 #include "html/html_parser.hpp"
 
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -2448,4 +2450,188 @@ TEST(PaintOpacity, TextTakesTheProductOfItsAncestorsOpacity) {
     EXPECT_FLOAT_EQ(g_textOpacity[0].second, 0.25f);
     EXPECT_EQ(g_textOpacity[1].first, "full");
     EXPECT_FLOAT_EQ(g_textOpacity[1].second, 1.0f);
+}
+
+// ---------------------------------------------------------------------------
+// CSS transforms: parsing, painting through the matrix, stacking, hit testing
+// ---------------------------------------------------------------------------
+
+namespace {
+
+bool near(float a, float b) { return std::fabs(a - b) < 1e-3f; }
+
+struct PaintRecord {
+    std::vector<std::array<float, 6>> pushes;
+    int pops = 0;
+    std::vector<std::array<float, 4>> clips;
+    std::vector<std::string> texts;
+    std::vector<std::pair<float, float>> textAt;
+};
+PaintRecord g_paint;
+
+void installRecorder() {
+    g_paint = {};
+    ZepraBrowser::setLayoutCallbacks(
+        [](float, float, float, float, uint32_t) {}, [](float, float, float, float, uint32_t, float) {},
+        [](const std::string& text, float x, float y, uint32_t, float, const LayoutBox*) {
+            g_paint.texts.push_back(text);
+            g_paint.textAt.push_back({x, y});
+        },
+        nullptr, nullptr, nullptr);
+    ZepraBrowser::setTransformCallbacks(
+        [](const float m[6]) { g_paint.pushes.push_back({m[0], m[1], m[2], m[3], m[4], m[5]}); },
+        [] { g_paint.pops++; });
+    ZepraBrowser::setLayoutClipCallbacks(
+        [](float x, float y, float w, float h) { g_paint.clips.push_back({x, y, w, h}); }, [] {});
+}
+
+void removeRecorder() {
+    ZepraBrowser::setLayoutCallbacks(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    ZepraBrowser::setTransformCallbacks(nullptr, nullptr);
+    ZepraBrowser::setLayoutClipCallbacks(nullptr, nullptr);
+}
+
+LayoutBox& textBox(LayoutBox& parent, const std::string& text, float x, float y, float w, float h) {
+    LayoutBox& b = addBox(parent, LayoutType::Block);
+    b.x = x; b.y = y; b.width = w; b.height = h;
+    LayoutBox& run = addBox(b, LayoutType::Text);
+    run.text = text;
+    run.width = w; run.height = 20;
+    return b;
+}
+
+}  // namespace
+
+TEST(BoxTransform, ParsesTheTransformFunctions) {
+    using ZepraBrowser::Affine;
+    Affine m;
+    ASSERT_TRUE(ZepraBrowser::parseTransformList("translate(10px, 50%)", 200, 100, 16, m));
+    EXPECT_TRUE(near(m.e, 10) && near(m.f, 50) && m.isTranslation());
+    // Tailwind's -translate-x-1/2: calc(calc(1 / 2 * 100%) * -1)
+    ASSERT_TRUE(ZepraBrowser::parseTransformList("translateX(calc(calc(1 / 2 * 100%) * -1))", 200, 100, 16, m));
+    EXPECT_TRUE(near(m.e, -100));
+    ASSERT_TRUE(ZepraBrowser::parseTransformList("translate3d(0px, -2em, 5px) scale(2)", 0, 0, 10, m));
+    EXPECT_TRUE(near(m.a, 2) && near(m.d, 2) && near(m.f, -20));
+    ASSERT_TRUE(ZepraBrowser::parseTransformList("rotate(90deg)", 0, 0, 16, m));
+    EXPECT_TRUE(near(m.a, 0) && near(m.b, 1) && near(m.c, -1) && near(m.d, 0));
+    ASSERT_TRUE(ZepraBrowser::parseTransformList("rotate(0.25turn) translateX(10px)", 0, 0, 16, m));
+    EXPECT_TRUE(near(m.e, 0) && near(m.f, 10));  // the translation turns with the box
+    ASSERT_TRUE(ZepraBrowser::parseTransformList("skewX(45deg)", 0, 0, 16, m));
+    EXPECT_TRUE(near(m.c, 1));
+    ASSERT_TRUE(ZepraBrowser::parseTransformList("matrix(1, 0.5, 0, 1, 7, 8)", 0, 0, 16, m));
+    EXPECT_TRUE(near(m.b, 0.5f) && near(m.e, 7) && near(m.f, 8));
+    ASSERT_TRUE(ZepraBrowser::parseTransformList("none", 0, 0, 16, m));
+    EXPECT_TRUE(m.isIdentity());
+    // Invalid lists are no transform
+    EXPECT_FALSE(ZepraBrowser::parseTransformList("translate(10px", 0, 0, 16, m));
+    EXPECT_FALSE(ZepraBrowser::parseTransformList("wobble(3)", 0, 0, 16, m));
+    EXPECT_FALSE(ZepraBrowser::parseTransformList("translateX(5)", 0, 0, 16, m));
+}
+
+TEST(BoxTransform, IndividualPropertiesOriginAndResolvedValue) {
+    EXPECT_EQ(ZepraBrowser::individualTransformFunctions("0 100%", "none", ""), "translate(0, 100%)");
+    EXPECT_EQ(ZepraBrowser::individualTransformFunctions("10px", "45deg", "1.5"),
+              "translate(10px) rotate(45deg) scale(1.5)");
+    EXPECT_EQ(ZepraBrowser::individualTransformFunctions("", "x 30deg", "none"), "rotateX(30deg)");
+    float x = 0, y = 0;
+    ZepraBrowser::parseTransformOrigin("", 200, 100, 16, x, y);
+    EXPECT_TRUE(near(x, 100) && near(y, 50));
+    ZepraBrowser::parseTransformOrigin("left top", 200, 100, 16, x, y);
+    EXPECT_TRUE(near(x, 0) && near(y, 0));
+    ZepraBrowser::parseTransformOrigin("bottom right", 200, 100, 16, x, y);
+    EXPECT_TRUE(near(x, 200) && near(y, 100));
+    ZepraBrowser::parseTransformOrigin("25% 10px", 200, 100, 16, x, y);
+    EXPECT_TRUE(near(x, 50) && near(y, 10));
+    EXPECT_EQ(ZepraBrowser::resolvedTransformValue("translateY(100%)", 50, 40, 16), "matrix(1, 0, 0, 1, 0, 40)");
+    EXPECT_EQ(ZepraBrowser::resolvedTransformValue("none", 50, 40, 16), "none");
+    EXPECT_EQ(ZepraBrowser::resolvedTransformValue("bogus(", 50, 40, 16), "none");
+}
+
+TEST(PaintTransform, ATransformedBoxPaintsItsSubtreeThroughItsMatrix) {
+    installRecorder();
+    LayoutBox root;
+    root.width = 800; root.height = 600;
+    LayoutBox& box = textBox(root, "moved", 100, 50, 200, 100);
+    box.transform = "rotate(90deg)";   // about the centre (200, 100)
+    textBox(root, "plain", 0, 300, 100, 20);
+    ZepraBrowser::paintBox(root, 0, 0, 10000, 0);
+    removeRecorder();
+    ASSERT_EQ(g_paint.pushes.size(), 1u);
+    EXPECT_EQ(g_paint.pops, 1);
+    const auto& m = g_paint.pushes[0];
+    // rotate(90deg) about (200, 100): x' = -y + 300, y' = x - 100
+    EXPECT_TRUE(near(m[0], 0) && near(m[1], 1) && near(m[2], -1) && near(m[3], 0));
+    EXPECT_TRUE(near(m[4], 300) && near(m[5], -100));
+    // Inside, the box draws where it was laid out; the matrix moves it
+    ASSERT_EQ(g_paint.texts.size(), 2u);
+    // A transformed box is a stacking context painted after in-flow content
+    EXPECT_EQ(g_paint.texts[0], "plain");
+    EXPECT_EQ(g_paint.texts[1], "moved");
+    EXPECT_TRUE(near(g_paint.textAt[1].first, 100));
+}
+
+TEST(PaintTransform, ClipsInsideATransformAreMappedToTheScreen) {
+    installRecorder();
+    LayoutBox root;
+    root.width = 800; root.height = 600;
+    LayoutBox& box = textBox(root, "x", 100, 100, 200, 100);
+    box.transform = "translate(50px, 20px)";
+    box.overflowX = box.overflowY = ZepraBrowser::kOverflowHidden;
+    box.overflowHidden = true;
+    HTMLParser parser;
+    auto doc = parser.parse("<div id=clip></div>");
+    box.domElement = doc->getElementById("clip");   // a clipping box is an element's
+    ZepraBrowser::paintBox(root, 0, 0, 10000, 0);
+    removeRecorder();
+    ASSERT_FALSE(g_paint.clips.empty());
+    // The clip is where the box appears: its padding box moved by the transform
+    const auto& c = g_paint.clips[0];
+    EXPECT_TRUE(near(c[0], 150) && near(c[1], 120) && near(c[2], 200) && near(c[3], 100));
+    // Scale(0) flattens the box: nothing of it is painted
+    installRecorder();
+    LayoutBox root2;
+    root2.width = 800; root2.height = 600;
+    textBox(root2, "flat", 0, 0, 100, 100).transform = "scale(0)";
+    ZepraBrowser::paintBox(root2, 0, 0, 10000, 0);
+    removeRecorder();
+    EXPECT_TRUE(g_paint.texts.empty());
+}
+
+TEST(PaintTransform, FixedNavPaintsOverAZIndexedSectionWithATransformedChild) {
+    // Tailwind sites: <nav class="fixed z-[100]"> and <section class="relative
+    // z-10"> whose .reveal child GSAP translates
+    installRecorder();
+    LayoutBox root;
+    root.width = 800; root.height = 2000;
+    LayoutBox& section = addBox(root, LayoutType::Block);
+    section.width = 800; section.height = 400;
+    section.positionType = 1;
+    section.zIndex = 10;
+    section.zIndexAuto = false;
+    textBox(section, "heading", 0, 0, 800, 50).transform = "translate(0px, 10px)";
+    LayoutBox& nav = textBox(root, "nav", 0, 0, 800, 60);
+    nav.positionType = 3;
+    nav.zIndex = 100;
+    nav.zIndexAuto = false;
+    ZepraBrowser::paintBox(root, 0, 0, 10000, 0);
+    removeRecorder();
+    ASSERT_EQ(g_paint.texts.size(), 2u);
+    EXPECT_EQ(g_paint.texts[0], "heading");
+    EXPECT_EQ(g_paint.texts[1], "nav");
+}
+
+TEST(PaintTransform, HitTestingMapsThePointIntoTheBox) {
+    LayoutBox box;
+    box.width = 100; box.height = 50;
+    box.screenX = 10; box.screenY = 10;
+    box.transform = "translateX(200px)";
+    float x = 250, y = 30;
+    ASSERT_TRUE(ZepraBrowser::toBoxSpace(box, x, y));
+    EXPECT_TRUE(near(x, 50) && near(y, 30));
+    box.transform = "scale(2)";   // about (60, 35)
+    x = 60 + 2 * 30; y = 35;
+    ASSERT_TRUE(ZepraBrowser::toBoxSpace(box, x, y));
+    EXPECT_TRUE(near(x, 90) && near(y, 35));
+    box.transform = "scale(0)";
+    EXPECT_FALSE(ZepraBrowser::toBoxSpace(box, x, y));
 }

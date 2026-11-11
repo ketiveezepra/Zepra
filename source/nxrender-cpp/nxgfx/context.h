@@ -63,6 +63,10 @@ public:
     void pushTransform();
     void popTransform();
     void translate(float x, float y);
+    /// Multiplies the 2D affine matrix (a, b, c, d, e, f) (x' = a*x + c*y + e,
+    /// y' = b*x + d*y + f) into the current transform: what is drawn next
+    /// goes through it, then through the ones before it
+    void multiplyTransform(float a, float b, float c, float d, float e, float f);
     void scale(float sx, float sy);
     void rotate(float radians);
     
