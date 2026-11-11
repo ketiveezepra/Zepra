@@ -68,6 +68,14 @@ center {
     text-align: -webkit-center;
 }
 
+listing, plaintext, xmp, optgroup, frameset, frame {
+    display: block;
+}
+
+slot {
+    display: contents;
+}
+
 p {
     display: block;
     margin-top: 1em;
@@ -346,6 +354,7 @@ fieldset {
 }
 
 legend {
+    display: block;
     padding-left: 2px;
     padding-right: 2px;
 }

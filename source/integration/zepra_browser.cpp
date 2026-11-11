@@ -2948,6 +2948,9 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     childTag == "address" || childTag == "details" || childTag == "summary") {
                     isBlockElement = true;
                 }
+                // <br> is inline (CSS display), but this layout has no forced
+                // break inside a line: an empty block ends the line instead
+                if (childTag == "br") isBlockElement = true;
             }
             
             if (isBlockElement) {

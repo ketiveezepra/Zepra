@@ -1472,6 +1472,16 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 float contentW = maxChildRight + child.paddingRight + child.borderRight;
                 if (contentW > 0 && contentW < availWidth)
                     child.width = contentW;
+            } else if (child.type == LayoutType::Inline && !wrappedRun && run.text.empty() &&
+                       child.children.empty() && child.paddingLeft == 0 && child.paddingRight == 0 &&
+                       child.paddingTop == 0 && child.paddingBottom == 0 && child.borderLeft == 0 &&
+                       child.borderRight == 0 && child.borderTop == 0 && child.borderBottom == 0 &&
+                       child.marginLeft == 0 && child.marginRight == 0) {
+                // An empty inline element (<span></span>, an unknown or
+                // custom element with no content) adds no line height: a
+                // line with nothing else is zero-height (CSS 2.1 §9.4.2)
+                child.width = 0;
+                child.height = 0;
             } else {
                 bool forcedBreaks = run.text.find('\n') != std::string::npos;
                 float textW = forcedBreaks ? widestForcedLine(run) : measureTextWidth(run.text, run.fontSize, &run);
