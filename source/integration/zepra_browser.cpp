@@ -2344,6 +2344,16 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
             std::string childTag = childElement->tagName();
             // std::cout << "[Layout] Visiting tag: " << childTag << std::endl;
             std::transform(childTag.begin(), childTag.end(), childTag.begin(), ::tolower);
+
+            // display: none makes no box, form controls and replaced
+            // elements included (their own paths below never check it)
+            if (g_cssEngine) {
+#pragma push_macro("None")
+#undef None
+                const CSSComputedStyle* hiddenStyle = g_cssEngine->getComputedStyle(childElement);
+                if (hiddenStyle && hiddenStyle->display == DisplayValue::None) continue;
+#pragma pop_macro("None")
+            }
             
             // Handle input elements
             if (childTag == "input") {
@@ -2593,21 +2603,15 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 }
             }
             
-            // Handle button and button-like inputs
-            if (childTag == "button" || 
-                (childTag == "input" && (childElement->getAttribute("type") == "submit" || 
-                                         childElement->getAttribute("type") == "button" ||
-                                         childElement->getAttribute("type") == "reset"))) {
+            // Button-like inputs: a label from their value. (A <button> is an
+            // ordinary container: its content, icons included, is laid out
+            // below like any element's, with the UA sheet's look.)
+            if (childTag == "input" && (childElement->getAttribute("type") == "submit" || 
+                                        childElement->getAttribute("type") == "button" ||
+                                        childElement->getAttribute("type") == "reset")) {
                 LayoutBox* btnBox = addChild(parentBox);
                 btnBox->type = LayoutType::InlineBlock;
-                
-                if (childTag == "button") {
-                    btnBox->text = childElement->textContent();
-                    if (btnBox->text.empty() && childElement->hasAttribute("value"))
-                        btnBox->text = childElement->getAttribute("value");
-                } else {
-                    btnBox->text = childElement->getAttribute("value");
-                }
+                btnBox->text = childElement->getAttribute("value");
                 
                 // Default text by type
                 if (btnBox->text.empty()) {
@@ -2620,12 +2624,13 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                 if (style) {
                     btnBox->fontSize = style->fontSize > 0 ? style->fontSize : 14;
                     btnBox->color = cssColorToRGB(style->color);
+                    // The page's (or the UA sheet's) background; a
+                    // transparent one paints nothing
                     if (!style->backgroundColor.isTransparent()) {
                         btnBox->bgColor = cssColorToRGB(style->backgroundColor);
-                    } else {
-                        btnBox->bgColor = 0x2563EB; // Default button blue
+                        btnBox->bgAlpha = style->backgroundColor.a;
+                        btnBox->hasBgColor = true;
                     }
-                    btnBox->hasBgColor = true;
                     btnBox->fontWeight = static_cast<int>(style->fontWeight);
                     btnBox->fontFamily = style->fontFamily;
                     btnBox->bold = (btnBox->fontWeight >= 600);

@@ -337,6 +337,7 @@ textarea {
 }
 
 button {
+    text-align: center;
     padding: 4px 12px;
     border: 1px solid #ccc;
     background-color: #f0f0f0;
