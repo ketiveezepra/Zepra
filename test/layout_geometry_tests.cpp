@@ -14,6 +14,8 @@
 
 #include "browser/dom.hpp"
 #include "browser/layout_geometry.h"
+#include "css/css_engine.hpp"
+#include "css/ua_stylesheet.h"
 #include "html/html_parser.hpp"
 #include "scripting/dom_bindings.hpp"
 #include "scripting/page_geometry.hpp"
@@ -707,4 +709,37 @@ TEST(ScrollContainers, MovedContainersAreReportedOnceForTheirScrollEvent) {
     ZepraBrowser::scrollContainerTo(page.box("list"), 0, 40);    // already there
     EXPECT_TRUE(ZepraBrowser::elementScrollOffsets().takeScrolled().empty());
     ZepraBrowser::elementScrollOffsets().clear();
+}
+
+// ---------------------------------------------------------------------------
+// getComputedStyle: width and height are the used size of a laid-out box
+// ---------------------------------------------------------------------------
+
+TEST(ComputedStyleUsedSize, WidthAndHeightComeFromTheBox) {
+    Page page;
+    CSSEngine css;
+    css.initialize(page.doc.get());
+    css.addStyleSheet(ZepraUAStylesheet::getStylesheet(), StyleOrigin::UserAgent);
+    css.addStyleSheet("#box { width: 50%; padding: 10px; border: 2px solid } #hidden { width: 50% }",
+                      StyleOrigin::Author);
+    uint64_t styled = 0;
+    page.script->setComputedStyleSource([&](DOMElement* element) -> const CSSComputedStyle* {
+        if (styled != domMutationVersion()) {
+            css.computeStyles();
+            styled = domMutationVersion();
+        }
+        return css.getComputedStyle(element);
+    });
+    auto size = [&](const char* id) {
+        return page.eval(std::string("var cs = getComputedStyle(document.getElementById('") + id +
+                         "')); cs.width + ' ' + cs.height");
+    };
+    // The 300 x 100 border box less its 2px border and 10px padding
+    EXPECT_EQ(size("box"), "276px 76px");
+    // Under border-box sizing: the border box itself
+    page.eval("document.getElementById('box').style.boxSizing = 'border-box'");
+    EXPECT_EQ(size("box"), "300px 100px");
+    // A non-replaced inline box and an element without a box keep the computed value
+    EXPECT_EQ(size("word"), "auto auto");
+    EXPECT_EQ(size("hidden"), "50% auto");
 }

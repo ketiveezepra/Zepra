@@ -121,6 +121,9 @@ public:
     /// for the element itself.
     std::vector<std::pair<std::string, std::string>> computedValues(DOMElement* element,
                                                                     const std::string& pseudo = "") const;
+    /// Replaces width and height in computedValues() with the element's
+    /// used size when it has a rendered box (getComputedStyle's resolved values)
+    void resolveUsedSizes(DOMElement* element, std::vector<std::pair<std::string, std::string>>& values) const;
 
     /// Called for each <script> element that may need preparing (HTML
     /// "prepare the script element"): one a script connected to the

@@ -109,7 +109,7 @@ TEST(ComputedStyle, InheritedColorAndFontSize) {
     EXPECT_EQ(page.eval("getComputedStyle(document.getElementById('child')).color"), "rgb(10, 20, 30)");
     EXPECT_EQ(page.eval("getComputedStyle(document.getElementById('child')).fontSize"), "20px");
     // background-color does not inherit
-    EXPECT_EQ(page.eval("getComputedStyle(document.getElementById('child')).backgroundColor"), "transparent");
+    EXPECT_EQ(page.eval("getComputedStyle(document.getElementById('child')).backgroundColor"), "rgba(0, 0, 0, 0)");
 }
 
 TEST(ComputedStyle, CamelCaseAndCssNames) {
@@ -136,7 +136,12 @@ TEST(ComputedStyle, LengthAndItemListTheResolvedProperties) {
     EXPECT_EQ(page.eval("cs.item(cs.length) + '|' + cs[cs.length]"), "|undefined");
     // Every value is the one the DevTools Computed pane shows
     std::string all;
-    for (const auto& [name, value] : expected) all += name + "=" + value + ";";
+    // ...with min-width/min-height: auto resolved against the parent (a
+    // block here, so 0px), which only the script-facing values can see
+    for (const auto& [name, value] : expected) {
+        bool minAuto = (name == "min-width" || name == "min-height") && value == "auto";
+        all += name + "=" + (minAuto ? std::string("0px") : value) + ";";
+    }
     EXPECT_EQ(page.eval("var out = ''; for (var i = 0; i < cs.length; i++) out += cs[i] + '=' + cs.getPropertyValue(cs[i]) + ';'; out"),
               all);
 }
@@ -273,13 +278,13 @@ TEST(ComputedStyle, ReadsFollowStyleChanges) {
     EXPECT_EQ(page.eval("box.style.width = '250px'; cs.width"), "250px");
     EXPECT_EQ(page.eval("box.removeAttribute('style'); cs.width + '|' + cs.marginTop"), "120px|0px");
     EXPECT_EQ(page.eval("child.className = 'faded'; ccs.opacity + '|' + ccs.backgroundColor"),
-              "0.5|rgba(255, 0, 0, 0.50)");
+              "0.5|rgba(255, 0, 0, 0.5)");
     // Inherited values follow the parent
     EXPECT_EQ(page.eval("box.style.color = 'rgb(1, 2, 3)'; ccs.color"), "rgb(1, 2, 3)");
-    // Properties that only apply to flex containers appear with display: flex
-    EXPECT_EQ(page.eval("var before = cs.length; box.className = 'flex';"
-                        "[cs.display, cs.flexDirection, cs.length > before].join('|')"),
-              "flex|column|true");
+    // The flex properties are there for every element, the shorthands too
+    EXPECT_EQ(page.eval("var before = cs.flexDirection; box.className = 'flex';"
+                        "[before, cs.display, cs.flexDirection, cs.flexFlow, cs.flex].join('|')"),
+              "row|flex|column|column nowrap|0 1 auto");
 }
 
 TEST(ComputedStyle, WithoutAStyleSourceValuesAreEmpty) {
@@ -773,4 +778,54 @@ TEST(Restyle, RandomChangesMatchAFullRestyle) {
         ASSERT_EQ(incremental, full) << "after step " << step;
     }
     EXPECT_GT(page.css->styleStats().targetedPasses, 200u);
+}
+
+// ---------------------------------------------------------------------------
+// Resolved values: font- and viewport-relative lengths in px, colours as
+// rgb()/rgba(), min sizes, currentColor borders, the flex shorthands
+// ---------------------------------------------------------------------------
+
+TEST(ComputedStyle, ResolvedValues) {
+    Page page(R"(<!DOCTYPE html><html><head><style>
+#a { font-size: 20px; padding: 1em 2rem; margin-right: 2em; max-width: 10em; min-height: 3em; flex-basis: 1em }
+#b { background: rgba(255, 0, 0, .5); color: rgba(0, 0, 0, .3); outline-color: rgba(1, 2, 3, .123) }
+#c { border: 1px solid; color: rgb(0, 128, 0) }
+#d { border-top: 2px solid red; border-right-color: currentColor; color: blue }
+#f { display: flex; flex-flow: wrap column-reverse; gap: 1em }
+#i { flex: 2 1 3rem }
+</style></head><body>
+<div id="a">a</div><div id="b">b</div><div id="c">c</div><div id="d">d</div>
+<div id="f"><div id="i">i</div></div>
+</body></html>)");
+    auto cs = [&](const char* id, const char* prop) {
+        return page.eval(std::string("getComputedStyle(document.getElementById('") + id + "'))." + prop);
+    };
+    EXPECT_EQ(cs("a", "paddingTop"), "20px");
+    EXPECT_EQ(cs("a", "paddingLeft"), "32px");
+    EXPECT_EQ(cs("a", "marginRight"), "40px");
+    EXPECT_EQ(cs("a", "maxWidth"), "200px");
+    EXPECT_EQ(cs("a", "maxHeight"), "none");
+    EXPECT_EQ(cs("a", "minHeight"), "60px");
+    EXPECT_EQ(cs("a", "flexBasis"), "20px");
+    // min-width/min-height: auto is 0px, except on a flex item
+    EXPECT_EQ(cs("b", "minWidth"), "0px");
+    EXPECT_EQ(cs("i", "minHeight"), "auto");
+    // Alpha with the fewest digits that round-trip
+    EXPECT_EQ(cs("b", "backgroundColor"), "rgba(255, 0, 0, 0.5)");
+    EXPECT_EQ(cs("b", "color"), "rgba(0, 0, 0, 0.3)");
+    EXPECT_EQ(cs("c", "backgroundColor"), "rgba(0, 0, 0, 0)");
+    // A border without a colour is currentColor, even with color declared after it
+    EXPECT_EQ(cs("c", "borderTopColor"), "rgb(0, 128, 0)");
+    EXPECT_EQ(cs("c", "borderLeftColor"), "rgb(0, 128, 0)");
+    EXPECT_EQ(cs("d", "borderTopColor"), "rgb(255, 0, 0)");
+    EXPECT_EQ(cs("d", "borderRightColor"), "rgb(0, 0, 255)");
+    EXPECT_EQ(cs("d", "borderBottomColor"), "rgb(0, 0, 255)");
+    // flex-flow in either order; the shorthands read back
+    EXPECT_EQ(cs("f", "flexDirection"), "column-reverse");
+    EXPECT_EQ(cs("f", "flexWrap"), "wrap");
+    EXPECT_EQ(cs("f", "flexFlow"), "column-reverse wrap");
+    EXPECT_EQ(cs("f", "gap"), "16px");
+    EXPECT_EQ(cs("a", "gap"), "normal");
+    EXPECT_EQ(cs("i", "flex"), "2 1 48px");
+    EXPECT_EQ(cs("a", "flex"), "0 1 20px");
 }

@@ -7,11 +7,13 @@
 
 #include "css/computed_style_values.hpp"
 #include "browser/box_transform.h"
+#include "css/media_query.hpp"
 
 #include <cctype>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 namespace Zepra::WebCore {
@@ -49,12 +51,48 @@ std::string lengthStr(const CSSLength& l) {
     }
 }
 
+// Colors resolve to rgb() / rgba() (CSSOM §6.7.2 "serialize a CSS
+// component value"): transparent is rgba(0, 0, 0, 0); the alpha has the
+// fewest digits (up to 3) within one 8-bit step of the stored value
 std::string colorStr(const CSSColor& c) {
-    if (c.a == 0) return "transparent";
-    char buf[48];
-    if (c.a == 255) std::snprintf(buf, sizeof buf, "rgb(%d, %d, %d)", c.r, c.g, c.b);
-    else std::snprintf(buf, sizeof buf, "rgba(%d, %d, %d, %.2f)", c.r, c.g, c.b, c.a / 255.0);
+    char buf[64];
+    if (c.a == 255) {
+        std::snprintf(buf, sizeof buf, "rgb(%d, %d, %d)", c.r, c.g, c.b);
+        return buf;
+    }
+    char alpha[16];
+    for (int digits = 1; digits <= 3; digits++) {
+        std::snprintf(alpha, sizeof alpha, "%.*f", digits, c.a / 255.0);
+        if (std::fabs(std::atof(alpha) * 255.0 - c.a) < 1.0) break;
+    }
+    std::string a = alpha;
+    while (a.size() > 1 && a.back() == '0') a.pop_back();
+    if (!a.empty() && a.back() == '.') a.pop_back();
+    std::snprintf(buf, sizeof buf, "rgba(%d, %d, %d, %s)", c.r, c.g, c.b, a.c_str());
     return buf;
+}
+
+// A length as its computed value: font- and viewport-relative units in px
+// (percentages and auto stay)
+std::string absLengthStr(const CSSLength& l, float fontSize) {
+    if (l.isAuto()) return "auto";
+    const MediaEnvironment& env = mediaEnvironment();
+    float px;
+    switch (l.unit) {
+        case CSSLength::Unit::Em: px = l.value * fontSize; break;
+        case CSSLength::Unit::Rem: px = l.value * 16.0f; break;
+        case CSSLength::Unit::Vw: px = l.value * (float)env.width / 100.0f; break;
+        case CSSLength::Unit::Vh: px = l.value * (float)env.height / 100.0f; break;
+        case CSSLength::Unit::Vmin: px = l.value * (float)std::min(env.width, env.height) / 100.0f; break;
+        case CSSLength::Unit::Vmax: px = l.value * (float)std::max(env.width, env.height) / 100.0f; break;
+        default: return lengthStr(l);
+    }
+    return formatComputedNumber(px) + "px";
+}
+
+// max-width / max-height: their initial value is none
+std::string maxLengthStr(const CSSLength& l, float fontSize) {
+    return l.isAuto() ? "none" : absLengthStr(l, fontSize);
 }
 
 // Strings in `content` print double-quoted with their escapes resolved, as
@@ -203,20 +241,23 @@ std::vector<std::pair<std::string, std::string>> resolve(const CSSComputedStyle&
         add("opacity", buf);
     }
     add("float", s.cssFloat == 1 ? "left" : s.cssFloat == 2 ? "right" : "none");
-    add("width", lengthStr(s.width));
-    add("height", lengthStr(s.height));
-    add("min-width", lengthStr(s.minWidth));
-    add("min-height", lengthStr(s.minHeight));
-    add("max-width", lengthStr(s.maxWidth));
-    add("max-height", lengthStr(s.maxHeight));
-    add("margin-top", lengthStr(s.marginTop));
-    add("margin-right", lengthStr(s.marginRight));
-    add("margin-bottom", lengthStr(s.marginBottom));
-    add("margin-left", lengthStr(s.marginLeft));
-    add("padding-top", lengthStr(s.paddingTop));
-    add("padding-right", lengthStr(s.paddingRight));
-    add("padding-bottom", lengthStr(s.paddingBottom));
-    add("padding-left", lengthStr(s.paddingLeft));
+    // width/height: the used size replaces these once the element has a
+    // box (DOMBindings::computedValues)
+    const float em = s.fontSize;
+    add("width", absLengthStr(s.width, em));
+    add("height", absLengthStr(s.height, em));
+    add("min-width", absLengthStr(s.minWidth, em));
+    add("min-height", absLengthStr(s.minHeight, em));
+    add("max-width", maxLengthStr(s.maxWidth, em));
+    add("max-height", maxLengthStr(s.maxHeight, em));
+    add("margin-top", absLengthStr(s.marginTop, em));
+    add("margin-right", absLengthStr(s.marginRight, em));
+    add("margin-bottom", absLengthStr(s.marginBottom, em));
+    add("margin-left", absLengthStr(s.marginLeft, em));
+    add("padding-top", absLengthStr(s.paddingTop, em));
+    add("padding-right", absLengthStr(s.paddingRight, em));
+    add("padding-bottom", absLengthStr(s.paddingBottom, em));
+    add("padding-left", absLengthStr(s.paddingLeft, em));
     add("border-top-width", formatComputedNumber(s.borderTopWidth) + "px");
     add("border-right-width", formatComputedNumber(s.borderRightWidth) + "px");
     add("border-bottom-width", formatComputedNumber(s.borderBottomWidth) + "px");
@@ -228,6 +269,9 @@ std::vector<std::pair<std::string, std::string>> resolve(const CSSComputedStyle&
     add("border-bottom-style", kBorderStyles[(int)s.borderBottomStyle]);
     add("border-left-style", kBorderStyles[(int)s.borderLeftStyle]);
     add("border-top-color", colorStr(s.borderTopColor));
+    add("border-right-color", colorStr(s.borderRightColor));
+    add("border-bottom-color", colorStr(s.borderBottomColor));
+    add("border-left-color", colorStr(s.borderLeftColor));
     add("border-radius", s.borderTopLeftRadiusPercent > 0 ? formatComputedNumber(s.borderTopLeftRadiusPercent) + "%"
                                                            : formatComputedNumber(s.borderTopLeftRadius) + "px");
     add("overflow-x", overflowStr(s.overflowX));
@@ -237,21 +281,29 @@ std::vector<std::pair<std::string, std::string>> resolve(const CSSComputedStyle&
     add("bottom", lengthStr(s.bottom));
     add("left", lengthStr(s.left));
     add("z-index", s.zIndexAuto ? "auto" : std::to_string(s.zIndex));
-    if (everything || s.display == DisplayValue::Flex || s.display == DisplayValue::InlineFlex) {
+    // The flex properties apply to every element's style (a script reads
+    // them on any element, as browsers report them)
+    {
         const char* dir = s.flexDirection == FlexDirection::Row ? "row" :
                           s.flexDirection == FlexDirection::RowReverse ? "row-reverse" :
                           s.flexDirection == FlexDirection::Column ? "column" : "column-reverse";
+        const char* wrap = s.flexWrap ? (s.wrapReverse ? "wrap-reverse" : "wrap") : "nowrap";
         add("flex-direction", dir);
-        add("flex-wrap", s.flexWrap ? (s.wrapReverse ? "wrap-reverse" : "wrap") : "nowrap");
+        add("flex-wrap", wrap);
+        add("flex-flow", std::string(dir) + " " + wrap);
         add("justify-content", justifyStr(s.justifyContent));
         add("align-items", justifyStr(s.alignItems));
         add("align-content", justifyStr(s.alignContent));
-        add("gap", lengthStr(s.gap));
+        add("gap", s.gap.isAuto() || (s.gap.value == 0 && s.gap.unit == CSSLength::Unit::Px) ? std::string("normal")
+                                                                                             : absLengthStr(s.gap, em));
     }
     add("align-self", justifyStr(s.alignSelf));
     add("flex-grow", formatComputedNumber(s.flexGrow));
     add("flex-shrink", formatComputedNumber(s.flexShrink));
-    add("flex-basis", lengthStr(s.flexBasis));
+    add("flex-basis", absLengthStr(s.flexBasis, em));
+    // The shorthand: grow shrink basis, as browsers serialize it
+    add("flex", formatComputedNumber(s.flexGrow) + " " + formatComputedNumber(s.flexShrink) + " " +
+                    absLengthStr(s.flexBasis, em));
     if (everything || s.order) add("order", std::to_string(s.order));
     if (everything || !s.gridTemplateColumns.empty()) add("grid-template-columns", s.gridTemplateColumns);
     if (everything || !s.gridTemplateRows.empty()) add("grid-template-rows", s.gridTemplateRows);
