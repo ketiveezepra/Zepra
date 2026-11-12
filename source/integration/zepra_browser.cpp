@@ -64,6 +64,7 @@
 // ===========================================================================
 #ifdef USE_WEBCORE
 #include "html_parser.hpp"
+#include "browser/style_change_log.hpp"
 #include "browser/dom.hpp"
 #include "css/css_engine.hpp"
 #include "css/css_animations.hpp"
@@ -1335,6 +1336,8 @@ static void rebuildLayoutTreeOnce() {
     syncPageStyleSheets();
     // Compute styles (shadow trees bring their own <style> sheets)
     g_cssEngine->syncShadowStyles(g_document.get());
+    const auto styleStart = std::chrono::steady_clock::now();
+    const uint64_t computedBefore = g_cssEngine->styleStats().stylesComputed;
     g_cssEngine->computeStyles();
     // std::cout << "[CSS] Styles computed" << std::endl;
     
@@ -1469,6 +1472,17 @@ static void rebuildLayoutTreeOnce() {
     int totalBoxes = countBoxes(*g_layoutRoot);
     std::cout << "[Layout] Built layout tree: " << totalBoxes << " total boxes, "
               << g_layoutRoot->children.size() << " direct children" << std::endl;
+    // ZEPRA_STYLE_STATS=1: what the style pass of this rebuild cost
+    if (CSSEngine::styleStatsEnabled()) {
+        const auto& st = g_cssEngine->styleStats();
+        double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - styleStart).count();
+        std::cout << "[Style] pass " << st.passes << (g_cssEngine->lastPassFull() ? " full" : " targeted")
+                  << (g_cssEngine->lastPassFull() ? std::string(" (") + g_cssEngine->lastPassReason() + ")" : std::string())
+                  << ": dropped " << g_cssEngine->lastPassDropped() << ", computed "
+                  << (st.stylesComputed - computedBefore) << " styles; build " << ms << " ms; totals: "
+                  << st.fullPasses << " full, " << st.targetedPasses << " targeted, " << st.stylesComputed
+                  << " computed, " << st.invalidationMs << " ms deciding" << std::endl;
+    }
     // Scroll positions of elements that are no longer scroll containers
     // (removed or restyled) are dropped; the others carry over to the new boxes
     ZepraBrowser::elementScrollOffsets().prune(*g_layoutRoot);
@@ -1606,6 +1620,12 @@ struct PageLoad {
     std::string url;
     std::shared_ptr<const std::string> html;
     std::unique_ptr<DOMDocument> document;   // until it is committed
+    /// The document's parser, stopped at its first script (null once the
+    /// whole document is parsed, or with ZEPRA_PARSE_WHOLE=1)
+    std::unique_ptr<Zepra::WebCore::HTMLDocumentParser> parser;
+    /// While the parser is not done: the whole page parsed ahead (the
+    /// preload scanner's view), for its sheets and scripts
+    std::unique_ptr<DOMDocument> lookahead;
     bool scriptsStarted = false;             // advanceParsing ran once
 };
 static std::unordered_map<int, PageLoad> g_pageLoads;
@@ -1753,6 +1773,8 @@ static void pumpPageFonts() {
     res->fontsApplied = key;
     ZepraBrowser::LoadTrace::mark("web fonts arrived (" + std::to_string(wanted.size()) + ")");
     loadPageWebFonts();
+    // Font-relative values are computed with the fonts there are
+    g_cssEngine->invalidate();
     relayoutDocument(true);
 }
 
@@ -1794,7 +1816,7 @@ static void pumpPageLoad() {
     if (load.phase == PageLoad::Phase::Styles) {
         auto res = g_pageResources.find(g_activeTabId);
         if (res != g_pageResources.end() && res->second.pageId == load.pageId &&
-            !res->second.styles->allSettled(load.document.get())) {
+            !res->second.styles->allSettled(load.lookahead ? load.lookahead.get() : load.document.get())) {
             return;
         }
         ZepraBrowser::LoadTrace::mark("stylesheets loaded");
@@ -1809,7 +1831,13 @@ static void pumpPageLoad() {
     // still take longer: scripts are not interrupted)
     constexpr auto kScriptSlice = std::chrono::milliseconds(8);
     load.scriptsStarted = true;
-    if (!g_scriptContext->advanceParsing(std::chrono::steady_clock::now() + kScriptSlice)) return;
+    const uint64_t versionBefore = Zepra::WebCore::domMutationVersion();
+    const bool parsed = g_scriptContext->advanceParsing(std::chrono::steady_clock::now() + kScriptSlice);
+    // The parser added text: the web fonts it needs may be new
+    if (Zepra::WebCore::domMutationVersion() != versionBefore) {
+        if (PageResources* res = activePageResources()) res->fontsDirty = true;
+    }
+    if (!parsed) return;
     ZepraBrowser::LoadTrace::mark("DOMContentLoaded");
     g_traceLoadPending = true;
     std::cout << "[JS] DOMContentLoaded fired; window load "
@@ -1828,13 +1856,35 @@ void parseWithWebCore(const std::string& html) {
     load.url = g_currentUrl;
     load.html = std::make_shared<const std::string>(html);
 
-    HTMLParser parser;
-    load.document = parser.parse(html);
+    // The document's own parser runs up to its first script now; scripts
+    // then run as it reaches them (ScriptContext::advanceParsing), each
+    // seeing the tree built so far. ZEPRA_PARSE_WHOLE=1: the old way, the
+    // whole page parsed before any script runs.
+    static const bool parseWhole = [] {
+        const char* v = std::getenv("ZEPRA_PARSE_WHOLE");
+        return v && *v && *v != '0';
+    }();
+    if (parseWhole) {
+        HTMLParser parser;
+        load.document = parser.parse(html);
+    } else {
+        load.parser = std::make_unique<Zepra::WebCore::HTMLDocumentParser>(html);
+        load.parser->pump();
+        load.document = load.parser->releaseDocument();
+        if (load.parser->done()) {
+            load.parser.reset();
+        } else {
+            // The preload scan and the render-blocking sheets look at the
+            // whole page, as a browser's preload scanner does
+            HTMLParser lookahead;
+            load.lookahead = lookahead.parse(html);
+        }
+    }
     if (!load.document) {
         std::cerr << "[WebCore] Failed to parse HTML" << std::endl;
         return;
     }
-    DOMDocument* document = load.document.get();
+    DOMDocument* document = load.lookahead ? load.lookahead.get() : load.document.get();
 
     // Preload scan: every sheet and script the document names, requested
     // now and in parallel (render-blocking sheets first); the loads below
@@ -2095,14 +2145,17 @@ static void commitPageLoad(int tabId, PageLoad& load) {
     // loaded; pumpPageLoad() moves them on from the frame loop.
     // Lines count from the document, so console links land on the page source.
     std::shared_ptr<const std::string> source = load.html;
-    g_scriptContext->beginParsing([source](DOMElement* script) -> uint32_t {
+    auto firstLineOf = [source](DOMElement* script) -> uint32_t {
         if (script->hasAttribute("src")) return 1;
         std::string code = script->textContent();
         const std::string& page = *source;
         size_t at = code.empty() ? std::string::npos : page.find(code);
         if (at == std::string::npos) return 1;
         return 1 + (uint32_t)std::count(page.begin(), page.begin() + (long)at, '\n');
-    });
+    };
+    load.lookahead.reset();
+    if (load.parser) g_scriptContext->beginParsing(std::move(load.parser), firstLineOf);
+    else g_scriptContext->beginParsing(firstLineOf);
     load.phase = PageLoad::Phase::Scripts;
     ZepraBrowser::LoadTrace::mark("committed; parser scripts start");
 }
@@ -6565,6 +6618,14 @@ static void setInteractionState(DOMElement* hovered, DOMElement* active, DOMElem
         ((state.hovered != hovered && g_cssEngine->usesHoverSelectors()) ||
          (state.active != active && g_cssEngine->usesActiveSelectors()) ||
          (g_styledFocus != focused && g_cssEngine->usesFocusSelectors()));
+    // The style pass restyles only the elements whose state flipped (and
+    // what their selectors reach)
+    if (restyle) {
+        const DOMDocument* doc = g_document.get();
+        if (state.hovered != hovered) Zepra::WebCore::noteInteractionChange(doc, state.hovered, hovered, "hover");
+        if (state.active != active) Zepra::WebCore::noteInteractionChange(doc, state.active, active, "active");
+        if (g_styledFocus != focused) Zepra::WebCore::noteInteractionChange(doc, g_styledFocus, focused, "focus");
+    }
     state.hovered = hovered;
     state.active = active;
     state.focused = focused;

@@ -9,6 +9,7 @@
  */
 
 #include "scripting/script_context.hpp"
+#include "html/html_parser.hpp"
 #include "scripting/canvas_bindings.hpp"
 #include "scripting/dom_bindings.hpp"
 #include "scripting/web_animations.hpp"
@@ -601,7 +602,7 @@ void ScriptContext::setGlobal(const std::string& name, const std::string& value)
 
 void ScriptContext::fireDOMContentLoaded() {
     if (vm_ && domBindings_) {
-        domBindings_->setReadyState("interactive");
+        setDocumentReadiness("interactive");
         runTask([this] { domBindings_->fireEvent(document_, "DOMContentLoaded", true, false); }, "DOMContentLoaded listener");
     }
     for (auto& listener : domContentLoadedListeners_) {
@@ -621,7 +622,7 @@ void ScriptContext::fireLoadEvent() {
 
 void ScriptContext::fireLoadEventNow() {
     if (vm_ && domBindings_) {
-        domBindings_->setReadyState("complete");
+        setDocumentReadiness("complete");
         runTask([this] { domBindings_->fireEvent(nullptr, "load", false, false); }, "load listener");
     }
     for (auto& listener : loadListeners_) {

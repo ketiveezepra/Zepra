@@ -185,9 +185,35 @@ public:
     }
 
     /**
-     * @brief Run the tokenizer over the full source
+     * @brief Run the tokenizer over the full source (pauses are ignored)
      */
     void tokenize();
+
+    /// Why run() returned
+    enum class RunResult {
+        Paused,      ///< requestPause() was called while a token was handled
+        NeedInput,   ///< reached the limit, or the end of input that is not closed yet
+        Finished     ///< the end-of-file token was emitted
+    };
+    /**
+     * @brief Tokenizes from where the last run stopped until a token handler
+     * asks for a pause (the tree constructor, after a </script>), the limit
+     * (setLimit: the parser's insertion point) or the end of the input.
+     * The source string may grow between runs (document.write inserts at
+     * or after position()); the end-of-file token comes only once the input
+     * is closed (setInputClosed).
+     */
+    RunResult run();
+    /// Stop after the token being handled now
+    void requestPause() { pauseRequested_ = true; }
+    /// Do not consume characters at or after this offset (npos: no limit)
+    void setLimit(size_t limit) { limit_ = limit; }
+    /// No more input will be added: the end of the source is end-of-file
+    void setInputClosed(bool closed) { inputClosed_ = closed; }
+    bool inputClosed() const { return inputClosed_; }
+    /// Offset of the next character to consume in the source
+    size_t position() const { return pos_; }
+    bool finished() const { return finished_; }
 
     /**
      * @brief Switch tokenizer state (called by tree constructor for raw-text elements)
@@ -205,6 +231,10 @@ private:
     // ─── Source access ────────────────────────────────────────────────────
     const std::string& src_;
     size_t pos_ = 0;
+    size_t limit_ = std::string::npos;
+    bool inputClosed_ = true;
+    bool pauseRequested_ = false;
+    bool finished_ = false;
 
     // Current char or EOF sentinel
     static constexpr char32_t kEOF = static_cast<char32_t>(-1);

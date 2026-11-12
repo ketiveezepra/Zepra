@@ -95,6 +95,19 @@ public:
     void setPageGeometry(PageGeometry* geometry) { geometry_ = geometry; }
     /// document.readyState: "loading", "interactive" or "complete"
     void setReadyState(const std::string& state) { readyState_ = state; }
+    const std::string& readyState() const { return readyState_; }
+    /// document.write()/writeln() (the text, writeln's newline included),
+    /// document.open() and document.close(): the page's parser
+    /// (ScriptContext). Without hooks they do nothing.
+    struct DocumentStreamHooks {
+        std::function<void(const std::string& text)> write;
+        std::function<void()> open;
+        std::function<void()> close;
+    };
+    void setDocumentStreamHooks(DocumentStreamHooks hooks) { streamHooks_ = std::move(hooks); }
+    /// Removes every child of `parent` as a script would (removed nodes
+    /// stay alive while a script can reach them): document.open()
+    void removeChildrenOf(DOMNode* parent) { removeAllChildren(parent); }
     /// Where getComputedStyle() reads styles (the browser's CSS engine).
     /// Without one every computed value is "".
     void setComputedStyleSource(ComputedStyleSource source) { computedStyleSource_ = std::move(source); }
@@ -108,6 +121,9 @@ public:
     /// for the element itself.
     std::vector<std::pair<std::string, std::string>> computedValues(DOMElement* element,
                                                                     const std::string& pseudo = "") const;
+    /// Replaces width and height in computedValues() with the element's
+    /// used size when it has a rendered box (getComputedStyle's resolved values)
+    void resolveUsedSizes(DOMElement* element, std::vector<std::pair<std::string, std::string>>& values) const;
 
     /// Called for each <script> element that may need preparing (HTML
     /// "prepare the script element"): one a script connected to the
@@ -222,6 +238,7 @@ private:
     std::string readyState_ = "loading";
     SubmitHandler submitHandler_;
     ScriptElementHook scriptHook_;
+    DocumentStreamHooks streamHooks_;
     DOMElement* currentScript_ = nullptr;
     std::function<std::string()> documentUrlSource_;
     /// The focused control's value when it got focus (or last committed);

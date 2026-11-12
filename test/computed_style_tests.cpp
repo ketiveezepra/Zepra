@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include "browser/dom.hpp"
+#include "browser/style_change_log.hpp"
 #include "css/computed_style_values.hpp"
 #include "css/css_engine.hpp"
 #include "css/ua_stylesheet.h"
@@ -108,7 +109,7 @@ TEST(ComputedStyle, InheritedColorAndFontSize) {
     EXPECT_EQ(page.eval("getComputedStyle(document.getElementById('child')).color"), "rgb(10, 20, 30)");
     EXPECT_EQ(page.eval("getComputedStyle(document.getElementById('child')).fontSize"), "20px");
     // background-color does not inherit
-    EXPECT_EQ(page.eval("getComputedStyle(document.getElementById('child')).backgroundColor"), "transparent");
+    EXPECT_EQ(page.eval("getComputedStyle(document.getElementById('child')).backgroundColor"), "rgba(0, 0, 0, 0)");
 }
 
 TEST(ComputedStyle, CamelCaseAndCssNames) {
@@ -135,7 +136,12 @@ TEST(ComputedStyle, LengthAndItemListTheResolvedProperties) {
     EXPECT_EQ(page.eval("cs.item(cs.length) + '|' + cs[cs.length]"), "|undefined");
     // Every value is the one the DevTools Computed pane shows
     std::string all;
-    for (const auto& [name, value] : expected) all += name + "=" + value + ";";
+    // ...with min-width/min-height: auto resolved against the parent (a
+    // block here, so 0px), which only the script-facing values can see
+    for (const auto& [name, value] : expected) {
+        bool minAuto = (name == "min-width" || name == "min-height") && value == "auto";
+        all += name + "=" + (minAuto ? std::string("0px") : value) + ";";
+    }
     EXPECT_EQ(page.eval("var out = ''; for (var i = 0; i < cs.length; i++) out += cs[i] + '=' + cs.getPropertyValue(cs[i]) + ';'; out"),
               all);
 }
@@ -272,13 +278,13 @@ TEST(ComputedStyle, ReadsFollowStyleChanges) {
     EXPECT_EQ(page.eval("box.style.width = '250px'; cs.width"), "250px");
     EXPECT_EQ(page.eval("box.removeAttribute('style'); cs.width + '|' + cs.marginTop"), "120px|0px");
     EXPECT_EQ(page.eval("child.className = 'faded'; ccs.opacity + '|' + ccs.backgroundColor"),
-              "0.5|rgba(255, 0, 0, 0.50)");
+              "0.5|rgba(255, 0, 0, 0.5)");
     // Inherited values follow the parent
     EXPECT_EQ(page.eval("box.style.color = 'rgb(1, 2, 3)'; ccs.color"), "rgb(1, 2, 3)");
-    // Properties that only apply to flex containers appear with display: flex
-    EXPECT_EQ(page.eval("var before = cs.length; box.className = 'flex';"
-                        "[cs.display, cs.flexDirection, cs.length > before].join('|')"),
-              "flex|column|true");
+    // The flex properties are there for every element, the shorthands too
+    EXPECT_EQ(page.eval("var before = cs.flexDirection; box.className = 'flex';"
+                        "[before, cs.display, cs.flexDirection, cs.flexFlow, cs.flex].join('|')"),
+              "row|flex|column|column nowrap|0 1 auto");
 }
 
 TEST(ComputedStyle, WithoutAStyleSourceValuesAreEmpty) {
@@ -591,4 +597,235 @@ TEST(CssAnimations, TransitionsStartFromTheOldValue) {
                                                     "transitionstart", "transitionend"}));
     }
     setCssAnimationsDriven(false);
+}
+
+// ============================================================================
+// Targeted restyles: a style pass drops only the styles a change can reach
+// ============================================================================
+
+namespace {
+
+const char* kRestylePage = R"(<!DOCTYPE html><html><head><style>
+.on { color: rgb(1, 0, 0) }
+.wrap .item { color: rgb(2, 0, 0) }
+.mark + .item { color: rgb(3, 0, 0) }
+li:first-child { color: rgb(4, 0, 0) }
+[data-k="v"] { color: rgb(5, 0, 0) }
+#solo { color: rgb(6, 0, 0) }
+.tint { background-color: rgb(9, 9, 9); font-size: 30px }
+input:checked + label { color: rgb(7, 0, 0) }
+.zzz ~ p { font-size: 22px }
+:not(.wrap) > .mark { background-color: rgb(4, 4, 4) }
+p:empty { font-size: 9px }
+li:nth-child(2n of .on) { font-size: 13px }
+.on > :is(.item, .zzz) span { background-color: rgb(6, 6, 6) }
+</style></head><body>
+<div id="w"><p id="a" class="item">a</p><p id="b" class="item">b</p><p id="c">c<span id="deep">d</span></p></div>
+<ul id="list"><li id="l1">1</li><li id="l2">2</li></ul>
+<div id="x"><span id="y">y</span></div>
+<input id="cb" type="checkbox"><label id="lab">l</label>
+</body></html>)";
+
+struct RestylePage {
+    std::unique_ptr<DOMDocument> doc;
+    std::unique_ptr<CSSEngine> css;
+
+    RestylePage() {
+        HTMLParser parser;
+        doc = parser.parse(kRestylePage);
+        css = std::make_unique<CSSEngine>();
+        css->initialize(doc.get());
+        css->addStyleSheet(ZepraUAStylesheet::getStylesheet(), StyleOrigin::UserAgent);
+        for (DOMElement* style : doc->getElementsByTagName("style")) css->addStyleSheet(style->textContent());
+        pass();
+    }
+    /// A style pass and every element's style read, as a layout would
+    std::string pass() {
+        css->computeStyles();
+        return snapshot();
+    }
+    std::string snapshot() {
+        std::string out;
+        std::function<void(DOMNode*)> walk = [&](DOMNode* node) {
+            for (const auto& child : node->childNodes()) {
+                auto* el = dynamic_cast<DOMElement*>(child.get());
+                if (!el) continue;
+                const CSSComputedStyle* s = css->getComputedStyle(el);
+                out += el->tagName() + "#" + el->getAttribute("id") + ":" + std::to_string((int)s->color.r) + "/" +
+                       std::to_string((int)s->fontSize) + "/" + std::to_string((int)s->backgroundColor.r) + " ";
+                walk(el);
+            }
+        };
+        walk(doc.get());
+        return out;
+    }
+    /// The same page restyled from scratch
+    std::string reference() {
+        css->invalidate();
+        return snapshot();
+    }
+    int red(const char* id) { return (int)css->getComputedStyle(doc->getElementById(id))->color.r; }
+};
+
+}  // namespace
+
+TEST(Restyle, ChangesReachOnlyWhatTheirSelectorsSee) {
+    RestylePage page;
+    // A class no selector names: nothing restyles
+    page.doc->getElementById("x")->setAttribute("class", "nothing-uses-this");
+    page.pass();
+    EXPECT_FALSE(page.css->lastPassFull());
+    EXPECT_EQ(page.css->lastPassDropped(), 0u);
+    // A subject class: the element and its subtree
+    page.doc->getElementById("x")->setAttribute("class", "on");
+    page.pass();
+    EXPECT_FALSE(page.css->lastPassFull());
+    EXPECT_EQ(page.css->lastPassDropped(), 2u);
+    EXPECT_EQ(page.red("x"), 1);
+    EXPECT_EQ(page.red("y"), 1);   // inherited
+    // An ancestor class: the subtree under it
+    page.doc->getElementById("w")->setAttribute("class", "wrap");
+    page.pass();
+    EXPECT_EQ(page.css->lastPassDropped(), 5u);
+    EXPECT_EQ(page.red("a"), 2);
+    EXPECT_NE(page.red("c"), 2);   // not an .item
+    // A sibling-combinator class: the parent's children
+    page.doc->getElementById("a")->setAttribute("class", "item mark");
+    page.pass();
+    EXPECT_EQ(page.red("b"), 3);
+    // An attribute selector; an id
+    page.doc->getElementById("c")->setAttribute("data-k", "v");
+    page.doc->getElementById("l2")->setAttribute("id", "solo");
+    page.pass();
+    EXPECT_EQ(page.red("c"), 5);
+    EXPECT_EQ(page.red("deep"), 5);
+    EXPECT_EQ(page.red("solo"), 6);
+    EXPECT_EQ(page.snapshot(), page.reference());
+}
+
+TEST(Restyle, StructureStateAndSheetChanges) {
+    RestylePage page;
+    DOMElement* list = page.doc->getElementById("list");
+    EXPECT_EQ(page.red("l1"), 4);
+    // A new first child: :first-child moves
+    auto li = page.doc->createElement("li");
+    li->setAttribute("id", "l0");
+    list->insertBefore(std::move(li), page.doc->getElementById("l1"));
+    page.pass();
+    EXPECT_EQ(page.red("l0"), 4);
+    EXPECT_NE(page.red("l1"), 4);
+    list->removeChild(page.doc->getElementById("l0"));
+    page.pass();
+    EXPECT_EQ(page.red("l1"), 4);
+    // A checkbox state, through its sibling selector
+    noteStateChange(page.doc->getElementById("cb"), "checked");
+    page.doc->getElementById("cb")->setAttribute("checked", "");
+    page.pass();
+    EXPECT_FALSE(page.css->lastPassFull());
+    EXPECT_EQ(page.snapshot(), page.reference());
+    // A sheet added and removed: only elements its subjects may match
+    page.pass();
+    auto entries = page.css->resolver().styleSheets();
+    auto sheet = CSSParser().parse(".tint { background-color: rgb(8, 8, 8) }");
+    std::shared_ptr<CSSStyleSheet> shared(std::move(sheet));
+    page.doc->getElementById("y")->setAttribute("class", "tint");
+    page.pass();
+    EXPECT_EQ(page.css->getComputedStyle(page.doc->getElementById("y"))->backgroundColor.r, 9);
+    auto withSheet = entries;
+    withSheet.push_back({shared, StyleOrigin::Author});
+    page.css->resolver().setStyleSheets(withSheet);
+    page.pass();
+    EXPECT_FALSE(page.css->lastPassFull());
+    EXPECT_EQ(page.css->lastPassDropped(), 1u);
+    EXPECT_EQ(page.css->getComputedStyle(page.doc->getElementById("y"))->backgroundColor.r, 8);
+    page.css->resolver().setStyleSheets(entries);
+    page.pass();
+    EXPECT_EQ(page.css->getComputedStyle(page.doc->getElementById("y"))->backgroundColor.r, 9);
+    EXPECT_EQ(page.snapshot(), page.reference());
+    // An undescribed change restyles everything
+    noteDomMutation();
+    page.pass();
+    EXPECT_TRUE(page.css->lastPassFull());
+}
+
+// Random DOM changes: after each style pass the styles are the ones a
+// restyle from scratch gives
+TEST(Restyle, RandomChangesMatchAFullRestyle) {
+    RestylePage page;
+    const char* ids[] = {"w", "a", "b", "c", "deep", "list", "l1", "l2", "x", "y", "cb", "lab"};
+    const char* classes[] = {"on", "wrap", "item", "mark", "tint", "", "item mark", "zzz"};
+    unsigned seed = 12345;
+    auto next = [&](unsigned n) { seed = seed * 1103515245u + 12345u; return (seed >> 16) % n; };
+    int created = 0;
+    for (int step = 0; step < 300; step++) {
+        DOMElement* e = page.doc->getElementById(ids[next(12)]);
+        if (!e) continue;
+        switch (next(5)) {
+            case 0: e->setAttribute("class", classes[next(8)]); break;
+            case 1: if (next(2)) e->setAttribute("data-k", "v"); else e->removeAttribute("data-k"); break;
+            case 2: {
+                auto child = page.doc->createElement(next(2) ? "li" : "p");
+                child->setAttribute("class", classes[next(8)]);
+                child->setAttribute("id", "n" + std::to_string(created++));
+                e->insertBefore(std::move(child), e->firstChild());
+                break;
+            }
+            case 3: if (DOMNode* first = e->firstChild()) e->removeChild(first); break;
+            case 4: e->setAttribute("style", next(2) ? "color: rgb(11, 0, 0)" : ""); break;
+        }
+        std::string incremental = page.pass();
+        std::string full = page.reference();
+        ASSERT_EQ(incremental, full) << "after step " << step;
+    }
+    EXPECT_GT(page.css->styleStats().targetedPasses, 200u);
+}
+
+// ---------------------------------------------------------------------------
+// Resolved values: font- and viewport-relative lengths in px, colours as
+// rgb()/rgba(), min sizes, currentColor borders, the flex shorthands
+// ---------------------------------------------------------------------------
+
+TEST(ComputedStyle, ResolvedValues) {
+    Page page(R"(<!DOCTYPE html><html><head><style>
+#a { font-size: 20px; padding: 1em 2rem; margin-right: 2em; max-width: 10em; min-height: 3em; flex-basis: 1em }
+#b { background: rgba(255, 0, 0, .5); color: rgba(0, 0, 0, .3); outline-color: rgba(1, 2, 3, .123) }
+#c { border: 1px solid; color: rgb(0, 128, 0) }
+#d { border-top: 2px solid red; border-right-color: currentColor; color: blue }
+#f { display: flex; flex-flow: wrap column-reverse; gap: 1em }
+#i { flex: 2 1 3rem }
+</style></head><body>
+<div id="a">a</div><div id="b">b</div><div id="c">c</div><div id="d">d</div>
+<div id="f"><div id="i">i</div></div>
+</body></html>)");
+    auto cs = [&](const char* id, const char* prop) {
+        return page.eval(std::string("getComputedStyle(document.getElementById('") + id + "'))." + prop);
+    };
+    EXPECT_EQ(cs("a", "paddingTop"), "20px");
+    EXPECT_EQ(cs("a", "paddingLeft"), "32px");
+    EXPECT_EQ(cs("a", "marginRight"), "40px");
+    EXPECT_EQ(cs("a", "maxWidth"), "200px");
+    EXPECT_EQ(cs("a", "maxHeight"), "none");
+    EXPECT_EQ(cs("a", "minHeight"), "60px");
+    EXPECT_EQ(cs("a", "flexBasis"), "20px");
+    // min-width/min-height: auto is 0px, except on a flex item
+    EXPECT_EQ(cs("b", "minWidth"), "0px");
+    EXPECT_EQ(cs("i", "minHeight"), "auto");
+    // Alpha with the fewest digits that round-trip
+    EXPECT_EQ(cs("b", "backgroundColor"), "rgba(255, 0, 0, 0.5)");
+    EXPECT_EQ(cs("b", "color"), "rgba(0, 0, 0, 0.3)");
+    EXPECT_EQ(cs("c", "backgroundColor"), "rgba(0, 0, 0, 0)");
+    // A border without a colour is currentColor, even with color declared after it
+    EXPECT_EQ(cs("c", "borderTopColor"), "rgb(0, 128, 0)");
+    EXPECT_EQ(cs("c", "borderLeftColor"), "rgb(0, 128, 0)");
+    EXPECT_EQ(cs("d", "borderTopColor"), "rgb(255, 0, 0)");
+    EXPECT_EQ(cs("d", "borderRightColor"), "rgb(0, 0, 255)");
+    EXPECT_EQ(cs("d", "borderBottomColor"), "rgb(0, 0, 255)");
+    // flex-flow in either order; the shorthands read back
+    EXPECT_EQ(cs("f", "flexDirection"), "column-reverse");
+    EXPECT_EQ(cs("f", "flexWrap"), "wrap");
+    EXPECT_EQ(cs("f", "flexFlow"), "column-reverse wrap");
+    EXPECT_EQ(cs("f", "gap"), "16px");
+    EXPECT_EQ(cs("a", "gap"), "normal");
+    EXPECT_EQ(cs("i", "flex"), "2 1 48px");
+    EXPECT_EQ(cs("a", "flex"), "0 1 20px");
 }

@@ -8,6 +8,7 @@
 #include "page_styles.hpp"
 
 #include "browser/dom.hpp"
+#include "css/media_query.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -117,6 +118,7 @@ std::vector<PageStyleSheets::Source> PageStyleSheets::collect(DOMDocument* docum
             Source s;
             s.element = el;
             s.text = el->textContent();
+            s.media = el->getAttribute("media");
             sources.push_back(std::move(s));
         } else if (tag == "link" && isStylesheetLink(el) && !el->hasAttribute("disabled")) {
             std::string href = el->getAttribute("href");
@@ -125,6 +127,7 @@ std::vector<PageStyleSheets::Source> PageStyleSheets::collect(DOMDocument* docum
             s.element = el;
             s.link = true;
             s.url = resolve_ ? resolve_(documentUrl_, href) : href;
+            s.media = el->getAttribute("media");
             sources.push_back(std::move(s));
         }
     }
@@ -192,22 +195,30 @@ bool PageStyleSheets::sourceSettled(const Source& source) const {
     return true;
 }
 
+bool PageStyleSheets::mediaMatches(const Source& source) {
+    if (source.media.find_first_not_of(" \t\n\r\f") == std::string::npos) return true;
+    return Zepra::WebCore::MediaQueryList::parse(source.media)->matches();
+}
+
 bool PageStyleSheets::allSettled(DOMDocument* document) {
     requestSheets(document);
     for (const Source& s : collect(document)) {
-        if (!sourceSettled(s)) return false;
+        // A sheet for other media (print, a wider screen) does not block
+        // the first paint; it applies when it arrives
+        if (!sourceSettled(s) && mediaMatches(s)) return false;
     }
     return true;
 }
 
 const std::vector<StyleResolver::StyleSheetEntry>&
-PageStyleSheets::parsed(CSSEngine* css, const std::string& key, const std::string& text, const std::string& href) {
+PageStyleSheets::parsed(CSSEngine* css, const std::string& key, const std::string& text, const std::string& href,
+                        const std::string& media) {
     auto it = parsed_.find(key);
     if (it != parsed_.end()) return it->second;
     // The engine parses the sheet (and the sheets it imports) at its end;
     // those entries are the sheet's, taken back off the list by sync()
     size_t before = css->styleSheets().size();
-    css->addStyleSheet(text, StyleOrigin::Author, href);
+    css->addStyleSheet(text, StyleOrigin::Author, href, media);
     const auto& all = css->styleSheets();
     std::vector<StyleResolver::StyleSheetEntry> mine(all.begin() + (long)std::min(before, all.size()), all.end());
     return parsed_[key] = std::move(mine);
@@ -238,9 +249,11 @@ bool PageStyleSheets::sync(DOMDocument* document, CSSEngine* css) {
             const Resource& r = resources_[s.url];
             if (notified_.insert({s.element, s.url}).second) linkEvents_.push_back({s.element, r.ok});
             if (!r.ok) continue;
-            keys.push_back({"link:" + s.url, &s});
+            // The media attribute is part of the key: a sheet with other
+            // media is parsed with its rules under those queries
+            keys.push_back({"link:" + s.media + "\n" + s.url, &s});
         } else {
-            keys.push_back({"style:" + s.text, &s});
+            keys.push_back({"style:" + s.media + "\n" + s.text, &s});
         }
     }
     std::vector<std::string> order;
@@ -257,8 +270,8 @@ bool PageStyleSheets::sync(DOMDocument* document, CSSEngine* css) {
     if (appliedTo_ != css) parsed_.clear();   // entries of another engine
     for (const auto& [key, source] : keys) {
         const auto& mine = source->link
-            ? parsed(css, key, resources_[source->url].text, resources_[source->url].base)
-            : parsed(css, key, source->text, "");
+            ? parsed(css, key, resources_[source->url].text, resources_[source->url].base, source->media)
+            : parsed(css, key, source->text, "", source->media);
         entries.insert(entries.end(), mine.begin(), mine.end());
     }
     for (const auto& extra : extraSheets_) {

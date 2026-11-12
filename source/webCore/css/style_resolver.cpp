@@ -40,6 +40,22 @@ static void zeroUnstyledBorders(CSSComputedStyle& style) {
     if (none(style.borderLeftStyle)) style.borderLeftWidth = 0;
 }
 
+// A border colour left at its initial value, or declared as currentColor,
+// is the element's own `color` (CSS Backgrounds 3 §3.1), whatever order
+// color and the border declarations came in
+static void resolveCurrentColorBorders(CSSComputedStyle& style) {
+    CSSColor* sides[4] = {&style.borderTopColor, &style.borderRightColor, &style.borderBottomColor,
+                          &style.borderLeftColor};
+    for (int i = 0; i < 4; i++)
+        if (!(style.borderColorSet & (1u << i))) *sides[i] = style.color;
+}
+
+static bool isCurrentColorKeyword(const std::string& value) {
+    std::string v = value;
+    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+    return v == "currentcolor";
+}
+
 // Space-separated values; a function's arguments ("calc(1px + 2px) 0") stay
 // together
 static std::vector<std::string> splitValues(const std::string& value) {
@@ -501,6 +517,7 @@ CSSComputedStyle StyleResolver::computeStyle(DOMElement* element, const CSSCompu
         resolveFontRelative(*len);
     }
     zeroUnstyledBorders(computed);
+    resolveCurrentColorBorders(computed);
     if (isRoot) rootFontSize_ = computed.fontSize > 0 ? computed.fontSize : 16.0f;
     
     return computed;
@@ -524,6 +541,7 @@ const CSSComputedStyle* StyleResolver::getComputedStyle(DOMElement* element) {
     }
     
     // Compute and cache
+    stats_.stylesComputed++;
     CSSComputedStyle style = computeStyle(element, parentStyle);
     styleCache_[element] = std::move(style);
     
@@ -572,6 +590,7 @@ const CSSComputedStyle* StyleResolver::getPseudoElementStyle(DOMElement* element
     }
 
     zeroUnstyledBorders(computed);
+    resolveCurrentColorBorders(computed);
 
     // `content: normal` computes to none on ::before/::after (CSS Content 3, 2)
     if ((pseudo == "before" || pseudo == "after") && (computed.content.empty() || computed.content == "normal")) {
@@ -650,8 +669,17 @@ void StyleResolver::setShadowStyleSheets(
         }
         next[root] = match;
     }
+    // Restyled (all of it) only when some tree's sheets changed
+    bool same = next.size() == shadowScopes_.size();
+    for (auto it = next.begin(); same && it != next.end(); ++it) {
+        auto old = shadowScopes_.find(it->first);
+        same = old != shadowScopes_.end() && old->second == it->second;
+    }
     shadowScopes_ = std::move(next);
-    invalidateAll();
+    if (!same) {
+        shadowScopesChanged_ = true;
+        invalidateAll();
+    }
 }
 
 bool isInheritedProperty(const std::string& property) {
@@ -1116,11 +1144,18 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         CSSColor c = parseColor(value);
         style.borderTopColor = c; style.borderRightColor = c;
         style.borderBottomColor = c; style.borderLeftColor = c;
+        style.borderColorSet = isCurrentColorKeyword(value) ? 0 : 0xF;
     }
-    else if (property == "border-top-color") { style.borderTopColor = parseColor(value); }
-    else if (property == "border-right-color") { style.borderRightColor = parseColor(value); }
-    else if (property == "border-bottom-color") { style.borderBottomColor = parseColor(value); }
-    else if (property == "border-left-color") { style.borderLeftColor = parseColor(value); }
+    else if (property == "border-top-color" || property == "border-right-color" ||
+             property == "border-bottom-color" || property == "border-left-color") {
+        const int side = property == "border-top-color" ? 0 : property == "border-right-color" ? 1
+                       : property == "border-bottom-color" ? 2 : 3;
+        CSSColor* target[4] = {&style.borderTopColor, &style.borderRightColor, &style.borderBottomColor,
+                               &style.borderLeftColor};
+        *target[side] = parseColor(value);
+        if (isCurrentColorKeyword(value)) style.borderColorSet &= ~(1u << side);
+        else style.borderColorSet |= (1u << side);
+    }
     else if (property == "border-radius") {
         // The first value (a percentage of the box is resolved when painting)
         auto parts = splitValues(value);
@@ -1157,6 +1192,7 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         float bw = 3;
         BorderStyle bs = BorderStyle::None;
         CSSColor bc = style.color;
+        bool colorGiven = false;
         while (ss >> token) {
             if (parseBorderStyle(token, bs)) continue;
             if (token == "thin") { bw = 1; continue; }
@@ -1171,11 +1207,20 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
             }
             if (token[0] == '#' || token.substr(0,3) == "rgb" || 
                 CSSColor::parse(token).a != 0 || token == "transparent") {
-                bc = CSSColor::parse(token); continue;
+                bc = CSSColor::parse(token);
+                colorGiven = !isCurrentColorKeyword(token);
+                continue;
             }
             CSSLength len = parseLength(token);
             if (!len.isAuto()) bw = len.toPx(style.fontSize, rootFontSize_, 1920, 1080, 0);
         }
+        auto markColor = [&](int side) {
+            if (colorGiven) style.borderColorSet |= (1u << side);
+            else style.borderColorSet &= ~(1u << side);
+        };
+        if (property == "border") for (int side = 0; side < 4; side++) markColor(side);
+        else markColor(property == "border-top" ? 0 : property == "border-right" ? 1
+                       : property == "border-bottom" ? 2 : 3);
         if (property == "border") {
             style.borderTopWidth = bw; style.borderRightWidth = bw;
             style.borderBottomWidth = bw; style.borderLeftWidth = bw;
@@ -1223,6 +1268,19 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         else if (value == "row-reverse") style.flexDirection = FlexDirection::RowReverse;
         else if (value == "column") style.flexDirection = FlexDirection::Column;
         else if (value == "column-reverse") style.flexDirection = FlexDirection::ColumnReverse;
+    }
+    else if (property == "flex-flow") {
+        // Shorthand for flex-direction and flex-wrap, in either order;
+        // an omitted part takes its initial value (row, nowrap)
+        std::string direction = "row", wrap = "nowrap";
+        for (const std::string& part : splitValues(value)) {
+            if (part == "row" || part == "row-reverse" || part == "column" || part == "column-reverse")
+                direction = part;
+            else if (part == "wrap" || part == "wrap-reverse" || part == "nowrap")
+                wrap = part;
+        }
+        applyProperty(style, "flex-direction", direction, parentStyle);
+        applyProperty(style, "flex-wrap", wrap, parentStyle);
     }
     else if (property == "flex-wrap") {
         style.flexWrap = (value == "wrap" || value == "wrap-reverse");

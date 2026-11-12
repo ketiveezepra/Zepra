@@ -688,6 +688,11 @@ bool CSSCascade::selectorGroupMatches(DOMElement* element, const std::string& se
     return true;
 }
 
+// :has() is among the pseudo-classes below that are not evaluated (they
+// match): no DOM change can change what it matches. The targeted restyle
+// (style_invalidation.cpp) asks this; it must say true once :has() is.
+bool selectorMatcherEvaluatesHas() { return false; }
+
 // Standard pseudo-classes this matcher does not evaluate: they keep matching
 // (as before) rather than dropping the rule. Anything else, including every
 // vendor-prefixed name, is an unknown pseudo-class and matches nothing.

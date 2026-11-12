@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <iostream>
 #include "scripting/dom_bindings.hpp"
+#include "browser/style_change_log.hpp"
 #include "scripting/canvas_bindings.hpp"
 #include "scripting/custom_elements.hpp"
 #include "scripting/mutation_observer.hpp"
@@ -534,7 +535,9 @@ public:
     std::vector<std::pair<std::string, std::string>> values() const {
         DOMElement* el = asElement(owner_->node);
         if (!el || pseudo_ == kInvalidPseudo) return {};
-        return bindings_->computedValues(el, pseudo_);
+        auto values = bindings_->computedValues(el, pseudo_);
+        if (pseudo_.empty()) bindings_->resolveUsedSizes(el, values);
+        return values;
     }
 
     std::string value(const std::string& property) const {
@@ -1405,12 +1408,12 @@ void DOMBindings::installElement() {
                     if (formControlValue(options[i]) == v) index = static_cast<long>(i);
                 }
                 setSelectedIndex(&e, index);
-                noteDomMutation();
+                noteSubtreeStyleChange(&e);   // its options' :checked
             } else if (tag == "input" || tag == "textarea") {
                 setFormControlValue(&e, v);
                 // A script's change is not the user's: no change event for it
                 if (focusedElement() == &e) valueAtFocus_ = v;
-                noteDomMutation();
+                noteStateChange(&e, "value");
             } else {
                 e.setAttribute("value", v);
             }
@@ -1428,7 +1431,9 @@ void DOMBindings::installElement() {
     BuiltinFn checkedGet = on<DOMElement>("checked", [](DOMElement& e, const Info&) { return Value::boolean(formControlChecked(&e)); });
     BuiltinFn checkedSet = on<DOMElement>("checked", [](DOMElement& e, const Info& info) {
             setFormControlChecked(&e, info.argument(0).toBoolean());
-            noteDomMutation();
+            // A radio button unchecks the others of its group: those restyle too
+            if (lower(e.getAttribute("type")) == "radio") noteDomMutation();
+            else noteStateChange(&e, "checked");
             return Value::undefined();
         });
 
@@ -2195,10 +2200,25 @@ void DOMBindings::installDocumentInterface() {
     }
 
     method(p, "hasFocus", 0, [](const FunctionCallInfo&) -> Value { return Value::boolean(true); });
-    // document.write is not supported (the page is parsed before scripts run)
-    for (const char* name : {"write", "writeln", "open", "close"}) {
-        method(p, name, 0, [](const FunctionCallInfo&) -> Value { return Value::undefined(); });
+    // document.write()/writeln(): the arguments joined, into the page's
+    // parser at its insertion point (ScriptContext::documentWrite)
+    for (bool line : {false, true}) {
+        method(p, line ? "writeln" : "write", 0, [this, line](const FunctionCallInfo& info) -> Value {
+            std::string text;
+            for (size_t i = 0; i < info.argumentCount(); i++) text += info.argument(i).toString();
+            if (line) text += "\n";
+            if (streamHooks_.write) streamHooks_.write(text);
+            return Value::undefined();
+        });
     }
+    method(p, "open", 0, [this](const FunctionCallInfo& info) -> Value {
+        if (streamHooks_.open) streamHooks_.open();
+        return info.thisValue();
+    });
+    method(p, "close", 0, [this](const FunctionCallInfo&) -> Value {
+        if (streamHooks_.close) streamHooks_.close();
+        return Value::undefined();
+    });
     auto createElement = [this](DOMDocument& d, const std::string& tag, bool svg) -> Value {
         if (tag.empty()) {
             throwDOMException("InvalidCharacterError", "Failed to execute 'createElement' on 'Document': The tag name provided ('') is not a valid name.");
@@ -2373,7 +2393,7 @@ void DOMBindings::installForms() {
         on<DOMElement>("selectedIndex", [this](DOMElement& e, const Info& info) {
             double n = info.argument(0).toNumber();
             setSelectedIndex(&e, std::isfinite(n) ? static_cast<long>(n) : -1);
-            noteDomMutation();
+            noteSubtreeStyleChange(&e);   // its options' :checked
             return Value::undefined();
         }));
     accessor(select, "options", on<DOMElement>("options", [this](DOMElement& e, const Info&) {
@@ -2692,7 +2712,7 @@ void DOMBindings::installForms() {
             replaceFormControlText(&e, start, end, replacement);
             // Like a value set by script: no change event for it
             if (focusedElement() == &e) valueAtFocus_ = formControlValue(&e);
-            noteDomMutation();
+            noteStateChange(&e, "value");
             size_t newEnd = start + replacement.size();
             if (mode == "select") {
                 setFormControlSelection(&e, start, newEnd);
@@ -3067,6 +3087,44 @@ void DOMBindings::evaluateMediaQueries() {
     }
 }
 
+// width and height resolve to the used size of a rendered box (CSSOM
+// §9 "resolved value"): the content box, or the border box under
+// box-sizing: border-box. A non-replaced inline box, an element without a
+// box (display: none, not laid out) and a page without layout keep the
+// computed value.
+void DOMBindings::resolveUsedSizes(DOMElement* element,
+                                   std::vector<std::pair<std::string, std::string>>& values) const {
+    if (!geometry_ || !element || values.empty()) return;
+    auto find = [&](const char* name) -> std::string* {
+        for (auto& [n, v] : values) if (n == name) return &v;
+        return nullptr;
+    };
+    std::string* width = find("width");
+    std::string* height = find("height");
+    std::string* display = find("display");
+    if (!width || !height || !display || *display == "none" || *display == "contents") return;
+    std::string boxSizing = find("box-sizing") ? *find("box-sizing") : std::string("content-box");
+    auto px = [&](const char* name) {
+        std::string* v = find(name);
+        if (!v || v->size() < 3 || v->compare(v->size() - 2, 2, "px") != 0) return 0.0;
+        try { return std::stod(v->substr(0, v->size() - 2)); } catch (...) { return 0.0; }
+    };
+    const double padding[4] = {px("padding-top"), px("padding-right"), px("padding-bottom"), px("padding-left")};
+    static const std::unordered_set<std::string> kReplaced = {
+        "img", "video", "canvas", "iframe", "embed", "object", "input", "textarea", "select", "button", "svg",
+    };
+    const bool replaced = kReplaced.count(lower(element->tagName())) > 0;
+    ElementGeometry g = geometry_->elementGeometry(element, false);
+    if (!g.hasBox || g.rects.empty() || (g.inlineBox && !replaced)) return;
+    double w = g.rects[0].width, h = g.rects[0].height;
+    if (boxSizing != "border-box") {
+        w -= g.borderLeft + g.borderRight + padding[1] + padding[3];
+        h -= g.borderTop + g.borderBottom + padding[0] + padding[2];
+    }
+    *width = formatComputedNumber((float)std::max(0.0, w)) + "px";
+    *height = formatComputedNumber((float)std::max(0.0, h)) + "px";
+}
+
 std::vector<std::pair<std::string, std::string>> DOMBindings::computedValues(DOMElement* element,
                                                                          const std::string& pseudo) const {
     if (!element || !isConnectedTo(element, document_)) return {};
@@ -3089,6 +3147,20 @@ std::vector<std::pair<std::string, std::string>> DOMBindings::computedValues(DOM
             if (name == "transform")
                 value = ZepraBrowser::resolvedTransformValue(transform, (float)g.boxWidth, (float)g.boxHeight, fontSize);
         }
+    }
+    // min-width/min-height: auto resolves to 0px, except on a flex or grid
+    // item, which keeps auto (CSS Sizing 3 §5.2, as browsers report it)
+    bool item = false;
+    if (DOMElement* parent = flatTreeParentElement(element)) {
+        if (const CSSComputedStyle* ps = computedStyleSource_(parent)) {
+            DisplayValue d = ps->display;
+            item = d == DisplayValue::Flex || d == DisplayValue::InlineFlex || d == DisplayValue::Grid ||
+                   d == DisplayValue::InlineGrid;
+        }
+    }
+    if (!item) {
+        for (auto& [name, value] : values)
+            if ((name == "min-width" || name == "min-height") && value == "auto") value = "0px";
     }
     return values;
 }

@@ -87,7 +87,8 @@ bool HTML5TreeConstructor::isScopeBoundary(const std::string& tag, ScopeType sco
 HTML5TreeConstructor::HTML5TreeConstructor() = default;
 
 std::unique_ptr<DOMDocument> HTML5TreeConstructor::construct(const std::string& html) {
-    doc_ = std::make_unique<DOMDocument>();
+    ownedDoc_ = std::make_unique<DOMDocument>();
+    doc_ = ownedDoc_.get();
     headElement_ = nullptr;
     formElement_ = nullptr;
     mode_ = InsertionMode::Initial;
@@ -111,8 +112,72 @@ std::unique_ptr<DOMDocument> HTML5TreeConstructor::construct(const std::string& 
     flushPendingText();
 
     tokenizer_ = nullptr;
+    pausedScript_ = nullptr;
     doc_->setQuirksMode(quirksMode_);
-    return std::move(doc_);
+    doc_ = nullptr;
+    return std::move(ownedDoc_);
+}
+
+void HTML5TreeConstructor::beginIncremental(const std::string& input, DOMDocument* target, bool inputClosed) {
+    if (target) {
+        ownedDoc_.reset();
+        doc_ = target;
+    } else {
+        ownedDoc_ = std::make_unique<DOMDocument>();
+        doc_ = ownedDoc_.get();
+    }
+    headElement_ = nullptr;
+    formElement_ = nullptr;
+    mode_ = InsertionMode::Initial;
+    openElements_.clear();
+    activeFormattingElements_.clear();
+    templateInsertionModes_.clear();
+    pendingTableChars_.clear();
+    pendingTableCharsHaveNonWhitespace_ = false;
+    pendingTextNode_ = nullptr;
+    pendingText_.clear();
+    framesetOk_ = true;
+    quirksMode_ = false;
+    pausedScript_ = nullptr;
+    ownedTokenizer_ = std::make_unique<HTML5Tokenizer>(input);
+    ownedTokenizer_->setInputClosed(inputClosed);
+    tokenizer_ = ownedTokenizer_.get();
+    tokenizer_->setTokenHandler([this](HTML5Token token) {
+        processToken(std::move(token));
+    });
+}
+
+HTML5Tokenizer::RunResult HTML5TreeConstructor::resume(size_t limit) {
+    if (!ownedTokenizer_ || !doc_) return HTML5Tokenizer::RunResult::Finished;
+    tokenizer_ = ownedTokenizer_.get();
+    tokenizer_->setLimit(limit);
+    HTML5Tokenizer::RunResult result = tokenizer_->run();
+    // What a script sees: every character parsed so far is in its node
+    flushPendingText();
+    doc_->setQuirksMode(quirksMode_);
+    if (result == HTML5Tokenizer::RunResult::Finished) {
+        // The end: nothing is open any more
+        openElements_.clear();
+        activeFormattingElements_.clear();
+        headElement_ = formElement_ = nullptr;
+    }
+    return result;
+}
+
+DOMElement* HTML5TreeConstructor::takePausedScript() {
+    DOMElement* script = pausedScript_;
+    pausedScript_ = nullptr;
+    return script;
+}
+
+std::vector<DOMElement*> HTML5TreeConstructor::referencedElements() const {
+    std::vector<DOMElement*> elements(openElements_.begin(), openElements_.end());
+    for (const auto& entry : activeFormattingElements_) {
+        if (!entry.isMarker && entry.element) elements.push_back(entry.element);
+    }
+    if (headElement_) elements.push_back(headElement_);
+    if (formElement_) elements.push_back(formElement_);
+    return elements;
 }
 
 // ============================================================================
@@ -154,7 +219,7 @@ void HTML5TreeConstructor::processToken(HTML5Token tok) {
 // ============================================================================
 
 std::pair<DOMNode*, DOMNode*> HTML5TreeConstructor::appropriateInsertionLocation() {
-    DOMNode* target = currentNode() ? static_cast<DOMNode*>(currentNode()) : static_cast<DOMNode*>(doc_.get());
+    DOMNode* target = currentNode() ? static_cast<DOMNode*>(currentNode()) : static_cast<DOMNode*>(doc_);
     DOMNode* before = nullptr;
 
     // Past kMaxTreeDepth open elements, new nodes go to the element at that depth
@@ -271,7 +336,7 @@ void HTML5TreeConstructor::insertCharacter(char32_t c) {
 
 void HTML5TreeConstructor::insertComment(const std::string& data, DOMNode* parent) {
     auto comment = doc_->createComment(data);
-    DOMNode* target = parent ? parent : currentNode() ? (DOMNode*)currentNode() : (DOMNode*)doc_.get();
+    DOMNode* target = parent ? parent : currentNode() ? (DOMNode*)currentNode() : (DOMNode*)doc_;
     if (target->nodeType() == NodeType::Element) {
         if (DOMDocumentFragment* content = static_cast<DOMElement*>(target)->templateContent()) target = content;
     }
@@ -595,7 +660,7 @@ void HTML5TreeConstructor::processInitial(HTML5Token& tok) {
         return; // ignore
     }
     if (tok.type == HTML5TokenType::Comment) {
-        insertComment(tok.data, doc_.get());
+        insertComment(tok.data, doc_);
         return;
     }
     if (tok.type == HTML5TokenType::DOCTYPE) {
@@ -622,7 +687,7 @@ void HTML5TreeConstructor::processBeforeHTML(HTML5Token& tok) {
     if (tok.type == HTML5TokenType::DOCTYPE) return; // ignore
 
     if (tok.type == HTML5TokenType::Comment) {
-        insertComment(tok.data, doc_.get());
+        insertComment(tok.data, doc_);
         return;
     }
 
@@ -1365,8 +1430,16 @@ void HTML5TreeConstructor::processText(HTML5Token& tok) {
         return;
     }
     if (tok.type == HTML5TokenType::EndTag) {
+        DOMElement* closed = currentNode();
         openElements_.pop_back();
         mode_ = originalMode_;
+        // A </script>: the parser stops here so the script runs with the
+        // tree built up to it (HTML §13.2.6.4.8, "An end tag whose tag
+        // name is script"); an incremental parse's driver prepares it
+        if (closed && tok.tagName == "script" && closed->tagName() == "script" && ownedTokenizer_) {
+            pausedScript_ = closed;
+            ownedTokenizer_->requestPause();
+        }
         return;
     }
 }
@@ -1965,7 +2038,7 @@ void HTML5TreeConstructor::processAfterFrameset(HTML5Token& tok) {
 }
 
 void HTML5TreeConstructor::processAfterAfterBody(HTML5Token& tok) {
-    if (tok.type == HTML5TokenType::Comment) { insertComment(tok.data, doc_.get()); return; }
+    if (tok.type == HTML5TokenType::Comment) { insertComment(tok.data, doc_); return; }
     auto isWS = [](const std::string& s) {
         for (char c : s) if (c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\f') return false;
         return true;
@@ -1980,7 +2053,7 @@ void HTML5TreeConstructor::processAfterAfterBody(HTML5Token& tok) {
 }
 
 void HTML5TreeConstructor::processAfterAfterFrameset(HTML5Token& tok) {
-    if (tok.type == HTML5TokenType::Comment) { insertComment(tok.data, doc_.get()); return; }
+    if (tok.type == HTML5TokenType::Comment) { insertComment(tok.data, doc_); return; }
     if (tok.type == HTML5TokenType::DOCTYPE) return;
     if (tok.type == HTML5TokenType::StartTag) {
         if (tok.tagName == "html") { processInBody(tok); return; }

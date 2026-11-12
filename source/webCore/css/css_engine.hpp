@@ -15,6 +15,9 @@
 #include "css/css_rule.hpp"
 #include "css/css_selector.hpp"
 #include "css/css_computed_style.hpp"
+#include "css/media_query.hpp"
+#include "css/style_invalidation.hpp"
+#include "browser/style_change_log.hpp"
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -275,6 +278,26 @@ public:
     void invalidateElement(DOMElement* element);
     void invalidateAll();
 
+    // ─── Targeted restyles (style_invalidation.cpp) ──────────────────────
+    /// What the sheet list did since the last call: nothing, a change that
+    /// restyles everything (`full`), or sheets that came or went whose
+    /// subjects have the `keys`
+    struct SheetChange {
+        bool any = false;
+        bool full = false;
+        SubjectKeys keys;
+    };
+    SheetChange takeSheetChange();
+    /// The features of every selector of the sheets (and shadow trees' sheets)
+    const SelectorFeatures& selectorFeatures();
+    /// Drops the cached styles of `root` and its flat-tree descendants
+    /// (shadow trees, slotted nodes); returns how many element styles went
+    size_t invalidateSubtree(DOMElement* root);
+    /// Drops the cached styles of elements not in `live`
+    void pruneStyles(const std::unordered_set<const DOMElement*>& live);
+    size_t cachedStyleCount() const { return styleCache_.size(); }
+    StyleRecalcStats& stats() { return stats_; }
+
     /// The style sheets of each shadow tree (its <style> elements), which
     /// replace the ones set before. A shadow tree's elements match only
     /// these (and the user-agent sheet); its host also matches their :host
@@ -308,6 +331,18 @@ private:
     std::vector<StyleSheetEntry> stylesheets_;
     std::unordered_map<DOMElement*, CSSComputedStyle> styleCache_;
     std::unordered_map<DOMElement*, std::unordered_map<std::string, CSSComputedStyle>> pseudoStyleCache_;
+    /// The sheet list the cached styles were computed with
+    /// (held, so a removed sheet can still be read, and no new sheet takes its address)
+    std::vector<StyleSheetEntry> styledSheets_;
+    SelectorFeatures features_;
+    bool featuresValid_ = false;
+    bool shadowScopesChanged_ = false;
+    struct SheetFeatures {
+        std::shared_ptr<CSSStyleSheet> sheet;
+        std::shared_ptr<SelectorFeatures> features;
+    };
+    std::unordered_map<const CSSStyleSheet*, SheetFeatures> sheetFeatures_;
+    StyleRecalcStats stats_;
     CSSCascade cascade_;
     SelectorMatcher matcher_;
     CSSLengthContext lengthContext_;               // for math functions, set per applyProperty
@@ -398,9 +433,12 @@ public:
     /// Initialize with document
     void initialize(DOMDocument* document);
 
-    /// Parse and add stylesheet; `href` is the URL of a <link> sheet (empty for <style>)
+    /// Parse and add stylesheet; `href` is the URL of a <link> sheet (empty for <style>).
+    /// `media`: the media query list of the sheet's element (a <link> or
+    /// <style> media attribute; empty = all): its rules apply while it
+    /// matches, as if the sheet were inside @media.
     void addStyleSheet(const std::string& css, StyleOrigin origin = StyleOrigin::Author,
-                       const std::string& href = "");
+                       const std::string& href = "", const std::string& media = "");
 
     /// The stylesheets in cascade order, with their origins (sheet->href() is set for <link> sheets)
     const std::vector<StyleResolver::StyleSheetEntry>& styleSheets() const { return resolver_.styleSheets(); }
@@ -444,6 +482,16 @@ public:
 
     /// Invalidate styles
     void invalidate(DOMElement* element = nullptr);
+
+    /// What the style passes did (computeStyles drops only the styles the
+    /// recorded DOM and sheet changes can reach; style_invalidation.hpp)
+    const StyleRecalcStats& styleStats() { return resolver_.stats(); }
+    bool lastPassFull() const { return lastPassFull_; }
+    size_t lastPassDropped() const { return lastPassDropped_; }
+    /// Why the last pass restyled everything ("" for a targeted pass)
+    const char* lastPassReason() const { return lastPassReason_; }
+    /// ZEPRA_STYLE_STATS=1: the browser logs each pass
+    static bool styleStatsEnabled();
 
     /// Parser access
     CSSParser& parser() { return parser_; }
@@ -494,6 +542,21 @@ private:
     void addSheetWithImports(const std::string& css, StyleOrigin origin, const std::string& href,
                              const std::vector<std::shared_ptr<const MediaQueryList>>& media,
                              std::vector<std::string>& chain);
+
+    /// The DOM version, described-change count and media environment the
+    /// cached styles saw (see applyStyleInvalidations)
+    uint64_t styledVersion_ = 0;
+    uint64_t styledDescribed_ = 0;
+    MediaEnvironment styledEnvironment_;
+    bool styledOnce_ = false;
+    bool lastPassFull_ = false;
+    size_t lastPassDropped_ = 0;
+    const char* lastPassReason_ = "";
+    /// The style pass: drops the cached styles the changes since the last
+    /// pass can reach (all of them for an undescribed change, a new
+    /// viewport or a sheet change that needs it)
+    void applyStyleInvalidations();
+    void verifyTargetedPass(const std::vector<StyleChange>& changes);
 };
 
 } // namespace Zepra::WebCore

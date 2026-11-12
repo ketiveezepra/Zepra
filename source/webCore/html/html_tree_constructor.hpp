@@ -99,9 +99,41 @@ public:
      */
     HTML5Tokenizer* tokenizer() { return tokenizer_; }
 
+    // ─── Incremental parsing (a document's own parser, HTML §13.2.1) ─────
+    /**
+     * @brief Starts parsing `input` (owned by the caller, which may insert
+     * text into it at or after the tokenizer's position between resume()
+     * calls) into `target`, or into a new document when `target` is null.
+     * `inputClosed` false: more input may be appended (document.open).
+     */
+    void beginIncremental(const std::string& input, DOMDocument* target, bool inputClosed);
+    /**
+     * @brief Tokenizes and builds the tree until a </script> end tag was
+     * processed (Paused: takePausedScript() names the script), the offset
+     * `limit` (NeedInput) or the end (Finished). The text gathered so far
+     * is in the tree when it returns.
+     */
+    HTML5Tokenizer::RunResult resume(size_t limit = std::string::npos);
+    /// The script element whose end tag made resume() pause, once
+    DOMElement* takePausedScript();
+    /// The tokenizer of an incremental parse (null otherwise)
+    HTML5Tokenizer* incrementalTokenizer() { return ownedTokenizer_.get(); }
+    /// The document being built
+    DOMDocument* document() const { return doc_; }
+    /// Ownership of a document beginIncremental() created; the parse can go
+    /// on into it (the caller keeps it alive)
+    std::unique_ptr<DOMDocument> releaseDocument() { return std::move(ownedDoc_); }
+    /// The elements the parser will insert into or refer to later (open
+    /// elements, active formatting elements, head and form pointers): a
+    /// script may take them out of the tree, and they must stay alive
+    std::vector<DOMElement*> referencedElements() const;
+
 private:
     // ─── Document / state ─────────────────────────────────────────────────
-    std::unique_ptr<DOMDocument> doc_;
+    std::unique_ptr<DOMDocument> ownedDoc_;   // when construct() or beginIncremental made it
+    DOMDocument* doc_ = nullptr;
+    std::unique_ptr<HTML5Tokenizer> ownedTokenizer_;   // incremental parse
+    DOMElement* pausedScript_ = nullptr;
     DOMElement* headElement_ = nullptr;
     DOMElement* formElement_ = nullptr;
     InsertionMode mode_ = InsertionMode::Initial;

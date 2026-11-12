@@ -10,6 +10,7 @@
  */
 
 #include "css/css_engine.hpp"
+#include "browser/style_change_log.hpp"
 #include <algorithm>
 #include "browser/dom.hpp"
 #include <iostream>
@@ -683,10 +684,15 @@ std::unique_ptr<MediaList> CSSParser::parseMediaQuery(const std::string& query) 
 // ============================================================================
 
 CSSEngine::CSSEngine() {}
-CSSEngine::~CSSEngine() {}
+CSSEngine::~CSSEngine() {
+    if (document_) trackStyleChanges(document_, false);
+}
 
 void CSSEngine::initialize(DOMDocument* doc) {
+    if (document_ && document_ != doc) trackStyleChanges(document_, false);
     document_ = doc;
+    styledOnce_ = false;
+    trackStyleChanges(document_, true);
     // StyleResolver constructor already adds user-agent stylesheet
 }
 
@@ -707,13 +713,16 @@ void CSSEngine::noteStyleAttributeSelectors(const std::string& css) {
     }
 }
 
-void CSSEngine::addStyleSheet(const std::string& css, StyleOrigin origin, const std::string& href) {
+void CSSEngine::addStyleSheet(const std::string& css, StyleOrigin origin, const std::string& href,
+                              const std::string& media) {
     usesHover_  = usesHover_  || css.find(":hover") != std::string::npos;
     usesActive_ = usesActive_ || css.find(":active") != std::string::npos;
     usesFocus_  = usesFocus_  || css.find(":focus") != std::string::npos;
     std::vector<std::string> chain;
     if (!href.empty()) chain.push_back(href);
-    addSheetWithImports(css, origin, href, {}, chain);
+    std::vector<std::shared_ptr<const MediaQueryList>> lists;
+    if (media.find_first_not_of(" \t\n\r\f") != std::string::npos) lists.push_back(MediaQueryList::parse(media));
+    addSheetWithImports(css, origin, href, lists, chain);
 }
 
 void CSSEngine::addSheetWithImports(const std::string& css, StyleOrigin origin, const std::string& href,
@@ -829,7 +838,7 @@ void CSSEngine::syncShadowStyles(DOMDocument* document) {
 
 void CSSEngine::computeStyles() {
     if (!document_) return;
-    resolver_.invalidateAll();
+    applyStyleInvalidations();
 }
 
 const CSSComputedStyle* CSSEngine::getComputedStyle(DOMElement* element) {

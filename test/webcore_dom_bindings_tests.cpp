@@ -1209,3 +1209,162 @@ TEST(DomBindings, PopoverShowingState) {
               "p.hidePopover(); p.showPopover();");
     EXPECT_EQ(page.eval("p.matches(':popover-open')"), "false") << "a canceled beforetoggle keeps it closed";
 }
+
+// ============================================================================
+// The document's incremental parser: scripts run with the tree built up to
+// them, document.write inserts at the insertion point, readyState steps
+// ============================================================================
+
+namespace {
+
+/// A page whose document is built by its own parser as scripts run
+struct StreamPage {
+    std::unique_ptr<DOMDocument> doc;
+    std::unique_ptr<ScriptContext> script;
+    HeldFetches net;
+
+    explicit StreamPage(const std::string& html, bool begin = true) {
+        auto parser = std::make_unique<HTMLDocumentParser>(html);
+        parser->pump();   // as the browser does: up to the first script
+        doc = parser->releaseDocument();
+        script = std::make_unique<ScriptContext>();
+        script->initialize(doc.get());
+        script->setPageUrl("https://example.test/");
+        script->setScriptFetcher(net.fetcher());
+        if (begin) script->beginParsing(std::move(parser), nullptr);
+    }
+    /// advanceParsing until DOMContentLoaded (or a script still missing)
+    bool advance() {
+        auto later = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        for (int i = 0; i < 50; i++) {
+            if (script->advanceParsing(later)) return true;
+            script->processTimers();
+        }
+        return false;
+    }
+    std::string eval(const std::string& code) {
+        ScriptResult r = script->evaluate(code, "test.js");
+        EXPECT_TRUE(r.success) << r.error << "\n  in: " << code;
+        return r.success ? r.value : "<error: " + r.error + ">";
+    }
+};
+
+}  // namespace
+
+TEST(IncrementalParser, ScriptsSeeOnlyTheNodesBeforeThem) {
+    StreamPage page(R"HTML(<!DOCTYPE html><html><head>
+        <script>var log = []; log.push('body:' + (document.body === null));</script></head>
+        <body><div id="a"></div>
+        <script>log.push('a:' + !!document.getElementById('a') + ',b:' + !!document.getElementById('b'));
+                log.push('cur:' + document.currentScript.previousElementSibling.id);
+                log.push('last:' + (document.body.lastElementChild === document.currentScript));</script>
+        <div id="b"></div><script>log.push('b:' + !!document.getElementById('b'))</script></body></html>)HTML");
+    ASSERT_TRUE(page.advance());
+    EXPECT_EQ(page.eval("log.join(' ')"), "body:true a:true,b:false cur:a last:true b:true");
+}
+
+TEST(IncrementalParser, ReadyStateStepsAndDeferOrder) {
+    StreamPage page(R"HTML(<html><head><script>var log = ['start:' + document.readyState];
+        document.addEventListener('readystatechange', function () { log.push('rsc:' + document.readyState); });
+        document.addEventListener('DOMContentLoaded', function () { log.push('DCL'); });
+        window.addEventListener('load', function () { log.push('load:' + document.readyState); });</script>
+        <script defer src="d.js"></script></head><body><p>x</p>
+        <script>log.push('body:' + document.readyState)</script></body></html>)HTML");
+    page.net.files["/d.js"] = "log.push('defer:' + document.readyState + ':' + document.querySelectorAll('p').length)";
+    EXPECT_FALSE(page.advance());   // waits for d.js
+    page.net.answer("/d.js");
+    ASSERT_TRUE(page.advance());
+    EXPECT_EQ(page.eval("log.join(' ')"),
+              "start:loading body:loading rsc:interactive defer:interactive:1 DCL rsc:complete load:complete");
+}
+
+TEST(IncrementalParser, DocumentWriteParsesBeforeReturning) {
+    StreamPage page(R"HTML(<html><body><div id="before"></div>
+        <script>var log = [];
+          document.write('<p id="w">wr', 'itten</p>');
+          log.push('w:' + (document.getElementById('w') ? document.getElementById('w').textContent : 'none'));
+          document.write('<b');
+          document.write(' id="z">bold</b>');
+          log.push('z:' + !!document.getElementById('z'));
+          document.writeln('<i>line</i>');
+          log.push('after:' + !!document.getElementById('after'));</script><span id="after"></span>
+        </body></html>)HTML");
+    ASSERT_TRUE(page.advance());
+    EXPECT_EQ(page.eval("log.join(' ')"), "w:written z:true after:false");
+    // The written nodes sit where the script was, before the rest of the page
+    EXPECT_EQ(page.eval("Array.prototype.map.call(document.body.children, function (e) { return e.tagName + (e.id ? '#' + e.id : ''); }).join(',')"),
+              "DIV#before,SCRIPT,P#w,B#z,I,SPAN#after");
+}
+
+TEST(IncrementalParser, WrittenScriptsRunInOrder) {
+    StreamPage page(R"HTML(<html><body><script>var log = [];
+          document.write('<script>log.push("nested:" + document.currentScript.id)</scr' + 'ipt>');
+          log.push('outer');
+          document.write('<script src="x.js"></scr' + 'ipt>');
+          log.push('outer-after-external');</script>
+        <script>log.push('next')</script></body></html>)HTML");
+    page.net.files["/x.js"] = "log.push('x'); document.write('<em id=fromx></em>')";
+    EXPECT_FALSE(page.advance());   // the written external script blocks the parser
+    EXPECT_EQ(page.eval("log.join(' ')"), "nested: outer outer-after-external");
+    page.net.answer("/x.js");
+    ASSERT_TRUE(page.advance());
+    EXPECT_EQ(page.eval("log.join(' ')"), "nested: outer outer-after-external x next");
+    EXPECT_EQ(page.eval("document.getElementById('fromx').previousElementSibling.getAttribute('src')"), "x.js");
+}
+
+TEST(IncrementalParser, ScriptRemovingAnOpenElement) {
+    // The parser goes on inserting into the element the script removed
+    StreamPage page(R"HTML(<html><body><div id="p"><script>var p = document.getElementById('p'); p.remove();</script>
+        <span id="s"></span></div><i id="after"></i></body></html>)HTML");
+    ASSERT_TRUE(page.advance());
+    EXPECT_EQ(page.eval("[document.getElementById('s') === null, !!p.querySelector('#s'), "
+                        "document.getElementById('after').parentNode === document.body].join()"),
+              "true,true,true");
+}
+
+TEST(IncrementalParser, WritesFromAsyncScriptsAreIgnoredAndAfterLoadReplaceTheDocument) {
+    StreamPage page(R"HTML(<html><body><p id="old">old</p><script async src="a.js"></script>
+        <script>var log = [];</script></body></html>)HTML");
+    page.net.files["/a.js"] = "document.write('<p id=async>no</p>'); log.push('async ran')";
+    ASSERT_TRUE(page.advance());
+    page.net.answer("/a.js");
+    page.script->processTimers();
+    EXPECT_EQ(page.eval("log.join() + ':' + !!document.getElementById('async')"), "async ran:false");
+    EXPECT_EQ(page.eval("document.readyState"), "complete");
+    // After the load a write opens the document again: the page is replaced
+    EXPECT_EQ(page.eval("document.write('<html><body><p id=n>new</p><script>window.inner = document.readyState</scr' + 'ipt>');"
+                        "[!!document.getElementById('n'), !!document.getElementById('old'), document.readyState, window.inner].join()"),
+              "true,false,loading,loading");
+    EXPECT_EQ(page.eval("document.close(); document.readyState + ':' + document.body.children.length"), "complete:2");
+}
+
+TEST(IncrementalParser, WholeDocumentParseMatchesTheOneShotParser) {
+    const std::string html = R"HTML(<!DOCTYPE html><html><head><title>t</title><style>p{}</style></head>
+        <body><table><tr><td>a<script>1</script>b</td></tr></table><p>x<b>y<script>2</script>z</b></p>
+        <select><option>1<script>3</script></select><template><script>4</script></template></body></html>)HTML";
+    HTMLParser oneShot;
+    auto expected = oneShot.parse(html);
+    HTMLDocumentParser parser(html);
+    int scripts = 0;
+    while (parser.pump() == HTMLDocumentParser::Stop::Script) {
+        if (parser.takePausedScript()) scripts++;
+    }
+    auto doc = parser.releaseDocument();
+    EXPECT_EQ(scripts, 4);
+    EXPECT_EQ(serializeChildNodes(doc.get()), serializeChildNodes(expected.get()));
+}
+
+TEST(IncrementalParser, ADeadlineAfterABlockingScriptDoesNotEndTheParse) {
+    StreamPage page(R"HTML(<html><head><script>var log = []</script><script src="b.js"></script></head>
+        <body><p id="late"></p><script>log.push('late:' + !!document.getElementById('late'))</script></body></html>)HTML");
+    page.net.files["/b.js"] = "log.push('b')";
+    auto past = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    for (int i = 0; i < 5 && page.net.pending.empty(); i++) EXPECT_FALSE(page.script->advanceParsing(past));
+    page.net.answer("/b.js");
+    // b.js runs and the deadline has passed: parsing is not over
+    EXPECT_FALSE(page.script->advanceParsing(past));
+    EXPECT_FALSE(page.script->parsingDone());
+    int calls = 0;
+    while (!page.script->advanceParsing(past) && calls < 20) calls++;
+    EXPECT_EQ(page.eval("log.join()"), "b,late:true");
+}

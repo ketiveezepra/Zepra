@@ -321,6 +321,9 @@ public:
     CSSColor borderRightColor;
     CSSColor borderBottomColor;
     CSSColor borderLeftColor;
+    // Sides whose colour was declared (bit 0 top, 1 right, 2 bottom, 3 left);
+    // the others are currentColor and take `color` once the cascade is done
+    uint8_t borderColorSet = 0;
 
     // Border radius
     float borderTopLeftRadius = 0;

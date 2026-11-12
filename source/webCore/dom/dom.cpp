@@ -7,6 +7,7 @@
 
 #include <unordered_set>
 #include "browser/dom.hpp"
+#include "browser/style_change_log.hpp"
 #include "css/css_engine.hpp"
 #include "html/html_parser.hpp"
 #include <algorithm>
@@ -232,20 +233,19 @@ void noteCharacterDataChange(DOMNode* node, const std::string& oldValue) {
 
 DOMNode* DOMNode::appendChild(std::unique_ptr<DOMNode> child) {
     if (!child) return nullptr;
-    noteDomMutation();
     
     child->parent_ = this;
     adopt(child.get());
     DOMNode* ptr = child.get();
     DOMNode* previous = children_.empty() ? nullptr : children_.back().get();
     children_.push_back(std::move(child));
+    noteChildInserted(this, ptr);
     if (DOMMutationSink* sink = sinkOf(this)) sink->childList(this, ptr, nullptr, previous, nullptr);
     return ptr;
 }
 
 DOMNode* DOMNode::insertBefore(std::unique_ptr<DOMNode> child, DOMNode* refChild) {
     if (!child) return nullptr;
-    noteDomMutation();
     
     child->parent_ = this;
     adopt(child.get());
@@ -267,6 +267,7 @@ DOMNode* DOMNode::insertBefore(std::unique_ptr<DOMNode> child, DOMNode* refChild
         previous = children_.back().get();
     }
     children_.insert(at, std::move(child));
+    noteChildInserted(this, ptr);
     if (DOMMutationSink* sink = sinkOf(this)) sink->childList(this, ptr, nullptr, previous, next);
     return ptr;
 }
@@ -278,7 +279,7 @@ std::unique_ptr<DOMNode> DOMNode::removeChild(DOMNode* child) {
             DOMNode* next = std::next(it) == children_.end() ? nullptr : std::next(it)->get();
             std::unique_ptr<DOMNode> removed = std::move(*it);
             children_.erase(it);
-            noteDomMutation();
+            noteChildRemoved(this, removed.get());
             removed->parent_ = nullptr;
             if (DOMMutationSink* sink = sinkOf(this)) sink->childList(this, nullptr, removed.get(), previous, next);
             return removed;
@@ -300,7 +301,8 @@ DOMNode* DOMNode::replaceChild(std::unique_ptr<DOMNode> newChild, DOMNode* oldCh
             DOMNode* next = std::next(it) == children_.end() ? nullptr : std::next(it)->get();
             std::unique_ptr<DOMNode> old = std::move(*it);
             *it = std::move(newChild);
-            noteDomMutation();
+            noteChildRemoved(this, old.get());
+            noteChildInserted(this, ptr);
             // The replaced node is destroyed on return, so it is not handed
             // to the sink (nothing in the bindings calls replaceChild)
             if (DOMMutationSink* sink = sinkOf(this)) sink->childList(this, ptr, nullptr, previous, next);
@@ -410,17 +412,17 @@ std::string DOMElement::getAttribute(const std::string& name) const {
 
 void DOMElement::setAttribute(const std::string& name, const std::string& value) {
     DOMMutationSink* sink = sinkOf(this);
-    if (!sink) {
+    if (!sink && name != "class" && name != "id") {
         attributes_[name] = value;
-        noteDomMutation();
+        noteAttributeChange(this, name, std::string());
         return;
     }
     auto it = attributes_.find(name);
     bool had = it != attributes_.end();
     std::string old = had ? it->second : std::string();
     attributes_[name] = value;
-    noteDomMutation();
-    sink->attribute(this, name, had ? &old : nullptr);
+    noteAttributeChange(this, name, old);
+    if (sink) sink->attribute(this, name, had ? &old : nullptr);
 }
 
 void DOMElement::removeAttribute(const std::string& name) {
@@ -428,7 +430,7 @@ void DOMElement::removeAttribute(const std::string& name) {
     if (it == attributes_.end()) return;
     std::string old = std::move(it->second);
     attributes_.erase(it);
-    noteDomMutation();
+    noteAttributeChange(this, name, old);
     if (DOMMutationSink* sink = sinkOf(this)) sink->attribute(this, name, &old);
 }
 
@@ -542,7 +544,7 @@ std::string DOMElement::innerHTML() const {
 void DOMElement::setInnerHTML(const std::string& html) {
     DOMNode* target = tagName_ == "template" ? static_cast<DOMNode*>(templateContent()) : this;
     while (DOMNode* last = target->lastChild()) target->removeChild(last);
-    noteDomMutation();
+    noteSubtreeStyleChange(this);
     HTMLParser parser;
     for (auto& node : parser.parseFragmentNodes(html, tagName_)) target->appendChild(std::move(node));
 }
@@ -561,7 +563,7 @@ std::string DOMElement::textContent() const {
 
 void DOMElement::setTextContent(const std::string& text) {
     children_.clear();
-    noteDomMutation();
+    noteSubtreeStyleChange(this);
     if (!text.empty()) {
         appendChild(std::make_unique<DOMText>(text));
     }

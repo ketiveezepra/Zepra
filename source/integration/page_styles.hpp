@@ -91,7 +91,11 @@ private:
         bool link = false;
         std::string text;   // <style>
         std::string url;    // <link>
+        std::string media;  // its media attribute (empty: all)
     };
+    /// Whether a source's media attribute matches now (a sheet whose media
+    /// does not match is still fetched, but does not block rendering)
+    static bool mediaMatches(const Source& source);
 
     std::vector<Source> collect(Zepra::WebCore::DOMDocument* document) const;
     void request(const std::string& url);
@@ -101,7 +105,8 @@ private:
     bool sourceSettled(const Source& source) const;
     /// The engine's entries for one sheet text (with its imported sheets), parsed once
     const std::vector<Zepra::WebCore::StyleResolver::StyleSheetEntry>&
-        parsed(Zepra::WebCore::CSSEngine* css, const std::string& key, const std::string& text, const std::string& href);
+        parsed(Zepra::WebCore::CSSEngine* css, const std::string& key, const std::string& text, const std::string& href,
+               const std::string& media = "");
 
     std::string documentUrl_;
     Fetch fetch_;

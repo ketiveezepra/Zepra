@@ -27,6 +27,109 @@ std::unique_ptr<DOMDocument> HTMLParser::parse(const std::string& html) {
     return std::move(document_);
 }
 
+// ============================================================================
+// HTMLDocumentParser — a document's incremental parser
+// ============================================================================
+
+HTMLDocumentParser::HTMLDocumentParser(std::string html)
+    : input_(std::move(html)), tree_(std::make_unique<HTML5TreeConstructor>()) {
+    tree_->beginIncremental(input_, nullptr, true);
+}
+
+HTMLDocumentParser::HTMLDocumentParser(DOMDocument* document)
+    : tree_(std::make_unique<HTML5TreeConstructor>()), scriptCreated_(true) {
+    tree_->beginIncremental(input_, document, false);
+    insertionPointDefined_ = true;
+}
+
+HTMLDocumentParser::~HTMLDocumentParser() = default;
+
+HTMLDocumentParser::Stop HTMLDocumentParser::run(size_t limit) {
+    if (done_) return Stop::Done;
+    switch (tree_->resume(limit)) {
+        case HTML5Tokenizer::RunResult::Paused:
+            // Only a </script> asks for a pause
+            return Stop::Script;
+        case HTML5Tokenizer::RunResult::NeedInput:
+            return Stop::NeedInput;
+        case HTML5Tokenizer::RunResult::Finished:
+            break;
+    }
+    done_ = true;
+    insertionPointDefined_ = false;
+    return Stop::Done;
+}
+
+HTMLDocumentParser::Stop HTMLDocumentParser::pump() {
+    return run(std::string::npos);
+}
+
+HTMLDocumentParser::Stop HTMLDocumentParser::pumpToInsertionPoint() {
+    if (!hasInsertionPoint()) return pump();
+    return run(scriptCreated_ ? std::string::npos : insertionPoint_);
+}
+
+DOMElement* HTMLDocumentParser::takePausedScript() {
+    return tree_->takePausedScript();
+}
+
+void HTMLDocumentParser::defineInsertionPoint() {
+    if (scriptCreated_ || done_) return;
+    insertionPointDefined_ = true;
+    insertionPoint_ = position();
+}
+
+void HTMLDocumentParser::undefineInsertionPoint() {
+    if (scriptCreated_) return;
+    insertionPointDefined_ = false;
+}
+
+void HTMLDocumentParser::restoreInsertionPoint(size_t offset) {
+    if (scriptCreated_ || done_) return;
+    insertionPointDefined_ = true;
+    insertionPoint_ = std::min(std::max(offset, position()), input_.size());
+}
+
+bool HTMLDocumentParser::hasInsertionPoint() const {
+    return insertionPointDefined_ && !done_;
+}
+
+bool HTMLDocumentParser::insertAtInsertionPoint(const std::string& text) {
+    if (!hasInsertionPoint()) return false;
+    if (scriptCreated_) {
+        // The input is still open: the insertion point is its end
+        if (HTML5Tokenizer* tok = tree_->incrementalTokenizer(); tok && tok->inputClosed()) return false;
+        input_ += text;
+        return true;
+    }
+    // Never before what the tokenizer consumed already
+    insertionPoint_ = std::max(insertionPoint_, position());
+    input_.insert(insertionPoint_, text);
+    insertionPoint_ += text.size();
+    return true;
+}
+
+void HTMLDocumentParser::closeInput() {
+    if (HTML5Tokenizer* tok = tree_->incrementalTokenizer()) tok->setInputClosed(true);
+}
+
+DOMDocument* HTMLDocumentParser::document() const {
+    return tree_->document();
+}
+
+std::unique_ptr<DOMDocument> HTMLDocumentParser::releaseDocument() {
+    return tree_->releaseDocument();
+}
+
+std::vector<DOMElement*> HTMLDocumentParser::referencedElements() const {
+    return done_ ? std::vector<DOMElement*>{} : tree_->referencedElements();
+}
+
+size_t HTMLDocumentParser::position() const {
+    HTML5Tokenizer* tok = const_cast<HTML5TreeConstructor*>(tree_.get())->incrementalTokenizer();
+    return tok ? tok->position() : input_.size();
+}
+
 std::unique_ptr<DOMElement> HTMLParser::parseFragment(const std::string& html) {
     // Fragment parsing: wrap in a context element and strip it
     std::string wrapped = "<div>" + html + "</div>";
