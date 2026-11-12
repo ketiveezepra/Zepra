@@ -351,13 +351,13 @@ ScriptResult ScriptContext::run(const std::string& code, const std::string& file
         auto t1 = std::chrono::steady_clock::now();
         auto parseMs = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
         
-        // Abort if parsing alone exceeded budget (500ms for framework bundles)
+        // A slow parse is reported, never punished: the time is already
+        // spent, and dropping the script here saved nothing but threw away
+        // the page's app (a Debug build parses YouTube's 10.7 MB module in
+        // ~2.8 s, and the page then sat on its loading skeleton forever).
         if (parseMs > 500) {
-            result.success = true;
-            result.value = "undefined";
-            std::cout << "[JS] Parse timeout (" << parseMs << "ms > 500ms) for " 
+            std::cout << "[JS] Slow parse (" << parseMs << "ms) for "
                       << code.size() << " byte script" << std::endl;
-            return result;
         }
         
         if (parser.hasErrors()) {
