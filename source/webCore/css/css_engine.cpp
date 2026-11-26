@@ -697,6 +697,9 @@ void CSSEngine::initialize(DOMDocument* doc) {
 }
 
 void CSSEngine::noteStyleAttributeSelectors(const std::string& css) {
+    // ":before" also finds "::before" (and ":after" "::after")
+    usesGeneratedContent_ = usesGeneratedContent_ || css.find(":before") != std::string::npos ||
+                            css.find(":after") != std::string::npos;
     if (usesStyleAttribute_) return;
     // "[style", any case, with white space allowed after the bracket
     for (size_t i = css.find('['); i != std::string::npos; i = css.find('[', i + 1)) {

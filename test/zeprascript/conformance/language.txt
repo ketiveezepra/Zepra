@@ -82,3 +82,10 @@ tagged_template_raw | (function(){ function t(s){ return s.raw[0]; } return t`a\
 tagged_template_same_strings | (function(){ function id(s){ return s; } function f(){ return id`q${1}`; } return f() === f() && Array.isArray(f()); })()
 tagged_template_method_this | (function(){ var o = { n: 3, tag(s, v){ return this.n + v; } }; return o.tag`a${4}` === 7; })()
 string_hex_and_pair_escapes | "\x41" === "A" && "\uD83D\uDE00" === "\u{1F600}" && "\u00e9" === "\xe9"
+trailing_comma_call | (function(a, b){ return a + b; })(1, 2,) === 3 && Math.max(...[1, 2],) === 2
+trailing_comma_new | new Array(1, 2,).length === 2
+trailing_comma_params | (function(a, b,){ return b; })(1, 2) === 2 && ((a, b = 3,) => a + b)(1) === 4 && (async (a,) => a) instanceof Function
+trailing_comma_methods | (function(){ class A { m(a,) { return a; } } return new A().m(5) === 5 && ({ f(x,) { return x; } }).f(6) === 6; })()
+instanceof_primitive_no_prototype | ("x" instanceof (() => 1)) === false && (1 instanceof Object) === false
+instanceof_has_instance | (function(){ var Even = { [Symbol.hasInstance](n) { return n % 2 === 0; } }; class C { static [Symbol.hasInstance](v) { return v === 7; } } return (2 instanceof Even) && !(3 instanceof Even) && (7 instanceof C); })()
+instanceof_bound | (function(){ function A(){} var B = A.bind(null); return new A() instanceof B; })()

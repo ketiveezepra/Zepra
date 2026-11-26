@@ -242,6 +242,14 @@ struct LayoutBox {
     
     // Float: 0=none, 1=left, 2=right
     int floatType = 0;
+    // clear: 0=none, 1=left, 2=right, 3=both (bit 1 left, bit 2 right)
+    int clearType = 0;
+    // The lowest left and right float margin edges this box's flow placed,
+    // its own floats and those of block descendants that do not start a
+    // block formatting context, from its border-box top: floats escape such
+    // boxes, and a later sibling's clear must go below them (CSS 2.1 §9.5.2)
+    mutable float floatsLeftBottom = 0;
+    mutable float floatsRightBottom = 0;
     
     // Visibility: hidden (takes space in layout but not painted)
     bool visibilityHidden = false;

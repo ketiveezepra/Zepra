@@ -27,7 +27,7 @@ const std::unordered_set<std::string>& knownProperties() {
         "border-collapse", "border-color", "border-left", "border-left-color", "border-left-width",
         "border-radius", "border-right", "border-right-color", "border-right-width", "border-spacing",
         "border-top", "border-top-color", "border-top-left-radius", "border-top-right-radius",
-        "border-top-width", "border-width", "bottom", "box-shadow", "box-sizing", "color", "column-gap",
+        "border-top-width", "border-width", "bottom", "box-shadow", "box-sizing", "clear", "color", "column-gap",
         "content", "cursor", "display", "filter", "flex", "flex-basis", "flex-direction", "flex-grow",
         "flex-shrink", "flex-wrap", "float", "font-family", "font-size", "font-style", "font-weight",
         "gap", "grid", "grid-area", "grid-auto-columns", "grid-auto-flow", "grid-auto-rows",

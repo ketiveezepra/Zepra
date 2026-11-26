@@ -2355,6 +2355,213 @@ static void fixupTableChildren(LayoutBox* parent, const CSSComputedStyle* style)
 
 #pragma pop_macro("None")
 
+// The text a ::before/::after `content` value generates: its strings (CSS
+// escapes such as "\f101" decoded, the icon fonts' way) and attr(name)
+// values, in order. Other parts (counter(), url(), quotes) add nothing yet.
+// Empty when the value generates no box: none, normal, or nothing usable.
+static std::optional<std::string> generatedContentText(const std::string& value, DOMElement* element) {
+    if (value.empty() || value == "none" || value == "normal") return std::nullopt;
+    auto appendUtf8 = [](std::string& out, unsigned long cp) {
+        if (cp == 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) cp = 0xFFFD;
+        if (cp < 0x80) out += static_cast<char>(cp);
+        else if (cp < 0x800) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+        else if (cp < 0x10000) {
+            out += static_cast<char>(0xE0 | (cp >> 12));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (cp >> 18));
+            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    };
+    std::string out;
+    bool generates = false;
+    for (size_t i = 0; i < value.size(); i++) {
+        char c = value[i];
+        if (c == '"' || c == '\'') {
+            const char quote = c;
+            generates = true;
+            for (i++; i < value.size() && value[i] != quote; i++) {
+                if (value[i] != '\\' || i + 1 >= value.size()) { out += value[i]; continue; }
+                i++;
+                if (std::isxdigit(static_cast<unsigned char>(value[i]))) {
+                    unsigned long cp = 0;
+                    int digits = 0;
+                    while (i < value.size() && digits < 6 && std::isxdigit(static_cast<unsigned char>(value[i]))) {
+                        char h = value[i];
+                        cp = cp * 16 + (std::isdigit(static_cast<unsigned char>(h)) ? h - '0' : (std::tolower(h) - 'a' + 10));
+                        i++;
+                        digits++;
+                    }
+                    // One white space after a hex escape belongs to it
+                    if (!(i < value.size() && (value[i] == ' ' || value[i] == '\t' || value[i] == '\n'))) i--;
+                    appendUtf8(out, cp);
+                } else if (value[i] != '\n') {
+                    out += value[i];
+                }
+            }
+        } else if (value.compare(i, 5, "attr(") == 0) {
+            size_t close = value.find(')', i);
+            if (close == std::string::npos) break;
+            std::string name = value.substr(i + 5, close - i - 5);
+            name.erase(0, name.find_first_not_of(" \t"));
+            name.erase(name.find_last_not_of(" \t") + 1);
+            if (element) out += element->getAttribute(name);
+            generates = true;
+            i = close;
+        } else if (std::isalpha(static_cast<unsigned char>(c))) {
+            // counter(), url(), open-quote ...: skip the function or keyword
+            size_t j = i;
+            while (j < value.size() && (std::isalnum(static_cast<unsigned char>(value[j])) || value[j] == '-')) j++;
+            if (j < value.size() && value[j] == '(') {
+                size_t close = value.find(')', j);
+                j = close == std::string::npos ? value.size() : close + 1;
+            }
+            i = j - 1;
+        }
+    }
+    if (!generates) return std::nullopt;
+    return out;
+}
+
+// A ::before or ::after box (CSS 2.1 §12.1): the element's first or last
+// child, with the pseudo-element's style. Covers what pages lean on: the
+// clearfix's empty `display: table; clear: both` box, icon-font glyphs and
+// short decorative text
+static void addGeneratedContentBox(DOMElement* element, LayoutBox* parentBox, const char* which) {
+    if (!g_cssEngine || !element || !parentBox) return;
+    // Pages whose sheets never mention ::before/::after skip the matching
+    if (!g_cssEngine->usesGeneratedContentSelectors()) return;
+    const CSSComputedStyle* ps = g_cssEngine->getPseudoElementStyle(element, which);
+    if (!ps) return;
+#pragma push_macro("None")
+#undef None
+    if (ps->display == DisplayValue::None || ps->display == DisplayValue::Contents) return;
+#pragma pop_macro("None")
+    std::optional<std::string> text = generatedContentText(ps->content, element);
+    if (!text) return;
+    if (!ps->textTransform.empty()) *text = ZepraBrowser::applyTextTransform(*text, ps->textTransform);
+
+    DOMElement* savedOwner = g_layoutOwner;
+    g_layoutOwner = element;
+    LayoutBox* box = addChild(parentBox);
+    g_layoutOwner = savedOwner;
+
+    // Absolutely positioned and floated boxes are blockified (CSS 2.1 §9.7);
+    // an absolutely positioned one does not float
+    const bool outOfFlow = ps->position == PositionValue::Absolute || ps->position == PositionValue::Fixed;
+    const bool floated = ps->cssFloat != 0 && !outOfFlow;
+    const DisplayValue d = ps->display;
+    const bool blockLevel = outOfFlow || floated || d == DisplayValue::Block || d == DisplayValue::Table ||
+                            d == DisplayValue::ListItem || d == DisplayValue::Flex || d == DisplayValue::Grid ||
+                            d == DisplayValue::TableCaption;
+    const bool inlineBlock = !blockLevel && (d == DisplayValue::InlineBlock || d == DisplayValue::InlineFlex ||
+                                             d == DisplayValue::InlineGrid || d == DisplayValue::InlineTable);
+    box->type = blockLevel ? LayoutType::Block : inlineBlock ? LayoutType::InlineBlock : LayoutType::Inline;
+    box->floatType = floated ? ps->cssFloat : 0;
+    box->clearType = blockLevel && !outOfFlow ? ps->cssClear : 0;
+    switch (ps->position) {
+        case PositionValue::Static:   box->positionType = 0; break;
+        case PositionValue::Relative: box->positionType = 1; break;
+        case PositionValue::Absolute: box->positionType = 2; break;
+        case PositionValue::Fixed:    box->positionType = 3; break;
+        case PositionValue::Sticky:   box->positionType = 4; break;
+    }
+    if (!ps->top.isAuto()) box->cssTop = cssToLayout(ps->top);
+    if (!ps->right.isAuto()) box->cssRight = cssToLayout(ps->right);
+    if (!ps->bottom.isAuto()) box->cssBottom = cssToLayout(ps->bottom);
+    if (!ps->left.isAuto()) box->cssLeft = cssToLayout(ps->left);
+    box->zIndex = ps->zIndex;
+    box->zIndexAuto = ps->zIndexAuto;
+
+    box->fontSize = ps->fontSize;
+    box->lineHeight = ps->usedLineHeight();
+    box->color = cssColorToRGB(ps->color);
+    box->colorAlpha = ps->color.a;
+    box->fontWeight = static_cast<int>(ps->fontWeight);
+    box->fontFamily = ps->fontFamily;
+    box->bold = box->fontWeight >= 600;
+    box->italic = ps->fontStyle == FontStyle::Italic;
+    box->textDecoration = ps->textDecoration;
+    box->letterSpacing = ps->letterSpacing;
+    box->noWrap = true;   // a generated glyph or label does not break
+    box->visibilityHidden = ps->visibility == Visibility::Hidden;
+    if (!ps->backgroundColor.isTransparent()) {
+        box->bgColor = cssColorToRGB(ps->backgroundColor);
+        box->bgAlpha = ps->backgroundColor.a;
+        box->hasBgColor = true;
+    }
+    if (!ps->backgroundImage.empty() && ps->backgroundImage != "none") setBackgroundImage(box, *ps);
+
+    // Box geometry (margins, padding and borders: an inline run takes its
+    // horizontal ones, a block or inline-block all of them)
+    box->marginTop = ps->marginTop.isAuto() ? 0 : ps->marginTop.value;
+    box->marginBottom = ps->marginBottom.isAuto() ? 0 : ps->marginBottom.value;
+    box->marginLeft = ps->marginLeft.isAuto() ? 0 : ps->marginLeft.value;
+    box->marginRight = ps->marginRight.isAuto() ? 0 : ps->marginRight.value;
+    box->marginLeftAuto = ps->marginLeft.isAuto();
+    box->marginRightAuto = ps->marginRight.isAuto();
+    box->paddingTop = ps->paddingTop.value;
+    box->paddingBottom = ps->paddingBottom.value;
+    box->paddingLeft = ps->paddingLeft.value;
+    box->paddingRight = ps->paddingRight.value;
+    box->borderTop = ps->borderTopWidth;
+    box->borderRight = ps->borderRightWidth;
+    box->borderBottom = ps->borderBottomWidth;
+    box->borderLeft = ps->borderLeftWidth;
+    if (ps->borderTopWidth > 0 || ps->borderRightWidth > 0 || ps->borderBottomWidth > 0 || ps->borderLeftWidth > 0) {
+        Zepra::WebCore::CSSColor borderColor = usedBorderColor(*ps);
+        box->borderColor = cssColorToRGB(borderColor);
+        box->borderVisible = borderColor.a > 0;
+        box->borderAlpha = borderColor.a;
+        box->borderStyle = usedBorderStyle(*ps);
+    }
+    box->borderRadius = ps->borderTopLeftRadius;
+    box->borderRadiusPercent = ps->borderTopLeftRadiusPercent;
+    box->opacity = ps->opacity;
+    box->boxSizing = ps->boxSizing == Zepra::WebCore::BoxSizing::BorderBox ? 1 : 0;
+    if (box->type != LayoutType::Inline) {
+        box->cssWidth = cssToLayout(ps->width);
+        box->cssHeight = cssToLayout(ps->height);
+        box->cssMinHeight = cssToLayout(ps->minHeight);
+        if (!ps->width.isAuto() && ps->width.value > 0 && ps->width.unit == Zepra::WebCore::CSSLength::Unit::Px)
+            box->width = ps->width.value;
+        if (!ps->height.isAuto() && ps->height.value > 0 && ps->height.unit == Zepra::WebCore::CSSLength::Unit::Px)
+            box->height = ps->height.value;
+    }
+
+    // White space collapses as in any text (content: " " is an empty line)
+    const bool preserveSpace = ps->whiteSpace == "pre" || ps->whiteSpace == "pre-wrap" ||
+                               ps->whiteSpace == "pre-line" || ps->whiteSpace == "break-spaces";
+    if (!preserveSpace && text->find_first_not_of(" \t\n\r\f") == std::string::npos) text->clear();
+    if (text->empty()) return;
+    if (box->type == LayoutType::Inline) {
+        box->text = *text;
+        return;
+    }
+    // A block or inline-block holds its text in an anonymous inline run
+    LayoutBox* run = addChild(box);
+    *run = LayoutBox();
+    run->domElement = element;
+    run->type = LayoutType::Inline;
+    run->text = *text;
+    run->fontSize = box->fontSize;
+    run->lineHeight = box->lineHeight;
+    run->color = box->color;
+    run->colorAlpha = box->colorAlpha;
+    run->fontWeight = box->fontWeight;
+    run->fontFamily = box->fontFamily;
+    run->bold = box->bold;
+    run->italic = box->italic;
+    run->textDecoration = box->textDecoration;
+    run->letterSpacing = box->letterSpacing;
+    run->noWrap = true;
+    if (ps->textAlign == TextAlign::Center) box->textAlign = run->textAlign = 1;
+    else if (ps->textAlign == TextAlign::Right) box->textAlign = run->textAlign = 2;
+}
+
 // Recursively build LayoutBox tree directly from DOM (Firefox pattern)
 void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink, 
                         const std::string& linkHref, const std::string& linkTarget) {
@@ -2399,6 +2606,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
     
     // Process child nodes, as rendered: a shadow host's shadow tree, with
     // each <slot> replaced by the host children assigned to it
+    addGeneratedContentBox(element, parentBox, "before");
     const std::vector<DOMNode*> flatChildren = Zepra::WebCore::flatTreeChildren(element);
     for (size_t i = 0; i < flatChildren.size(); i++) {
         DOMNode* child = flatChildren[i];
@@ -3026,6 +3234,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                         imgBox->marginLeft = imgStyle->marginLeft.isAuto() ? 0 : imgStyle->marginLeft.value;
                         imgBox->marginRight = imgStyle->marginRight.isAuto() ? 0 : imgStyle->marginRight.value;
                         imgBox->floatType = imgStyle->cssFloat;
+                        imgBox->clearType = imgStyle->cssClear;
                         // Padding and border surround the image; with
                         // box-sizing: border-box they come out of its size
                         imgBox->paddingTop = imgStyle->paddingTop.value;
@@ -3282,6 +3491,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
                     
                     // Float
                     blockBox->floatType = childStyle->cssFloat;
+                    blockBox->clearType = childStyle->cssClear;
                     
                     // Text alignment
                     if (childStyle->textAlign == TextAlign::Center) blockBox->textAlign = 1;
@@ -3501,6 +3711,7 @@ void buildLayoutFromDOM(DOMElement* element, LayoutBox* parentBox, bool inLink,
             }
         }
     }
+    addGeneratedContentBox(element, parentBox, "after");
 
     fixupTableChildren(parentBox, style);
 }
@@ -5917,8 +6128,11 @@ void onNavigate(const std::string& input, const NavigationPost* post) {
             std::string pendingTitle;
             std::string pendingContent;
             std::string pendingError;
-            bool success = resp.success;
-            
+            // Any HTTP answer is a page to show: a 404, a 429 or a 500 carries
+            // the site's own error page (Google's /sorry, php.net's 404 lookup),
+            // which browsers render. Only a failed connection is an error.
+            bool success = resp.success || (resp.error.empty() && resp.statusCode > 0);
+
             if (success) {
                 pendingContent = resp.data;
                 pendingTitle = extractTitle(resp.data);

@@ -241,6 +241,7 @@ std::vector<std::pair<std::string, std::string>> resolve(const CSSComputedStyle&
         add("opacity", buf);
     }
     add("float", s.cssFloat == 1 ? "left" : s.cssFloat == 2 ? "right" : "none");
+    add("clear", s.cssClear == 1 ? "left" : s.cssClear == 2 ? "right" : s.cssClear == 3 ? "both" : "none");
     // width/height: the used size replaces these once the element has a
     // box (DOMBindings::computedValues)
     const float em = s.fontSize;
