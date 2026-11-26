@@ -513,6 +513,10 @@ public:
     /// `style` ([style], [style*=...]): then adding or removing the style
     /// attribute can change what matches (it stays true once seen)
     bool usesStyleAttributeSelectors() const { return usesStyleAttribute_; }
+    /// Whether any sheet given to the engine has a ::before / ::after rule
+    /// (or the CSS 2 :before / :after spelling), so that the layout asks for
+    /// generated content only on pages that can have it (stays true once seen)
+    bool usesGeneratedContentSelectors() const { return usesGeneratedContent_; }
 
     /// Check @supports condition
     bool supports(const std::string& property, const std::string& value);
@@ -532,6 +536,7 @@ private:
     bool usesActive_ = false;
     bool usesFocus_ = false;
     bool usesStyleAttribute_ = false;
+    bool usesGeneratedContent_ = false;
     void noteStyleAttributeSelectors(const std::string& css);
     ImportFetcher importFetcher_;
     std::string baseUrl_;

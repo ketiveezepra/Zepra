@@ -923,6 +923,13 @@ void StyleResolver::applyProperty(CSSComputedStyle& style,
         else if (value == "right") style.cssFloat = 2;
         else style.cssFloat = 0;
     }
+    else if (property == "clear") {
+        // inline-start/inline-end are left/right in a left-to-right page
+        if (value == "left" || value == "inline-start") style.cssClear = 1;
+        else if (value == "right" || value == "inline-end") style.cssClear = 2;
+        else if (value == "both") style.cssClear = 3;
+        else style.cssClear = 0;
+    }
 
     // =====================================================================
     // Typography

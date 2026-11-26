@@ -959,6 +959,11 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
         if (box.boxSizing == 1) h -= box.paddingTop + box.paddingBottom + box.borderTop + box.borderBottom;
         childBase = std::max(0.0f, h);
     }
+    // An inline box is no containing block: a block inside it (a <div> in a
+    // <label> or <a>) takes its percentages from the block around both
+    if (box.type == LayoutType::Inline && !box.isImage && !box.isInput && !box.isSelect) {
+        childBase = s_percentHeightBase;
+    }
     PercentHeightBaseScope percentBase(childBase);
 
     if (box.type == LayoutType::Table) {
@@ -1026,6 +1031,11 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     // Layout children
     float childY = box.paddingTop + box.borderTop;
     float floatBottom = 0;  // lowest float margin edge of the block flow below
+    // What clear must go below: the flow's floats and the ones that escaped
+    // its earlier block children (their widths are not tracked, so they do
+    // not narrow later lines); passed up as box.floatsLeft/RightBottom
+    float clearLeftBottom = 0, clearRightBottom = 0;
+    box.floatsLeftBottom = box.floatsRightBottom = 0;
     float childX = box.paddingLeft + box.borderLeft;
     float lineHeight = 0;
     float lineWidth = 0;
@@ -1557,16 +1567,47 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     const LayoutBox* prevInline = nullptr;  // the inline-level box before this one on the line
     float floatLeftX = 0, floatRightX = contentWidth;
     float floatLeftBottom = 0, floatRightBottom = 0;
-    
+    // clear: the box's top border edge moves below the floats it clears,
+    // and that clearance stops its margin collapsing with the one above
+    auto applyClear = [&](const LayoutBox& child) {
+        float below = 0;
+        if (child.clearType & 1) below = std::max(below, clearLeftBottom);
+        if (child.clearType & 2) below = std::max(below, clearRightBottom);
+        if (below > childY + child.marginTop) {
+            if (lineHeight > 0) {
+                childY += lineHeight;
+                lineHeight = 0;
+                lineWidth = 0;
+            }
+            childY = std::max(childY, below - child.marginTop);
+            prevBlockMarginBottom = 0;
+        }
+    };
+
     for (auto& child : box.children) {
         if (child.type == LayoutType::None) continue;
-        
+
         // Skip absolutely positioned elements from normal flow
         if (child.positionType == 2 || child.positionType == 3) continue;
-        
+
         // Float handling
         if (child.floatType > 0) {
-            layoutBlock(child, contentWidth, childY);
+            if (child.clearType) {
+                applyClear(child);
+                if (childY >= floatLeftBottom) floatLeftX = 0;
+                if (childY >= floatRightBottom) floatRightX = contentWidth;
+            }
+            if ((!child.cssWidth.isSet() || child.cssWidth.isAuto()) && !child.isImage) {
+                // A float with width: auto is shrink-to-fit (CSS 2.1 §10.3.5):
+                // its content's width within the line, not the whole line (an
+                // empty clearfix-style float is 0 wide)
+                float minW, maxW;
+                intrinsicWidths(child, minW, maxW);
+                float available = contentWidth - child.marginLeft - child.marginRight;
+                layoutAtWidth(child, std::max(0.0f, std::min(maxW, std::max(minW, available))));
+            } else {
+                layoutBlock(child, contentWidth, childY);
+            }
             if (child.floatType == 1) { // float:left
                 child.x = childX + floatLeftX + child.marginLeft;
                 child.y = childY + child.marginTop;
@@ -1580,6 +1621,8 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 floatRightBottom = std::max(floatRightBottom, child.y + child.height + child.marginBottom);
                 floatBottom = std::max(floatBottom, floatRightBottom);
             }
+            clearLeftBottom = std::max(clearLeftBottom, floatLeftBottom);
+            clearRightBottom = std::max(clearRightBottom, floatRightBottom);
             continue;
         }
         
@@ -1592,7 +1635,8 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
                 lineWidth = 0;
                 prevBlockMarginBottom = 0;
             }
-            
+            if (child.clearType) applyClear(child);
+
             // Margin collapsing: adjacent block margins collapse to max(prev_bottom, cur_top)
             // instead of summing (CSS2 §8.3.1, WebKit RenderBlockFlow::MarginValues)
             float effectiveMarginTop = child.marginTop;
@@ -1629,7 +1673,17 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
             
             childY = child.y + child.height + child.marginBottom;
             prevBlockMarginBottom = child.marginBottom;
-            
+
+            // Floats inside a plain block escape it: later siblings clear
+            // them, and a formatting-context root up the tree contains them
+            if (child.type == LayoutType::Block && !clipsContent(child)) {
+                if (child.floatsLeftBottom > 0)
+                    clearLeftBottom = std::max(clearLeftBottom, child.y + child.floatsLeftBottom);
+                if (child.floatsRightBottom > 0)
+                    clearRightBottom = std::max(clearRightBottom, child.y + child.floatsRightBottom);
+                floatBottom = std::max(floatBottom, std::max(clearLeftBottom, clearRightBottom));
+            }
+
             // Clear floats if child extends past them
             if (childY >= floatLeftBottom) floatLeftX = 0;
             if (childY >= floatRightBottom) floatRightX = contentWidth;
@@ -1862,6 +1916,9 @@ void layoutBlock(LayoutBox& box, float containingWidth, float startY) {
     // A box that clips its overflow starts a block formatting context, which
     // grows to contain its floats (CSS 2.1 §10.6.7)
     if (clipsContent(box)) childY = std::max(childY, floatBottom);
+    // Floats escape a box that does not start a formatting context
+    box.floatsLeftBottom = clipsContent(box) ? 0 : clearLeftBottom;
+    box.floatsRightBottom = clipsContent(box) ? 0 : clearRightBottom;
     float computedHeight = childY + box.paddingBottom + box.borderBottom;
     if (box.cssHeight.isAuto() || !box.cssHeight.isSet()) {
         if (box.height <= 0) {

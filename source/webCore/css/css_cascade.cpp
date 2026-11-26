@@ -696,6 +696,42 @@ bool selectorMatcherEvaluatesHas() { return false; }
 // Standard pseudo-classes this matcher does not evaluate: they keep matching
 // (as before) rather than dropping the rule. Anything else, including every
 // vendor-prefixed name, is an unknown pseudo-class and matches nothing.
+// An+B (CSS Syntax 3 §6.2): "odd", "even", "7", "2n", "-n+3", "+ n - 1"...
+// false when the text is not one
+static bool parseAnPlusB(const std::string& text, int& a, int& b) {
+    std::string t;
+    for (char c : text) {
+        if (!std::isspace(static_cast<unsigned char>(c))) t += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (t == "odd") { a = 2; b = 1; return true; }
+    if (t == "even") { a = 2; b = 0; return true; }
+    if (t.empty()) return false;
+    size_t n = t.find('n');
+    auto parseInt = [](const std::string& s, int& out) {
+        if (s.empty()) return false;
+        size_t i = (s[0] == '+' || s[0] == '-') ? 1 : 0;
+        if (i >= s.size()) return false;
+        for (size_t j = i; j < s.size(); j++) if (!std::isdigit(static_cast<unsigned char>(s[j]))) return false;
+        try { out = std::stoi(s); } catch (...) { return false; }
+        return true;
+    };
+    if (n == std::string::npos) { a = 0; return parseInt(t, b); }
+    std::string coef = t.substr(0, n), rest = t.substr(n + 1);
+    if (coef.empty() || coef == "+") a = 1;
+    else if (coef == "-") a = -1;
+    else if (!parseInt(coef, a)) return false;
+    if (rest.empty()) { b = 0; return true; }
+    if (rest[0] != '+' && rest[0] != '-') return false;
+    return parseInt(rest, b);
+}
+
+// Whether the 1-based position `index` is a An+B one for some n >= 0
+static bool anPlusBMatches(int a, int b, int index) {
+    if (a == 0) return index == b;
+    int diff = index - b;
+    return diff % a == 0 && diff / a >= 0;
+}
+
 static bool knownPseudoClass(const std::string& name) {
     static const char* const known[] = {
         "first-of-type", "last-of-type", "only-of-type", "nth-of-type", "nth-last-of-type", "nth-last-child",
@@ -939,17 +975,56 @@ bool CSSCascade::compoundMatches(DOMElement* element, const std::string& compoun
                 sib = element->nextSibling();
                 while (sib && !dynamic_cast<DOMElement*>(sib)) sib = sib->nextSibling();
                 if (sib) return false;
-            } else if (pseudoName == "nth-child" && !pseudoArg.empty()) {
-                int idx = 1;
-                DOMNode* sib = element->previousSibling();
-                while (sib) {
-                    if (dynamic_cast<DOMElement*>(sib)) idx++;
-                    sib = sib->previousSibling();
+            } else if (pseudoName == "nth-child" || pseudoName == "nth-last-child" ||
+                       pseudoName == "nth-of-type" || pseudoName == "nth-last-of-type" ||
+                       pseudoName == "first-of-type" || pseudoName == "last-of-type" ||
+                       pseudoName == "only-of-type") {
+                // Selectors 4 §14.4: the element's position among its element
+                // siblings (of its own type for *-of-type; that match S for
+                // :nth-child(An+B of S)), counted from the start or the end
+                const bool ofType = pseudoName.size() > 8 && pseudoName.compare(pseudoName.size() - 8, 8, "-of-type") == 0;
+                const bool fromEnd = pseudoName == "nth-last-child" || pseudoName == "nth-last-of-type" ||
+                                     pseudoName == "last-of-type";
+                std::string anb = pseudoArg, ofSelector;
+                if (!ofType && pseudoName != "only-of-type") {
+                    size_t of = anb.find(" of ");
+                    if (of != std::string::npos) {
+                        ofSelector = anb.substr(of + 4);
+                        anb = anb.substr(0, of);
+                        if (!selectorMatches(element, ofSelector)) return false;
+                    }
                 }
-                if (pseudoArg == "odd") { if (idx % 2 == 0) return false; }
-                else if (pseudoArg == "even") { if (idx % 2 != 0) return false; }
-                else {
-                    try { int n = std::stoi(pseudoArg); if (idx != n) return false; } catch (...) {}
+                auto sameKind = [&](DOMElement* sib) {
+                    if (ofType) {
+                        const std::string& x = sib->tagName();
+                        const std::string& y = element->tagName();
+                        return x.size() == y.size() &&
+                               std::equal(x.begin(), x.end(), y.begin(), [](char p, char q) {
+                                   return std::tolower(static_cast<unsigned char>(p)) ==
+                                          std::tolower(static_cast<unsigned char>(q));
+                               });
+                    }
+                    if (!ofSelector.empty()) return selectorMatches(sib, ofSelector);
+                    return true;
+                };
+                auto position = [&](bool backwards) {
+                    int idx = 1;
+                    for (DOMNode* sib = backwards ? element->nextSibling() : element->previousSibling(); sib;
+                         sib = backwards ? sib->nextSibling() : sib->previousSibling()) {
+                        auto* el = dynamic_cast<DOMElement*>(sib);
+                        if (el && sameKind(el)) idx++;
+                    }
+                    return idx;
+                };
+                if (pseudoName == "first-of-type" || pseudoName == "last-of-type") {
+                    if (position(fromEnd) != 1) return false;
+                } else if (pseudoName == "only-of-type") {
+                    if (position(false) != 1 || position(true) != 1) return false;
+                } else {
+                    int a = 0, b = 0;
+                    // An argument that is not An+B makes the selector invalid
+                    if (!parseAnPlusB(anb, a, b)) return false;
+                    if (!anPlusBMatches(a, b, position(fromEnd))) return false;
                 }
             } else if (pseudoName == "root") {
                 std::string tag = element->tagName();

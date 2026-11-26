@@ -2635,3 +2635,155 @@ TEST(PaintTransform, HitTestingMapsThePointIntoTheBox) {
     box.transform = "scale(0)";
     EXPECT_FALSE(ZepraBrowser::toBoxSpace(box, x, y));
 }
+
+// ---------------------------------------------------------------------------
+// clear, escaping floats, shrink-to-fit floats, percentages through inlines
+// ---------------------------------------------------------------------------
+
+TEST(Floats, ClearMovesABlockBelowTheFloats) {
+    LayoutBox root;
+    LayoutBox& f = addBox(root, LayoutType::Block);
+    f.floatType = 1;
+    f.cssWidth = ZepraBrowser::LayoutLength::px(100);
+    f.cssHeight = ZepraBrowser::LayoutLength::px(150);
+    LayoutBox& plain = addBox(root, LayoutType::Block);
+    plain.cssHeight = ZepraBrowser::LayoutLength::px(10);
+    LayoutBox& cleared = addBox(root, LayoutType::Block);
+    cleared.clearType = 3;
+    cleared.cssHeight = ZepraBrowser::LayoutLength::px(20);
+    ZepraBrowser::layoutBlock(root, 400, 0);
+    EXPECT_FLOAT_EQ(plain.y, 0);      // beside the float
+    EXPECT_FLOAT_EQ(cleared.y, 150);  // below it
+}
+
+TEST(Floats, ClearOnOneSideIgnoresTheOther) {
+    LayoutBox root;
+    LayoutBox& f = addBox(root, LayoutType::Block);
+    f.floatType = 2;   // right
+    f.cssWidth = ZepraBrowser::LayoutLength::px(100);
+    f.cssHeight = ZepraBrowser::LayoutLength::px(150);
+    LayoutBox& clearLeft = addBox(root, LayoutType::Block);
+    clearLeft.clearType = 1;
+    LayoutBox& clearRight = addBox(root, LayoutType::Block);
+    clearRight.clearType = 2;
+    ZepraBrowser::layoutBlock(root, 400, 0);
+    EXPECT_FLOAT_EQ(clearLeft.y, 0);
+    EXPECT_FLOAT_EQ(clearRight.y, 150);
+}
+
+TEST(Floats, FloatsEscapeAPlainBlockAndALaterSiblingClearsThem) {
+    // <div id=layout><float 600px/></div><footer style="clear: both">
+    LayoutBox root;
+    LayoutBox& layout = addBox(root, LayoutType::Block);
+    LayoutBox& f = addBox(layout, LayoutType::Block);
+    f.floatType = 1;
+    f.cssWidth = ZepraBrowser::LayoutLength::px(100);
+    f.cssHeight = ZepraBrowser::LayoutLength::px(600);
+    LayoutBox& footer = addBox(root, LayoutType::Block);
+    footer.clearType = 3;
+    footer.cssHeight = ZepraBrowser::LayoutLength::px(60);
+    ZepraBrowser::layoutBlock(root, 400, 0);
+    EXPECT_FLOAT_EQ(layout.height, 0);   // the float hangs out of it
+    EXPECT_FLOAT_EQ(footer.y, 600);
+}
+
+TEST(Floats, ClearfixChildMakesTheParentContainItsFloats) {
+    // .clearfix::after { content: ""; display: table; clear: both }
+    LayoutBox root;
+    LayoutBox& layout = addBox(root, LayoutType::Block);
+    LayoutBox& f = addBox(layout, LayoutType::Block);
+    f.floatType = 1;
+    f.cssWidth = ZepraBrowser::LayoutLength::px(100);
+    f.cssHeight = ZepraBrowser::LayoutLength::px(300);
+    LayoutBox& after = addBox(layout, LayoutType::Block);
+    after.clearType = 3;
+    ZepraBrowser::layoutBlock(root, 400, 0);
+    EXPECT_FLOAT_EQ(layout.height, 300);
+}
+
+TEST(Floats, AutoWidthFloatShrinksToItsContent) {
+    LayoutBox root;
+    LayoutBox& empty = addBox(root, LayoutType::Block);
+    empty.floatType = 1;
+    LayoutBox& sized = addBox(root, LayoutType::Block);
+    sized.floatType = 1;
+    LayoutBox& inner = addBox(sized, LayoutType::Block);
+    inner.cssWidth = ZepraBrowser::LayoutLength::px(70);
+    inner.cssHeight = ZepraBrowser::LayoutLength::px(10);
+    ZepraBrowser::layoutBlock(root, 400, 0);
+    EXPECT_FLOAT_EQ(empty.width, 0);
+    EXPECT_FLOAT_EQ(sized.width, 70);
+    EXPECT_FLOAT_EQ(sized.x, 0);   // after the 0-wide float, not past the line
+}
+
+TEST(PercentHeight, ResolvesThroughAnInlineBox) {
+    // <div style="height: 100px"><label><div style="height: 100%">
+    LayoutBox root;
+    LayoutBox& outer = addBox(root, LayoutType::Block);
+    outer.cssHeight = ZepraBrowser::LayoutLength::px(100);
+    LayoutBox& label = addBox(outer, LayoutType::Inline);
+    LayoutBox& inner = addBox(label, LayoutType::Block);
+    inner.cssHeight = ZepraBrowser::LayoutLength::pct(100);
+    ZepraBrowser::layoutBlock(root, 400, 0);
+    EXPECT_FLOAT_EQ(inner.height, 100);
+}
+
+TEST(Cascade, ClearIsParsed) {
+    StyledDoc d("<!doctype html><p id=a></p><p id=b></p><p id=c></p><p id=d></p><p id=e></p>",
+                "#a { clear: both } #b { clear: left } #c { clear: right } #d { clear: none } #e { clear: inline-end }");
+    EXPECT_EQ(d.style("a")->cssClear, 3);
+    EXPECT_EQ(d.style("b")->cssClear, 1);
+    EXPECT_EQ(d.style("c")->cssClear, 2);
+    EXPECT_EQ(d.style("d")->cssClear, 0);
+    EXPECT_EQ(d.style("e")->cssClear, 2);
+}
+
+// ---------------------------------------------------------------------------
+// :nth-child(An+B), :nth-last-child, the *-of-type pseudo-classes
+// ---------------------------------------------------------------------------
+
+namespace {
+// Which of the ids a..h end up floated left by `css`
+std::string floatedIds(const std::string& html, const std::string& css) {
+    StyledDoc d(html, css);
+    std::string out;
+    for (char c = 'a'; c <= 'h'; c++) {
+        auto* el = d.doc->getElementById(std::string(1, c));
+        if (el && d.css->getComputedStyle(el)->cssFloat == 1) out += c;
+    }
+    return out;
+}
+const char* kSixItems = "<!doctype html><ul><li id=a><li id=b><li id=c><li id=d><li id=e><li id=f></ul>";
+}  // namespace
+
+TEST(Selectors, NthChildTakesAnPlusB) {
+    EXPECT_EQ(floatedIds(kSixItems, "li:nth-child(2n) { float: left }"), "bdf");
+    EXPECT_EQ(floatedIds(kSixItems, "li:nth-child(2n+1) { float: left }"), "ace");
+    EXPECT_EQ(floatedIds(kSixItems, "li:nth-child(3n + 1) { float: left }"), "ad");
+    EXPECT_EQ(floatedIds(kSixItems, "li:nth-child(-n+2) { float: left }"), "ab");
+    EXPECT_EQ(floatedIds(kSixItems, "li:nth-child(n+5) { float: left }"), "ef");
+    EXPECT_EQ(floatedIds(kSixItems, "li:nth-child(even) { float: left }"), "bdf");
+    EXPECT_EQ(floatedIds(kSixItems, "li:nth-child(4) { float: left }"), "d");
+    EXPECT_EQ(floatedIds(kSixItems, "li:nth-child(2x) { float: left }"), "");   // not An+B: invalid
+}
+
+TEST(Selectors, NthLastChildCountsFromTheEnd) {
+    EXPECT_EQ(floatedIds(kSixItems, "li:nth-last-child(1) { float: left }"), "f");
+    EXPECT_EQ(floatedIds(kSixItems, "li:nth-last-child(-n+2) { float: left }"), "ef");
+}
+
+TEST(Selectors, NthChildOfASelector) {
+    const char* html = "<!doctype html><ul><li id=a class=k><li id=b><li id=c class=k><li id=d class=k></ul>";
+    EXPECT_EQ(floatedIds(html, "li:nth-child(2 of .k) { float: left }"), "c");
+    EXPECT_EQ(floatedIds(html, "li:nth-child(odd of .k) { float: left }"), "ad");
+}
+
+TEST(Selectors, OfTypePseudoClassesCountTheSameTag) {
+    const char* html = "<!doctype html><div><h2 id=a></h2><p id=b></p><span id=c></span><p id=d></p>"
+                       "<p id=e></p><em id=f></em></div>";
+    EXPECT_EQ(floatedIds(html, "p:first-of-type { float: left }"), "b");
+    EXPECT_EQ(floatedIds(html, "p:last-of-type { float: left }"), "e");
+    EXPECT_EQ(floatedIds(html, "p:nth-of-type(2) { float: left }"), "d");
+    EXPECT_EQ(floatedIds(html, "p:nth-last-of-type(3) { float: left }"), "b");
+    EXPECT_EQ(floatedIds(html, ":only-of-type { float: left }"), "acf");
+}

@@ -1172,7 +1172,23 @@ void VM::dispatch(Opcode op) {
             Value constructorVal = pop();
             Value instance = pop();
 
-            if (!constructorVal.isObject() || !constructorVal.asObject()->isFunction()) {
+            if (!constructorVal.isObject()) {
+                throw std::runtime_error("Right-hand side of 'instanceof' is not an object");
+            }
+            // InstanceofOperator (ECMA-262 13.10.2): a [Symbol.hasInstance]
+            // method decides first (instanceof checks against plain objects
+            // and classes with a static [Symbol.hasInstance])
+            Value hasInstance = getProperty(constructorVal, symbolPropertyKey(WellKnownSymbols::HasInstance));
+            if (hasInstance.isObject() && hasInstance.asObject()->isFunction()) {
+                Value result = executeCallback(static_cast<Function*>(hasInstance.asObject()), constructorVal,
+                                               {instance});
+                push(Value::boolean(result.toBoolean()));
+                break;
+            }
+            if (!hasInstance.isUndefined() && !hasInstance.isNull()) {
+                throw std::runtime_error("Symbol.hasInstance is not a function");
+            }
+            if (!constructorVal.asObject()->isFunction()) {
                 throw std::runtime_error("Right-hand side of 'instanceof' is not callable");
             }
             Function* constructor = static_cast<Function*>(constructorVal.asObject());
@@ -1180,9 +1196,18 @@ void VM::dispatch(Opcode op) {
                 constructor = constructor->boundTarget();
             }
 
+            // OrdinaryHasInstance: a primitive is never an instance, and is
+            // answered before the prototype is read (`"x" instanceof f` is
+            // false even when f has no prototype object)
+            if (!instance.isObject()) {
+                push(Value::boolean(false));
+                break;
+            }
             Object* prototype = ensurePrototypeObject(constructor);
             if (!prototype) {
-                throw std::runtime_error("Function has non-object prototype in instanceof check");
+                Value name = constructor->get("name");
+                std::string label = name.isString() && !name.toString().empty() ? name.toString() : "anonymous";
+                throw std::runtime_error("Function has non-object prototype in instanceof check (" + label + ")");
             }
             bool found = false;
             if (instance.isObject()) {

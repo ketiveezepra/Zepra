@@ -283,6 +283,7 @@ public:
 
     // Float
     int cssFloat = 0; // 0=none, 1=left, 2=right
+    int cssClear = 0; // clear: 0=none, 1=left, 2=right, 3=both
 
     // Dimensions — default to auto per CSS spec (not 0px)
     CSSLength width = CSSLength::auto_();

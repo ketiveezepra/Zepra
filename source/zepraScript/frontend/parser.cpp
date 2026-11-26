@@ -579,9 +579,16 @@ std::vector<FunctionParam> Parser::parseParameters() {
             }
 
             params.push_back(std::move(param));
-            
+
             if (rest) break;
-        } while (match(TokenType::Comma));
+            // A trailing comma: function f(a, b,) {} and (a, b,) => a
+            // (not after a rest parameter, which ends the list above)
+            if (match(TokenType::Comma)) {
+                if (check(TokenType::RightParen)) break;
+                continue;
+            }
+            break;
+        } while (true);
     }
     
     return params;
@@ -1421,7 +1428,8 @@ std::vector<ExprPtr> Parser::parseArguments() {
             } else {
                 args.push_back(parseAssignmentExpression());
             }
-        } while (match(TokenType::Comma));
+            // A trailing comma: f(a, b,) and new C(a,) (Prettier writes these)
+        } while (match(TokenType::Comma) && !check(TokenType::RightParen));
     }
     
     return args;
